@@ -1,0 +1,169 @@
+name: iOS TestFlight Deploy
+
+on:
+  # Trigger on version tags (e.g., v1.0.0, v1.2.3)
+  push:
+    tags:
+      - 'v*.*.*'
+
+  # Allow manual workflow dispatch for testing
+  workflow_dispatch:
+    inputs:
+      skip_upload:
+        description: 'Skip TestFlight upload (for testing)'
+        required: false
+        default: 'true'
+
+env:
+  XCODE_VERSION: '15.2'
+  IOS_DEPLOYMENT_TARGET: '16.0'
+  SCHEME_NAME: 'DrawEvolve'
+
+jobs:
+  build-and-deploy:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Show Xcode and Swift versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-derived-data-${{ hashFiles('**/project.pbxproj') }}
+          restore-keys: |
+            ${{ runner.os }}-derived-data-
+
+      - name: Cache SPM packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Install fastlane
+        run: |
+          brew install fastlane
+          fastlane --version
+
+      - name: Configure App Store Connect API key
+        env:
+          APP_STORE_P8: ${{ secrets.APP_STORE_P8 }}
+          APP_STORE_KEY_ID: ${{ secrets.APP_STORE_KEY_ID }}
+          APP_STORE_ISSUER_ID: ${{ secrets.APP_STORE_ISSUER_ID }}
+        run: |
+          # Decode base64-encoded API key
+          echo "$APP_STORE_P8" | base64 --decode > AuthKey_${{ secrets.APP_STORE_KEY_ID }}.p8
+
+          # Move to private keys directory
+          mkdir -p ~/private_keys
+          mv AuthKey_${{ secrets.APP_STORE_KEY_ID }}.p8 ~/private_keys/
+
+          echo "✅ App Store Connect API key configured"
+
+      - name: Build archive
+        run: |
+          echo "🏗️  Building archive for ${{ env.SCHEME_NAME }}..."
+
+          xcodebuild -project DrawEvolve/DrawEvolve.xcodeproj \
+            -scheme "${{ env.SCHEME_NAME }}" \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/DrawEvolve.xcarchive" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            clean archive \
+            CODE_SIGN_STYLE=Automatic \
+            -allowProvisioningUpdates \
+            | xcpretty || exit 1
+
+          echo "✅ Archive created at: $RUNNER_TEMP/DrawEvolve.xcarchive"
+
+      - name: Export IPA
+        run: |
+          echo "📦 Exporting IPA..."
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/DrawEvolve.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist DrawEvolve/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            | xcpretty || exit 1
+
+          # Show exported files
+          echo "✅ IPA exported to:"
+          ls -lh "$RUNNER_TEMP/export/"
+
+          # Echo artifact path for logs
+          IPA_PATH="$RUNNER_TEMP/export/DrawEvolve.ipa"
+          if [ -f "$IPA_PATH" ]; then
+            echo "📱 IPA location: $IPA_PATH"
+            echo "📊 IPA size: $(du -h "$IPA_PATH" | cut -f1)"
+          else
+            echo "❌ IPA file not found!"
+            exit 1
+          fi
+
+      # ⚠️ IMPORTANT: Uncomment this step after adding GitHub secrets
+      # Required secrets: APP_STORE_KEY_ID, APP_STORE_ISSUER_ID, APP_STORE_P8
+      #
+      # To enable TestFlight upload:
+      # 1. Create App Store Connect API key (see README)
+      # 2. Add secrets to GitHub repo settings
+      # 3. Uncomment the block below
+      # 4. Commit and push changes
+      #
+      # - name: Upload to TestFlight via fastlane
+      #   env:
+      #     APP_STORE_KEY_ID: ${{ secrets.APP_STORE_KEY_ID }}
+      #     APP_STORE_ISSUER_ID: ${{ secrets.APP_STORE_ISSUER_ID }}
+      #   run: |
+      #     echo "🚀 Uploading to TestFlight..."
+      #
+      #     fastlane pilot upload \
+      #       --ipa "$RUNNER_TEMP/export/DrawEvolve.ipa" \
+      #       --api_key_path ~/private_keys/AuthKey_${{ secrets.APP_STORE_KEY_ID }}.p8 \
+      #       --skip_waiting_for_build_processing \
+      #       --skip_submission
+      #
+      #     echo "✅ Upload complete! Check App Store Connect for processing status."
+
+      - name: Upload build artifacts to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: DrawEvolve-IPA-${{ github.ref_name }}
+          path: ${{ runner.temp }}/export/*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Generate build summary
+        if: success()
+        run: |
+          echo "## ✅ Build Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Scheme:** ${{ env.SCHEME_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Xcode:** ${{ env.XCODE_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- IPA file available in GitHub Actions artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- Retention: 30 days" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup secrets
+        if: always()
+        run: |
+          echo "🧹 Cleaning up sensitive files..."
+          rm -rf ~/private_keys
+          rm -rf "$RUNNER_TEMP/DrawEvolve.xcarchive"
+          rm -rf "$RUNNER_TEMP/export"
+          echo "✅ Cleanup complete"
