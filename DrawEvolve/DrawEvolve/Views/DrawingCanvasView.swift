@@ -163,19 +163,17 @@ struct CanvasRepresentable: UIViewRepresentable {
         canvasView.tool = PKInkingTool(.pen, color: .black, width: 2)
         canvasView.drawingPolicy = .anyInput
         canvasView.backgroundColor = .systemBackground
-
-        // Show the tool picker
-        let toolPicker = PKToolPicker.shared(for: canvasView.window)
-        toolPicker?.setVisible(showToolPicker, forFirstResponder: canvasView)
-        toolPicker?.addObserver(canvasView)
         canvasView.becomeFirstResponder()
-
         return canvasView
     }
 
     func updateUIView(_ uiView: PKCanvasView, context: Context) {
-        let toolPicker = PKToolPicker.shared(for: uiView.window)
-        toolPicker?.setVisible(showToolPicker, forFirstResponder: uiView)
+        // Update tool picker visibility
+        if let window = uiView.window?.windowScene {
+            let toolPicker = PKToolPicker.shared(for: window)
+            toolPicker?.setVisible(showToolPicker, forFirstResponder: uiView)
+            toolPicker?.addObserver(uiView)
+        }
     }
 }
 
