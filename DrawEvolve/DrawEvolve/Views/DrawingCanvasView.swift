@@ -23,7 +23,7 @@ struct DrawingCanvasView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                // Main canvas
+                // Main canvas - SHOULD BE VISIBLE WITH RED BORDER FOR DEBUGGING
                 MetalCanvasView(
                     layers: $canvasState.layers,
                     currentTool: $canvasState.currentTool,
@@ -31,6 +31,10 @@ struct DrawingCanvasView: View {
                     selectedLayerIndex: $canvasState.selectedLayerIndex
                 )
                 .background(Color(uiColor: .systemGray6))
+                .border(Color.red, width: 3) // DEBUG: See canvas boundaries
+                .onTapGesture {
+                    print("DEBUG: Canvas received tap gesture from SwiftUI level!")
+                }
 
                 // Feedback overlay
                 if showFeedback, let feedback = canvasState.feedback {
@@ -42,7 +46,7 @@ struct DrawingCanvasView: View {
                     .transition(.move(edge: .trailing))
                 }
 
-                // Side toolbar - 2 column grid
+                // Side toolbar - 2 column grid (blocks touches to canvas beneath)
                 HStack {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
