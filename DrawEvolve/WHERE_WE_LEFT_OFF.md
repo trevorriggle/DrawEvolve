@@ -1,6 +1,6 @@
 # Where We Left Off
 
-## Status: Drawing Engine Complete with All Tools! 🎨
+## Status: App Launches, UI Polish Needed, Drawing Broken 🔧
 
 ### What's Done ✅
 - **Completely removed PencilKit** - was too limited (Notes app tech)
@@ -45,29 +45,47 @@
 - Text tool needs text input UI
 
 ### Current Build Status
-- ✅ **Builds cleanly with zero errors!**
-- ✅ UI shows up with all 19 tools in organized toolbar
-- ✅ Layers, colors, brush settings all have UI
-- ✅ **Drawing should now work!** Brush and eraser functional
-- ✅ Fixed all warnings:
-  - Overlapping access in CanvasRenderer
-  - Publishing changes warnings in MetalCanvasView
-  - Integer sign comparison in Shaders.metal
+- ✅ **App launches successfully!**
+- ✅ **Fixed infinite loop crash** - updateUIView was modifying @Bindings causing recursion death spiral
+- ✅ **Verified git workflow** - Codespaces → GitHub → Mac works!
+- ✅ **2-column toolbar** - All 19 tools in scrollable grid
+- ⚠️ **Drawing doesn't work** - Touch events not triggering strokes
+- ⚠️ **Button layout broken** - Clear/Feedback buttons still have padding issues
+- ❌ **App crashes on interaction** - Red error in Xcode debugger on MTKView
 
-### Next Steps (when ready)
-1. **Test basic drawing** - Open in Xcode, build, try brush tool
-2. **Test eraser** - Should erase with same pressure sensitivity
-3. **Test layers** - Create multiple layers, draw on each
-4. **Test blend modes** - Change layer blend modes
-5. **Implement shape tools** - Line, rectangle, circle drawing
-6. **Add selection tools** - Rectangle select, lasso
-7. **Wire up effect tools** - Blur/sharpen compute shaders to UI
+### Critical Issues to Fix Next Session
 
-### Known Issues to Watch For
-- May need to adjust brush size default (currently 5px)
-- Layer texture initialization happens on first draw
-- Some tools show in UI but aren't implemented yet (shapes, selection, effects)
-- Toolbar is LONG - may want collapsible sections later
+**Priority 1: Fix Drawing (BLOCKING)**
+The error shows: `uiView DrawEvolve.TouchEnabledMTKView 0x0000000106542100`
+This is likely:
+- Touch events not reaching Coordinator
+- MTKView delegate methods not firing
+- Layer textures not properly initialized
+- Draw loop not running
+
+**Debug steps needed:**
+1. Add console logging to EVERY touch method to see which fires
+2. Verify `draw(in view:)` is being called at all
+3. Check if layer textures actually exist when touch happens
+4. Test with simple colored rectangle instead of stroke rendering
+
+**Priority 2: Fix Button Layout**
+- Clear button and Get Feedback still linked to collapsible UI
+- Need to separate from toolbar completely
+- Use ZStack with proper absolute positioning
+
+**Priority 3: Metal Rendering Pipeline**
+Once touches work, verify:
+- Brush strokes actually render to layer textures
+- Layer textures composite to screen
+- Blend modes work
+- Pressure sensitivity works with Apple Pencil
+
+### What We Learned This Session
+- ✅ **Remote workflow is viable** - AnyDesk struggles with Metal, but SSH + console works
+- ✅ **SwiftUI + Metal tricky** - Binding updates cause infinite loops easily
+- ✅ **Git sync works** - Just need to rebuild in Xcode after pull
+- 💡 **Need more debug logging** - Can't fix what we can't see
 
 ### Files Changed This Session
 **New Files:**
@@ -108,19 +126,42 @@
 - Building/testing in Xcode on Mac, coding in Codespaces
 
 ### What We Did This Session
-User asked:
-1. **"Are there ways to add more tools?"** - YES! Added 15 new tools
-2. **"Did you make drawing work now?"** - YES! Implemented complete Metal rendering
 
-We delivered:
-- ✅ 19 total professional tools (Brush, Eraser, Shapes, Selection, Effects, Transform)
-- ✅ Complete Metal shader system (300+ lines)
-- ✅ Fully wired rendering pipeline
-- ✅ Touch handling connected
-- ✅ Fixed brush settings warning
-- ✅ Drawing should now work!
+**Session Goals:**
+1. ✅ Get app launching (was stuck on blue screen)
+2. ✅ Verify git workflow (Codespaces → Mac)
+3. ⚠️ Fix drawing (attempted but still broken)
+4. ⚠️ Fix button layout (attempted but still broken)
+
+**Major Wins:**
+- 🎯 **Solved infinite loop crash** - App was recursing in updateUIView, Mac froze
+- 🎯 **Confirmed remote workflow** - Can code in Codespaces, deploy to Mac
+- 🎯 **2-column toolbar works** - All 19 tools visible and scrollable
+- 🎯 **Added extensive debug logging** - Ready to debug drawing next session
+
+**Still Broken:**
+- ❌ Drawing doesn't work (touch events not triggering rendering)
+- ❌ App crashes/hangs on canvas interaction
+- ❌ Button layout still has padding issues
+
+**Next Session Plan:**
+1. Deep dive on touch event debugging (add prints everywhere)
+2. Verify Metal draw loop is running
+3. Fix button positioning with ZStack
+4. Once drawing works → implement exportImage() for AI feedback
+5. Test full flow end-to-end
 
 ---
 
-**Token Count**: ~62k / 200k used
-**Status**: Ready to test on Mac! Build and try drawing with brush tool.
+**Token Count**: ~133k / 200k used
+**Status**: App launches but drawing broken. Need console logs to debug further.
+
+### Your Feedback
+> "Ironically, I call this good progress."
+
+**You're right!** We proved:
+- The vibe workflow works (remote Mac + Codespaces)
+- The architecture is solid (Metal engine is there)
+- We can iterate fast (fixed infinite loop in minutes once we saw it)
+
+The drawing WILL work - it's just a matter of finding which piece isn't wired up. The foundation is solid.
