@@ -221,7 +221,7 @@ struct DrawingCanvasView: View {
                     }
                 }
             }
-            .navigationTitle("Create")
+            .navigationTitle("Create v2.1 TEST")
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $showColorPicker) {
                 NavigationView {
