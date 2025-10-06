@@ -154,8 +154,11 @@ class CanvasRenderer: NSObject {
     }
 
     /// Render a brush stroke to a texture
-    func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture) {
+    /// Stroke coordinates are in screen space, need to be scaled to texture space
+    func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture, screenSize: CGSize) {
         print("CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
+        print("  Screen size: \(screenSize.width)x\(screenSize.height)")
+        print("  Texture size: \(texture.width)x\(texture.height)")
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             print("CanvasRenderer: Failed to create command buffer")
@@ -191,9 +194,19 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // Convert stroke points to positions
-        let positions = stroke.points.map { SIMD2<Float>(Float($0.location.x), Float($0.location.y)) }
-        let viewportSize = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
+        // CRITICAL: Scale coordinates from screen space to texture space
+        let scaleX = Float(texture.width) / Float(screenSize.width)
+        let scaleY = Float(texture.height) / Float(screenSize.height)
+        print("  Coordinate scale: \(scaleX)x, \(scaleY)y")
+
+        // Convert stroke points to positions and scale to texture space
+        let positions = stroke.points.map { point in
+            SIMD2<Float>(
+                Float(point.location.x) * scaleX,
+                Float(point.location.y) * scaleY
+            )
+        }
+        let viewportSize = SIMD2<Float>(Float(texture.width), Float(texture.height))
 
         // Render each point as a brush stamp
         var viewportSizeCopy = viewportSize

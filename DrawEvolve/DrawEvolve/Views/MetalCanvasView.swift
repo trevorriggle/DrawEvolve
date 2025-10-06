@@ -182,21 +182,19 @@ struct MetalCanvasView: UIViewRepresentable {
         func ensureLayerTextures() {
             guard needsTextureInitialization, let renderer = renderer else { return }
 
-            print("ensureLayerTextures: Starting texture initialization for \(layers.count) layers")
+            print("ensureLayerTextures: Starting SYNCHRONOUS texture initialization for \(layers.count) layers")
 
-            // Initialize textures - must be on main thread for binding updates
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-
-                for i in 0..<self.layers.count {
-                    if self.layers[i].texture == nil {
-                        self.layers[i].texture = renderer.createLayerTexture()
-                        print("Created texture for layer \(i)")
-                    }
+            // Initialize textures SYNCHRONOUSLY to avoid race conditions
+            for i in 0..<layers.count {
+                if layers[i].texture == nil {
+                    layers[i].texture = renderer.createLayerTexture()
+                    print("Created texture for layer \(i)")
+                } else {
+                    print("Layer \(i) already has texture")
                 }
-                self.needsTextureInitialization = false
-                print("Layer textures initialized: \(self.layers.count) layers")
             }
+            needsTextureInitialization = false
+            print("Layer textures initialized: \(layers.count) layers ready")
         }
 
         // Touch handling for drawing
@@ -295,24 +293,39 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             print("Committing stroke with \(stroke.points.count) points")
+            print("Selected layer index: \(selectedLayerIndex)")
+            print("Total layers: \(layers.count)")
+
+            // Ensure textures are initialized before committing
+            ensureLayerTextures()
 
             // Commit stroke to layer
-            if let selectedLayer = layers[safe: selectedLayerIndex],
-               let texture = selectedLayer.texture,
-               let renderer = renderer {
-                print("Rendering stroke to layer \(selectedLayerIndex) texture")
-                renderer.renderStroke(stroke, to: texture)
-                print("Stroke committed successfully")
+            guard selectedLayerIndex < layers.count else {
+                print("ERROR: Invalid layer index \(selectedLayerIndex)")
+                currentStroke = nil
+                lastPoint = nil
+                return
+            }
+
+            let layer = layers[selectedLayerIndex]
+            print("Layer \(selectedLayerIndex) name: \(layer.name)")
+            print("Layer has texture: \(layer.texture != nil)")
+
+            if let texture = layer.texture, let renderer = renderer {
+                print("Rendering stroke to layer \(selectedLayerIndex) texture (width: \(texture.width), height: \(texture.height))")
+                print("View size: \(view.bounds.size.width)x\(view.bounds.size.height)")
+                renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
+                print("Stroke committed successfully - texture should now contain the stroke")
             } else {
                 print("ERROR: Could not render stroke")
-                print("  - Layer exists: \(layers[safe: selectedLayerIndex] != nil)")
-                print("  - Texture exists: \(layers[safe: selectedLayerIndex]?.texture != nil)")
+                print("  - Texture exists: \(layer.texture != nil)")
                 print("  - Renderer exists: \(renderer != nil)")
             }
 
+            // Clear current stroke so preview stops rendering
             currentStroke = nil
             lastPoint = nil
-            print("Stroke cleared, ready for next stroke")
+            print("Stroke cleared from preview, should now be visible in layer texture")
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView) {
