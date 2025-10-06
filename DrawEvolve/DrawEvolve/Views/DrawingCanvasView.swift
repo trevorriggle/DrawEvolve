@@ -42,141 +42,126 @@ struct DrawingCanvasView: View {
                     .transition(.move(edge: .trailing))
                 }
 
-                // Side toolbar
+                // Side toolbar - 2 column grid
                 HStack {
-                    VStack(spacing: 12) {
-                        Spacer()
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
+                            // Drawing tools
+                            ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
+                                canvasState.currentTool = .brush
+                            }
 
-                        // Drawing tools
-                        ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
-                            canvasState.currentTool = .brush
+                            ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
+                                canvasState.currentTool = .eraser
+                            }
+
+                            // Shape tools
+                            ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
+                                canvasState.currentTool = .line
+                            }
+
+                            ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
+                                canvasState.currentTool = .rectangle
+                            }
+
+                            ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
+                                canvasState.currentTool = .circle
+                            }
+
+                            ToolButton(icon: DrawingTool.polygon.icon, isSelected: canvasState.currentTool == .polygon) {
+                                canvasState.currentTool = .polygon
+                            }
+
+                            // Fill and color tools
+                            ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
+                                canvasState.currentTool = .paintBucket
+                            }
+
+                            ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
+                                canvasState.currentTool = .eyeDropper
+                            }
+
+                            // Selection tools
+                            ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
+                                canvasState.currentTool = .rectangleSelect
+                            }
+
+                            ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
+                                canvasState.currentTool = .lasso
+                            }
+
+                            ToolButton(icon: DrawingTool.magicWand.icon, isSelected: canvasState.currentTool == .magicWand) {
+                                canvasState.currentTool = .magicWand
+                            }
+
+                            ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
+                                canvasState.currentTool = .smudge
+                            }
+
+                            // Effect tools
+                            ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
+                                canvasState.currentTool = .blur
+                            }
+
+                            ToolButton(icon: DrawingTool.sharpen.icon, isSelected: canvasState.currentTool == .sharpen) {
+                                canvasState.currentTool = .sharpen
+                            }
+
+                            ToolButton(icon: DrawingTool.cloneStamp.icon, isSelected: canvasState.currentTool == .cloneStamp) {
+                                canvasState.currentTool = .cloneStamp
+                            }
+
+                            ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
+                                canvasState.currentTool = .move
+                            }
+
+                            // Transform tools
+                            ToolButton(icon: DrawingTool.rotate.icon, isSelected: canvasState.currentTool == .rotate) {
+                                canvasState.currentTool = .rotate
+                            }
+
+                            ToolButton(icon: DrawingTool.scale.icon, isSelected: canvasState.currentTool == .scale) {
+                                canvasState.currentTool = .scale
+                            }
+
+                            ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
+                                canvasState.currentTool = .text
+                            }
+
+                            // Color picker button
+                            Button(action: { showColorPicker.toggle() }) {
+                                Circle()
+                                    .fill(Color(canvasState.brushSettings.color))
+                                    .frame(width: 40, height: 40)
+                                    .overlay(Circle().stroke(Color.white, lineWidth: 3))
+                                    .shadow(radius: 2)
+                            }
+
+                            // Brush settings
+                            ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
+                                showBrushSettings.toggle()
+                            }
+
+                            // Layers
+                            ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
+                                showLayerPanel.toggle()
+                            }
+
+                            // Undo/Redo
+                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                                canvasState.undo()
+                            }
+                            .disabled(!canvasState.historyManager.canUndo)
+
+                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                                canvasState.redo()
+                            }
+                            .disabled(!canvasState.historyManager.canRedo)
                         }
-
-                        ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
-                            canvasState.currentTool = .eraser
-                        }
-
-                        Divider()
-
-                        // Shape tools
-                        ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
-                            canvasState.currentTool = .line
-                        }
-
-                        ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
-                            canvasState.currentTool = .rectangle
-                        }
-
-                        ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
-                            canvasState.currentTool = .circle
-                        }
-
-                        ToolButton(icon: DrawingTool.polygon.icon, isSelected: canvasState.currentTool == .polygon) {
-                            canvasState.currentTool = .polygon
-                        }
-
-                        Divider()
-
-                        // Fill and color tools
-                        ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
-                            canvasState.currentTool = .paintBucket
-                        }
-
-                        ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
-                            canvasState.currentTool = .eyeDropper
-                        }
-
-                        Divider()
-
-                        // Selection tools
-                        ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
-                            canvasState.currentTool = .rectangleSelect
-                        }
-
-                        ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
-                            canvasState.currentTool = .lasso
-                        }
-
-                        ToolButton(icon: DrawingTool.magicWand.icon, isSelected: canvasState.currentTool == .magicWand) {
-                            canvasState.currentTool = .magicWand
-                        }
-
-                        Divider()
-
-                        // Effect tools
-                        ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
-                            canvasState.currentTool = .smudge
-                        }
-
-                        ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
-                            canvasState.currentTool = .blur
-                        }
-
-                        ToolButton(icon: DrawingTool.sharpen.icon, isSelected: canvasState.currentTool == .sharpen) {
-                            canvasState.currentTool = .sharpen
-                        }
-
-                        ToolButton(icon: DrawingTool.cloneStamp.icon, isSelected: canvasState.currentTool == .cloneStamp) {
-                            canvasState.currentTool = .cloneStamp
-                        }
-
-                        Divider()
-
-                        // Transform tools
-                        ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
-                            canvasState.currentTool = .move
-                        }
-
-                        ToolButton(icon: DrawingTool.rotate.icon, isSelected: canvasState.currentTool == .rotate) {
-                            canvasState.currentTool = .rotate
-                        }
-
-                        ToolButton(icon: DrawingTool.scale.icon, isSelected: canvasState.currentTool == .scale) {
-                            canvasState.currentTool = .scale
-                        }
-
-                        ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
-                            canvasState.currentTool = .text
-                        }
-
-                        Divider()
-
-                        // Color picker button
-                        Button(action: { showColorPicker.toggle() }) {
-                            Circle()
-                                .fill(Color(canvasState.brushSettings.color))
-                                .frame(width: 40, height: 40)
-                                .overlay(Circle().stroke(Color.white, lineWidth: 3))
-                                .shadow(radius: 2)
-                        }
-
-                        Divider()
-
-                        // Brush settings
-                        ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
-                            showBrushSettings.toggle()
-                        }
-
-                        // Layers
-                        ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
-                            showLayerPanel.toggle()
-                        }
-
-                        Spacer()
-
-                        // Undo/Redo
-                        ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
-                            canvasState.undo()
-                        }
-                        .disabled(!canvasState.historyManager.canUndo)
-
-                        ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
-                            canvasState.redo()
-                        }
-                        .disabled(!canvasState.historyManager.canRedo)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 8)
                     }
-                    .padding(.vertical, 20)
-                    .padding(.horizontal, 12)
+                    .frame(width: 104) // 2 columns of 44px + padding
                     .background(Color(uiColor: .systemBackground).opacity(0.95))
                     .cornerRadius(16)
                     .shadow(radius: 5)

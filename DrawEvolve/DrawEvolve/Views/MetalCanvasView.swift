@@ -56,8 +56,8 @@ struct MetalCanvasView: UIViewRepresentable {
 
         metalView.device = device
         metalView.delegate = context.coordinator
-        metalView.enableSetNeedsDisplay = true
-        metalView.isPaused = true
+        metalView.enableSetNeedsDisplay = false  // Manual drawing control
+        metalView.isPaused = false  // Continuous drawing
         metalView.framebufferOnly = false
         metalView.clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
         metalView.backgroundColor = .white
@@ -72,18 +72,14 @@ struct MetalCanvasView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {
-        // Update coordinator state without triggering view updates
-        DispatchQueue.main.async {
-            context.coordinator.layers = layers
-            context.coordinator.currentTool = currentTool
-            context.coordinator.brushSettings = brushSettings
-            context.coordinator.selectedLayerIndex = selectedLayerIndex
-        }
+        // Update coordinator state
+        context.coordinator.layers = layers
+        context.coordinator.currentTool = currentTool
+        context.coordinator.brushSettings = brushSettings
+        context.coordinator.selectedLayerIndex = selectedLayerIndex
 
         // Ensure layer textures are initialized
         context.coordinator.ensureLayerTextures()
-
-        uiView.setNeedsDisplay()
     }
 
     func makeCoordinator() -> Coordinator {
@@ -133,6 +129,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Initialize renderer if needed
             if renderer == nil {
                 renderer = CanvasRenderer(metalDevice: device)
+                ensureLayerTextures()
             }
 
             guard let commandQueue = device.makeCommandQueue(),
@@ -141,13 +138,17 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Clear background
-            // Layers will composite on top
+            // Composite all visible layers to screen
+            var renderedLayers = 0
+            for layer in layers where layer.isVisible {
+                if let texture = layer.texture {
+                    renderer?.renderTextureToScreen(texture, to: renderEncoder, opacity: layer.opacity)
+                    renderedLayers += 1
+                }
+            }
 
-            // Render current stroke if in progress
-            if let stroke = currentStroke, let layerTexture = layers[safe: selectedLayerIndex]?.texture {
-                // Render stroke preview
-                renderer?.renderStroke(stroke, to: layerTexture)
+            if renderedLayers > 0 {
+                print("Composited \(renderedLayers) layers to screen")
             }
 
             renderEncoder.endEncoding()
@@ -158,24 +159,29 @@ struct MetalCanvasView: UIViewRepresentable {
         func ensureLayerTextures() {
             guard needsTextureInitialization, let renderer = renderer else { return }
 
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                for i in 0..<self.layers.count {
-                    if self.layers[i].texture == nil {
-                        self.layers[i].texture = renderer.createLayerTexture()
-                    }
+            // Initialize textures synchronously
+            for i in 0..<layers.count {
+                if layers[i].texture == nil {
+                    layers[i].texture = renderer.createLayerTexture()
+                    print("Created texture for layer \(i)")
                 }
-                self.needsTextureInitialization = false
             }
+            needsTextureInitialization = false
+            print("Layer textures initialized: \(layers.count) layers")
         }
 
         // Touch handling for drawing
         func touchesBegan(_ touches: Set<UITouch>, in view: MTKView) {
             guard let touch = touches.first else { return }
 
+            // Ensure layer textures exist
+            ensureLayerTextures()
+
             let location = touch.location(in: view)
-            let pressure = touch.type == .pencil ? touch.force / touch.maximumPossibleForce : 1.0
+            let pressure = touch.type == .pencil ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 1.0) : 1.0
             let timestamp = touch.timestamp
+
+            print("Touch began at \(location) with pressure \(pressure)")
 
             // Start new stroke
             let point = BrushStroke.StrokePoint(
@@ -241,16 +247,20 @@ struct MetalCanvasView: UIViewRepresentable {
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView) {
             guard let stroke = currentStroke else { return }
 
+            print("Touch ended - committing stroke with \(stroke.points.count) points")
+
             // Commit stroke to layer
             if let selectedLayer = layers[safe: selectedLayerIndex],
                let texture = selectedLayer.texture,
                let renderer = renderer {
+                print("Rendering stroke to layer texture")
                 renderer.renderStroke(stroke, to: texture)
+            } else {
+                print("ERROR: Could not render stroke - layer: \(layers[safe: selectedLayerIndex] != nil), texture: \(layers[safe: selectedLayerIndex]?.texture != nil), renderer: \(renderer != nil)")
             }
 
             currentStroke = nil
             lastPoint = nil
-            view.setNeedsDisplay()
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView) {

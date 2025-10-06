@@ -210,6 +210,13 @@ fragment float4 shapeFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, uniforms.opacity * uniforms.color.a);
 }
 
+// Fragment shader for displaying a texture (simple passthrough)
+fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
+                                      texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    return tex.sample(textureSampler, in.texCoord);
+}
+
 // MARK: - Effect Shaders
 
 // Compute shader for blur effect

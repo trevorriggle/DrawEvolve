@@ -16,6 +16,7 @@ class CanvasRenderer: NSObject {
     private var brushPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
+    private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var blurComputeState: MTLComputePipelineState?
     private var sharpenComputeState: MTLComputePipelineState?
 
@@ -47,6 +48,7 @@ class CanvasRenderer: NSObject {
               let eraserFragment = library.makeFunction(name: "eraserFragmentShader"),
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
               let compositeFragment = library.makeFunction(name: "compositeFragmentShader"),
+              let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader"),
               let blurKernel = library.makeFunction(name: "blurKernel"),
               let sharpenKernel = library.makeFunction(name: "sharpenKernel") else {
             print("Failed to load shader functions")
@@ -89,10 +91,21 @@ class CanvasRenderer: NSObject {
         compositeDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         compositeDescriptor.colorAttachments[0].rgbBlendOperation = .add
 
+        // Texture display pipeline (for showing layers on screen)
+        let textureDisplayDescriptor = MTLRenderPipelineDescriptor()
+        textureDisplayDescriptor.vertexFunction = quadVertex
+        textureDisplayDescriptor.fragmentFunction = textureDisplayFragment
+        textureDisplayDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        textureDisplayDescriptor.colorAttachments[0].isBlendingEnabled = true
+        textureDisplayDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        textureDisplayDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        textureDisplayDescriptor.colorAttachments[0].rgbBlendOperation = .add
+
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
+            textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             blurComputeState = try device.makeComputePipelineState(function: blurKernel)
             sharpenComputeState = try device.makeComputePipelineState(function: sharpenKernel)
         } catch {
@@ -111,12 +124,41 @@ class CanvasRenderer: NSObject {
         descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
         descriptor.storageMode = .private
 
-        return device.makeTexture(descriptor: descriptor)
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+
+        // Clear the texture to transparent
+        clearTexture(texture)
+
+        return texture
+    }
+
+    /// Clear a texture to transparent
+    private func clearTexture(_ texture: MTLTexture) {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            return
+        }
+
+        renderEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
     }
 
     /// Render a brush stroke to a texture
     func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture) {
+        print("CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
+
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            print("CanvasRenderer: Failed to create command buffer")
             return
         }
 
@@ -126,17 +168,20 @@ class CanvasRenderer: NSObject {
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            print("CanvasRenderer: Failed to create render encoder")
             return
         }
 
         // Select pipeline based on tool
         let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
         guard let pipelineState = pipeline else {
+            print("CanvasRenderer: No pipeline state available")
             renderEncoder.endEncoding()
             return
         }
 
         renderEncoder.setRenderPipelineState(pipelineState)
+        print("CanvasRenderer: Pipeline set, rendering points...")
 
         // Prepare brush uniforms
         var uniforms = BrushUniforms(
@@ -171,6 +216,8 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.endEncoding()
         commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        print("CanvasRenderer: Stroke rendered successfully")
     }
 
     // Metal structure matching shader
@@ -262,6 +309,22 @@ class CanvasRenderer: NSObject {
         }
 
         return UIImage(cgImage: cgImage)
+    }
+
+    /// Render a texture as a fullscreen quad
+    func renderTextureToScreen(
+        _ texture: MTLTexture,
+        to renderEncoder: MTLRenderCommandEncoder,
+        opacity: Float = 1.0
+    ) {
+        guard let pipeline = textureDisplayPipelineState else { return }
+
+        renderEncoder.setRenderPipelineState(pipeline)
+        renderEncoder.setFragmentTexture(texture, index: 0)
+
+        // Draw fullscreen quad (6 vertices for 2 triangles)
+        // The quadVertexShader generates these automatically
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
     /// Flood fill (paint bucket) algorithm
