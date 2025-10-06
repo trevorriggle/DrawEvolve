@@ -1,6 +1,6 @@
 # Where We Left Off
 
-## Status: DRAWING WORKS! 🎉 Ready for Testing
+## Status: Drawing Works (But Scuffed) 🎨 - Ready to Polish
 
 ### What's Done ✅
 - **Completely removed PencilKit** - was too limited (Notes app tech)
@@ -38,25 +38,37 @@
 
 ### What Was Fixed This Session ✅
 
-**THE BIG FIX: Drawing now works!**
+**THE BIG WIN: You can now leave marks on the page! 🎨**
 
-**Root Cause Analysis:**
-The drawing system was completely functional (Metal shaders, renderer, touch handling) but THREE critical issues prevented it from working:
+User reported after testing:
+> "It is INSANELY scuffed, and the canvas isn't nearly the full area of the ipad, the drawing is out of sync, but god dammit you can leave a mark on the page. W."
 
-1. **`isUserInteractionEnabled` was false** - MTKView doesn't enable touch events by default
-2. **No real-time stroke preview** - Users couldn't see what they were drawing until touchesEnded
-3. **Draw loop only showed committed layers** - Current stroke wasn't rendered during drawing
+**THREE Critical Fixes:**
 
-**Fixes Applied:**
-- ✅ Set `metalView.isUserInteractionEnabled = true` (CRITICAL)
-- ✅ Added `renderStrokePreview()` method to CanvasRenderer
-- ✅ Modified draw loop to render `currentStroke` in real-time before committing
-- ✅ Increased frame rate from 30fps to 60fps for smooth drawing
-- ✅ Added comprehensive debug logging to trace touch events
+**Fix 1: Canvas Layout (was tiny red box)**
+- Changed from ZStack (everything overlapping) to HStack
+- Toolbar: Fixed 104px width on left
+- Canvas: Fills remaining space to the right
+- Result: Canvas now expands (but still not full iPad area - needs tuning)
+
+**Fix 2: Touch Input Enabled**
+- Set `metalView.isUserInteractionEnabled = true`
+- Added real-time stroke preview with `renderStrokePreview()`
+- Increased frame rate to 60fps
+- Result: Drawing appears in real-time while touching
+
+**Fix 3: Coordinate System Mismatch (THE BIG ONE)**
+- **Problem**: Touch coords in screen space (e.g. 1024x768), textures are 2048x2048
+- Strokes showed during preview but vanished on touchesEnded
+- **Fix**: Scale coordinates from screen space to texture space
+- Added `screenSize` parameter to `renderStroke()`
+- Calculate scale factor: `textureWidth/screenWidth`, `textureHeight/screenHeight`
+- Result: Strokes now persist after lifting finger!
 
 **Files Modified:**
-- `MetalCanvasView.swift` - Enable touch input, real-time preview, debug logging
-- `CanvasRenderer.swift` - Add renderStrokePreview() for live stroke rendering
+- `DrawingCanvasView.swift` - Fixed layout from ZStack to HStack
+- `MetalCanvasView.swift` - Enable touch input, synchronous texture init, enhanced logging
+- `CanvasRenderer.swift` - Add coordinate scaling to renderStroke(), renderStrokePreview()
 
 ### What's Missing (Non-Critical) ⚠️
 Advanced features not yet implemented:
@@ -68,39 +80,44 @@ Advanced features not yet implemented:
 
 ### Current Build Status
 - ✅ **App launches successfully!**
-- ✅ **Drawing WORKS!** - Touch events trigger real-time stroke preview
-- ✅ **Fixed infinite loop crash** - updateUIView was modifying @Bindings
-- ✅ **Verified git workflow** - Codespaces → GitHub → Mac works!
-- ✅ **2-column toolbar** - All 19 tools in scrollable grid
-- ⚠️ **Button layout** - Clear/Feedback buttons still have padding issues (cosmetic only)
+- ✅ **Drawing WORKS!** - Can leave marks on page, strokes persist
+- ✅ **Real-time preview** - See strokes as you draw
+- ✅ **Touch input enabled** - MTKView receives touches
+- ⚠️ **Canvas size is scuffed** - Not filling full iPad area (needs layout tuning)
+- ⚠️ **Drawing is out of sync** - Coordinate scaling works but may need adjustment
+- ⚠️ **Visual quality is rough** - "INSANELY scuffed" but functional
 
-### Next Session Priorities
+### Known Issues to Fix Next Session
 
-**Priority 1: Test Drawing End-to-End**
-1. Pull latest code to Mac
-2. Build and run in Xcode
-3. Test touch drawing on canvas
-4. Verify console logs show touch events
-5. Check that strokes appear in real-time
-6. Verify strokes persist after lifting finger
+**Priority 1: Canvas Size & Layout**
+- Canvas doesn't fill full iPad area
+- Need to adjust HStack layout or add explicit frame sizes
+- Debug red border shows canvas boundaries - use to diagnose
 
-**Priority 2: Test Full Workflow**
-1. Draw something on canvas
-2. Tap "Get Feedback" button
-3. Verify image export works (exportImage() currently returns nil)
-4. Test AI feedback integration
+**Priority 2: Coordinate Sync Issues**
+- Drawing appears "out of sync" (touch location vs stroke location)
+- Scaling math is there but may need fine-tuning
+- Check console logs for scale factors (should be printed on every stroke)
+- May need to account for toolbar offset, safe area, or navigation bar
 
-**Priority 3: Polish UI (if time permits)**
-- Fix button layout padding issues
-- Improve toolbar aesthetics
-- Test layer switching
+**Priority 3: Visual Polish**
+- Drawing quality described as "scuffed"
+- Check brush size, opacity, hardness settings
+- May need to adjust default brush settings (currently size: 5.0)
+- Test pressure sensitivity with Apple Pencil
+
+**Priority 4: Image Export (for AI feedback)**
+- exportImage() still returns nil
+- Need to implement compositeLayersToImage()
+- Required for "Get Feedback" button to work
 
 ### What We Learned This Session
-- ✅ **MTKView requires explicit user interaction** - Not enabled by default
-- ✅ **Real-time preview is essential** - Users need visual feedback during drawing
-- ✅ **Debug logging is invaluable** - Comprehensive logging helps trace issues quickly
-- ✅ **The architecture was solid** - Metal engine was correct, just needed wiring
-- 💡 **Sometimes the fix is simple** - One line (isUserInteractionEnabled) was the blocker
+- ✅ **Coordinate systems are critical** - Screen space vs texture space mismatch caused vanishing strokes
+- ✅ **User feedback is essential** - "Canvas is tiny red box" led to HStack layout fix
+- ✅ **Debug logging saved us** - Console logs showed exactly what was broken
+- ✅ **The architecture was solid** - Metal pipeline works, just needed proper wiring
+- 💡 **"Scuffed but functional" is progress** - Can polish once core mechanics work
+- 💡 **Visual reference matters** - User describing "red box" immediately clarified the problem
 
 ### Files Changed This Session
 
@@ -136,40 +153,50 @@ Advanced features not yet implemented:
 ### What We Did This Session
 
 **Session Goal:**
-Fix drawing so the canvas is actually usable ✅
+Fix drawing so the canvas is actually usable ✅ (achieved, but scuffed)
 
-**The Problem:**
-Drawing was completely broken - touches weren't being received, strokes weren't visible during drawing, and users had no feedback.
+**The Journey:**
 
-**Root Cause:**
-After deep analysis of the code architecture, I identified THREE critical issues:
-1. `isUserInteractionEnabled` was never set to `true` on MTKView
-2. No real-time stroke preview - users couldn't see strokes until touchesEnded
-3. Draw loop only rendered committed layer textures, not the in-progress stroke
+**Act 1: The Mystery**
+- User: "Drawing doesn't work, tools are there but can't be used"
+- Me: "Maybe touches aren't reaching MTKView?"
+- Added isUserInteractionEnabled, real-time preview, debug logging
+- Pushed code... but still broken
 
-**The Solution:**
-- ✅ Set `metalView.isUserInteractionEnabled = true` (ONE LINE FIX!)
-- ✅ Implemented `renderStrokePreview()` for live drawing feedback
-- ✅ Modified draw loop to render currentStroke before committing
-- ✅ Increased frame rate to 60fps for smooth experience
-- ✅ Added comprehensive debug logging to trace touch flow
+**Act 2: The Red Box**
+- User: "Canvas is a tiny red box, not filling screen"
+- **AH HA moment**: Canvas layout was fundamentally broken
+- Fixed: Changed ZStack (everything overlapping) to HStack (toolbar left, canvas right)
+- Canvas now expands!
 
-**Major Win:**
-🎯 **Drawing now works!** The entire Metal rendering pipeline was correct - it just needed proper touch input and real-time preview.
+**Act 3: The Vanishing Strokes**
+- User: "Drawing works but vanishes when I lift my finger"
+- Preview showed strokes, but touchesEnded made them disappear
+- **THE BIG FIX**: Coordinate system mismatch!
+  - Touch coords in screen space (1024x768)
+  - Textures in texture space (2048x2048)
+  - Strokes were rendering off-canvas at wrong coordinates
+- Added coordinate scaling: `textureSize / screenSize`
+- **IT WORKED!** Strokes persist!
 
-**What's Ready for Testing:**
-- Touch/Apple Pencil input on canvas
-- Real-time stroke preview during drawing
-- Pressure-sensitive brush with Metal shaders
-- Layer system with textures
-- All 19 tools in toolbar (brush/eraser functional)
+**Final Status:**
+User's verdict:
+> "It is INSANELY scuffed, and the canvas isn't nearly the full area of the ipad, the drawing is out of sync, but god dammit you can leave a mark on the page. W."
 
-**What Still Needs Work:**
-- Image export for AI feedback (exportImage() returns nil)
-- Button layout polish (cosmetic only)
-- Advanced tool implementations (shapes, effects, etc.)
+**What Works:**
+- ✅ Can draw and leave marks on page
+- ✅ Strokes persist after lifting finger
+- ✅ Real-time preview shows drawing
+
+**What's Scuffed:**
+- ⚠️ Canvas doesn't fill full iPad area
+- ⚠️ Drawing coordinates slightly off
+- ⚠️ Visual quality needs polish
+
+**The Win:**
+The foundation works. Everything else is just tuning.
 
 ---
 
-**Token Count**: ~54k / 200k used
-**Status**: ✅ DRAWING WORKS! Ready for real-world testing on Mac.
+**Token Count**: ~79k / 200k used
+**Status**: 🎨 DRAWING WORKS (but scuffed) - Ready to polish tomorrow
