@@ -86,7 +86,8 @@ struct BrushPreview: View {
     let settings: BrushSettings
 
     var body: some View {
-        Canvas { context, size in
+        TimelineView(.animation) { _ in
+            Canvas { context, size in
             // Draw sample stroke with current settings
             let path = Path { path in
                 let points: [CGPoint] = stride(from: 0, to: size.width, by: 5).map { x in
@@ -98,14 +99,15 @@ struct BrushPreview: View {
                 path.addLines(points)
             }
 
-            context.stroke(
-                path,
-                with: .color(Color(settings.color)),
-                lineWidth: settings.size
-            )
+                context.stroke(
+                    path,
+                    with: .color(Color(settings.color)),
+                    lineWidth: settings.size
+                )
+            }
+            .background(Color(uiColor: .systemGray6))
+            .cornerRadius(8)
         }
-        .background(Color(uiColor: .systemGray6))
-        .cornerRadius(8)
     }
 }
 

@@ -26,6 +26,7 @@
 		DE000018 /* ColorPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100018 /* ColorPicker.swift */; };
 		DE000019 /* LayerPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100019 /* LayerPanelView.swift */; };
 		DE000020 /* BrushSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100020 /* BrushSettingsView.swift */; };
+		DE000021 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = DE100021 /* Shaders.metal */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		DE100018 /* ColorPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorPicker.swift; sourceTree = "<group>"; };
 		DE100019 /* LayerPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerPanelView.swift; sourceTree = "<group>"; };
 		DE100020 /* BrushSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSettingsView.swift; sourceTree = "<group>"; };
+		DE100021 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -81,6 +83,7 @@
 				DE000311 /* Models */,
 				DE000312 /* Services */,
 				DE000313 /* Config */,
+				DE100021 /* Shaders.metal */,
 				DE200001 /* Assets.xcassets */,
 				DE000314 /* Preview Content */,
 			);
@@ -235,6 +238,7 @@
 				DE000007 /* OpenAIManager.swift in Sources */,
 				DE000015 /* CanvasRenderer.swift in Sources */,
 				DE000016 /* HistoryManager.swift in Sources */,
+				DE000021 /* Shaders.metal in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

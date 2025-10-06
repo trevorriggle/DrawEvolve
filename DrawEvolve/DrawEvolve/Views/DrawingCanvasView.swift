@@ -44,24 +44,99 @@ struct DrawingCanvasView: View {
 
                 // Side toolbar
                 HStack {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 12) {
                         Spacer()
 
-                        // Tools
-                        ToolButton(icon: "paintbrush.pointed.fill", isSelected: canvasState.currentTool == .brush) {
+                        // Drawing tools
+                        ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
                             canvasState.currentTool = .brush
                         }
 
-                        ToolButton(icon: "eraser.fill", isSelected: canvasState.currentTool == .eraser) {
+                        ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
                             canvasState.currentTool = .eraser
                         }
 
-                        ToolButton(icon: "paintpalette.fill", isSelected: canvasState.currentTool == .paintBucket) {
+                        Divider()
+
+                        // Shape tools
+                        ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
+                            canvasState.currentTool = .line
+                        }
+
+                        ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
+                            canvasState.currentTool = .rectangle
+                        }
+
+                        ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
+                            canvasState.currentTool = .circle
+                        }
+
+                        ToolButton(icon: DrawingTool.polygon.icon, isSelected: canvasState.currentTool == .polygon) {
+                            canvasState.currentTool = .polygon
+                        }
+
+                        Divider()
+
+                        // Fill and color tools
+                        ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
                             canvasState.currentTool = .paintBucket
                         }
 
-                        ToolButton(icon: "eyedropper", isSelected: canvasState.currentTool == .eyeDropper) {
+                        ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
                             canvasState.currentTool = .eyeDropper
+                        }
+
+                        Divider()
+
+                        // Selection tools
+                        ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
+                            canvasState.currentTool = .rectangleSelect
+                        }
+
+                        ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
+                            canvasState.currentTool = .lasso
+                        }
+
+                        ToolButton(icon: DrawingTool.magicWand.icon, isSelected: canvasState.currentTool == .magicWand) {
+                            canvasState.currentTool = .magicWand
+                        }
+
+                        Divider()
+
+                        // Effect tools
+                        ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
+                            canvasState.currentTool = .smudge
+                        }
+
+                        ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
+                            canvasState.currentTool = .blur
+                        }
+
+                        ToolButton(icon: DrawingTool.sharpen.icon, isSelected: canvasState.currentTool == .sharpen) {
+                            canvasState.currentTool = .sharpen
+                        }
+
+                        ToolButton(icon: DrawingTool.cloneStamp.icon, isSelected: canvasState.currentTool == .cloneStamp) {
+                            canvasState.currentTool = .cloneStamp
+                        }
+
+                        Divider()
+
+                        // Transform tools
+                        ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
+                            canvasState.currentTool = .move
+                        }
+
+                        ToolButton(icon: DrawingTool.rotate.icon, isSelected: canvasState.currentTool == .rotate) {
+                            canvasState.currentTool = .rotate
+                        }
+
+                        ToolButton(icon: DrawingTool.scale.icon, isSelected: canvasState.currentTool == .scale) {
+                            canvasState.currentTool = .scale
+                        }
+
+                        ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
+                            canvasState.currentTool = .text
                         }
 
                         Divider()

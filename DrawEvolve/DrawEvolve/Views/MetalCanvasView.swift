@@ -9,6 +9,38 @@ import SwiftUI
 import MetalKit
 import UIKit
 
+// Custom MTKView that forwards touches
+class TouchEnabledMTKView: MTKView {
+    weak var touchDelegate: TouchHandling?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesBegan(touches, with: event)
+        touchDelegate?.touchesBegan(touches, in: self)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        touchDelegate?.touchesMoved(touches, in: self)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        touchDelegate?.touchesEnded(touches, in: self)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        touchDelegate?.touchesCancelled(touches, in: self)
+    }
+}
+
+protocol TouchHandling: AnyObject {
+    func touchesBegan(_ touches: Set<UITouch>, in view: MTKView)
+    func touchesMoved(_ touches: Set<UITouch>, in view: MTKView)
+    func touchesEnded(_ touches: Set<UITouch>, in view: MTKView)
+    func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView)
+}
+
 struct MetalCanvasView: UIViewRepresentable {
     @Binding var layers: [DrawingLayer]
     @Binding var currentTool: DrawingTool
@@ -16,7 +48,7 @@ struct MetalCanvasView: UIViewRepresentable {
     @Binding var selectedLayerIndex: Int
 
     func makeUIView(context: Context) -> MTKView {
-        let metalView = MTKView()
+        let metalView = TouchEnabledMTKView()
 
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this device")
@@ -32,6 +64,9 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // Enable multi-touch and pencil input
         metalView.isMultipleTouchEnabled = true
+
+        // Connect touch events to coordinator
+        metalView.touchDelegate = context.coordinator
 
         return metalView
     }
@@ -53,7 +88,7 @@ struct MetalCanvasView: UIViewRepresentable {
         )
     }
 
-    class Coordinator: NSObject, MTKViewDelegate {
+    class Coordinator: NSObject, MTKViewDelegate, TouchHandling {
         @Binding var layers: [DrawingLayer]
         @Binding var currentTool: DrawingTool
         @Binding var brushSettings: BrushSettings
@@ -90,6 +125,13 @@ struct MetalCanvasView: UIViewRepresentable {
             // Initialize renderer if needed
             if renderer == nil {
                 renderer = CanvasRenderer(metalDevice: device)
+
+                // Initialize layer textures
+                for i in 0..<layers.count {
+                    if layers[i].texture == nil {
+                        layers[i].texture = renderer?.createLayerTexture()
+                    }
+                }
             }
 
             guard let commandQueue = device.makeCommandQueue(),
@@ -98,8 +140,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Render all layers
-            // Will implement layer rendering
+            // Clear background
+            // Layers will composite on top
+
+            // Render current stroke if in progress
+            if let stroke = currentStroke, let layerTexture = layers[safe: selectedLayerIndex]?.texture {
+                // Render stroke preview
+                renderer?.renderStroke(stroke, to: layerTexture)
+            }
 
             renderEncoder.endEncoding()
             commandBuffer.present(drawable)
