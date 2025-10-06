@@ -2,44 +2,119 @@
 //  DrawingCanvasView.swift
 //  DrawEvolve
 //
-//  PencilKit-powered drawing canvas with feedback request capability.
+//  Metal-powered canvas with full layer support, pressure sensitivity, and professional tools.
 //
 
 import SwiftUI
-import PencilKit
 
 struct DrawingCanvasView: View {
     @Binding var context: DrawingContext
-    @StateObject private var canvasState = CanvasState()
+
+    // Canvas state
+    @StateObject private var canvasState = CanvasStateManager()
     @State private var showFeedback = false
     @State private var isRequestingFeedback = false
-    @State private var showToolPicker = true
+
+    // Tool and layer controls
+    @State private var showColorPicker = false
+    @State private var showLayerPanel = false
+    @State private var showBrushSettings = false
 
     var body: some View {
         NavigationView {
             ZStack {
                 // Main canvas
-                CanvasRepresentable(
-                    canvasView: $canvasState.canvasView,
-                    showToolPicker: $showToolPicker
+                MetalCanvasView(
+                    layers: $canvasState.layers,
+                    currentTool: $canvasState.currentTool,
+                    brushSettings: $canvasState.brushSettings,
+                    selectedLayerIndex: $canvasState.selectedLayerIndex
                 )
-                .background(Color(uiColor: .systemBackground))
+                .background(Color(uiColor: .systemGray6))
 
                 // Feedback overlay
                 if showFeedback, let feedback = canvasState.feedback {
                     FeedbackOverlay(
                         feedback: feedback,
                         isPresented: $showFeedback,
-                        canvasImage: canvasState.capturedImage
+                        canvasImage: canvasState.exportImage()
                     )
                     .transition(.move(edge: .trailing))
                 }
 
-                // Bottom action bar (positioned to not overlap with tool picker)
+                // Side toolbar
+                HStack {
+                    VStack(spacing: 16) {
+                        Spacer()
+
+                        // Tools
+                        ToolButton(icon: "paintbrush.pointed.fill", isSelected: canvasState.currentTool == .brush) {
+                            canvasState.currentTool = .brush
+                        }
+
+                        ToolButton(icon: "eraser.fill", isSelected: canvasState.currentTool == .eraser) {
+                            canvasState.currentTool = .eraser
+                        }
+
+                        ToolButton(icon: "paintpalette.fill", isSelected: canvasState.currentTool == .paintBucket) {
+                            canvasState.currentTool = .paintBucket
+                        }
+
+                        ToolButton(icon: "eyedropper", isSelected: canvasState.currentTool == .eyeDropper) {
+                            canvasState.currentTool = .eyeDropper
+                        }
+
+                        Divider()
+
+                        // Color picker button
+                        Button(action: { showColorPicker.toggle() }) {
+                            Circle()
+                                .fill(Color(canvasState.brushSettings.color))
+                                .frame(width: 40, height: 40)
+                                .overlay(Circle().stroke(Color.white, lineWidth: 3))
+                                .shadow(radius: 2)
+                        }
+
+                        Divider()
+
+                        // Brush settings
+                        ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
+                            showBrushSettings.toggle()
+                        }
+
+                        // Layers
+                        ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
+                            showLayerPanel.toggle()
+                        }
+
+                        Spacer()
+
+                        // Undo/Redo
+                        ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                            canvasState.undo()
+                        }
+                        .disabled(!canvasState.historyManager.canUndo)
+
+                        ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                            canvasState.redo()
+                        }
+                        .disabled(!canvasState.historyManager.canRedo)
+                    }
+                    .padding(.vertical, 20)
+                    .padding(.horizontal, 12)
+                    .background(Color(uiColor: .systemBackground).opacity(0.95))
+                    .cornerRadius(16)
+                    .shadow(radius: 5)
+                    .padding()
+
+                    Spacer()
+                }
+
+                // Bottom action bar
                 VStack {
                     Spacer()
                     HStack(spacing: 16) {
-                        Button(action: clearCanvas) {
+                        Button(action: { canvasState.clearCanvas() }) {
                             VStack(spacing: 4) {
                                 Image(systemName: "trash")
                                     .font(.system(size: 20))
@@ -72,25 +147,68 @@ struct DrawingCanvasView: View {
                             .foregroundColor(.white)
                             .cornerRadius(12)
                         }
-                        .disabled(isRequestingFeedback || canvasState.canvasView.drawing.bounds.isEmpty)
-                        .opacity(canvasState.canvasView.drawing.bounds.isEmpty ? 0.5 : 1.0)
+                        .disabled(isRequestingFeedback || canvasState.isEmpty)
+                        .opacity(canvasState.isEmpty ? 0.5 : 1.0)
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 80) // Offset for left toolbar
                     .padding(.bottom, 20)
                 }
             }
             .navigationTitle("Create")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $showColorPicker) {
+                NavigationView {
+                    AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
+                        .navigationTitle("Color")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") {
+                                    showColorPicker = false
+                                }
+                            }
+                        }
+                }
+            }
+            .sheet(isPresented: $showLayerPanel) {
+                NavigationView {
+                    LayerPanelView(
+                        layers: $canvasState.layers,
+                        selectedIndex: $canvasState.selectedLayerIndex,
+                        onAddLayer: { canvasState.addLayer() },
+                        onDeleteLayer: { index in canvasState.deleteLayer(at: index) }
+                    )
+                    .navigationTitle("Layers")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showLayerPanel = false
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showBrushSettings) {
+                NavigationView {
+                    BrushSettingsView(settings: $canvasState.brushSettings)
+                        .navigationTitle("Brush Settings")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") {
+                                    showBrushSettings = false
+                                }
+                            }
+                        }
+                }
+            }
         }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(canvasState.errorMessage)
         }
-    }
-
-    private func clearCanvas() {
-        canvasState.canvasView.drawing = PKDrawing()
     }
 
     private func requestFeedback() {
@@ -108,24 +226,86 @@ struct DrawingCanvasView: View {
     }
 }
 
-/// Observable state for the canvas
+struct ToolButton: View {
+    let icon: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 22))
+                .foregroundColor(isSelected ? .white : .primary)
+                .frame(width: 44, height: 44)
+                .background(isSelected ? Color.accentColor : Color.clear)
+                .cornerRadius(8)
+        }
+    }
+}
+
+// Canvas state manager
 @MainActor
-class CanvasState: ObservableObject {
-    @Published var canvasView = PKCanvasView()
+class CanvasStateManager: ObservableObject {
+    @Published var layers: [DrawingLayer] = []
+    @Published var selectedLayerIndex = 0
+    @Published var currentTool: DrawingTool = .brush
+    @Published var brushSettings = BrushSettings()
     @Published var feedback: String?
-    @Published var capturedImage: UIImage?
     @Published var showError = false
     @Published var errorMessage = ""
 
+    let historyManager = HistoryManager()
+
+    var isEmpty: Bool {
+        layers.allSatisfy { $0.texture == nil }
+    }
+
+    init() {
+        // Start with one layer
+        addLayer()
+    }
+
+    func addLayer() {
+        let layer = DrawingLayer(name: "Layer \(layers.count + 1)")
+        layers.append(layer)
+        selectedLayerIndex = layers.count - 1
+    }
+
+    func deleteLayer(at index: Int) {
+        guard layers.count > 1, layers.indices.contains(index) else { return }
+        layers.remove(at: index)
+        if selectedLayerIndex >= layers.count {
+            selectedLayerIndex = layers.count - 1
+        }
+    }
+
+    func clearCanvas() {
+        layers.removeAll()
+        addLayer()
+        historyManager.clear()
+    }
+
+    func undo() {
+        guard let action = historyManager.undo() else { return }
+        // Apply undo action
+    }
+
+    func redo() {
+        guard let action = historyManager.redo() else { return }
+        // Apply redo action
+    }
+
+    func exportImage() -> UIImage? {
+        // Export all layers as single composited image
+        return nil // Will implement with renderer
+    }
+
     func requestFeedback(for context: DrawingContext) async {
-        // Capture the drawing as an image
-        guard let image = captureDrawing() else {
-            showError(message: "Failed to capture drawing image")
+        guard let image = exportImage() else {
+            showError(message: "Failed to export drawing")
             return
         }
-        capturedImage = image
 
-        // Request feedback from OpenAI
         do {
             let feedbackText = try await OpenAIManager.shared.requestFeedback(
                 image: image,
@@ -137,37 +317,9 @@ class CanvasState: ObservableObject {
         }
     }
 
-    private func captureDrawing() -> UIImage? {
-        let drawing = canvasView.drawing
-        return drawing.image(from: drawing.bounds, scale: 1.0)
-    }
-
     private func showError(message: String) {
         errorMessage = message
         showError = true
-    }
-}
-
-/// UIViewRepresentable wrapper for PKCanvasView
-struct CanvasRepresentable: UIViewRepresentable {
-    @Binding var canvasView: PKCanvasView
-    @Binding var showToolPicker: Bool
-
-    func makeUIView(context: Context) -> PKCanvasView {
-        canvasView.tool = PKInkingTool(.pen, color: .black, width: 2)
-        canvasView.drawingPolicy = .anyInput
-        canvasView.backgroundColor = .systemBackground
-        canvasView.becomeFirstResponder()
-        return canvasView
-    }
-
-    func updateUIView(_ uiView: PKCanvasView, context: Context) {
-        // Update tool picker visibility
-        if let window = uiView.window,
-           let toolPicker = PKToolPicker.shared(for: window) {
-            toolPicker.setVisible(showToolPicker, forFirstResponder: uiView)
-            toolPicker.addObserver(uiView)
-        }
     }
 }
 
