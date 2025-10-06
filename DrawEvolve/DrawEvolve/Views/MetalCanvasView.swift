@@ -72,10 +72,17 @@ struct MetalCanvasView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {
-        context.coordinator.layers = layers
-        context.coordinator.currentTool = currentTool
-        context.coordinator.brushSettings = brushSettings
-        context.coordinator.selectedLayerIndex = selectedLayerIndex
+        // Update coordinator state without triggering view updates
+        DispatchQueue.main.async {
+            context.coordinator.layers = layers
+            context.coordinator.currentTool = currentTool
+            context.coordinator.brushSettings = brushSettings
+            context.coordinator.selectedLayerIndex = selectedLayerIndex
+        }
+
+        // Ensure layer textures are initialized
+        context.coordinator.ensureLayerTextures()
+
         uiView.setNeedsDisplay()
     }
 
@@ -98,6 +105,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var currentStroke: BrushStroke?
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
+        private var needsTextureInitialization = true
 
         init(
             layers: Binding<[DrawingLayer]>,
@@ -125,13 +133,6 @@ struct MetalCanvasView: UIViewRepresentable {
             // Initialize renderer if needed
             if renderer == nil {
                 renderer = CanvasRenderer(metalDevice: device)
-
-                // Initialize layer textures
-                for i in 0..<layers.count {
-                    if layers[i].texture == nil {
-                        layers[i].texture = renderer?.createLayerTexture()
-                    }
-                }
             }
 
             guard let commandQueue = device.makeCommandQueue(),
@@ -152,6 +153,20 @@ struct MetalCanvasView: UIViewRepresentable {
             renderEncoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+        }
+
+        func ensureLayerTextures() {
+            guard needsTextureInitialization, let renderer = renderer else { return }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                for i in 0..<self.layers.count {
+                    if self.layers[i].texture == nil {
+                        self.layers[i].texture = renderer.createLayerTexture()
+                    }
+                }
+                self.needsTextureInitialization = false
+            }
         }
 
         // Touch handling for drawing

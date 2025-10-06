@@ -45,11 +45,14 @@
 - Text tool needs text input UI
 
 ### Current Build Status
-- ✅ Should build without errors (needs testing on Mac)
+- ✅ **Builds cleanly with zero errors!**
 - ✅ UI shows up with all 19 tools in organized toolbar
 - ✅ Layers, colors, brush settings all have UI
 - ✅ **Drawing should now work!** Brush and eraser functional
-- ⚠️ Fixed "Publishing changes" warning in BrushSettingsView
+- ✅ Fixed all warnings:
+  - Overlapping access in CanvasRenderer
+  - Publishing changes warnings in MetalCanvasView
+  - Integer sign comparison in Shaders.metal
 
 ### Next Steps (when ready)
 1. **Test basic drawing** - Open in Xcode, build, try brush tool

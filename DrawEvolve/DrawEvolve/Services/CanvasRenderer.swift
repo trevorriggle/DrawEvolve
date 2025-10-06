@@ -147,25 +147,26 @@ class CanvasRenderer: NSObject {
         )
 
         // Convert stroke points to positions
-        var positions = stroke.points.map { SIMD2<Float>(Float($0.location.x), Float($0.location.y)) }
+        let positions = stroke.points.map { SIMD2<Float>(Float($0.location.x), Float($0.location.y)) }
         let viewportSize = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
 
         // Render each point as a brush stamp
-        positions.withUnsafeMutableBytes { positionsPtr in
-            var viewportSizeCopy = viewportSize
+        var viewportSizeCopy = viewportSize
 
-            for (index, point) in stroke.points.enumerated() {
-                // Update pressure for this point
-                uniforms.pressure = Float(point.pressure)
+        for (index, point) in stroke.points.enumerated() {
+            // Update pressure for this point
+            uniforms.pressure = Float(point.pressure)
 
-                renderEncoder.setVertexBytes(&positions[index], length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
-                renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
-                renderEncoder.setVertexBytes(&viewportSizeCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
-                renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            // Copy position to avoid overlapping access
+            var position = positions[index]
 
-                // Draw point sprite
-                renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
-            }
+            renderEncoder.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            renderEncoder.setVertexBytes(&viewportSizeCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+
+            // Draw point sprite
+            renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
         }
 
         renderEncoder.endEncoding()

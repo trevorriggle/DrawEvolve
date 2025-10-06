@@ -229,8 +229,8 @@ kernel void blurKernel(texture2d<float, access::read> inputTexture [[texture(0)]
     for (int dy = -radius; dy <= radius; dy++) {
         for (int dx = -radius; dx <= radius; dx++) {
             int2 coord = int2(gid) + int2(dx, dy);
-            if (coord.x >= 0 && coord.x < inputTexture.get_width() &&
-                coord.y >= 0 && coord.y < inputTexture.get_height()) {
+            if (coord.x >= 0 && coord.x < int(inputTexture.get_width()) &&
+                coord.y >= 0 && coord.y < int(inputTexture.get_height())) {
                 sum += inputTexture.read(uint2(coord));
                 count++;
             }
@@ -262,8 +262,8 @@ kernel void sharpenKernel(texture2d<float, access::read> inputTexture [[texture(
 
     for (int i = 0; i < 8; i++) {
         int2 coord = int2(gid) + offsets[i];
-        if (coord.x >= 0 && coord.x < inputTexture.get_width() &&
-            coord.y >= 0 && coord.y < inputTexture.get_height()) {
+        if (coord.x >= 0 && coord.x < int(inputTexture.get_width()) &&
+            coord.y >= 0 && coord.y < int(inputTexture.get_height())) {
             sum += inputTexture.read(uint2(coord));
         }
     }
