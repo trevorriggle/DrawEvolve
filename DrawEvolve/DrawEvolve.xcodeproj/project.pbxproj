@@ -18,6 +18,14 @@
 		DE000009 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200002 /* Preview Assets.xcassets */; };
 		DE000011 /* LandingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100011 /* LandingView.swift */; };
 		DE000012 /* OnboardingPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100012 /* OnboardingPopup.swift */; };
+		DE000013 /* DrawingLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100013 /* DrawingLayer.swift */; };
+		DE000014 /* DrawingTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100014 /* DrawingTool.swift */; };
+		DE000015 /* CanvasRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100015 /* CanvasRenderer.swift */; };
+		DE000016 /* HistoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100016 /* HistoryManager.swift */; };
+		DE000017 /* MetalCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100017 /* MetalCanvasView.swift */; };
+		DE000018 /* ColorPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100018 /* ColorPicker.swift */; };
+		DE000019 /* LayerPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100019 /* LayerPanelView.swift */; };
+		DE000020 /* BrushSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100020 /* BrushSettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +39,14 @@
 		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
 		DE100011 /* LandingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LandingView.swift; sourceTree = "<group>"; };
 		DE100012 /* OnboardingPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPopup.swift; sourceTree = "<group>"; };
+		DE100013 /* DrawingLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingLayer.swift; sourceTree = "<group>"; };
+		DE100014 /* DrawingTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingTool.swift; sourceTree = "<group>"; };
+		DE100015 /* CanvasRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasRenderer.swift; sourceTree = "<group>"; };
+		DE100016 /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
+		DE100017 /* MetalCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCanvasView.swift; sourceTree = "<group>"; };
+		DE100018 /* ColorPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorPicker.swift; sourceTree = "<group>"; };
+		DE100019 /* LayerPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerPanelView.swift; sourceTree = "<group>"; };
+		DE100020 /* BrushSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSettingsView.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -87,7 +103,11 @@
 				DE100012 /* OnboardingPopup.swift */,
 				DE100003 /* PromptInputView.swift */,
 				DE100004 /* DrawingCanvasView.swift */,
+				DE100017 /* MetalCanvasView.swift */,
 				DE100005 /* FeedbackOverlay.swift */,
+				DE100018 /* ColorPicker.swift */,
+				DE100019 /* LayerPanelView.swift */,
+				DE100020 /* BrushSettingsView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -96,6 +116,8 @@
 			isa = PBXGroup;
 			children = (
 				DE100006 /* DrawingContext.swift */,
+				DE100013 /* DrawingLayer.swift */,
+				DE100014 /* DrawingTool.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -104,6 +126,8 @@
 			isa = PBXGroup;
 			children = (
 				DE100007 /* OpenAIManager.swift */,
+				DE100015 /* CanvasRenderer.swift */,
+				DE100016 /* HistoryManager.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -200,9 +224,17 @@
 				DE000012 /* OnboardingPopup.swift in Sources */,
 				DE000003 /* PromptInputView.swift in Sources */,
 				DE000004 /* DrawingCanvasView.swift in Sources */,
+				DE000017 /* MetalCanvasView.swift in Sources */,
 				DE000005 /* FeedbackOverlay.swift in Sources */,
+				DE000018 /* ColorPicker.swift in Sources */,
+				DE000019 /* LayerPanelView.swift in Sources */,
+				DE000020 /* BrushSettingsView.swift in Sources */,
 				DE000006 /* DrawingContext.swift in Sources */,
+				DE000013 /* DrawingLayer.swift in Sources */,
+				DE000014 /* DrawingTool.swift in Sources */,
 				DE000007 /* OpenAIManager.swift in Sources */,
+				DE000015 /* CanvasRenderer.swift in Sources */,
+				DE000016 /* HistoryManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
