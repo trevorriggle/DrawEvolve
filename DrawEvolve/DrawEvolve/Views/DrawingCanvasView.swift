@@ -169,8 +169,8 @@ struct CanvasRepresentable: UIViewRepresentable {
 
     func updateUIView(_ uiView: PKCanvasView, context: Context) {
         // Update tool picker visibility
-        if let window = uiView.window {
-            let toolPicker = PKToolPicker.shared(for: window)
+        if let window = uiView.window,
+           let toolPicker = PKToolPicker.shared(for: window) {
             toolPicker.setVisible(showToolPicker, forFirstResponder: uiView)
             toolPicker.addObserver(uiView)
         }
