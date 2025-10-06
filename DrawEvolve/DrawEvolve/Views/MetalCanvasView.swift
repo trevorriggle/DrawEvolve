@@ -14,8 +14,14 @@ class TouchEnabledMTKView: MTKView {
     weak var touchDelegate: TouchHandling?
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("TouchEnabledMTKView: touchesBegan received \(touches.count) touches")
         super.touchesBegan(touches, with: event)
-        touchDelegate?.touchesBegan(touches, in: self)
+        if let delegate = touchDelegate {
+            print("TouchEnabledMTKView: Forwarding to delegate")
+            delegate.touchesBegan(touches, in: self)
+        } else {
+            print("TouchEnabledMTKView: WARNING - No touch delegate!")
+        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -24,11 +30,13 @@ class TouchEnabledMTKView: MTKView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("TouchEnabledMTKView: touchesEnded received")
         super.touchesEnded(touches, with: event)
         touchDelegate?.touchesEnded(touches, in: self)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("TouchEnabledMTKView: touchesCancelled received")
         super.touchesCancelled(touches, with: event)
         touchDelegate?.touchesCancelled(touches, in: self)
     }
@@ -63,15 +71,18 @@ struct MetalCanvasView: UIViewRepresentable {
 
         metalView.device = device
         metalView.delegate = context.coordinator
-        metalView.enableSetNeedsDisplay = false  // Use continuous drawing
-        metalView.isPaused = false  // Continuous updates
-        metalView.framebufferOnly = false
+        metalView.enableSetNeedsDisplay = false  // Use continuous drawing mode
+        metalView.isPaused = false  // Continuous updates at preferredFramesPerSecond
+        metalView.framebufferOnly = false  // Allow texture readback
         metalView.clearColor = MTLClearColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1)  // Light gray to see canvas
         metalView.backgroundColor = .systemGray6  // Light gray background
-        metalView.preferredFramesPerSecond = 30  // Limit to 30fps to prevent lag
+        metalView.preferredFramesPerSecond = 60  // Smooth drawing at 60fps
 
         // Enable multi-touch and pencil input
         metalView.isMultipleTouchEnabled = true
+
+        // CRITICAL: Enable user interaction so touches are received
+        metalView.isUserInteractionEnabled = true
 
         // Connect touch events to coordinator
         metalView.touchDelegate = context.coordinator
@@ -158,6 +169,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
+            // IMPORTANT: Render current stroke preview on top
+            if let stroke = currentStroke, !stroke.points.isEmpty {
+                renderer?.renderStrokePreview(stroke, to: renderEncoder, viewportSize: view.drawableSize)
+            }
+
             renderEncoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -185,7 +201,11 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // Touch handling for drawing
         func touchesBegan(_ touches: Set<UITouch>, in view: MTKView) {
-            guard let touch = touches.first else { return }
+            print("=== TOUCH BEGAN ===")
+            guard let touch = touches.first else {
+                print("ERROR: No touch in set")
+                return
+            }
 
             // Ensure layer textures exist
             ensureLayerTextures()
@@ -194,7 +214,9 @@ struct MetalCanvasView: UIViewRepresentable {
             let pressure = touch.type == .pencil ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 1.0) : 1.0
             let timestamp = touch.timestamp
 
-            print("Touch began at \(location) with pressure \(pressure)")
+            print("Touch began at \(location) with pressure \(pressure), tool: \(currentTool)")
+            print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
+            print("Layer has texture: \(layers[safe: selectedLayerIndex]?.texture != nil)")
 
             // Start new stroke
             let point = BrushStroke.StrokePoint(
@@ -212,11 +234,15 @@ struct MetalCanvasView: UIViewRepresentable {
 
             lastPoint = location
             lastTimestamp = timestamp
+            print("Created stroke with 1 point")
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView) {
             guard let touch = touches.first,
-                  var stroke = currentStroke else { return }
+                  var stroke = currentStroke else {
+                print("touchesMoved: No touch or no current stroke")
+                return
+            }
 
             let location = touch.location(in: view)
             let pressure = touch.type == .pencil ? touch.force / touch.maximumPossibleForce : 1.0
@@ -253,27 +279,40 @@ struct MetalCanvasView: UIViewRepresentable {
             lastPoint = location
             lastTimestamp = timestamp
 
-            // Render stroke incrementally
-            view.setNeedsDisplay()
+            // Print every 10th point to avoid spam
+            if stroke.points.count % 10 == 0 {
+                print("touchesMoved: stroke has \(stroke.points.count) points")
+            }
+
+            // No need to call setNeedsDisplay - continuous drawing is enabled
         }
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView) {
-            guard let stroke = currentStroke else { return }
+            print("=== TOUCH ENDED ===")
+            guard let stroke = currentStroke else {
+                print("ERROR: No current stroke to commit")
+                return
+            }
 
-            print("Touch ended - committing stroke with \(stroke.points.count) points")
+            print("Committing stroke with \(stroke.points.count) points")
 
             // Commit stroke to layer
             if let selectedLayer = layers[safe: selectedLayerIndex],
                let texture = selectedLayer.texture,
                let renderer = renderer {
-                print("Rendering stroke to layer texture")
+                print("Rendering stroke to layer \(selectedLayerIndex) texture")
                 renderer.renderStroke(stroke, to: texture)
+                print("Stroke committed successfully")
             } else {
-                print("ERROR: Could not render stroke - layer: \(layers[safe: selectedLayerIndex] != nil), texture: \(layers[safe: selectedLayerIndex]?.texture != nil), renderer: \(renderer != nil)")
+                print("ERROR: Could not render stroke")
+                print("  - Layer exists: \(layers[safe: selectedLayerIndex] != nil)")
+                print("  - Texture exists: \(layers[safe: selectedLayerIndex]?.texture != nil)")
+                print("  - Renderer exists: \(renderer != nil)")
             }
 
             currentStroke = nil
             lastPoint = nil
+            print("Stroke cleared, ready for next stroke")
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView) {

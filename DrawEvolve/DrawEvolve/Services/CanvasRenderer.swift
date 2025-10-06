@@ -327,6 +327,50 @@ class CanvasRenderer: NSObject {
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
+    /// Render in-progress stroke preview directly to screen (for real-time feedback)
+    func renderStrokePreview(
+        _ stroke: BrushStroke,
+        to renderEncoder: MTLRenderCommandEncoder,
+        viewportSize: CGSize
+    ) {
+        // Select pipeline based on tool
+        let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
+        guard let pipelineState = pipeline else { return }
+
+        renderEncoder.setRenderPipelineState(pipelineState)
+
+        // Prepare brush uniforms
+        var uniforms = BrushUniforms(
+            color: stroke.settings.color,
+            size: Float(stroke.settings.size),
+            opacity: Float(stroke.settings.opacity),
+            hardness: Float(stroke.settings.hardness)
+        )
+
+        // Convert stroke points to positions
+        let positions = stroke.points.map { SIMD2<Float>(Float($0.location.x), Float($0.location.y)) }
+        let viewport = SIMD2<Float>(Float(viewportSize.width), Float(viewportSize.height))
+
+        // Render each point as a brush stamp
+        var viewportCopy = viewport
+
+        for (index, point) in stroke.points.enumerated() {
+            // Update pressure for this point
+            uniforms.pressure = Float(point.pressure)
+
+            // Copy position to avoid overlapping access
+            var position = positions[index]
+
+            renderEncoder.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            renderEncoder.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            renderEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+
+            // Draw point sprite
+            renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+        }
+    }
+
     /// Flood fill (paint bucket) algorithm
     func floodFill(at point: CGPoint, with color: UIColor, in texture: MTLTexture) {
         // Will implement flood fill algorithm
