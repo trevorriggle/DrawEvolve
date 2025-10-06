@@ -16,7 +16,6 @@
 		DE000007 /* OpenAIManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100007 /* OpenAIManager.swift */; };
 		DE000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200001 /* Assets.xcassets */; };
 		DE000009 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200002 /* Preview Assets.xcassets */; };
-		DE000010 /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = DE300001 /* Config.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,7 +29,6 @@
 		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
-		DE300001 /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.plist; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
 		DE400001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -107,7 +105,6 @@
 		DE000313 /* Config */ = {
 			isa = PBXGroup;
 			children = (
-				DE300001 /* Config.plist */,
 				DE300002 /* Config.example.plist */,
 			);
 			path = Config;
@@ -181,7 +178,6 @@
 			files = (
 				DE000009 /* Preview Assets.xcassets in Resources */,
 				DE000008 /* Assets.xcassets in Resources */,
-				DE000010 /* Config.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
