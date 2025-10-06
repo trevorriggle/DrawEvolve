@@ -13,13 +13,17 @@ struct DrawingCanvasView: View {
     @StateObject private var canvasState = CanvasState()
     @State private var showFeedback = false
     @State private var isRequestingFeedback = false
+    @State private var showToolPicker = true
 
     var body: some View {
         NavigationView {
             ZStack {
                 // Canvas
-                CanvasRepresentable(canvasView: $canvasState.canvasView)
-                    .background(Color(uiColor: .systemBackground))
+                CanvasRepresentable(
+                    canvasView: $canvasState.canvasView,
+                    showToolPicker: $showToolPicker
+                )
+                .background(Color(uiColor: .systemBackground))
 
                 // Feedback overlay
                 if showFeedback, let feedback = canvasState.feedback {
@@ -30,23 +34,57 @@ struct DrawingCanvasView: View {
                     )
                     .transition(.move(edge: .trailing))
                 }
+
+                // Bottom action bar
+                VStack {
+                    Spacer()
+                    HStack(spacing: 16) {
+                        Button(action: clearCanvas) {
+                            VStack(spacing: 4) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 20))
+                                Text("Clear")
+                                    .font(.caption)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.red.opacity(0.1))
+                            .foregroundColor(.red)
+                            .cornerRadius(12)
+                        }
+
+                        Button(action: requestFeedback) {
+                            VStack(spacing: 4) {
+                                if isRequestingFeedback {
+                                    ProgressView()
+                                } else {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 20))
+                                    Text("Get Feedback")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                        }
+                        .disabled(isRequestingFeedback || canvasState.canvasView.drawing.bounds.isEmpty)
+                        .opacity(canvasState.canvasView.drawing.bounds.isEmpty ? 0.5 : 1.0)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                }
             }
             .navigationTitle("Draw")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button(action: clearCanvas) {
-                        Label("Clear", systemImage: "trash")
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showToolPicker.toggle() }) {
+                        Image(systemName: showToolPicker ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
                     }
-
-                    Button(action: requestFeedback) {
-                        if isRequestingFeedback {
-                            ProgressView()
-                        } else {
-                            Label("Feedback", systemImage: "sparkles")
-                        }
-                    }
-                    .disabled(isRequestingFeedback || canvasState.canvasView.drawing.bounds.isEmpty)
                 }
             }
         }
@@ -119,15 +157,26 @@ class CanvasState: ObservableObject {
 /// UIViewRepresentable wrapper for PKCanvasView
 struct CanvasRepresentable: UIViewRepresentable {
     @Binding var canvasView: PKCanvasView
+    @Binding var showToolPicker: Bool
 
     func makeUIView(context: Context) -> PKCanvasView {
         canvasView.tool = PKInkingTool(.pen, color: .black, width: 2)
         canvasView.drawingPolicy = .anyInput
         canvasView.backgroundColor = .systemBackground
+
+        // Show the tool picker
+        let toolPicker = PKToolPicker.shared(for: canvasView.window)
+        toolPicker?.setVisible(showToolPicker, forFirstResponder: canvasView)
+        toolPicker?.addObserver(canvasView)
+        canvasView.becomeFirstResponder()
+
         return canvasView
     }
 
-    func updateUIView(_ uiView: PKCanvasView, context: Context) {}
+    func updateUIView(_ uiView: PKCanvasView, context: Context) {
+        let toolPicker = PKToolPicker.shared(for: uiView.window)
+        toolPicker?.setVisible(showToolPicker, forFirstResponder: uiView)
+    }
 }
 
 #Preview {
