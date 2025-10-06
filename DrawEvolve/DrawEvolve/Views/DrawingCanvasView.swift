@@ -170,26 +170,33 @@ struct DrawingCanvasView: View {
                     Spacer()
                 }
 
-                // Bottom action bar
+                // Clear button - aligned with toolbar
                 VStack {
                     Spacer()
-                    HStack(spacing: 16) {
-                        Button(action: { canvasState.clearCanvas() }) {
-                            VStack(spacing: 4) {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 20))
-                                Text("Clear")
-                                    .font(.caption)
+                    HStack {
+                        VStack(spacing: 16) {
+                            Button(action: { canvasState.clearCanvas() }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 20))
+                                    Text("Clear")
+                                        .font(.caption)
+                                }
+                                .frame(width: 80)
+                                .padding(.vertical, 12)
+                                .background(Color.red.opacity(0.1))
+                                .foregroundColor(.red)
+                                .cornerRadius(12)
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.red.opacity(0.1))
-                            .foregroundColor(.red)
-                            .cornerRadius(12)
                         }
+                        .padding(.leading, 16)
+                        .padding(.bottom, 20)
 
+                        Spacer()
+
+                        // Get Feedback button - bottom right
                         Button(action: requestFeedback) {
-                            VStack(spacing: 4) {
+                            HStack(spacing: 8) {
                                 if isRequestingFeedback {
                                     ProgressView()
                                         .tint(.white)
@@ -197,21 +204,21 @@ struct DrawingCanvasView: View {
                                     Image(systemName: "sparkles")
                                         .font(.system(size: 20))
                                     Text("Get Feedback")
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
+                                        .font(.headline)
                                 }
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 16)
                             .background(Color.accentColor)
                             .foregroundColor(.white)
-                            .cornerRadius(12)
+                            .cornerRadius(16)
+                            .shadow(radius: 4)
                         }
                         .disabled(isRequestingFeedback || canvasState.isEmpty)
                         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 20)
                     }
-                    .padding(.horizontal, 80) // Offset for left toolbar
-                    .padding(.bottom, 20)
                 }
             }
             .navigationTitle("Create")

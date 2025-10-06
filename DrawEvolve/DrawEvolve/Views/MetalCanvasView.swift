@@ -63,12 +63,12 @@ struct MetalCanvasView: UIViewRepresentable {
 
         metalView.device = device
         metalView.delegate = context.coordinator
-        metalView.enableSetNeedsDisplay = true  // Manual control
-        metalView.isPaused = true  // Don't draw unless needed
+        metalView.enableSetNeedsDisplay = false  // Use continuous drawing
+        metalView.isPaused = false  // Continuous updates
         metalView.framebufferOnly = false
-        metalView.clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
-        metalView.backgroundColor = .white
-        metalView.preferredFramesPerSecond = 30  // Limit to 30fps
+        metalView.clearColor = MTLClearColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1)  // Light gray to see canvas
+        metalView.backgroundColor = .systemGray6  // Light gray background
+        metalView.preferredFramesPerSecond = 30  // Limit to 30fps to prevent lag
 
         // Enable multi-touch and pencil input
         metalView.isMultipleTouchEnabled = true
@@ -132,11 +132,13 @@ struct MetalCanvasView: UIViewRepresentable {
             guard let device = view.device,
                   let drawable = view.currentDrawable,
                   let descriptor = view.currentRenderPassDescriptor else {
+                print("MetalCanvasView.draw: Failed to get device/drawable/descriptor")
                 return
             }
 
             // Initialize renderer if needed
             if renderer == nil {
+                print("MetalCanvasView.draw: Initializing renderer")
                 renderer = CanvasRenderer(metalDevice: device)
             }
 
