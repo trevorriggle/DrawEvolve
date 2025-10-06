@@ -22,33 +22,9 @@ struct DrawingCanvasView: View {
 
     var body: some View {
         NavigationView {
-            ZStack {
-                // Main canvas - SHOULD BE VISIBLE WITH RED BORDER FOR DEBUGGING
-                MetalCanvasView(
-                    layers: $canvasState.layers,
-                    currentTool: $canvasState.currentTool,
-                    brushSettings: $canvasState.brushSettings,
-                    selectedLayerIndex: $canvasState.selectedLayerIndex
-                )
-                .background(Color(uiColor: .systemGray6))
-                .border(Color.red, width: 3) // DEBUG: See canvas boundaries
-                .onTapGesture {
-                    print("DEBUG: Canvas received tap gesture from SwiftUI level!")
-                }
-
-                // Feedback overlay
-                if showFeedback, let feedback = canvasState.feedback {
-                    FeedbackOverlay(
-                        feedback: feedback,
-                        isPresented: $showFeedback,
-                        canvasImage: canvasState.exportImage()
-                    )
-                    .transition(.move(edge: .trailing))
-                }
-
-                // Side toolbar - 2 column grid (blocks touches to canvas beneath)
-                HStack {
-                    ScrollView {
+            HStack(spacing: 0) {
+                // Side toolbar - 2 column grid, FIXED WIDTH on left
+                ScrollView {
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
                             // Drawing tools
                             ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
@@ -161,24 +137,40 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
-                        }
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 8)
                     }
-                    .frame(width: 104) // 2 columns of 44px + padding
-                    .background(Color(uiColor: .systemBackground).opacity(0.95))
-                    .cornerRadius(16)
-                    .shadow(radius: 5)
-                    .padding()
-
-                    Spacer()
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 8)
                 }
+                .frame(width: 104) // 2 columns of 44px + padding
+                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                .shadow(radius: 5)
 
-                // Clear button - aligned with toolbar
-                VStack {
-                    Spacer()
-                    HStack {
-                        VStack(spacing: 16) {
+                // Main canvas - fills remaining space
+                ZStack {
+                    MetalCanvasView(
+                        layers: $canvasState.layers,
+                        currentTool: $canvasState.currentTool,
+                        brushSettings: $canvasState.brushSettings,
+                        selectedLayerIndex: $canvasState.selectedLayerIndex
+                    )
+                    .background(Color(uiColor: .systemGray6))
+                    .border(Color.red, width: 3) // DEBUG: See canvas boundaries
+
+                    // Feedback overlay on top of canvas
+                    if showFeedback, let feedback = canvasState.feedback {
+                        FeedbackOverlay(
+                            feedback: feedback,
+                            isPresented: $showFeedback,
+                            canvasImage: canvasState.exportImage()
+                        )
+                        .transition(.move(edge: .trailing))
+                    }
+
+                    // Bottom buttons - over canvas
+                    VStack {
+                        Spacer()
+                        HStack {
+                            // Clear button - bottom left
                             Button(action: { canvasState.clearCanvas() }) {
                                 VStack(spacing: 4) {
                                     Image(systemName: "trash")
@@ -192,36 +184,36 @@ struct DrawingCanvasView: View {
                                 .foregroundColor(.red)
                                 .cornerRadius(12)
                             }
-                        }
-                        .padding(.leading, 16)
-                        .padding(.bottom, 20)
+                            .padding(.leading, 16)
+                            .padding(.bottom, 20)
 
-                        Spacer()
+                            Spacer()
 
-                        // Get Feedback button - bottom right
-                        Button(action: requestFeedback) {
-                            HStack(spacing: 8) {
-                                if isRequestingFeedback {
-                                    ProgressView()
-                                        .tint(.white)
-                                } else {
-                                    Image(systemName: "sparkles")
-                                        .font(.system(size: 20))
-                                    Text("Get Feedback")
-                                        .font(.headline)
+                            // Get Feedback button - bottom right
+                            Button(action: requestFeedback) {
+                                HStack(spacing: 8) {
+                                    if isRequestingFeedback {
+                                        ProgressView()
+                                            .tint(.white)
+                                    } else {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 20))
+                                        Text("Get Feedback")
+                                            .font(.headline)
+                                    }
                                 }
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 16)
+                                .background(Color.accentColor)
+                                .foregroundColor(.white)
+                                .cornerRadius(16)
+                                .shadow(radius: 4)
                             }
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 16)
-                            .background(Color.accentColor)
-                            .foregroundColor(.white)
-                            .cornerRadius(16)
-                            .shadow(radius: 4)
+                            .disabled(isRequestingFeedback || canvasState.isEmpty)
+                            .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+                            .padding(.trailing, 20)
+                            .padding(.bottom, 20)
                         }
-                        .disabled(isRequestingFeedback || canvasState.isEmpty)
-                        .opacity(canvasState.isEmpty ? 0.5 : 1.0)
-                        .padding(.trailing, 20)
-                        .padding(.bottom, 20)
                     }
                 }
             }
