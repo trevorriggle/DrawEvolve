@@ -16,6 +16,8 @@
 		DE000007 /* OpenAIManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100007 /* OpenAIManager.swift */; };
 		DE000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200001 /* Assets.xcassets */; };
 		DE000009 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200002 /* Preview Assets.xcassets */; };
+		DE000011 /* LandingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100011 /* LandingView.swift */; };
+		DE000012 /* OnboardingPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100012 /* OnboardingPopup.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +29,8 @@
 		DE100005 /* FeedbackOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackOverlay.swift; sourceTree = "<group>"; };
 		DE100006 /* DrawingContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingContext.swift; sourceTree = "<group>"; };
 		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
+		DE100011 /* LandingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LandingView.swift; sourceTree = "<group>"; };
+		DE100012 /* OnboardingPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPopup.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -79,6 +83,8 @@
 			isa = PBXGroup;
 			children = (
 				DE100002 /* ContentView.swift */,
+				DE100011 /* LandingView.swift */,
+				DE100012 /* OnboardingPopup.swift */,
 				DE100003 /* PromptInputView.swift */,
 				DE100004 /* DrawingCanvasView.swift */,
 				DE100005 /* FeedbackOverlay.swift */,
@@ -190,6 +196,8 @@
 			files = (
 				DE000001 /* DrawEvolveApp.swift in Sources */,
 				DE000002 /* ContentView.swift in Sources */,
+				DE000011 /* LandingView.swift in Sources */,
+				DE000012 /* OnboardingPopup.swift in Sources */,
 				DE000003 /* PromptInputView.swift in Sources */,
 				DE000004 /* DrawingCanvasView.swift in Sources */,
 				DE000005 /* FeedbackOverlay.swift in Sources */,

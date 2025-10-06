@@ -1,0 +1,118 @@
+//
+//  OnboardingPopup.swift
+//  DrawEvolve
+//
+//  First-time user onboarding explanation.
+//
+
+import SwiftUI
+
+struct OnboardingPopup: View {
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        ZStack {
+            // Dimmed background
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    // Prevent dismissal by tapping outside
+                }
+
+            // Popup card
+            VStack(spacing: 24) {
+                // Header
+                VStack(spacing: 12) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 50))
+                        .foregroundColor(.accentColor)
+
+                    Text("Welcome to DrawEvolve!")
+                        .font(.title2)
+                        .fontWeight(.bold)
+
+                    Text("Your AI-powered drawing coach")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+
+                Divider()
+
+                // How it works
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("How it works:")
+                        .font(.headline)
+
+                    OnboardingStep(
+                        icon: "doc.text.fill",
+                        title: "Tell us about your drawing",
+                        description: "Share what you're creating and what feedback you need"
+                    )
+
+                    OnboardingStep(
+                        icon: "paintbrush.pointed.fill",
+                        title: "Create your artwork",
+                        description: "Use our canvas and Apple Pencil to bring your vision to life"
+                    )
+
+                    OnboardingStep(
+                        icon: "sparkles",
+                        title: "Get AI feedback",
+                        description: "Receive personalized, encouraging feedback to improve your skills"
+                    )
+                }
+                .padding(.horizontal)
+
+                // Continue button
+                Button(action: {
+                    isPresented = false
+                }) {
+                    Text("Let's Get Started")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                }
+                .padding(.horizontal)
+            }
+            .padding(32)
+            .background(
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(uiColor: .systemBackground))
+                    .shadow(radius: 20)
+            )
+            .padding(.horizontal, 32)
+        }
+    }
+}
+
+struct OnboardingStep: View {
+    let icon: String
+    let title: String
+    let description: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundColor(.accentColor)
+                .frame(width: 32)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                Text(description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
+#Preview {
+    OnboardingPopup(isPresented: .constant(true))
+}

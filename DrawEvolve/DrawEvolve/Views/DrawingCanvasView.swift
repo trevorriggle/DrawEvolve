@@ -18,7 +18,7 @@ struct DrawingCanvasView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                // Canvas
+                // Main canvas
                 CanvasRepresentable(
                     canvasView: $canvasState.canvasView,
                     showToolPicker: $showToolPicker
@@ -35,7 +35,7 @@ struct DrawingCanvasView: View {
                     .transition(.move(edge: .trailing))
                 }
 
-                // Bottom action bar
+                // Bottom action bar (positioned to not overlap with tool picker)
                 VStack {
                     Spacer()
                     HStack(spacing: 16) {
@@ -57,6 +57,7 @@ struct DrawingCanvasView: View {
                             VStack(spacing: 4) {
                                 if isRequestingFeedback {
                                     ProgressView()
+                                        .tint(.white)
                                 } else {
                                     Image(systemName: "sparkles")
                                         .font(.system(size: 20))
@@ -78,15 +79,8 @@ struct DrawingCanvasView: View {
                     .padding(.bottom, 20)
                 }
             }
-            .navigationTitle("Draw")
+            .navigationTitle("Create")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showToolPicker.toggle() }) {
-                        Image(systemName: showToolPicker ? "pencil.tip.crop.circle.fill" : "pencil.tip.crop.circle")
-                    }
-                }
-            }
         }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}

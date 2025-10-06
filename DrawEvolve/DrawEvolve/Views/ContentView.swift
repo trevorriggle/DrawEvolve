@@ -8,18 +8,50 @@
 import SwiftUI
 
 struct ContentView: View {
+    @AppStorage("isAuthenticated") private var isAuthenticated = false
+    @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
+    @State private var showOnboarding = false
     @State private var drawingContext = DrawingContext()
-    @State private var showPromptInput = true
+    @State private var showPromptInput = false
 
     var body: some View {
         Group {
-            if showPromptInput {
+            if !isAuthenticated {
+                // Landing page with auth options
+                LandingView(isAuthenticated: $isAuthenticated)
+            } else if showPromptInput {
+                // Questionnaire
                 PromptInputView(
                     context: $drawingContext,
                     isPresented: $showPromptInput
                 )
             } else {
+                // Drawing canvas
                 DrawingCanvasView(context: $drawingContext)
+            }
+        }
+        .overlay {
+            // First-time onboarding popup
+            if showOnboarding {
+                OnboardingPopup(isPresented: $showOnboarding)
+            }
+        }
+        .onChange(of: isAuthenticated) { _, newValue in
+            if newValue {
+                // User just logged in/signed up
+                if !hasSeenOnboarding {
+                    showOnboarding = true
+                    hasSeenOnboarding = true
+                } else {
+                    // Returning user - go straight to prompt
+                    showPromptInput = true
+                }
+            }
+        }
+        .onChange(of: showOnboarding) { _, newValue in
+            if !newValue && isAuthenticated {
+                // Onboarding dismissed - show prompt input
+                showPromptInput = true
             }
         }
     }
