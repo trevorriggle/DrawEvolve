@@ -150,7 +150,7 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.endEncoding()
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
+        // Don't wait - this blocks the thread
     }
 
     /// Render a brush stroke to a texture
@@ -216,8 +216,8 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.endEncoding()
         commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        print("CanvasRenderer: Stroke rendered successfully")
+        // Don't wait - let GPU work asynchronously
+        print("CanvasRenderer: Stroke submitted to GPU")
     }
 
     // Metal structure matching shader

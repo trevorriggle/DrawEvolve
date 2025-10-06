@@ -19,15 +19,24 @@ struct ContentView: View {
             if !isAuthenticated {
                 // Landing page with auth options
                 LandingView(isAuthenticated: $isAuthenticated)
+                    .onAppear {
+                        print("ContentView: Showing landing page")
+                    }
             } else if showPromptInput {
                 // Questionnaire
                 PromptInputView(
                     context: $drawingContext,
                     isPresented: $showPromptInput
                 )
+                .onAppear {
+                    print("ContentView: Showing questionnaire")
+                }
             } else {
                 // Drawing canvas
                 DrawingCanvasView(context: $drawingContext)
+                    .onAppear {
+                        print("ContentView: Showing drawing canvas")
+                    }
             }
         }
         .overlay {

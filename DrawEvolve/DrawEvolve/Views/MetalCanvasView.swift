@@ -50,17 +50,25 @@ struct MetalCanvasView: UIViewRepresentable {
     func makeUIView(context: Context) -> MTKView {
         let metalView = TouchEnabledMTKView()
 
+        print("MetalCanvasView: Creating MTKView")
+
         guard let device = MTLCreateSystemDefaultDevice() else {
-            fatalError("Metal is not supported on this device")
+            print("MetalCanvasView: FATAL - Metal not supported!")
+            // Return a basic view that just shows white instead of crashing
+            metalView.backgroundColor = .white
+            return metalView
         }
+
+        print("MetalCanvasView: Metal device created: \(device.name)")
 
         metalView.device = device
         metalView.delegate = context.coordinator
-        metalView.enableSetNeedsDisplay = false  // Manual drawing control
-        metalView.isPaused = false  // Continuous drawing
+        metalView.enableSetNeedsDisplay = true  // Manual control
+        metalView.isPaused = true  // Don't draw unless needed
         metalView.framebufferOnly = false
         metalView.clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
         metalView.backgroundColor = .white
+        metalView.preferredFramesPerSecond = 30  // Limit to 30fps
 
         // Enable multi-touch and pencil input
         metalView.isMultipleTouchEnabled = true
@@ -68,18 +76,17 @@ struct MetalCanvasView: UIViewRepresentable {
         // Connect touch events to coordinator
         metalView.touchDelegate = context.coordinator
 
+        print("MetalCanvasView: MTKView configured successfully")
+
         return metalView
     }
 
     func updateUIView(_ uiView: MTKView, context: Context) {
-        // Update coordinator state
-        context.coordinator.layers = layers
-        context.coordinator.currentTool = currentTool
-        context.coordinator.brushSettings = brushSettings
-        context.coordinator.selectedLayerIndex = selectedLayerIndex
+        // IMPORTANT: Don't modify @Binding values here - causes infinite loop!
+        // Coordinator already has access to bindings via init
 
-        // Ensure layer textures are initialized
-        context.coordinator.ensureLayerTextures()
+        // Just trigger a redraw when something changes
+        uiView.setNeedsDisplay()
     }
 
     func makeCoordinator() -> Coordinator {
@@ -113,6 +120,8 @@ struct MetalCanvasView: UIViewRepresentable {
             _currentTool = currentTool
             _brushSettings = brushSettings
             _selectedLayerIndex = selectedLayerIndex
+
+            print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -129,8 +138,10 @@ struct MetalCanvasView: UIViewRepresentable {
             // Initialize renderer if needed
             if renderer == nil {
                 renderer = CanvasRenderer(metalDevice: device)
-                ensureLayerTextures()
             }
+
+            // Ensure textures exist (only runs once)
+            ensureLayerTextures()
 
             guard let commandQueue = device.makeCommandQueue(),
                   let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -139,16 +150,10 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Composite all visible layers to screen
-            var renderedLayers = 0
             for layer in layers where layer.isVisible {
                 if let texture = layer.texture {
                     renderer?.renderTextureToScreen(texture, to: renderEncoder, opacity: layer.opacity)
-                    renderedLayers += 1
                 }
-            }
-
-            if renderedLayers > 0 {
-                print("Composited \(renderedLayers) layers to screen")
             }
 
             renderEncoder.endEncoding()
@@ -159,15 +164,21 @@ struct MetalCanvasView: UIViewRepresentable {
         func ensureLayerTextures() {
             guard needsTextureInitialization, let renderer = renderer else { return }
 
-            // Initialize textures synchronously
-            for i in 0..<layers.count {
-                if layers[i].texture == nil {
-                    layers[i].texture = renderer.createLayerTexture()
-                    print("Created texture for layer \(i)")
+            print("ensureLayerTextures: Starting texture initialization for \(layers.count) layers")
+
+            // Initialize textures - must be on main thread for binding updates
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+
+                for i in 0..<self.layers.count {
+                    if self.layers[i].texture == nil {
+                        self.layers[i].texture = renderer.createLayerTexture()
+                        print("Created texture for layer \(i)")
+                    }
                 }
+                self.needsTextureInitialization = false
+                print("Layer textures initialized: \(self.layers.count) layers")
             }
-            needsTextureInitialization = false
-            print("Layer textures initialized: \(layers.count) layers")
         }
 
         // Touch handling for drawing
