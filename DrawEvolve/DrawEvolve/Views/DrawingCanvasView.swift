@@ -286,13 +286,13 @@ class CanvasStateManager: ObservableObject {
     }
 
     func undo() {
-        guard let action = historyManager.undo() else { return }
-        // Apply undo action
+        guard historyManager.undo() != nil else { return }
+        // TODO: Apply undo action
     }
 
     func redo() {
-        guard let action = historyManager.redo() else { return }
-        // Apply redo action
+        guard historyManager.redo() != nil else { return }
+        // TODO: Apply redo action
     }
 
     func exportImage() -> UIImage? {

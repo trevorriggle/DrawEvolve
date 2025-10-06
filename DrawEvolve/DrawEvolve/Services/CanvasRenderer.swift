@@ -33,10 +33,12 @@ class CanvasRenderer: NSObject {
 
     private func setupPipeline() {
         // Set up Metal rendering pipeline
-        guard let library = device.makeDefaultLibrary() else {
+        guard device.makeDefaultLibrary() != nil else {
             print("Failed to create Metal library")
             return
         }
+
+        // TODO: Load vertex and fragment shaders when Metal shader file is created
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm

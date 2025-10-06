@@ -29,7 +29,7 @@ struct AdvancedColorPicker: View {
             VStack(spacing: 12) {
                 ColorSlider(value: $hue, range: 0...1, label: "Hue") {
                     LinearGradient(
-                        colors: [.red, .yellow, .green, .cyan, .blue, .magenta, .red],
+                        colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
