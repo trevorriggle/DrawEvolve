@@ -376,24 +376,28 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture snapshot AFTER rendering stroke
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Record in history for undo/redo
+                // Record in history for undo/redo (on main actor)
                 if let before = beforeSnapshot, let after = afterSnapshot {
                     // Use canvasState to record history if available
                     if let canvasState = canvasState {
-                        canvasState.historyManager.record(.stroke(
-                            layerId: layer.id,
-                            beforeSnapshot: before,
-                            afterSnapshot: after
-                        ))
-                        print("Recorded stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
+                        let layerId = layer.id
+                        Task { @MainActor in
+                            canvasState.historyManager.record(.stroke(
+                                layerId: layerId,
+                                beforeSnapshot: before,
+                                afterSnapshot: after
+                            ))
+                            print("Recorded stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
+                        }
                     }
                 }
 
                 // Update thumbnail for layer panel preview (async, don't block drawing)
-                DispatchQueue.global(qos: .utility).async {
+                let currentLayerIndex = selectedLayerIndex
+                DispatchQueue.global(qos: .utility).async { [weak self] in
                     if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
                         DispatchQueue.main.async {
-                            self.layers[selectedLayerIndex].updateThumbnail(thumbnail)
+                            self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
                         }
                     }
                 }
