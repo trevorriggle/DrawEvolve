@@ -22,6 +22,10 @@ struct ContentView: View {
                 LandingView(isAuthenticated: $isAuthenticated)
                     .onAppear {
                         print("ContentView: Showing landing page")
+                        print("  isAuthenticated: \(isAuthenticated)")
+                        print("  hasSeenOnboarding: \(hasSeenOnboarding)")
+                        print("  hasCompletedPrompt: \(hasCompletedPrompt)")
+                        print("  showPromptInput: \(showPromptInput)")
                     }
             } else if showPromptInput && !hasCompletedPrompt {
                 // Questionnaire
@@ -47,21 +51,25 @@ struct ContentView: View {
             }
         }
         .onChange(of: isAuthenticated) { _, newValue in
+            print("ContentView: isAuthenticated changed to \(newValue)")
             if newValue {
                 // User just logged in/signed up
                 if !hasSeenOnboarding {
+                    print("  -> First time user, showing onboarding")
                     showOnboarding = true
                     hasSeenOnboarding = true
                 } else if !hasCompletedPrompt {
-                    // Returning user who hasn't completed prompt
+                    print("  -> Returning user without prompt, showing prompt")
                     showPromptInput = true
+                } else {
+                    print("  -> Returning user with completed prompt, showing canvas")
                 }
-                // else: Returning user who has completed prompt goes straight to canvas
             }
         }
         .onChange(of: showOnboarding) { _, newValue in
+            print("ContentView: showOnboarding changed to \(newValue)")
             if !newValue && isAuthenticated && !hasCompletedPrompt {
-                // Onboarding dismissed - show prompt input
+                print("  -> Onboarding dismissed, showing prompt input")
                 showPromptInput = true
             }
         }
