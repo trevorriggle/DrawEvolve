@@ -17,6 +17,19 @@ struct ContentView: View {
 
     init() {
         print("=== ContentView INIT ===")
+
+        // DEVELOPMENT ONLY: Force reset flow to test from beginning
+        // Comment out these lines once you've verified the flow works
+        #if DEBUG
+        if !UserDefaults.standard.bool(forKey: "hasLaunchedBefore") {
+            print("  First launch detected - resetting all flags")
+            UserDefaults.standard.set(false, forKey: "isAuthenticated")
+            UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
+            UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
+            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+        }
+        #endif
+
         print("  isAuthenticated: \(UserDefaults.standard.bool(forKey: "isAuthenticated"))")
         print("  hasSeenOnboarding: \(UserDefaults.standard.bool(forKey: "hasSeenOnboarding"))")
         print("  hasCompletedPrompt: \(UserDefaults.standard.bool(forKey: "hasCompletedPrompt"))")
