@@ -124,7 +124,6 @@ struct MetalCanvasView: UIViewRepresentable {
         private var currentStroke: BrushStroke?
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
-        private var needsTextureInitialization = true
         private var shapeStartPoint: CGPoint? // For shape tools
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
@@ -200,21 +199,22 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func ensureLayerTextures() {
-            guard needsTextureInitialization, let renderer = renderer else { return }
+            guard let renderer = renderer else { return }
 
-            print("ensureLayerTextures: Starting SYNCHRONOUS texture initialization for \(layers.count) layers")
-
-            // Initialize textures SYNCHRONOUSLY to avoid race conditions
+            // ALWAYS check all layers, not just on first run
+            // This ensures new layers get textures when added
+            var createdCount = 0
             for i in 0..<layers.count {
                 if layers[i].texture == nil {
                     layers[i].texture = renderer.createLayerTexture()
-                    print("Created texture for layer \(i)")
-                } else {
-                    print("Layer \(i) already has texture")
+                    createdCount += 1
+                    print("Created texture for layer \(i): \(layers[i].name)")
                 }
             }
-            needsTextureInitialization = false
-            print("Layer textures initialized: \(layers.count) layers ready")
+
+            if createdCount > 0 {
+                print("ensureLayerTextures: Created \(createdCount) new textures, total layers: \(layers.count)")
+            }
         }
 
         // Touch handling for drawing
@@ -365,8 +365,38 @@ struct MetalCanvasView: UIViewRepresentable {
             if let texture = layer.texture, let renderer = renderer {
                 print("Rendering stroke to layer \(selectedLayerIndex) texture (width: \(texture.width), height: \(texture.height))")
                 print("View size: \(view.bounds.size.width)x\(view.bounds.size.height)")
+
+                // Capture snapshot BEFORE rendering stroke
+                let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
+                // Render the stroke
                 renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
                 print("Stroke committed successfully - texture should now contain the stroke")
+
+                // Capture snapshot AFTER rendering stroke
+                let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+                // Record in history for undo/redo
+                if let before = beforeSnapshot, let after = afterSnapshot {
+                    // Use canvasState to record history if available
+                    if let canvasState = canvasState {
+                        canvasState.historyManager.record(.stroke(
+                            layerId: layer.id,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                        print("Recorded stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
+                    }
+                }
+
+                // Update thumbnail for layer panel preview (async, don't block drawing)
+                DispatchQueue.global(qos: .utility).async {
+                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        DispatchQueue.main.async {
+                            self.layers[selectedLayerIndex].updateThumbnail(thumbnail)
+                        }
+                    }
+                }
             } else {
                 print("ERROR: Could not render stroke")
                 print("  - Texture exists: \(layer.texture != nil)")

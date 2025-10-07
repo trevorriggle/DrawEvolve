@@ -54,7 +54,7 @@ class HistoryManager: ObservableObject {
 }
 
 enum HistoryAction {
-    case stroke(BrushStroke)
+    case stroke(layerId: UUID, beforeSnapshot: Data, afterSnapshot: Data)
     case layerAdded(DrawingLayer)
     case layerRemoved(DrawingLayer, index: Int)
     case layerMoved(from: Int, to: Int)

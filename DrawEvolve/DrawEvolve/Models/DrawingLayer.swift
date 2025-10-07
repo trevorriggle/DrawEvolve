@@ -21,6 +21,9 @@ class DrawingLayer: Identifiable, ObservableObject {
     // Metal texture for this layer
     var texture: MTLTexture?
 
+    // Cached thumbnail for layer panel preview (44x44)
+    @Published var thumbnail: UIImage?
+
     // Cached UIImage for export
     private(set) var cachedImage: UIImage?
 
@@ -42,6 +45,10 @@ class DrawingLayer: Identifiable, ObservableObject {
         // Convert Metal texture to UIImage for export/feedback
         // Will implement texture-to-image conversion
         self.texture = texture
+    }
+
+    func updateThumbnail(_ image: UIImage?) {
+        self.thumbnail = image
     }
 }
 

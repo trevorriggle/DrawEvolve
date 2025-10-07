@@ -25,6 +25,9 @@ struct DrawingCanvasView: View {
     @State private var textInputLocation: CGPoint = .zero
     @State private var textToRender = ""
 
+    // Toolbar collapse state
+    @State private var isToolbarCollapsed = false
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
@@ -44,8 +47,26 @@ struct DrawingCanvasView: View {
             .background(Color(uiColor: .systemGray6))
 
             // Floating toolbar overlay (top layer, left side)
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
+            VStack(spacing: 0) {
+                // Collapse/Expand button
+                Button(action: {
+                    withAnimation(.spring(response: 0.3)) {
+                        isToolbarCollapsed.toggle()
+                    }
+                }) {
+                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .frame(width: 32, height: 32)
+                        .background(Color(uiColor: .systemBackground).opacity(0.95))
+                        .cornerRadius(8)
+                }
+                .padding(.leading, 8)
+                .padding(.top, 8)
+
+                if !isToolbarCollapsed {
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
                             // Drawing tools
                             ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
                                 canvasState.currentTool = .brush
@@ -157,16 +178,18 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
+                        }
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 8)
+                    }
+                    .frame(width: 104) // 2 columns of 44px + padding
+                    .background(Color(uiColor: .systemBackground).opacity(0.95))
+                    .cornerRadius(12)
+                    .shadow(radius: 5)
+                    .padding(.leading, 8)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
                 }
-                .padding(.vertical, 12)
-                .padding(.horizontal, 8)
             }
-            .frame(width: 104) // 2 columns of 44px + padding
-            .background(Color(uiColor: .systemBackground).opacity(0.95))
-            .cornerRadius(12)
-            .shadow(radius: 5)
-            .padding(.leading, 8)
-            .padding(.top, 8)
 
             // Feedback overlay (middle layer)
             if showFeedback, let feedback = canvasState.feedback {
@@ -353,14 +376,17 @@ class CanvasStateManager: ObservableObject {
         let layer = DrawingLayer(name: "Layer \(layers.count + 1)")
         layers.append(layer)
         selectedLayerIndex = layers.count - 1
+        historyManager.record(.layerAdded(layer))
     }
 
     func deleteLayer(at index: Int) {
         guard layers.count > 1, layers.indices.contains(index) else { return }
+        let layer = layers[index]
         layers.remove(at: index)
         if selectedLayerIndex >= layers.count {
             selectedLayerIndex = layers.count - 1
         }
+        historyManager.record(.layerRemoved(layer, index: index))
     }
 
     func clearCanvas() {
@@ -370,13 +396,118 @@ class CanvasStateManager: ObservableObject {
     }
 
     func undo() {
-        guard historyManager.undo() != nil else { return }
-        // TODO: Apply undo action
+        guard let action = historyManager.undo() else { return }
+
+        switch action {
+        case .stroke(let layerId, let beforeSnapshot, _):
+            // Restore the layer texture to its state before the stroke
+            if let layer = layers.first(where: { $0.id == layerId }),
+               let texture = layer.texture,
+               let renderer = renderer {
+                renderer.restoreSnapshot(beforeSnapshot, to: texture)
+                print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.count) bytes)")
+
+                // Update thumbnail
+                DispatchQueue.global(qos: .utility).async {
+                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        DispatchQueue.main.async {
+                            layer.updateThumbnail(thumbnail)
+                        }
+                    }
+                }
+            }
+
+        case .layerAdded(let layer):
+            // Remove the layer
+            if let index = layers.firstIndex(where: { $0.id == layer.id }) {
+                layers.remove(at: index)
+                if selectedLayerIndex >= layers.count {
+                    selectedLayerIndex = max(0, layers.count - 1)
+                }
+            }
+
+        case .layerRemoved(let layer, let index):
+            // Re-add the layer
+            layers.insert(layer, at: min(index, layers.count))
+
+        case .layerMoved(let from, let to):
+            // Move layer back
+            let layer = layers.remove(at: to)
+            layers.insert(layer, at: from)
+
+        case .layerPropertyChanged(let layerId, let property):
+            // Restore old property value
+            if let layer = layers.first(where: { $0.id == layerId }) {
+                switch property {
+                case .opacity(let old, _):
+                    layer.opacity = old
+                case .name(let old, _):
+                    layer.name = old
+                case .blendMode(let old, _):
+                    layer.blendMode = old
+                case .visibility(let old, _):
+                    layer.isVisible = old
+                }
+            }
+        }
     }
 
     func redo() {
-        guard historyManager.redo() != nil else { return }
-        // TODO: Apply redo action
+        guard let action = historyManager.redo() else { return }
+
+        switch action {
+        case .stroke(let layerId, _, let afterSnapshot):
+            // Restore the layer texture to its state after the stroke
+            if let layer = layers.first(where: { $0.id == layerId }),
+               let texture = layer.texture,
+               let renderer = renderer {
+                renderer.restoreSnapshot(afterSnapshot, to: texture)
+                print("Redo stroke - restored texture from snapshot (\(afterSnapshot.count) bytes)")
+
+                // Update thumbnail
+                DispatchQueue.global(qos: .utility).async {
+                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        DispatchQueue.main.async {
+                            layer.updateThumbnail(thumbnail)
+                        }
+                    }
+                }
+            }
+
+        case .layerAdded(let layer):
+            // Re-add the layer
+            layers.append(layer)
+            selectedLayerIndex = layers.count - 1
+
+        case .layerRemoved(let layer, let index):
+            // Remove the layer again
+            if let currentIndex = layers.firstIndex(where: { $0.id == layer.id }) {
+                layers.remove(at: currentIndex)
+                if selectedLayerIndex >= layers.count {
+                    selectedLayerIndex = max(0, layers.count - 1)
+                }
+            }
+
+        case .layerMoved(let from, let to):
+            // Move layer forward again
+            let layer = layers.remove(at: from)
+            layers.insert(layer, at: to)
+
+        case .layerPropertyChanged(let layerId, let property):
+            // Apply new property value
+            if let layer = layers.first(where: { $0.id == layerId }) {
+                switch property {
+                case .opacity(_, let new):
+                    layer.opacity = new
+                case .name(_, let new):
+                    layer.name = new
+                case .blendMode(_, let new):
+                    layer.blendMode = new
+                case .visibility(_, let new):
+                    layer.isVisible = new
+                }
+            }
+        }
     }
 
     func exportImage() -> UIImage? {

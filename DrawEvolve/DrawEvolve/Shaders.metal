@@ -210,11 +210,15 @@ fragment float4 shapeFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, uniforms.opacity * uniforms.color.a);
 }
 
-// Fragment shader for displaying a texture (simple passthrough)
+// Fragment shader for displaying a texture with opacity and blend mode support
 fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
-                                      texture2d<float> tex [[texture(0)]]) {
+                                      texture2d<float> tex [[texture(0)]],
+                                      constant float &opacity [[buffer(0)]]) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
-    return tex.sample(textureSampler, in.texCoord);
+    float4 color = tex.sample(textureSampler, in.texCoord);
+    // Apply layer opacity to alpha channel
+    color.a *= opacity;
+    return color;
 }
 
 // MARK: - Effect Shaders

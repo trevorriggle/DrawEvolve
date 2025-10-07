@@ -324,6 +324,53 @@ class CanvasRenderer: NSObject {
         return UIImage(cgImage: cgImage)
     }
 
+    /// Generate a thumbnail preview from a layer texture
+    func generateThumbnail(from texture: MTLTexture, size: CGSize) -> UIImage? {
+        // Create a smaller texture for the thumbnail
+        let thumbnailSize = MTLSize(
+            width: Int(size.width),
+            height: Int(size.height),
+            depth: 1
+        )
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: thumbnailSize.width,
+            height: thumbnailSize.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+
+        guard let thumbnailTexture = device.makeTexture(descriptor: descriptor),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return nil
+        }
+
+        // Render the full texture scaled down to thumbnail
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = thumbnailTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor),
+              let pipeline = textureDisplayPipelineState else {
+            return nil
+        }
+
+        renderEncoder.setRenderPipelineState(pipeline)
+        renderEncoder.setFragmentTexture(texture, index: 0)
+        var opacity: Float = 1.0
+        renderEncoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        renderEncoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        return textureToUIImage(thumbnailTexture)
+    }
+
     /// Render a texture as a fullscreen quad
     func renderTextureToScreen(
         _ texture: MTLTexture,
@@ -334,6 +381,10 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipeline)
         renderEncoder.setFragmentTexture(texture, index: 0)
+
+        // Pass opacity to shader
+        var opacityValue = opacity
+        renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
         // The quadVertexShader generates these automatically
@@ -391,6 +442,51 @@ class CanvasRenderer: NSObject {
         // 1. Sample color at point
         // 2. Recursively fill connected pixels of same color
         // 3. Optimized using Metal compute shaders for performance
+    }
+
+    /// Capture a snapshot of a texture's pixel data for undo/redo
+    func captureSnapshot(of texture: MTLTexture) -> Data? {
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+
+        var pixelData = Data(count: dataSize)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        return pixelData
+    }
+
+    /// Restore a texture from a snapshot
+    func restoreSnapshot(_ snapshot: Data, to texture: MTLTexture) {
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+
+        snapshot.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
+        }
     }
 
     /// Render text to a texture at the specified location
