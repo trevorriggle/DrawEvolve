@@ -15,6 +15,13 @@ struct ContentView: View {
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
 
+    init() {
+        print("=== ContentView INIT ===")
+        print("  isAuthenticated: \(UserDefaults.standard.bool(forKey: "isAuthenticated"))")
+        print("  hasSeenOnboarding: \(UserDefaults.standard.bool(forKey: "hasSeenOnboarding"))")
+        print("  hasCompletedPrompt: \(UserDefaults.standard.bool(forKey: "hasCompletedPrompt"))")
+    }
+
     var body: some View {
         let _ = print("ContentView: body re-evaluated")
         let _ = print("  isAuthenticated: \(isAuthenticated), hasSeenOnboarding: \(hasSeenOnboarding), hasCompletedPrompt: \(hasCompletedPrompt), showPromptInput: \(showPromptInput)")
