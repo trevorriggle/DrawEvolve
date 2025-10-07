@@ -55,6 +55,9 @@ struct MetalCanvasView: UIViewRepresentable {
     @Binding var brushSettings: BrushSettings
     @Binding var selectedLayerIndex: Int
 
+    var canvasState: CanvasStateManager? // For sharing renderer/screen size
+    var onTextRequest: ((CGPoint) -> Void)? // Callback for text tool
+
     func makeUIView(context: Context) -> MTKView {
         let metalView = TouchEnabledMTKView()
 
@@ -105,7 +108,9 @@ struct MetalCanvasView: UIViewRepresentable {
             layers: $layers,
             currentTool: $currentTool,
             brushSettings: $brushSettings,
-            selectedLayerIndex: $selectedLayerIndex
+            selectedLayerIndex: $selectedLayerIndex,
+            canvasState: canvasState,
+            onTextRequest: onTextRequest
         )
     }
 
@@ -120,17 +125,24 @@ struct MetalCanvasView: UIViewRepresentable {
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
         private var needsTextureInitialization = true
+        private var shapeStartPoint: CGPoint? // For shape tools
+        private var canvasState: CanvasStateManager?
+        private var onTextRequest: ((CGPoint) -> Void)?
 
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
             brushSettings: Binding<BrushSettings>,
-            selectedLayerIndex: Binding<Int>
+            selectedLayerIndex: Binding<Int>,
+            canvasState: CanvasStateManager?,
+            onTextRequest: ((CGPoint) -> Void)?
         ) {
             _layers = layers
             _currentTool = currentTool
             _brushSettings = brushSettings
             _selectedLayerIndex = selectedLayerIndex
+            self.canvasState = canvasState
+            self.onTextRequest = onTextRequest
 
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
         }
@@ -151,6 +163,13 @@ struct MetalCanvasView: UIViewRepresentable {
             if renderer == nil {
                 print("MetalCanvasView.draw: Initializing renderer")
                 renderer = CanvasRenderer(metalDevice: device)
+
+                // Share renderer and screen size with canvas state (for text rendering)
+                if let canvasState = canvasState {
+                    canvasState.renderer = renderer
+                    canvasState.screenSize = view.bounds.size
+                    print("MetalCanvasView.draw: Shared renderer with canvas state, screen size: \(view.bounds.size)")
+                }
             }
 
             // Ensure textures exist (only runs once)
@@ -170,8 +189,9 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // IMPORTANT: Render current stroke preview on top
+            // Use bounds.size (screen space) for preview, matching touch coordinates
             if let stroke = currentStroke, !stroke.points.isEmpty {
-                renderer?.renderStrokePreview(stroke, to: renderEncoder, viewportSize: view.drawableSize)
+                renderer?.renderStrokePreview(stroke, to: renderEncoder, viewportSize: view.bounds.size)
             }
 
             renderEncoder.endEncoding()
@@ -216,6 +236,22 @@ struct MetalCanvasView: UIViewRepresentable {
             print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
             print("Layer has texture: \(layers[safe: selectedLayerIndex]?.texture != nil)")
 
+            // Handle text tool - show text input dialog
+            if currentTool == .text {
+                print("Text tool: requesting text input at \(location)")
+                onTextRequest?(location)
+                return
+            }
+
+            // Check if this is a shape tool
+            let isShapeTool = [.line, .rectangle, .circle].contains(currentTool)
+
+            if isShapeTool {
+                // For shape tools, just store the start point
+                shapeStartPoint = location
+                print("Shape tool: stored start point \(location)")
+            }
+
             // Start new stroke
             let point = BrushStroke.StrokePoint(
                 location: location,
@@ -246,40 +282,55 @@ struct MetalCanvasView: UIViewRepresentable {
             let pressure = touch.type == .pencil ? touch.force / touch.maximumPossibleForce : 1.0
             let timestamp = touch.timestamp
 
-            // Add point to stroke with interpolation for smooth curves
-            if let last = lastPoint {
-                let distance = hypot(location.x - last.x, location.y - last.y)
-                let spacing = brushSettings.size * brushSettings.spacing
+            // Check if this is a shape tool
+            let isShapeTool = [.line, .rectangle, .circle].contains(currentTool)
 
-                if distance > spacing {
-                    // Interpolate points for smoother strokes
-                    let steps = Int(ceil(distance / spacing))
-                    for i in 1...steps {
-                        let t = CGFloat(i) / CGFloat(steps)
-                        let interpLocation = CGPoint(
-                            x: last.x + (location.x - last.x) * t,
-                            y: last.y + (location.y - last.y) * t
-                        )
-                        let interpPressure = (lastTimestamp > 0) ?
-                            (1 - t) * (stroke.points.last?.pressure ?? 1.0) + t * pressure : pressure
+            if isShapeTool, let startPoint = shapeStartPoint {
+                // For shape tools, regenerate the shape from start to current point
+                stroke.points = generateShapePoints(
+                    from: startPoint,
+                    to: location,
+                    tool: currentTool,
+                    pressure: pressure,
+                    timestamp: timestamp
+                )
+                currentStroke = stroke
+            } else {
+                // Regular brush/eraser: Add point to stroke with interpolation for smooth curves
+                if let last = lastPoint {
+                    let distance = hypot(location.x - last.x, location.y - last.y)
+                    let spacing = brushSettings.size * brushSettings.spacing
 
-                        let point = BrushStroke.StrokePoint(
-                            location: interpLocation,
-                            pressure: interpPressure,
-                            timestamp: timestamp
-                        )
-                        stroke.points.append(point)
+                    if distance > spacing {
+                        // Interpolate points for smoother strokes
+                        let steps = Int(ceil(distance / spacing))
+                        for i in 1...steps {
+                            let t = CGFloat(i) / CGFloat(steps)
+                            let interpLocation = CGPoint(
+                                x: last.x + (location.x - last.x) * t,
+                                y: last.y + (location.y - last.y) * t
+                            )
+                            let interpPressure = (lastTimestamp > 0) ?
+                                (1 - t) * (stroke.points.last?.pressure ?? 1.0) + t * pressure : pressure
+
+                            let point = BrushStroke.StrokePoint(
+                                location: interpLocation,
+                                pressure: interpPressure,
+                                timestamp: timestamp
+                            )
+                            stroke.points.append(point)
+                        }
                     }
                 }
-            }
 
-            currentStroke = stroke
-            lastPoint = location
-            lastTimestamp = timestamp
+                currentStroke = stroke
+                lastPoint = location
+                lastTimestamp = timestamp
 
-            // Print every 10th point to avoid spam
-            if stroke.points.count % 10 == 0 {
-                print("touchesMoved: stroke has \(stroke.points.count) points")
+                // Print every 10th point to avoid spam
+                if stroke.points.count % 10 == 0 {
+                    print("touchesMoved: stroke has \(stroke.points.count) points")
+                }
             }
 
             // No need to call setNeedsDisplay - continuous drawing is enabled
@@ -325,12 +376,147 @@ struct MetalCanvasView: UIViewRepresentable {
             // Clear current stroke so preview stops rendering
             currentStroke = nil
             lastPoint = nil
+            shapeStartPoint = nil
             print("Stroke cleared from preview, should now be visible in layer texture")
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView) {
             currentStroke = nil
             lastPoint = nil
+            shapeStartPoint = nil
+        }
+
+        // MARK: - Shape Generation
+
+        /// Generate points for shape tools (line, rectangle, circle)
+        private func generateShapePoints(
+            from start: CGPoint,
+            to end: CGPoint,
+            tool: DrawingTool,
+            pressure: CGFloat,
+            timestamp: TimeInterval
+        ) -> [BrushStroke.StrokePoint] {
+            switch tool {
+            case .line:
+                return generateLinePoints(from: start, to: end, pressure: pressure, timestamp: timestamp)
+            case .rectangle:
+                return generateRectanglePoints(from: start, to: end, pressure: pressure, timestamp: timestamp)
+            case .circle:
+                return generateCirclePoints(from: start, to: end, pressure: pressure, timestamp: timestamp)
+            default:
+                return []
+            }
+        }
+
+        private func generateLinePoints(
+            from start: CGPoint,
+            to end: CGPoint,
+            pressure: CGFloat,
+            timestamp: TimeInterval
+        ) -> [BrushStroke.StrokePoint] {
+            let distance = hypot(end.x - start.x, end.y - start.y)
+            let spacing = brushSettings.size * brushSettings.spacing
+            let steps = max(Int(distance / spacing), 2)
+
+            var points: [BrushStroke.StrokePoint] = []
+            for i in 0...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                let location = CGPoint(
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t
+                )
+                points.append(BrushStroke.StrokePoint(
+                    location: location,
+                    pressure: pressure,
+                    timestamp: timestamp
+                ))
+            }
+            return points
+        }
+
+        private func generateRectanglePoints(
+            from start: CGPoint,
+            to end: CGPoint,
+            pressure: CGFloat,
+            timestamp: TimeInterval
+        ) -> [BrushStroke.StrokePoint] {
+            let spacing = brushSettings.size * brushSettings.spacing
+            var points: [BrushStroke.StrokePoint] = []
+
+            // Top edge (start to top-right)
+            let topRight = CGPoint(x: end.x, y: start.y)
+            points.append(contentsOf: generateLineSegment(from: start, to: topRight, spacing: spacing, pressure: pressure, timestamp: timestamp))
+
+            // Right edge (top-right to end)
+            points.append(contentsOf: generateLineSegment(from: topRight, to: end, spacing: spacing, pressure: pressure, timestamp: timestamp))
+
+            // Bottom edge (end to bottom-left)
+            let bottomLeft = CGPoint(x: start.x, y: end.y)
+            points.append(contentsOf: generateLineSegment(from: end, to: bottomLeft, spacing: spacing, pressure: pressure, timestamp: timestamp))
+
+            // Left edge (bottom-left back to start)
+            points.append(contentsOf: generateLineSegment(from: bottomLeft, to: start, spacing: spacing, pressure: pressure, timestamp: timestamp))
+
+            return points
+        }
+
+        private func generateCirclePoints(
+            from start: CGPoint,
+            to end: CGPoint,
+            pressure: CGFloat,
+            timestamp: TimeInterval
+        ) -> [BrushStroke.StrokePoint] {
+            let center = CGPoint(
+                x: (start.x + end.x) / 2,
+                y: (start.y + end.y) / 2
+            )
+            let radius = hypot(end.x - start.x, end.y - start.y) / 2
+
+            // Calculate number of points based on circumference
+            let circumference = 2 * .pi * radius
+            let spacing = brushSettings.size * brushSettings.spacing
+            let steps = max(Int(circumference / spacing), 16)
+
+            var points: [BrushStroke.StrokePoint] = []
+            for i in 0...steps {
+                let angle = (CGFloat(i) / CGFloat(steps)) * 2 * .pi
+                let location = CGPoint(
+                    x: center.x + radius * cos(angle),
+                    y: center.y + radius * sin(angle)
+                )
+                points.append(BrushStroke.StrokePoint(
+                    location: location,
+                    pressure: pressure,
+                    timestamp: timestamp
+                ))
+            }
+            return points
+        }
+
+        private func generateLineSegment(
+            from start: CGPoint,
+            to end: CGPoint,
+            spacing: CGFloat,
+            pressure: CGFloat,
+            timestamp: TimeInterval
+        ) -> [BrushStroke.StrokePoint] {
+            let distance = hypot(end.x - start.x, end.y - start.y)
+            let steps = max(Int(distance / spacing), 1)
+
+            var points: [BrushStroke.StrokePoint] = []
+            for i in 0...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                let location = CGPoint(
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t
+                )
+                points.append(BrushStroke.StrokePoint(
+                    location: location,
+                    pressure: pressure,
+                    timestamp: timestamp
+                ))
+            }
+            return points
         }
     }
 }

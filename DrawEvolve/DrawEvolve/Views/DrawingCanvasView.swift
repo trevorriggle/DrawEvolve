@@ -20,6 +20,11 @@ struct DrawingCanvasView: View {
     @State private var showLayerPanel = false
     @State private var showBrushSettings = false
 
+    // Text tool
+    @State private var showTextInput = false
+    @State private var textInputLocation: CGPoint = .zero
+    @State private var textToRender = ""
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
@@ -27,7 +32,13 @@ struct DrawingCanvasView: View {
                 layers: $canvasState.layers,
                 currentTool: $canvasState.currentTool,
                 brushSettings: $canvasState.brushSettings,
-                selectedLayerIndex: $canvasState.selectedLayerIndex
+                selectedLayerIndex: $canvasState.selectedLayerIndex,
+                canvasState: canvasState,
+                onTextRequest: { location in
+                    textInputLocation = location
+                    textToRender = ""
+                    showTextInput = true
+                }
             )
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
@@ -269,6 +280,17 @@ struct DrawingCanvasView: View {
         } message: {
             Text(canvasState.errorMessage)
         }
+        .alert("Add Text", isPresented: $showTextInput) {
+            TextField("Enter text", text: $textToRender)
+            Button("Cancel", role: .cancel) {}
+            Button("Add") {
+                if !textToRender.isEmpty {
+                    canvasState.renderText(textToRender, at: textInputLocation)
+                }
+            }
+        } message: {
+            Text("Enter the text you want to add to the canvas")
+        }
     }
 
     private func requestFeedback() {
@@ -315,6 +337,8 @@ class CanvasStateManager: ObservableObject {
     @Published var errorMessage = ""
 
     let historyManager = HistoryManager()
+    var renderer: CanvasRenderer?
+    var screenSize: CGSize = .zero
 
     var isEmpty: Bool {
         layers.allSatisfy { $0.texture == nil }
@@ -358,6 +382,30 @@ class CanvasStateManager: ObservableObject {
     func exportImage() -> UIImage? {
         // Export all layers as single composited image
         return nil // Will implement with renderer
+    }
+
+    func renderText(_ text: String, at location: CGPoint) {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture else {
+            print("ERROR: Cannot render text - invalid layer or texture")
+            return
+        }
+
+        guard let renderer = renderer else {
+            print("ERROR: Renderer not available")
+            return
+        }
+
+        let fontSize: CGFloat = 32
+
+        renderer.renderText(
+            text,
+            at: location,
+            fontSize: fontSize,
+            color: brushSettings.color,
+            to: texture,
+            screenSize: screenSize
+        )
     }
 
     func requestFeedback(for context: DrawingContext) async {

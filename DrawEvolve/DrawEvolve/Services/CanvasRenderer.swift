@@ -360,8 +360,9 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // Convert stroke points to positions
+        // Convert stroke points to positions (already in screen space, no scaling needed)
         let positions = stroke.points.map { SIMD2<Float>(Float($0.location.x), Float($0.location.y)) }
+        // Use the actual viewport size for the preview
         let viewport = SIMD2<Float>(Float(viewportSize.width), Float(viewportSize.height))
 
         // Render each point as a brush stamp
@@ -390,5 +391,135 @@ class CanvasRenderer: NSObject {
         // 1. Sample color at point
         // 2. Recursively fill connected pixels of same color
         // 3. Optimized using Metal compute shaders for performance
+    }
+
+    /// Render text to a texture at the specified location
+    func renderText(
+        _ text: String,
+        at location: CGPoint,
+        fontSize: CGFloat,
+        color: UIColor,
+        to texture: MTLTexture,
+        screenSize: CGSize
+    ) {
+        print("CanvasRenderer: Rendering text '\(text)' at \(location)")
+
+        // Create text attributes
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .regular)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color
+        ]
+
+        // Calculate text size
+        let textSize = (text as NSString).size(withAttributes: attributes)
+        print("  Text size: \(textSize)")
+
+        // Scale coordinates from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let scaledLocation = CGPoint(x: location.x * scaleX, y: location.y * scaleY)
+        let scaledFontSize = fontSize * max(scaleX, scaleY)
+        let scaledFont = UIFont.systemFont(ofSize: scaledFontSize, weight: .regular)
+        let scaledAttributes: [NSAttributedString.Key: Any] = [
+            .font: scaledFont,
+            .foregroundColor: color
+        ]
+        let scaledTextSize = (text as NSString).size(withAttributes: scaledAttributes)
+
+        print("  Scaled location: \(scaledLocation), scaled size: \(scaledTextSize)")
+
+        // Create a temporary texture to render text into
+        let textWidth = Int(ceil(scaledTextSize.width))
+        let textHeight = Int(ceil(scaledTextSize.height))
+
+        guard textWidth > 0, textHeight > 0 else {
+            print("  ERROR: Invalid text dimensions")
+            return
+        }
+
+        // Render text to a CGContext
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        let bytesPerRow = textWidth * 4
+
+        guard let context = CGContext(
+            data: nil,
+            width: textWidth,
+            height: textHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("  ERROR: Failed to create CGContext")
+            return
+        }
+
+        // Flip coordinate system for correct text orientation
+        context.translateBy(x: 0, y: CGFloat(textHeight))
+        context.scaleBy(x: 1.0, y: -1.0)
+
+        // Draw text
+        (text as NSString).draw(at: .zero, withAttributes: scaledAttributes)
+
+        // Get the pixel data
+        guard let data = context.data else {
+            print("  ERROR: Failed to get context data")
+            return
+        }
+
+        // Create a temporary Metal texture from the CGContext data
+        let textTextureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: textWidth,
+            height: textHeight,
+            mipmapped: false
+        )
+        textTextureDescriptor.usage = [.shaderRead]
+
+        guard let textTexture = device.makeTexture(descriptor: textTextureDescriptor) else {
+            print("  ERROR: Failed to create text texture")
+            return
+        }
+
+        let region = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: textWidth, height: textHeight, depth: 1)
+        )
+        textTexture.replace(region: region, mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
+
+        // Now blit the text texture onto the layer texture at the specified location
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+            print("  ERROR: Failed to create command buffer/blit encoder")
+            return
+        }
+
+        let sourceOrigin = MTLOrigin(x: 0, y: 0, z: 0)
+        let sourceSize = MTLSize(width: textWidth, height: textHeight, depth: 1)
+        let destinationOrigin = MTLOrigin(
+            x: Int(scaledLocation.x),
+            y: Int(scaledLocation.y),
+            z: 0
+        )
+
+        blitEncoder.copy(
+            from: textTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: sourceOrigin,
+            sourceSize: sourceSize,
+            to: texture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: destinationOrigin
+        )
+
+        blitEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        print("  Text rendered successfully")
     }
 }
