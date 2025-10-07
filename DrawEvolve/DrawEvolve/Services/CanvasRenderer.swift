@@ -11,7 +11,7 @@ import MetalKit
 import UIKit
 
 class CanvasRenderer: NSObject {
-    private let device: MTLDevice
+    let device: MTLDevice // Public for GPU sync
     private let commandQueue: MTLCommandQueue
     private var brushPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
@@ -122,7 +122,9 @@ class CanvasRenderer: NSObject {
             mipmapped: false
         )
         descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
-        descriptor.storageMode = .private
+        // Use .shared for CPU access (needed for undo/redo snapshots)
+        // On iOS/macOS unified memory, this is efficient
+        descriptor.storageMode = .shared
 
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             return nil
@@ -229,8 +231,9 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.endEncoding()
         commandBuffer.commit()
-        // Don't wait - let GPU work asynchronously
-        print("CanvasRenderer: Stroke submitted to GPU")
+        // Wait for completion so texture is readable for snapshots
+        commandBuffer.waitUntilCompleted()
+        print("CanvasRenderer: Stroke completed on GPU")
     }
 
     // Metal structure matching shader
@@ -446,27 +449,48 @@ class CanvasRenderer: NSObject {
 
     /// Capture a snapshot of a texture's pixel data for undo/redo
     func captureSnapshot(of texture: MTLTexture) -> Data? {
+        // Verify texture is readable
+        guard texture.storageMode == .shared || texture.storageMode == .managed else {
+            print("ERROR: Cannot capture snapshot - texture storage mode is \(texture.storageMode.rawValue) (need .shared or .managed)")
+            return nil
+        }
+
         let width = texture.width
         let height = texture.height
         let bytesPerRow = width * 4
         let dataSize = bytesPerRow * height
 
-        var pixelData = Data(count: dataSize)
-
-        pixelData.withUnsafeMutableBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
-                baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
+        guard dataSize > 0 else {
+            print("ERROR: Invalid texture size for snapshot")
+            return nil
         }
 
-        return pixelData
+        var pixelData = Data(count: dataSize)
+
+        let success = pixelData.withUnsafeMutableBytes { ptr -> Bool in
+            guard let baseAddress = ptr.baseAddress else {
+                print("ERROR: Failed to get base address for pixel data")
+                return false
+            }
+
+            do {
+                texture.getBytes(
+                    baseAddress,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: width, height: height, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+                return true
+            } catch {
+                print("ERROR: Failed to read texture bytes: \(error)")
+                return false
+            }
+        }
+
+        return success ? pixelData : nil
     }
 
     /// Restore a texture from a snapshot

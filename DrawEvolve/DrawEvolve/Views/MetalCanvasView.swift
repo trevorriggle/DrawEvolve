@@ -367,14 +367,22 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("View size: \(view.bounds.size.width)x\(view.bounds.size.height)")
 
                 // Capture snapshot BEFORE rendering stroke
+                print("Capturing BEFORE snapshot...")
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
+                if beforeSnapshot == nil {
+                    print("WARNING: Failed to capture before snapshot")
+                }
 
-                // Render the stroke
+                // Render the stroke (waits for GPU completion)
                 renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
                 print("Stroke committed successfully - texture should now contain the stroke")
 
-                // Capture snapshot AFTER rendering stroke
+                // Capture snapshot AFTER rendering stroke (GPU is done now)
+                print("Capturing AFTER snapshot...")
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
+                if afterSnapshot == nil {
+                    print("WARNING: Failed to capture after snapshot")
+                }
 
                 // Record in history for undo/redo (on main actor)
                 if let before = beforeSnapshot, let after = afterSnapshot {

@@ -48,23 +48,7 @@ struct DrawingCanvasView: View {
             .background(Color(uiColor: .systemGray6))
 
             // Floating toolbar overlay (top layer, left side)
-            VStack(spacing: 0) {
-                // Collapse/Expand button
-                Button(action: {
-                    withAnimation(.spring(response: 0.3)) {
-                        isToolbarCollapsed.toggle()
-                    }
-                }) {
-                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(width: 32, height: 32)
-                        .background(Color(uiColor: .systemBackground).opacity(0.95))
-                        .cornerRadius(8)
-                }
-                .padding(.leading, 8)
-                .padding(.top, 8)
-
+            VStack(alignment: .leading, spacing: 0) {
                 if !isToolbarCollapsed {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
@@ -180,16 +164,35 @@ struct DrawingCanvasView: View {
                             }
                             .disabled(!canvasState.historyManager.canRedo)
                         }
-                        .padding(.vertical, 12)
+                        .padding(.top, 12)
                         .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
                     }
                     .frame(width: 104) // 2 columns of 44px + padding
                     .background(Color(uiColor: .systemBackground).opacity(0.95))
                     .cornerRadius(12)
                     .shadow(radius: 5)
                     .padding(.leading, 8)
+                    .padding(.top, 8)
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
+
+                // Collapse/Expand button at bottom of toolbar
+                Button(action: {
+                    withAnimation(.spring(response: 0.3)) {
+                        isToolbarCollapsed.toggle()
+                    }
+                }) {
+                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .frame(width: 44, height: 44)
+                        .background(Color(uiColor: .systemBackground).opacity(0.95))
+                        .cornerRadius(8)
+                        .shadow(radius: 5)
+                }
+                .padding(.leading, 8)
+                .padding(.top, isToolbarCollapsed ? 8 : 4)
             }
 
             // Feedback overlay (middle layer)
