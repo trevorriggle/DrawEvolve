@@ -14,40 +14,15 @@ struct ContentView: View {
     @State private var showOnboarding = false
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
-
-    init() {
-        print("=== ContentView INIT ===")
-
-        // DEVELOPMENT ONLY: Force reset flow to test from beginning
-        // Comment out these lines once you've verified the flow works
-        #if DEBUG
-        if !UserDefaults.standard.bool(forKey: "hasLaunchedBefore") {
-            print("  First launch detected - resetting all flags")
-            UserDefaults.standard.set(false, forKey: "isAuthenticated")
-            UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
-            UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
-            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
-        }
-        #endif
-
-        print("  isAuthenticated: \(UserDefaults.standard.bool(forKey: "isAuthenticated"))")
-        print("  hasSeenOnboarding: \(UserDefaults.standard.bool(forKey: "hasSeenOnboarding"))")
-        print("  hasCompletedPrompt: \(UserDefaults.standard.bool(forKey: "hasCompletedPrompt"))")
-    }
+    @State private var hasCheckedFirstLaunch = false
 
     var body: some View {
-        let _ = print("ContentView: body re-evaluated")
-        let _ = print("  isAuthenticated: \(isAuthenticated), hasSeenOnboarding: \(hasSeenOnboarding), hasCompletedPrompt: \(hasCompletedPrompt), showPromptInput: \(showPromptInput)")
         Group {
             if !isAuthenticated {
                 // Landing page with auth options
                 LandingView(isAuthenticated: $isAuthenticated)
                     .onAppear {
-                        print("ContentView: Showing landing page")
-                        print("  isAuthenticated: \(isAuthenticated)")
-                        print("  hasSeenOnboarding: \(hasSeenOnboarding)")
-                        print("  hasCompletedPrompt: \(hasCompletedPrompt)")
-                        print("  showPromptInput: \(showPromptInput)")
+                        performFirstLaunchCheck()
                     }
             } else if showPromptInput && !hasCompletedPrompt {
                 // Questionnaire
@@ -55,15 +30,9 @@ struct ContentView: View {
                     context: $drawingContext,
                     isPresented: $showPromptInput
                 )
-                .onAppear {
-                    print("ContentView: Showing questionnaire")
-                }
             } else {
                 // Drawing canvas
                 DrawingCanvasView(context: $drawingContext)
-                    .onAppear {
-                        print("ContentView: Showing drawing canvas")
-                    }
             }
         }
         .overlay {
@@ -73,35 +42,40 @@ struct ContentView: View {
             }
         }
         .onChange(of: isAuthenticated) { _, newValue in
-            print("ContentView: isAuthenticated changed to \(newValue)")
             if newValue {
                 // User just logged in/signed up
                 if !hasSeenOnboarding {
-                    print("  -> First time user, showing onboarding")
                     showOnboarding = true
                     hasSeenOnboarding = true
                 } else if !hasCompletedPrompt {
-                    print("  -> Returning user without prompt, showing prompt")
                     showPromptInput = true
-                } else {
-                    print("  -> Returning user with completed prompt, showing canvas")
                 }
             }
         }
         .onChange(of: showOnboarding) { _, newValue in
-            print("ContentView: showOnboarding changed to \(newValue)")
             if !newValue && isAuthenticated && !hasCompletedPrompt {
-                print("  -> Onboarding dismissed, showing prompt input")
                 showPromptInput = true
             }
         }
         .onChange(of: showPromptInput) { _, newValue in
             if !newValue && isAuthenticated && drawingContext.isComplete {
-                // Prompt dismissed with complete context - mark as complete
                 hasCompletedPrompt = true
-                print("ContentView: Prompt completed, moving to canvas")
             }
         }
+    }
+
+    private func performFirstLaunchCheck() {
+        guard !hasCheckedFirstLaunch else { return }
+        hasCheckedFirstLaunch = true
+
+        #if DEBUG
+        if !UserDefaults.standard.bool(forKey: "hasLaunchedBefore") {
+            UserDefaults.standard.set(false, forKey: "isAuthenticated")
+            UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
+            UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
+            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+        }
+        #endif
     }
 }
 
