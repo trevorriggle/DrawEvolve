@@ -440,11 +440,144 @@ class CanvasRenderer: NSObject {
     }
 
     /// Flood fill (paint bucket) algorithm
-    func floodFill(at point: CGPoint, with color: UIColor, in texture: MTLTexture) {
-        // Will implement flood fill algorithm
-        // 1. Sample color at point
-        // 2. Recursively fill connected pixels of same color
-        // 3. Optimized using Metal compute shaders for performance
+    func floodFill(at point: CGPoint, with color: UIColor, in texture: MTLTexture, screenSize: CGSize) {
+        print("CanvasRenderer: Flood fill at \(point) with color")
+
+        // Scale coordinates from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let texturePoint = CGPoint(x: point.x * scaleX, y: point.y * scaleY)
+
+        let x = Int(texturePoint.x)
+        let y = Int(texturePoint.y)
+
+        // Validate coordinates
+        guard x >= 0, y >= 0, x < texture.width, y < texture.height else {
+            print("ERROR: Point outside texture bounds")
+            return
+        }
+
+        // Read pixel data from texture
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+
+        var pixelData = Data(count: dataSize)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        // Get target color at click point
+        let targetIndex = (y * width + x) * 4
+        guard targetIndex + 3 < pixelData.count else {
+            print("ERROR: Invalid pixel index")
+            return
+        }
+
+        let targetB = pixelData[targetIndex]
+        let targetG = pixelData[targetIndex + 1]
+        let targetR = pixelData[targetIndex + 2]
+        let targetA = pixelData[targetIndex + 3]
+
+        // Convert fill color to BGRA
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let fillB = UInt8(b * 255)
+        let fillG = UInt8(g * 255)
+        let fillR = UInt8(r * 255)
+        let fillA = UInt8(a * 255)
+
+        // Check if target and fill colors are the same (within tolerance)
+        let tolerance: UInt8 = 5
+        if abs(Int(targetB) - Int(fillB)) <= tolerance &&
+           abs(Int(targetG) - Int(fillG)) <= tolerance &&
+           abs(Int(targetR) - Int(fillR)) <= tolerance &&
+           abs(Int(targetA) - Int(fillA)) <= tolerance {
+            print("Target and fill colors are the same, skipping fill")
+            return
+        }
+
+        // Perform flood fill using stack-based approach
+        var stack: [(Int, Int)] = [(x, y)]
+        var visited = Set<Int>()
+
+        func matches(_ px: Int, _ py: Int) -> Bool {
+            guard px >= 0, py >= 0, px < width, py < height else { return false }
+            let idx = (py * width + px) * 4
+            guard idx + 3 < pixelData.count else { return false }
+
+            let pixelKey = py * width + px
+            if visited.contains(pixelKey) { return false }
+
+            let b = pixelData[idx]
+            let g = pixelData[idx + 1]
+            let r = pixelData[idx + 2]
+            let a = pixelData[idx + 3]
+
+            return abs(Int(b) - Int(targetB)) <= tolerance &&
+                   abs(Int(g) - Int(targetG)) <= tolerance &&
+                   abs(Int(r) - Int(targetR)) <= tolerance &&
+                   abs(Int(a) - Int(targetA)) <= tolerance
+        }
+
+        func setPixel(_ px: Int, _ py: Int) {
+            let idx = (py * width + px) * 4
+            guard idx + 3 < pixelData.count else { return }
+            pixelData[idx] = fillB
+            pixelData[idx + 1] = fillG
+            pixelData[idx + 2] = fillR
+            pixelData[idx + 3] = fillA
+        }
+
+        // Stack-based flood fill (prevents stack overflow)
+        var fillCount = 0
+        let maxFill = width * height // Safety limit
+
+        while !stack.isEmpty && fillCount < maxFill {
+            let (px, py) = stack.removeLast()
+
+            if !matches(px, py) { continue }
+
+            let pixelKey = py * width + px
+            visited.insert(pixelKey)
+            setPixel(px, py)
+            fillCount += 1
+
+            // Add neighbors
+            stack.append((px + 1, py))
+            stack.append((px - 1, py))
+            stack.append((px, py + 1))
+            stack.append((px, py - 1))
+        }
+
+        print("Filled \(fillCount) pixels")
+
+        // Write modified pixel data back to texture
+        pixelData.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
+        }
+
+        print("Flood fill complete")
     }
 
     /// Capture a snapshot of a texture's pixel data for undo/redo

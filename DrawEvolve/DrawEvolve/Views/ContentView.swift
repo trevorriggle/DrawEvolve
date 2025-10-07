@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     @AppStorage("isAuthenticated") private var isAuthenticated = false
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
+    @AppStorage("hasCompletedPrompt") private var hasCompletedPrompt = false
     @State private var showOnboarding = false
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
@@ -22,7 +23,7 @@ struct ContentView: View {
                     .onAppear {
                         print("ContentView: Showing landing page")
                     }
-            } else if showPromptInput {
+            } else if showPromptInput && !hasCompletedPrompt {
                 // Questionnaire
                 PromptInputView(
                     context: $drawingContext,
@@ -51,16 +52,24 @@ struct ContentView: View {
                 if !hasSeenOnboarding {
                     showOnboarding = true
                     hasSeenOnboarding = true
-                } else {
-                    // Returning user - go straight to prompt
+                } else if !hasCompletedPrompt {
+                    // Returning user who hasn't completed prompt
                     showPromptInput = true
                 }
+                // else: Returning user who has completed prompt goes straight to canvas
             }
         }
         .onChange(of: showOnboarding) { _, newValue in
-            if !newValue && isAuthenticated {
+            if !newValue && isAuthenticated && !hasCompletedPrompt {
                 // Onboarding dismissed - show prompt input
                 showPromptInput = true
+            }
+        }
+        .onChange(of: showPromptInput) { _, newValue in
+            if !newValue && isAuthenticated && drawingContext.isComplete {
+                // Prompt dismissed with complete context - mark as complete
+                hasCompletedPrompt = true
+                print("ContentView: Prompt completed, moving to canvas")
             }
         }
     }
