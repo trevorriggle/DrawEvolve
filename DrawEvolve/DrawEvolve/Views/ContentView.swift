@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var showPromptInput = false
 
     var body: some View {
+        let _ = print("ContentView: body re-evaluated")
+        let _ = print("  isAuthenticated: \(isAuthenticated), hasSeenOnboarding: \(hasSeenOnboarding), hasCompletedPrompt: \(hasCompletedPrompt), showPromptInput: \(showPromptInput)")
         Group {
             if !isAuthenticated {
                 // Landing page with auth options
