@@ -21,11 +21,20 @@ struct DrawingCanvasView: View {
     @State private var showBrushSettings = false
 
     var body: some View {
-        NavigationView {
-            HStack(spacing: 0) {
-                // Side toolbar - 2 column grid, FIXED WIDTH on left
-                ScrollView {
-                        LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
+        ZStack(alignment: .topLeading) {
+            // Main canvas - FULLSCREEN (bottom layer)
+            MetalCanvasView(
+                layers: $canvasState.layers,
+                currentTool: $canvasState.currentTool,
+                brushSettings: $canvasState.brushSettings,
+                selectedLayerIndex: $canvasState.selectedLayerIndex
+            )
+            .ignoresSafeArea() // Full screen, edge to edge
+            .background(Color(uiColor: .systemGray6))
+
+            // Floating toolbar overlay (top layer, left side)
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
                             // Drawing tools
                             ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
                                 canvasState.currentTool = .brush
@@ -137,88 +146,77 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
-                    }
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 8)
                 }
-                .frame(width: 104) // 2 columns of 44px + padding
-                .background(Color(uiColor: .systemBackground).opacity(0.95))
-                .shadow(radius: 5)
+                .padding(.vertical, 12)
+                .padding(.horizontal, 8)
+            }
+            .frame(width: 104) // 2 columns of 44px + padding
+            .background(Color(uiColor: .systemBackground).opacity(0.95))
+            .cornerRadius(12)
+            .shadow(radius: 5)
+            .padding(.leading, 8)
+            .padding(.top, 8)
 
-                // Main canvas - fills remaining space
-                ZStack {
-                    MetalCanvasView(
-                        layers: $canvasState.layers,
-                        currentTool: $canvasState.currentTool,
-                        brushSettings: $canvasState.brushSettings,
-                        selectedLayerIndex: $canvasState.selectedLayerIndex
-                    )
-                    .background(Color(uiColor: .systemGray6))
-                    .border(Color.red, width: 3) // DEBUG: See canvas boundaries
+            // Feedback overlay (middle layer)
+            if showFeedback, let feedback = canvasState.feedback {
+                FeedbackOverlay(
+                    feedback: feedback,
+                    isPresented: $showFeedback,
+                    canvasImage: canvasState.exportImage()
+                )
+                .transition(.move(edge: .trailing))
+            }
 
-                    // Feedback overlay on top of canvas
-                    if showFeedback, let feedback = canvasState.feedback {
-                        FeedbackOverlay(
-                            feedback: feedback,
-                            isPresented: $showFeedback,
-                            canvasImage: canvasState.exportImage()
-                        )
-                        .transition(.move(edge: .trailing))
-                    }
-
-                    // Bottom buttons - over canvas
-                    VStack {
-                        Spacer()
-                        HStack {
-                            // Clear button - bottom left
-                            Button(action: { canvasState.clearCanvas() }) {
-                                VStack(spacing: 4) {
-                                    Image(systemName: "trash")
-                                        .font(.system(size: 20))
-                                    Text("Clear")
-                                        .font(.caption)
-                                }
-                                .frame(width: 80)
-                                .padding(.vertical, 12)
-                                .background(Color.red.opacity(0.1))
-                                .foregroundColor(.red)
-                                .cornerRadius(12)
-                            }
-                            .padding(.leading, 16)
-                            .padding(.bottom, 20)
-
-                            Spacer()
-
-                            // Get Feedback button - bottom right
-                            Button(action: requestFeedback) {
-                                HStack(spacing: 8) {
-                                    if isRequestingFeedback {
-                                        ProgressView()
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: "sparkles")
-                                            .font(.system(size: 20))
-                                        Text("Get Feedback")
-                                            .font(.headline)
-                                    }
-                                }
-                                .padding(.horizontal, 24)
-                                .padding(.vertical, 16)
-                                .background(Color.accentColor)
-                                .foregroundColor(.white)
-                                .cornerRadius(16)
-                                .shadow(radius: 4)
-                            }
-                            .disabled(isRequestingFeedback || canvasState.isEmpty)
-                            .opacity(canvasState.isEmpty ? 0.5 : 1.0)
-                            .padding(.trailing, 20)
-                            .padding(.bottom, 20)
+            // Bottom buttons (top layer, bottom corners)
+            VStack {
+                Spacer()
+                HStack {
+                    // Clear button - bottom left
+                    Button(action: { canvasState.clearCanvas() }) {
+                        VStack(spacing: 4) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 20))
+                            Text("Clear")
+                                .font(.caption)
                         }
+                        .frame(width: 80)
+                        .padding(.vertical, 12)
+                        .background(Color.red.opacity(0.1))
+                        .foregroundColor(.red)
+                        .cornerRadius(12)
                     }
+                    .padding(.leading, 16)
+                    .padding(.bottom, 20)
+
+                    Spacer()
+
+                    // Get Feedback button - bottom right
+                    Button(action: requestFeedback) {
+                        HStack(spacing: 8) {
+                            if isRequestingFeedback {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 20))
+                                Text("Get Feedback")
+                                    .font(.headline)
+                            }
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
+                        .background(Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(16)
+                        .shadow(radius: 4)
+                    }
+                    .disabled(isRequestingFeedback || canvasState.isEmpty)
+                    .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 20)
                 }
             }
-            .navigationTitle("Create v2.1 TEST")
-            .navigationBarTitleDisplayMode(.inline)
+        }
             .sheet(isPresented: $showColorPicker) {
                 NavigationView {
                     AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
