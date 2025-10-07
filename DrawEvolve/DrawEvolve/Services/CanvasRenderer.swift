@@ -449,11 +449,18 @@ class CanvasRenderer: NSObject {
 
     /// Capture a snapshot of a texture's pixel data for undo/redo
     func captureSnapshot(of texture: MTLTexture) -> Data? {
-        // Verify texture is readable
+        // Verify texture is readable (iOS only supports .shared for CPU access)
+        #if os(iOS)
+        guard texture.storageMode == .shared else {
+            print("ERROR: Cannot capture snapshot - texture storage mode is \(texture.storageMode.rawValue) (need .shared)")
+            return nil
+        }
+        #else
         guard texture.storageMode == .shared || texture.storageMode == .managed else {
             print("ERROR: Cannot capture snapshot - texture storage mode is \(texture.storageMode.rawValue) (need .shared or .managed)")
             return nil
         }
+        #endif
 
         let width = texture.width
         let height = texture.height

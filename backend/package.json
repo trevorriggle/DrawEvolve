@@ -1,0 +1,8 @@
+{
+  "name": "drawevolve-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "next": "^14.0.0"
+  }
+}

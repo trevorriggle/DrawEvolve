@@ -31,68 +31,45 @@ enum OpenAIError: LocalizedError {
 actor OpenAIManager {
     static let shared = OpenAIManager()
 
-    private let apiKey: String
-    private let baseURL = "https://api.openai.com/v1/chat/completions"
-    private let model = "gpt-4o" // GPT-4 with vision capabilities
+    // YOUR VERCEL BACKEND URL - Replace this after deploying
+    private let backendURL = "https://YOUR-PROJECT.vercel.app/api/feedback"
+
+    // For local testing with Vercel Dev, use:
+    // private let backendURL = "http://localhost:3000/api/feedback"
 
     private init() {
-        // Load API key from Config.plist
-        if let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
-           let config = NSDictionary(contentsOfFile: path),
-           let key = config["OPENAI_API_KEY"] as? String, !key.isEmpty {
-            self.apiKey = key
-        } else {
-            self.apiKey = ""
-            print("⚠️ WARNING: OpenAI API key not found in Config.plist")
-        }
+        print("✅ OpenAIManager using secure backend proxy at: \(backendURL)")
     }
 
-    /// Requests feedback from OpenAI by sending the drawing image and user context
+    /// Requests feedback via our secure backend proxy
     func requestFeedback(image: UIImage, context: DrawingContext) async throws -> String {
-        guard !apiKey.isEmpty else {
-            throw OpenAIError.missingAPIKey
-        }
-
         // Convert image to base64
         guard let imageData = image.jpegData(compressionQuality: 0.8) else {
             throw OpenAIError.imageEncodingFailed
         }
         let base64Image = imageData.base64EncodedString()
 
-        // Build the prompt
-        let prompt = buildPrompt(from: context)
-
-        // Construct the API request
+        // Send to OUR backend (not OpenAI directly)
         let requestBody: [String: Any] = [
-            "model": model,
-            "messages": [
-                [
-                    "role": "user",
-                    "content": [
-                        [
-                            "type": "text",
-                            "text": prompt
-                        ],
-                        [
-                            "type": "image_url",
-                            "image_url": [
-                                "url": "data:image/jpeg;base64,\(base64Image)"
-                            ]
-                        ]
-                    ]
-                ]
-            ],
-            "max_tokens": 800
+            "image": base64Image,
+            "context": [
+                "subject": context.subject,
+                "style": context.style,
+                "artists": context.artists,
+                "techniques": context.techniques,
+                "focus": context.focus,
+                "additionalContext": context.additionalContext
+            ]
         ]
 
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody) else {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody),
+              let url = URL(string: backendURL) else {
             throw OpenAIError.invalidResponse
         }
 
-        // Make the API call
-        var request = URLRequest(url: URL(string: baseURL)!)
+        // Call our backend
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = jsonData
 
@@ -104,23 +81,19 @@ actor OpenAIManager {
 
         guard httpResponse.statusCode == 200 else {
             if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let error = errorJson["error"] as? [String: Any],
-               let message = error["message"] as? String {
-                throw OpenAIError.serverError(message)
+               let errorMessage = errorJson["error"] as? String {
+                throw OpenAIError.serverError(errorMessage)
             }
             throw OpenAIError.serverError("HTTP \(httpResponse.statusCode)")
         }
 
-        // Parse the response
+        // Parse backend response
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any],
-              let content = message["content"] as? String else {
+              let feedback = json["feedback"] as? String else {
             throw OpenAIError.invalidResponse
         }
 
-        return content
+        return feedback
     }
 
     /// Builds the feedback prompt from the user's context
