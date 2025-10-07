@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+@preconcurrency import Metal
 
 struct DrawingCanvasView: View {
     @Binding var context: DrawingContext
@@ -407,11 +408,15 @@ class CanvasStateManager: ObservableObject {
                 renderer.restoreSnapshot(beforeSnapshot, to: texture)
                 print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.count) bytes)")
 
-                // Update thumbnail
-                DispatchQueue.global(qos: .utility).async {
-                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
-                        DispatchQueue.main.async {
-                            layer.updateThumbnail(thumbnail)
+                // Update thumbnail (avoid Sendable warnings by not capturing directly)
+                nonisolated(unsafe) let unsafeRenderer = renderer
+                nonisolated(unsafe) let unsafeTexture = texture
+                Task.detached {
+                    if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                        await MainActor.run {
+                            if let layer = self.layers.first(where: { $0.id == layerId }) {
+                                layer.updateThumbnail(thumbnail)
+                            }
                         }
                     }
                 }
@@ -464,11 +469,15 @@ class CanvasStateManager: ObservableObject {
                 renderer.restoreSnapshot(afterSnapshot, to: texture)
                 print("Redo stroke - restored texture from snapshot (\(afterSnapshot.count) bytes)")
 
-                // Update thumbnail
-                DispatchQueue.global(qos: .utility).async {
-                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
-                        DispatchQueue.main.async {
-                            layer.updateThumbnail(thumbnail)
+                // Update thumbnail (avoid Sendable warnings by not capturing directly)
+                nonisolated(unsafe) let unsafeRenderer = renderer
+                nonisolated(unsafe) let unsafeTexture = texture
+                Task.detached {
+                    if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                        await MainActor.run {
+                            if let layer = self.layers.first(where: { $0.id == layerId }) {
+                                layer.updateThumbnail(thumbnail)
+                            }
                         }
                     }
                 }
@@ -479,7 +488,7 @@ class CanvasStateManager: ObservableObject {
             layers.append(layer)
             selectedLayerIndex = layers.count - 1
 
-        case .layerRemoved(let layer, let index):
+        case .layerRemoved(let layer, _):
             // Remove the layer again
             if let currentIndex = layers.firstIndex(where: { $0.id == layer.id }) {
                 layers.remove(at: currentIndex)
