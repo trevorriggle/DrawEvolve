@@ -134,6 +134,11 @@ struct DrawingCanvasView: View {
                                 canvasState.currentTool = .text
                             }
 
+                            // Clear button
+                            ToolButton(icon: "trash", isSelected: false) {
+                                canvasState.clearCanvas()
+                            }
+
                             // Color picker button
                             Button(action: { showColorPicker.toggle() }) {
                                 Circle()
@@ -205,27 +210,10 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing))
             }
 
-            // Bottom buttons (top layer, bottom corners)
+            // Bottom buttons (top layer, bottom right corner)
             VStack {
                 Spacer()
                 HStack {
-                    // Clear button - bottom left
-                    Button(action: { canvasState.clearCanvas() }) {
-                        VStack(spacing: 4) {
-                            Image(systemName: "trash")
-                                .font(.system(size: 20))
-                            Text("Clear")
-                                .font(.caption)
-                        }
-                        .frame(width: 80)
-                        .padding(.vertical, 12)
-                        .background(Color.red.opacity(0.1))
-                        .foregroundColor(.red)
-                        .cornerRadius(12)
-                    }
-                    .padding(.leading, 16)
-                    .padding(.bottom, 20)
-
                     Spacer()
 
                     // Get Feedback button - bottom right

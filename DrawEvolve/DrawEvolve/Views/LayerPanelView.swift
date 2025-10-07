@@ -83,7 +83,7 @@ struct LayerRow: View {
 
             // Layer info
             VStack(alignment: .leading, spacing: 4) {
-                TextField("Layer name", text: $layer.name)
+                Text(layer.name)
                     .font(.subheadline.weight(.medium))
 
                 HStack(spacing: 8) {
