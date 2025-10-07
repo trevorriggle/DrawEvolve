@@ -217,52 +217,51 @@ struct DrawingCanvasView: View {
                 }
             }
         }
-            .sheet(isPresented: $showColorPicker) {
-                NavigationView {
-                    AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
-                        .navigationTitle("Color")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") {
-                                    showColorPicker = false
-                                }
-                            }
-                        }
-                }
-            }
-            .sheet(isPresented: $showLayerPanel) {
-                NavigationView {
-                    LayerPanelView(
-                        layers: $canvasState.layers,
-                        selectedIndex: $canvasState.selectedLayerIndex,
-                        onAddLayer: { canvasState.addLayer() },
-                        onDeleteLayer: { index in canvasState.deleteLayer(at: index) }
-                    )
-                    .navigationTitle("Layers")
+        .sheet(isPresented: $showColorPicker) {
+            NavigationView {
+                AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
+                    .navigationTitle("Color")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") {
-                                showLayerPanel = false
+                                showColorPicker = false
                             }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showLayerPanel) {
+            NavigationView {
+                LayerPanelView(
+                    layers: $canvasState.layers,
+                    selectedIndex: $canvasState.selectedLayerIndex,
+                    onAddLayer: { canvasState.addLayer() },
+                    onDeleteLayer: { index in canvasState.deleteLayer(at: index) }
+                )
+                .navigationTitle("Layers")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            showLayerPanel = false
                         }
                     }
                 }
             }
-            .sheet(isPresented: $showBrushSettings) {
-                NavigationView {
-                    BrushSettingsView(settings: $canvasState.brushSettings)
-                        .navigationTitle("Brush Settings")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") {
-                                    showBrushSettings = false
-                                }
+        }
+        .sheet(isPresented: $showBrushSettings) {
+            NavigationView {
+                BrushSettingsView(settings: $canvasState.brushSettings)
+                    .navigationTitle("Brush Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showBrushSettings = false
                             }
                         }
-                }
+                    }
             }
         }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
