@@ -9,6 +9,10 @@ import SwiftUI
 
 struct LandingView: View {
     @Binding var isAuthenticated: Bool
+    @StateObject private var authManager = AuthManager.shared
+
+    @State private var showSignIn = false
+    @State private var showSignUp = false
 
     var body: some View {
         ZStack {
@@ -51,8 +55,7 @@ struct LandingView: View {
                 VStack(spacing: 16) {
                     // Login button
                     Button(action: {
-                        // TODO: Implement login
-                        isAuthenticated = true
+                        showSignIn = true
                     }) {
                         Text("Log In")
                             .font(.headline)
@@ -63,7 +66,7 @@ struct LandingView: View {
                             .cornerRadius(12)
                     }
 
-                    // Google sign in
+                    // Google sign in (future implementation)
                     Button(action: {
                         // TODO: Implement Google sign in
                         isAuthenticated = true
@@ -87,8 +90,7 @@ struct LandingView: View {
 
                     // Create account
                     Button(action: {
-                        // TODO: Implement account creation
-                        isAuthenticated = true
+                        showSignUp = true
                     }) {
                         Text("Create Account")
                             .font(.headline)
@@ -105,7 +107,7 @@ struct LandingView: View {
 
                     // Guest mode
                     Button(action: {
-                        isAuthenticated = true
+                        authManager.continueAsGuest()
                     }) {
                         Text("Continue as Guest")
                             .font(.subheadline)
@@ -116,6 +118,15 @@ struct LandingView: View {
                 .padding(.horizontal, 32)
                 .padding(.bottom, 40)
             }
+        }
+        .sheet(isPresented: $showSignIn) {
+            SignInView()
+        }
+        .sheet(isPresented: $showSignUp) {
+            SignUpView()
+        }
+        .onChange(of: authManager.isAuthenticated) { newValue in
+            isAuthenticated = newValue
         }
     }
 }

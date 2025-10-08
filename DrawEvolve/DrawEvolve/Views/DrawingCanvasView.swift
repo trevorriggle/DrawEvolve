@@ -29,6 +29,13 @@ struct DrawingCanvasView: View {
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
 
+    // Save state
+    @State private var showSaveDialog = false
+    @State private var drawingTitle = ""
+    @State private var isSaving = false
+    @StateObject private var storageManager = DrawingStorageManager.shared
+    @StateObject private var authManager = AuthManager.shared
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
@@ -216,6 +223,28 @@ struct DrawingCanvasView: View {
                 HStack {
                     Spacer()
 
+                    // Save button
+                    if authManager.currentUser != nil {
+                        Button(action: {
+                            showSaveDialog = true
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "square.and.arrow.down")
+                                    .font(.system(size: 20))
+                                Text("Save")
+                                    .font(.headline)
+                            }
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 16)
+                            .background(Color.green)
+                            .foregroundColor(.white)
+                            .cornerRadius(16)
+                            .shadow(radius: 4)
+                        }
+                        .disabled(canvasState.isEmpty)
+                        .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+                    }
+
                     // Get Feedback button - bottom right
                     Button(action: requestFeedback) {
                         HStack(spacing: 8) {
@@ -306,6 +335,40 @@ struct DrawingCanvasView: View {
         } message: {
             Text("Enter the text you want to add to the canvas")
         }
+        .alert("Save Drawing", isPresented: $showSaveDialog) {
+            TextField("Title", text: $drawingTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                Task {
+                    await saveDrawing()
+                }
+            }
+        } message: {
+            Text("Enter a title for your drawing")
+        }
+    }
+
+    private func saveDrawing() async {
+        guard !drawingTitle.isEmpty else { return }
+
+        isSaving = true
+
+        guard let image = canvasState.exportImage(),
+              let imageData = image.pngData() else {
+            print("ERROR: Failed to export image")
+            isSaving = false
+            return
+        }
+
+        do {
+            try await storageManager.saveDrawing(title: drawingTitle, imageData: imageData)
+            print("Drawing saved successfully!")
+            drawingTitle = "" // Reset for next save
+        } catch {
+            print("ERROR: Failed to save drawing: \(error)")
+        }
+
+        isSaving = false
     }
 
     private func requestFeedback() {
@@ -512,7 +575,11 @@ class CanvasStateManager: ObservableObject {
 
     func exportImage() -> UIImage? {
         // Export all layers as single composited image
-        return nil // Will implement with renderer
+        guard let renderer = renderer else {
+            print("ERROR: Renderer not available for export")
+            return nil
+        }
+        return renderer.exportImage(layers: layers)
     }
 
     func renderText(_ text: String, at location: CGPoint) {

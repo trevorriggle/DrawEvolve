@@ -1,11 +1,19 @@
 # DrawEvolve - Feature Status
+*Last updated: 2025-10-07*
 
 ## ✅ Fully Implemented & Working
+
+### User Flow
+- **Landing/Auth Screen** - Placeholder auth with Login, Google Sign-In, Create Account, Guest mode
+- **Onboarding Popup** - First-time user welcome (shown once)
+- **Prompt Input Questionnaire** - Pre-drawing context gathering (subject, style, artists, techniques, focus areas)
+- **Flow Logic** - Auth → Onboarding (first time) → Prompt → Canvas
+- **State Persistence** - AppStorage for isAuthenticated, hasSeenOnboarding, hasCompletedPrompt
 
 ### Core Drawing Tools
 - **Brush** - Pressure-sensitive drawing with size, opacity, hardness settings
 - **Eraser** - Remove strokes with pressure sensitivity
-- **Paint Bucket** - Flood fill with color tolerance (just implemented!)
+- **Paint Bucket** - Flood fill with color tolerance (CPU-based implementation)
 - **Eye Dropper** - Sample colors from canvas
 
 ### Shape Tools
@@ -32,8 +40,8 @@
 - Texture management (2048x2048 resolution)
 
 ### AI Features
-- **Prompt-based drawing guidance** - User fills questionnaire about what to draw
-- **Get Feedback** - OpenAI integration to provide feedback on artwork
+- **Prompt-based drawing guidance** - User fills questionnaire about what to draw (subject, style, artists, techniques, focus)
+- **Get Feedback** - OpenAI integration to provide feedback on artwork (requires export image fix)
 
 ## 🚧 Partially Implemented (UI exists but no functionality)
 
@@ -54,6 +62,13 @@
 - **Scale** - Tool defined, no implementation
 
 ## ❌ Not Yet Implemented
+
+### Authentication
+- Real user accounts/database
+- Password validation
+- OAuth providers (actual Google, Apple Sign-In)
+- Backend API integration
+- User profile management
 
 ### Layer Features
 - Layer reordering via drag & drop
@@ -100,20 +115,23 @@
 
 ## 🐛 Known Issues
 
-1. **Layer text selection** - Fixed by changing TextField to Text
-2. **Paint bucket performance** - May be slow on large areas (uses CPU-based flood fill)
+1. **UserDefaults persistence in simulator** - May need to manually reset simulator between fresh installs (DEBUG flag helps with this)
+2. **Paint bucket performance** - May be slow on large areas (uses CPU-based flood fill, needs Metal compute shader optimization)
 3. **Eyedropper** - Defined but implementation not verified
 4. **Shape tools** - Only draw outlines, no fill option
 5. **Blend modes** - Setting exists on layers but not applied during compositing
+6. **Export image returns nil** - Blocks AI feedback feature from working
 
 ## 📝 Technical Debt
 
-1. **Flood fill optimization** - Should use Metal compute shader instead of CPU
-2. **Export image** - Needs proper layer compositing implementation
-3. **Tool implementations** - Many tools need complete logic
-4. **Error handling** - More robust handling of Metal failures
-5. **Performance** - Optimize snapshot capture for large textures
-6. **Testing** - No unit or integration tests
+1. **Auth is placeholder only** - All buttons just set isAuthenticated=true, no real authentication
+2. **Flood fill optimization** - Should use Metal compute shader instead of CPU
+3. **Export image** - Needs proper layer compositing implementation (blocks AI feedback)
+4. **Tool implementations** - Many tools need complete logic
+5. **Error handling** - More robust handling of Metal failures
+6. **Performance** - Optimize snapshot capture for large textures
+7. **Testing** - No unit or integration tests
+8. **Flow polish** - Onboarding and prompt screens need design refinement
 
 ## 🎯 Recommended Next Steps
 
@@ -140,11 +158,22 @@
 
 ## 📊 Completion Estimate
 
+- **User flow/onboarding**: ~70% complete (works but needs polish)
+- **Authentication**: ~10% complete (UI only, no backend)
 - **Core drawing**: ~85% complete
 - **Layer system**: ~70% complete
 - **Effects/filters**: ~20% complete
 - **Selection/transforms**: ~10% complete
 - **Export/import**: ~30% complete
-- **Overall**: ~50% complete
+- **Overall**: ~55% complete
 
-The app has a solid foundation with working brush, layer, and undo/redo systems. The main gaps are in selection tools, effects, transforms, and export functionality.
+The app has a solid foundation with working user flow, brush, layer, and undo/redo systems. The main gaps are in real authentication, selection tools, effects, transforms, and export functionality.
+
+## 🎯 Recent Session Accomplishments (2025-10-07)
+
+1. ✅ **Paint bucket tool** - Implemented CPU-based flood fill algorithm with color tolerance
+2. ✅ **Clear button moved to toolbox** - No longer separate floating button
+3. ✅ **Fixed layer text selection bug** - Changed TextField to Text to allow layer switching
+4. ✅ **Restored complete user flow** - Landing → Onboarding → Prompt → Canvas
+5. ✅ **Fixed UserDefaults persistence** - Added DEBUG first-launch detection to reset flow
+6. ✅ **Feature inventory** - Comprehensive documentation of what's done and what's left

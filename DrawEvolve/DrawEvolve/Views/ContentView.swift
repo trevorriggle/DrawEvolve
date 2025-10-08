@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
     @State private var hasCheckedFirstLaunch = false
+    @State private var showCanvas = false
 
     var body: some View {
         Group {
@@ -24,15 +25,18 @@ struct ContentView: View {
                     .onAppear {
                         performFirstLaunchCheck()
                     }
-            } else if showPromptInput && !hasCompletedPrompt {
-                // Questionnaire
+            } else if showPromptInput && !hasCompletedPrompt && showCanvas {
+                // Questionnaire before starting new drawing
                 PromptInputView(
                     context: $drawingContext,
                     isPresented: $showPromptInput
                 )
-            } else {
+            } else if showCanvas {
                 // Drawing canvas
                 DrawingCanvasView(context: $drawingContext)
+            } else {
+                // Gallery view (default after auth)
+                GalleryView()
             }
         }
         .overlay {

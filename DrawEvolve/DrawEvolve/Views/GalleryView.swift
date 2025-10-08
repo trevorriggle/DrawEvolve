@@ -1,0 +1,196 @@
+//
+//  GalleryView.swift
+//  DrawEvolve
+//
+//  Gallery view displaying user's saved drawings.
+//
+
+import SwiftUI
+
+struct GalleryView: View {
+    @StateObject private var storageManager = DrawingStorageManager.shared
+    @StateObject private var authManager = AuthManager.shared
+
+    @State private var showNewDrawing = false
+    @State private var showPromptFirst = false
+    @State private var selectedDrawing: Drawing?
+    @State private var showDeleteAlert = false
+    @State private var drawingToDelete: Drawing?
+    @State private var drawingContext = DrawingContext()
+
+    let columns = [
+        GridItem(.flexible(), spacing: 16),
+        GridItem(.flexible(), spacing: 16)
+    ]
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                if storageManager.isLoading && storageManager.drawings.isEmpty {
+                    ProgressView("Loading your drawings...")
+                } else if storageManager.drawings.isEmpty {
+                    emptyStateView
+                } else {
+                    drawingsGridView
+                }
+            }
+            .navigationTitle("My Drawings")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        showPromptFirst = true
+                    }) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title2)
+                    }
+                }
+
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        if authManager.currentUser != nil {
+                            Button(role: .destructive, action: {
+                                Task {
+                                    try? await authManager.signOut()
+                                }
+                            }) {
+                                Label("Sign Out", systemImage: "arrow.right.square")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "person.circle")
+                            .font(.title2)
+                    }
+                }
+            }
+            .task {
+                await storageManager.fetchDrawings()
+            }
+            .refreshable {
+                await storageManager.fetchDrawings()
+            }
+            .sheet(isPresented: $showPromptFirst) {
+                PromptInputView(context: $drawingContext, isPresented: $showPromptFirst)
+            }
+            .sheet(isPresented: $showNewDrawing) {
+                DrawingCanvasView(context: $drawingContext)
+            }
+            .onChange(of: showPromptFirst) { newValue in
+                if !newValue && drawingContext.isComplete {
+                    showNewDrawing = true
+                }
+            }
+            .alert("Delete Drawing", isPresented: $showDeleteAlert, presenting: drawingToDelete) { drawing in
+                Button("Cancel", role: .cancel) {}
+                Button("Delete", role: .destructive) {
+                    Task {
+                        try? await storageManager.deleteDrawing(id: drawing.id)
+                    }
+                }
+            } message: { drawing in
+                Text("Are you sure you want to delete '\(drawing.title)'?")
+            }
+        }
+    }
+
+    // MARK: - Empty State
+
+    private var emptyStateView: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 80))
+                .foregroundColor(.secondary.opacity(0.5))
+
+            VStack(spacing: 8) {
+                Text("No Drawings Yet")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text("Tap the + button to create your first drawing")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button(action: {
+                showPromptFirst = true
+            }) {
+                Label("Create Drawing", systemImage: "plus.circle.fill")
+                    .font(.headline)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+            }
+        }
+        .padding()
+    }
+
+    // MARK: - Drawings Grid
+
+    private var drawingsGridView: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 16) {
+                ForEach(storageManager.drawings) { drawing in
+                    DrawingCard(drawing: drawing) {
+                        drawingToDelete = drawing
+                        showDeleteAlert = true
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+}
+
+// MARK: - Drawing Card
+
+struct DrawingCard: View {
+    let drawing: Drawing
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Drawing thumbnail
+            if let uiImage = UIImage(data: drawing.imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(height: 200)
+                    .clipped()
+                    .cornerRadius(12)
+            } else {
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.2))
+                    .frame(height: 200)
+                    .cornerRadius(12)
+                    .overlay(
+                        Image(systemName: "photo")
+                            .font(.largeTitle)
+                            .foregroundColor(.secondary)
+                    )
+            }
+
+            // Title and metadata
+            VStack(alignment: .leading, spacing: 4) {
+                Text(drawing.title)
+                    .font(.headline)
+                    .lineLimit(1)
+
+                Text(drawing.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .contextMenu {
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+}
+
+#Preview {
+    GalleryView()
+}
