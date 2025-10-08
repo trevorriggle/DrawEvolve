@@ -817,7 +817,8 @@ class CanvasRenderer: NSObject {
         }
 
         // Composite all visible layers
-        for layer in layers where layer.isVisible, let texture = layer.texture {
+        for layer in layers where layer.isVisible {
+            guard let texture = layer.texture else { continue }
             compositeLayer(
                 texture: texture,
                 opacity: layer.opacity,
