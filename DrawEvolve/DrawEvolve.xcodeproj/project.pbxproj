@@ -34,6 +34,10 @@
 		DE000026 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100026 /* SignInView.swift */; };
 		DE000027 /* SignUpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100027 /* SignUpView.swift */; };
 		DE000028 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100028 /* GalleryView.swift */; };
+		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
+		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
+		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
+		DEPACKAGE09 /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE05 /* Storage */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -74,6 +78,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DEPACKAGE06 /* Supabase in Frameworks */,
+				DEPACKAGE07 /* Auth in Frameworks */,
+				DEPACKAGE08 /* PostgREST in Frameworks */,
+				DEPACKAGE09 /* Storage in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -188,6 +196,12 @@
 			dependencies = (
 			);
 			name = DrawEvolve;
+			packageProductDependencies = (
+				DEPACKAGE02 /* Supabase */,
+				DEPACKAGE03 /* Auth */,
+				DEPACKAGE04 /* PostgREST */,
+				DEPACKAGE05 /* Storage */,
+			);
 			productName = DrawEvolve;
 			productReference = DE000100 /* DrawEvolve.app */;
 			productType = "com.apple.product-type.application";
@@ -216,6 +230,9 @@
 				Base,
 			);
 			mainGroup = DE000300;
+			packageReferences = (
+				DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			productRefGroup = DE000302 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -476,6 +493,40 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		DEPACKAGE02 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+		DEPACKAGE03 /* Auth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Auth;
+		};
+		DEPACKAGE04 /* PostgREST */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = PostgREST;
+		};
+		DEPACKAGE05 /* Storage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Storage;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = DE000700 /* Project object */;
 }
