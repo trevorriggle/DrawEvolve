@@ -278,9 +278,22 @@ class CanvasRenderer: NSObject {
         }
 
         // Blend each layer
+        guard let pipeline = textureDisplayPipelineState else {
+            print("ERROR: textureDisplayPipelineState not available")
+            return nil
+        }
+
+        renderEncoder.setRenderPipelineState(pipeline)
+
         for layer in layers where layer.isVisible {
-            // Render layer texture with opacity and blend mode
-            // Will implement layer blending
+            guard let layerTexture = layer.texture else {
+                continue
+            }
+
+            renderEncoder.setFragmentTexture(layerTexture, index: 0)
+            var opacityValue = layer.opacity
+            renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
 
         renderEncoder.endEncoding()
