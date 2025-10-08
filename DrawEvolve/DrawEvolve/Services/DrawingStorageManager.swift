@@ -101,29 +101,18 @@ class DrawingStorageManager: ObservableObject {
         defer { isLoading = false }
 
         do {
-            // Build update object based on what's provided
-            if let title = title, let imageData = imageData {
-                try await supabase
-                    .from("drawings")
-                    .update(["title": title, "image_data": imageData])
-                    .eq("id", value: id.uuidString)
-                    .execute()
-            } else if let title = title {
+            // For now, only support title updates
+            // Image updates would require re-encoding the drawing
+            if let title = title {
                 try await supabase
                     .from("drawings")
                     .update(["title": title])
                     .eq("id", value: id.uuidString)
                     .execute()
-            } else if let imageData = imageData {
-                try await supabase
-                    .from("drawings")
-                    .update(["image_data": imageData])
-                    .eq("id", value: id.uuidString)
-                    .execute()
-            }
 
-            // Refresh drawings list
-            await fetchDrawings()
+                // Refresh drawings list
+                await fetchDrawings()
+            }
         } catch {
             errorMessage = error.localizedDescription
             throw error
