@@ -613,21 +613,16 @@ class CanvasRenderer: NSObject {
                 return false
             }
 
-            do {
-                texture.getBytes(
-                    baseAddress,
-                    bytesPerRow: bytesPerRow,
-                    from: MTLRegion(
-                        origin: MTLOrigin(x: 0, y: 0, z: 0),
-                        size: MTLSize(width: width, height: height, depth: 1)
-                    ),
-                    mipmapLevel: 0
-                )
-                return true
-            } catch {
-                print("ERROR: Failed to read texture bytes: \(error)")
-                return false
-            }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+            return true
         }
 
         return success ? pixelData : nil
@@ -788,94 +783,6 @@ class CanvasRenderer: NSObject {
     /// Exports all visible layers composited into a single image
     func exportImage(layers: [DrawingLayer]) -> UIImage? {
         print("CanvasRenderer: Exporting image with \(layers.count) layers")
-
-        // Create a texture to composite all layers
-        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: Int(canvasSize.width),
-            height: Int(canvasSize.height),
-            mipmapped: false
-        )
-        textureDescriptor.usage = [.renderTarget, .shaderRead]
-
-        guard let compositeTexture = device.makeTexture(descriptor: textureDescriptor) else {
-            print("ERROR: Failed to create composite texture")
-            return nil
-        }
-
-        // Create render pass to composite layers
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = compositeTexture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            print("ERROR: Failed to create command buffer/encoder")
-            return nil
-        }
-
-        // Composite all visible layers
-        for layer in layers where layer.isVisible {
-            guard let texture = layer.texture else { continue }
-            compositeLayer(
-                texture: texture,
-                opacity: layer.opacity,
-                blendMode: layer.blendMode,
-                to: renderEncoder
-            )
-        }
-
-        renderEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        // Convert Metal texture to UIImage
-        let width = compositeTexture.width
-        let height = compositeTexture.height
-        let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
-
-        var pixelData = Data(count: dataSize)
-
-        pixelData.withUnsafeMutableBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            compositeTexture.getBytes(
-                baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
-        }
-
-        // Create CGImage from pixel data
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
-
-        guard let dataProvider = CGDataProvider(data: pixelData as CFData),
-              let cgImage = CGImage(
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bitsPerPixel: 32,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
-                provider: dataProvider,
-                decode: nil,
-                shouldInterpolate: false,
-                intent: .defaultIntent
-              ) else {
-            print("ERROR: Failed to create CGImage")
-            return nil
-        }
-
-        let uiImage = UIImage(cgImage: cgImage)
-        print("CanvasRenderer: Successfully exported image (\(width)x\(height))")
-        return uiImage
+        return compositeLayersToImage(layers: layers)
     }
 }
