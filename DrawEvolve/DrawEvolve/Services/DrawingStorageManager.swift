@@ -100,20 +100,27 @@ class DrawingStorageManager: ObservableObject {
 
         defer { isLoading = false }
 
-        var updates: [String: Any] = [:]
-        if let title = title {
-            updates["title"] = title
-        }
-        if let imageData = imageData {
-            updates["image_data"] = imageData
-        }
-
         do {
-            try await supabase
-                .from("drawings")
-                .update(updates)
-                .eq("id", value: id.uuidString)
-                .execute()
+            // Build update object based on what's provided
+            if let title = title, let imageData = imageData {
+                try await supabase
+                    .from("drawings")
+                    .update(["title": title, "image_data": imageData])
+                    .eq("id", value: id.uuidString)
+                    .execute()
+            } else if let title = title {
+                try await supabase
+                    .from("drawings")
+                    .update(["title": title])
+                    .eq("id", value: id.uuidString)
+                    .execute()
+            } else if let imageData = imageData {
+                try await supabase
+                    .from("drawings")
+                    .update(["image_data": imageData])
+                    .eq("id", value: id.uuidString)
+                    .execute()
+            }
 
             // Refresh drawings list
             await fetchDrawings()
