@@ -12,68 +12,101 @@ struct PromptInputView: View {
     @Binding var isPresented: Bool
 
     var body: some View {
-        NavigationView {
-            Form {
-                Section {
-                    Text("Welcome to DrawEvolve")
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                    Text("Let's understand what you're creating today.")
+        ZStack {
+            // Dimmed background
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+
+            // Card
+            VStack(spacing: 0) {
+                // Header
+                VStack(spacing: 12) {
+                    Image(systemName: "paintbrush.pointed.fill")
+                        .font(.system(size: 50))
+                        .foregroundColor(.accentColor)
+
+                    Text("Let's Set Up Your Canvas")
+                        .font(.title)
+                        .fontWeight(.bold)
+
+                    Text("Tell me what you're creating today")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
-                } header: {
-                    EmptyView()
                 }
+                .padding(.top, 32)
+                .padding(.horizontal, 24)
 
-                Section("What are you drawing today?") {
-                    TextField("e.g., a portrait, landscape, still life", text: $context.subject)
-                        .textInputAutocapitalization(.sentences)
-                }
-
-                Section("What style are you going for?") {
-                    TextField("e.g., realism, impressionism, anime", text: $context.style)
-                        .textInputAutocapitalization(.sentences)
-                }
-
-                Section("Are you inspired by any artists?") {
-                    TextField("e.g., Van Gogh, Miyazaki (optional)", text: $context.artists)
-                        .textInputAutocapitalization(.words)
-                }
-
-                Section("What techniques are you planning on implementing?") {
-                    TextField("e.g., hatching, blending, stippling (optional)", text: $context.techniques)
-                        .textInputAutocapitalization(.sentences)
-                }
-
-                Section("Is there a specific area you want feedback on?") {
-                    TextField("e.g., proportions, shading, composition (optional)", text: $context.focus)
-                        .textInputAutocapitalization(.sentences)
-                }
-
-                Section("Lastly, is there any additional context you'd like me to have?") {
-                    TextEditor(text: $context.additionalContext)
-                        .frame(minHeight: 80)
-                        .textInputAutocapitalization(.sentences)
-                }
-
-                Section {
-                    Button(action: {
-                        if context.isComplete {
-                            isPresented = false
+                // Form
+                ScrollView {
+                    VStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("What are you drawing?")
+                                .font(.headline)
+                            TextField("e.g., a portrait, landscape, still life", text: $context.subject)
+                                .textFieldStyle(.roundedBorder)
+                                .textInputAutocapitalization(.sentences)
                         }
-                    }) {
-                        HStack {
-                            Spacer()
-                            Text("Start Drawing")
-                                .fontWeight(.semibold)
-                            Spacer()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("What style?")
+                                .font(.headline)
+                            TextField("e.g., realism, impressionism, anime", text: $context.style)
+                                .textFieldStyle(.roundedBorder)
+                                .textInputAutocapitalization(.sentences)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Inspired by any artists?")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            TextField("e.g., Van Gogh, Miyazaki (optional)", text: $context.artists)
+                                .textFieldStyle(.roundedBorder)
+                                .textInputAutocapitalization(.words)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Techniques you'll use?")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            TextField("e.g., hatching, blending (optional)", text: $context.techniques)
+                                .textFieldStyle(.roundedBorder)
+                                .textInputAutocapitalization(.sentences)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Area you want feedback on?")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            TextField("e.g., proportions, shading (optional)", text: $context.focus)
+                                .textFieldStyle(.roundedBorder)
+                                .textInputAutocapitalization(.sentences)
                         }
                     }
-                    .disabled(!context.isComplete)
+                    .padding(24)
                 }
+
+                // Start Drawing button
+                Button(action: {
+                    if context.isComplete {
+                        isPresented = false
+                    }
+                }) {
+                    Text("Start Drawing")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(context.isComplete ? Color.accentColor : Color.gray)
+                        .cornerRadius(12)
+                }
+                .disabled(!context.isComplete)
+                .padding(24)
             }
-            .navigationTitle("Setup Your Session")
-            .navigationBarTitleDisplayMode(.inline)
+            .frame(maxWidth: 600, maxHeight: 700)
+            .background(Color(uiColor: .systemBackground))
+            .cornerRadius(20)
+            .shadow(radius: 20)
+            .padding(40)
         }
     }
 }

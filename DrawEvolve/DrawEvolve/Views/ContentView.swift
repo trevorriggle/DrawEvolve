@@ -22,12 +22,6 @@ struct ContentView: View {
             if !isAuthenticated {
                 // Landing page with auth options
                 LandingView(isAuthenticated: $isAuthenticated)
-            } else if showPromptInput && !hasCompletedPrompt {
-                // Questionnaire before starting drawing
-                PromptInputView(
-                    context: $drawingContext,
-                    isPresented: $showPromptInput
-                )
             } else {
                 // Drawing canvas (main screen after auth)
                 DrawingCanvasView(context: $drawingContext)
@@ -40,6 +34,15 @@ struct ContentView: View {
             // First-time onboarding popup
             if showOnboarding {
                 OnboardingPopup(isPresented: $showOnboarding)
+            }
+        }
+        .overlay {
+            // Pre-drawing questionnaire popup
+            if showPromptInput && !hasCompletedPrompt {
+                PromptInputView(
+                    context: $drawingContext,
+                    isPresented: $showPromptInput
+                )
             }
         }
         .onChange(of: isAuthenticated) { _, newValue in
