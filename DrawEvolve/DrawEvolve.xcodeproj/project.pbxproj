@@ -27,6 +27,13 @@
 		DE000019 /* LayerPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100019 /* LayerPanelView.swift */; };
 		DE000020 /* BrushSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100020 /* BrushSettingsView.swift */; };
 		DE000021 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = DE100021 /* Shaders.metal */; };
+		DE000022 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100022 /* SupabaseManager.swift */; };
+		DE000023 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100023 /* AuthManager.swift */; };
+		DE000024 /* DrawingStorageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100024 /* DrawingStorageManager.swift */; };
+		DE000025 /* Drawing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100025 /* Drawing.swift */; };
+		DE000026 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100026 /* SignInView.swift */; };
+		DE000027 /* SignUpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100027 /* SignUpView.swift */; };
+		DE000028 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100028 /* GalleryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -53,6 +60,13 @@
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
 		DE400001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		DE100022 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
+		DE100023 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
+		DE100024 /* DrawingStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingStorageManager.swift; sourceTree = "<group>"; };
+		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
+		DE100026 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		DE100027 /* SignUpView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignUpView.swift; sourceTree = "<group>"; };
+		DE100028 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -111,6 +125,9 @@
 				DE100018 /* ColorPicker.swift */,
 				DE100019 /* LayerPanelView.swift */,
 				DE100020 /* BrushSettingsView.swift */,
+				DE100026 /* SignInView.swift */,
+				DE100027 /* SignUpView.swift */,
+				DE100028 /* GalleryView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -121,6 +138,7 @@
 				DE100006 /* DrawingContext.swift */,
 				DE100013 /* DrawingLayer.swift */,
 				DE100014 /* DrawingTool.swift */,
+				DE100025 /* Drawing.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -131,6 +149,9 @@
 				DE100007 /* OpenAIManager.swift */,
 				DE100015 /* CanvasRenderer.swift */,
 				DE100016 /* HistoryManager.swift */,
+				DE100022 /* SupabaseManager.swift */,
+				DE100023 /* AuthManager.swift */,
+				DE100024 /* DrawingStorageManager.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -239,6 +260,13 @@
 				DE000015 /* CanvasRenderer.swift in Sources */,
 				DE000016 /* HistoryManager.swift in Sources */,
 				DE000021 /* Shaders.metal in Sources */,
+				DE000022 /* SupabaseManager.swift in Sources */,
+				DE000023 /* AuthManager.swift in Sources */,
+				DE000024 /* DrawingStorageManager.swift in Sources */,
+				DE000025 /* Drawing.swift in Sources */,
+				DE000026 /* SignInView.swift in Sources */,
+				DE000027 /* SignUpView.swift in Sources */,
+				DE000028 /* GalleryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
