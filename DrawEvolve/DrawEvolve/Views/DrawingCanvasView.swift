@@ -225,65 +225,66 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing))
             }
 
-            // Top right buttons (Save and Feedback)
-            VStack(alignment: .trailing, spacing: 12) {
-                HStack(spacing: 12) {
-                    Spacer()
+            // Top right - User/Gallery button
+            if !isToolbarCollapsed {
+                VStack {
+                    HStack {
+                        Spacer()
 
-                    // Save button (top button)
-                    if authManager.currentUser != nil {
                         Button(action: {
-                            showSaveDialog = true
+                            if authManager.currentUser != nil {
+                                showGallery = true
+                            }
                         }) {
+                            Image(systemName: authManager.currentUser != nil ? "person.circle.fill" : "person.circle")
+                                .font(.system(size: 32))
+                                .foregroundColor(.accentColor)
+                                .frame(width: 50, height: 50)
+                                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                                .clipShape(Circle())
+                                .shadow(radius: 4)
+                        }
+                        .padding(.top, 12)
+                        .padding(.trailing, 12)
+                    }
+                    Spacer()
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
+            // Bottom right - Get Feedback button (collapses with toolbar)
+            if !isToolbarCollapsed {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+
+                        Button(action: requestFeedback) {
                             HStack(spacing: 8) {
-                                Image(systemName: "square.and.arrow.down")
-                                    .font(.system(size: 18))
-                                Text("Save")
-                                    .font(.headline)
+                                if isRequestingFeedback {
+                                    ProgressView()
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 18))
+                                    Text("Get Feedback")
+                                        .font(.headline)
+                                }
                             }
                             .padding(.horizontal, 20)
                             .padding(.vertical, 14)
-                            .background(Color.green)
+                            .background(Color.accentColor)
                             .foregroundColor(.white)
                             .cornerRadius(12)
                             .shadow(radius: 4)
                         }
-                        .disabled(canvasState.isEmpty)
+                        .disabled(isRequestingFeedback || canvasState.isEmpty)
                         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+                        .padding(.trailing, 12)
+                        .padding(.bottom, 12)
                     }
                 }
-                .padding(.top, 12)
-                .padding(.trailing, 12)
-
-                HStack(spacing: 12) {
-                    Spacer()
-
-                    // Get Feedback button (below Save)
-                    Button(action: requestFeedback) {
-                        HStack(spacing: 8) {
-                            if isRequestingFeedback {
-                                ProgressView()
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 18))
-                                Text("Get Feedback")
-                                    .font(.headline)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 14)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
-                        .shadow(radius: 4)
-                    }
-                    .disabled(isRequestingFeedback || canvasState.isEmpty)
-                    .opacity(canvasState.isEmpty ? 0.5 : 1.0)
-                }
-                .padding(.trailing, 12)
-
-                Spacer()
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .sheet(isPresented: $showColorPicker) {
