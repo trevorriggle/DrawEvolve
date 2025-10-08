@@ -70,12 +70,13 @@ struct ContentView: View {
         hasCheckedFirstLaunch = true
 
         #if DEBUG
-        if !UserDefaults.standard.bool(forKey: "hasLaunchedBefore") {
-            UserDefaults.standard.set(false, forKey: "isAuthenticated")
-            UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
-            UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
-            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
-        }
+        // Reset on every launch for testing
+        UserDefaults.standard.set(false, forKey: "isAuthenticated")
+        UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
+        UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
+        isAuthenticated = false
+        hasSeenOnboarding = false
+        hasCompletedPrompt = false
         #endif
     }
 }
