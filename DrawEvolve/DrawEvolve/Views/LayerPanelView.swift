@@ -16,13 +16,15 @@ struct LayerPanelView: View {
     var body: some View {
         List {
             ForEach(Array(layers.enumerated().reversed()), id: \.element.id) { index, layer in
-                LayerRow(
-                    layer: layer,
-                    isSelected: selectedIndex == (layers.count - 1 - index)
-                )
-                .onTapGesture {
+                Button(action: {
                     selectedIndex = layers.count - 1 - index
+                }) {
+                    LayerRow(
+                        layer: layer,
+                        isSelected: selectedIndex == (layers.count - 1 - index)
+                    )
                 }
+                .buttonStyle(.plain)
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     if layers.count > 1 {
                         Button(role: .destructive) {
