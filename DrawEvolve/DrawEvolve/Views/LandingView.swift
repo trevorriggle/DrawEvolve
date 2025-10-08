@@ -28,8 +28,7 @@ struct LandingView: View {
                 Spacer()
 
                 // Logo and branding
-                VStack(spacing: 16) {
-                    // Placeholder for logo image
+                VStack(spacing: 20) {
                     Image(systemName: "paintbrush.pointed.fill")
                         .font(.system(size: 80))
                         .foregroundStyle(
@@ -44,15 +43,30 @@ struct LandingView: View {
                         .font(.system(size: 48, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
 
-                    Text("Your AI Drawing Coach")
+                    Text("Welcome to DrawEvolve.\nLet's get you logged in to save your artwork.")
                         .font(.title3)
                         .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
                 }
 
                 Spacer()
 
                 // Auth buttons
                 VStack(spacing: 16) {
+                    // Create account (primary CTA)
+                    Button(action: {
+                        showSignUp = true
+                    }) {
+                        Text("Create Account")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                    }
+
                     // Login button
                     Button(action: {
                         showSignIn = true
@@ -61,9 +75,13 @@ struct LandingView: View {
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 16)
-                            .background(Color.accentColor)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
+                            .background(Color(uiColor: .systemBackground))
+                            .foregroundColor(.accentColor)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.accentColor, lineWidth: 2)
+                        )
+                        .cornerRadius(12)
                     }
 
                     // Google sign in (future implementation)
@@ -84,23 +102,6 @@ struct LandingView: View {
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
                                 .stroke(Color(uiColor: .separator), lineWidth: 1)
-                        )
-                        .cornerRadius(12)
-                    }
-
-                    // Create account
-                    Button(action: {
-                        showSignUp = true
-                    }) {
-                        Text("Create Account")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(Color(uiColor: .systemBackground))
-                            .foregroundColor(.accentColor)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.accentColor, lineWidth: 2)
                         )
                         .cornerRadius(12)
                     }

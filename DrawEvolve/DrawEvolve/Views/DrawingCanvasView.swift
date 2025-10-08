@@ -33,6 +33,7 @@ struct DrawingCanvasView: View {
     @State private var showSaveDialog = false
     @State private var drawingTitle = ""
     @State private var isSaving = false
+    @State private var showGallery = false
     @StateObject private var storageManager = DrawingStorageManager.shared
     @StateObject private var authManager = AuthManager.shared
 
@@ -175,6 +176,13 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
+
+                            // Gallery button (only show if authenticated)
+                            if authManager.currentUser != nil {
+                                ToolButton(icon: "photo.on.rectangle", isSelected: false) {
+                                    showGallery = true
+                                }
+                            }
                         }
                         .padding(.top, 12)
                         .padding(.horizontal, 8)
@@ -217,35 +225,40 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing))
             }
 
-            // Bottom buttons (top layer, bottom right corner)
-            VStack {
-                Spacer()
-                HStack {
+            // Top right buttons (Save and Feedback)
+            VStack(alignment: .trailing, spacing: 12) {
+                HStack(spacing: 12) {
                     Spacer()
 
-                    // Save button
+                    // Save button (top button)
                     if authManager.currentUser != nil {
                         Button(action: {
                             showSaveDialog = true
                         }) {
                             HStack(spacing: 8) {
                                 Image(systemName: "square.and.arrow.down")
-                                    .font(.system(size: 20))
+                                    .font(.system(size: 18))
                                 Text("Save")
                                     .font(.headline)
                             }
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 16)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 14)
                             .background(Color.green)
                             .foregroundColor(.white)
-                            .cornerRadius(16)
+                            .cornerRadius(12)
                             .shadow(radius: 4)
                         }
                         .disabled(canvasState.isEmpty)
                         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
                     }
+                }
+                .padding(.top, 12)
+                .padding(.trailing, 12)
 
-                    // Get Feedback button - bottom right
+                HStack(spacing: 12) {
+                    Spacer()
+
+                    // Get Feedback button (below Save)
                     Button(action: requestFeedback) {
                         HStack(spacing: 8) {
                             if isRequestingFeedback {
@@ -253,23 +266,24 @@ struct DrawingCanvasView: View {
                                     .tint(.white)
                             } else {
                                 Image(systemName: "sparkles")
-                                    .font(.system(size: 20))
+                                    .font(.system(size: 18))
                                 Text("Get Feedback")
                                     .font(.headline)
                             }
                         }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 16)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
                         .background(Color.accentColor)
                         .foregroundColor(.white)
-                        .cornerRadius(16)
+                        .cornerRadius(12)
                         .shadow(radius: 4)
                     }
                     .disabled(isRequestingFeedback || canvasState.isEmpty)
                     .opacity(canvasState.isEmpty ? 0.5 : 1.0)
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 20)
                 }
+                .padding(.trailing, 12)
+
+                Spacer()
             }
         }
         .sheet(isPresented: $showColorPicker) {
@@ -345,6 +359,9 @@ struct DrawingCanvasView: View {
             }
         } message: {
             Text("Enter a title for your drawing")
+        }
+        .fullScreenCover(isPresented: $showGallery) {
+            GalleryView()
         }
     }
 

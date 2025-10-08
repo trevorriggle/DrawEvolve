@@ -25,18 +25,15 @@ struct ContentView: View {
                     .onAppear {
                         performFirstLaunchCheck()
                     }
-            } else if showPromptInput && !hasCompletedPrompt && showCanvas {
-                // Questionnaire before starting new drawing
+            } else if showPromptInput && !hasCompletedPrompt {
+                // Questionnaire before starting drawing
                 PromptInputView(
                     context: $drawingContext,
                     isPresented: $showPromptInput
                 )
-            } else if showCanvas {
-                // Drawing canvas
-                DrawingCanvasView(context: $drawingContext)
             } else {
-                // Gallery view (default after auth)
-                GalleryView()
+                // Drawing canvas (main screen after auth)
+                DrawingCanvasView(context: $drawingContext)
             }
         }
         .overlay {
