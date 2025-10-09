@@ -35,7 +35,6 @@ struct DrawingCanvasView: View {
     @State private var isSaving = false
     @State private var showGallery = false
     @StateObject private var storageManager = DrawingStorageManager.shared
-    @StateObject private var authManager = AuthManager.shared
 
     // Clear confirmation
     @State private var showClearConfirmation = false
@@ -180,11 +179,9 @@ struct DrawingCanvasView: View {
                             }
                             .disabled(!canvasState.historyManager.canRedo)
 
-                            // Gallery button (only show if authenticated)
-                            if authManager.currentUser != nil {
-                                ToolButton(icon: "photo.on.rectangle", isSelected: false) {
-                                    showGallery = true
-                                }
+                            // Gallery button
+                            ToolButton(icon: "photo.on.rectangle", isSelected: false) {
+                                showGallery = true
                             }
                         }
                         .padding(.top, 12)
@@ -220,18 +217,14 @@ struct DrawingCanvasView: View {
 
             // Feedback overlay removed from here - now using fullScreenCover below
 
-            // Top right - User/Gallery button
+            // Top right - Gallery button
             if !isToolbarCollapsed {
                 VStack {
                     HStack {
                         Spacer()
 
-                        Button(action: {
-                            if authManager.currentUser != nil {
-                                showGallery = true
-                            }
-                        }) {
-                            Image(systemName: authManager.currentUser != nil ? "person.circle.fill" : "person.circle")
+                        Button(action: { showGallery = true }) {
+                            Image(systemName: "photo.on.rectangle")
                                 .font(.system(size: 32))
                                 .foregroundColor(.accentColor)
                                 .frame(width: 50, height: 50)
