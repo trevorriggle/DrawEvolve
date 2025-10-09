@@ -14,6 +14,8 @@
 - ✅ OpenAI API key secured server-side
 - ✅ **P0 UX FIXES COMPLETE** - Feedback panel, loading states, markdown formatting, confirmations
 - ✅ **AI PROMPT TUNED** - Warm, specific, actionable tone with clean structure
+- ✅ **SUPABASE AUTH REMOVED** - Replaced with simple anonymous UUID system (-518 lines of code!)
+- ✅ **CLEAN BUILD** - All auth references removed, app builds without errors
 - ✅ End-to-end feature working with polish
 
 **Build Time:** ~8 hours total dev time across sessions
@@ -96,47 +98,56 @@
 
 ## ⚠️ Features That Are Broken/Incomplete
 
-### Authentication - PARTIALLY BROKEN
-**Status:** Supabase integration started but not fully functional
+### Authentication - SIMPLIFIED TO ANONYMOUS
+**Status:** Anonymous UUID-based system (Supabase removed)
 
 **What Exists:**
-- ✅ SupabaseManager.swift (client initialized)
-- ✅ AuthManager.swift (sign up, sign in, sign out methods)
-- ✅ LandingView.swift (auth UI)
-- ✅ SignUpView.swift
-- ✅ SignInView.swift
-- ✅ "Continue as Guest" mode
+- ✅ AnonymousUserManager.swift - generates and stores UUID
+- ✅ UUID persisted in UserDefaults
+- ✅ Clean onboarding flow: Onboarding → Prompts → Canvas
+- ✅ No auth screens blocking user journey
 
-**What's Broken:**
-- ❌ Auth flow doesn't actually work reliably
-- ❌ Session persistence questionable
-- ❌ No user ID passed to backend (needed for usage tracking)
-- ❌ Guest mode bypasses auth entirely (security risk)
-- ❌ No password reset flow
-- ❌ No OAuth (Apple Sign In, Google, etc.)
+**What Was Removed:**
+- 🗑️ SupabaseManager.swift (deleted)
+- 🗑️ AuthManager.swift (deleted)
+- 🗑️ LandingView.swift (deleted)
+- 🗑️ SignUpView.swift (deleted)
+- 🗑️ SignInView.swift (deleted)
+
+**Future Plans:**
+- Can add real auth later (Cloudflare Workers + Durable Objects)
+- Anonymous users can "claim" their drawings when they sign up
+- UUID ready for backend usage tracking
 
 **Impact on TestFlight:**
-- Medium priority for TestFlight
-- Can use "guest mode" for initial testing
-- MUST FIX before any real user data or monetization
+- ✅ No blocker - simpler is better for testing
+- Users can start drawing immediately
+- Can add auth in future version based on feedback
 
-### Data Persistence - INCOMPLETE
-**Status:** Drawings are NOT saved
+### Data Persistence - STUBBED OUT (TODO)
+**Status:** Drawings are NOT saved (in-memory only)
 
 **What Exists:**
-- ✅ DrawingStorageManager.swift file exists
-- ✅ Basic save/load structure
+- ✅ DrawingStorageManager.swift - stubbed with in-memory storage
+- ✅ Basic save/load/delete interface
+- ✅ Gallery UI ready (just shows empty state)
 
-**What's Broken:**
-- ❌ Drawings don't persist between app sessions
+**What's Missing:**
+- ❌ No FileManager or Core Data implementation
+- ❌ Drawings lost on app restart
 - ❌ No cloud sync
-- ❌ No gallery of past drawings
-- ❌ Export works, but only to Photos app (one-time)
+- ❌ Export works to Photos, but not to app storage
 
 **Impact on TestFlight:**
-- HIGH priority for TestFlight
+- ⚠️ HIGH priority for TestFlight
 - Users will lose work if app closes
-- Gallery feature can't work without this
+- Gallery feature exists but shows "No Drawings Yet"
+
+**Implementation Plan:**
+- Use FileManager to save drawings as files
+- Store in app's Documents directory
+- Each drawing: UUID.json (metadata) + UUID.png (image)
+- Load on app launch, display in gallery
 
 ### Gallery - NON-FUNCTIONAL
 **Status:** UI exists but no data to show
@@ -200,33 +211,22 @@
 
 ## 🔧 Technical Debt & Issues
 
-### Security Issues
-1. **Supabase API Key Exposed in Code** (SupabaseManager.swift:20)
-   - Hardcoded in source code (bad practice)
-   - Should be in Config.plist or environment variable
-   - Low risk (it's the anon key, has RLS) but still poor practice
-
-2. **Guest Mode Bypasses Auth**
-   - Sets `isAuthenticated = true` without actual authentication
-   - Could lead to weird states
-   - Need proper guest user handling
-
 ### Architecture Issues
-1. **Auth State Management Confusion**
-   - `@AppStorage("isAuthenticated")` in ContentView
-   - `@Published var isAuthenticated` in AuthManager
-   - Two sources of truth = bugs waiting to happen
+1. ✅ **Auth State Management** - FIXED
+   - Removed Supabase auth entirely
+   - Simple anonymous UUID system
+   - Single source of truth in AnonymousUserManager
 
-2. **No User ID in Backend Requests**
-   - AI feedback requests don't include user ID
-   - Can't track usage per user
-   - Can't implement rate limiting or premium features
-   - MUST FIX before monetization
+2. **User ID in Backend Requests**
+   - AI feedback requests don't include user ID yet
+   - TODO: Pass anonymous UUID to backend for usage tracking
+   - Not critical for TestFlight, but needed before monetization
 
 3. **Drawing Context Always Created Fresh**
-   - Line 15 in ContentView: `@State private var drawingContext = DrawingContext()`
+   - Line 14 in ContentView: `@State private var drawingContext = DrawingContext()`
    - Not persisted, not loaded from previous session
-   - User loses their questionnaire answers
+   - User loses their questionnaire answers between launches
+   - LOW priority (onboarding reset in DEBUG mode anyway)
 
 ### Performance Issues (Potential)
 1. **Layer Thumbnail Generation**
@@ -422,16 +422,11 @@
    - **Estimate:** 4-6 hours
    - **Depends on:** #1 (drawing persistence)
 
-3. **Fix/Simplify Auth**
-   - **Option A:** Remove Supabase entirely for TestFlight, use simple guest mode
-   - **Option B:** Fix Supabase auth properly
-   - **Recommendation:** Option A (simpler, faster)
-   - **What to do:**
-     - Remove auth screens for now
-     - Auto-login as guest on launch
-     - Generate anonymous user ID for tracking
-     - Can add real auth later
-   - **Estimate:** 1-2 hours
+3. ✅ **Fix/Simplify Auth** - COMPLETE
+   - ✅ Removed Supabase entirely
+   - ✅ Anonymous UUID system implemented
+   - ✅ Clean onboarding flow (no auth screens)
+   - ✅ Can add real auth later without breaking existing users
 
 4. ✅ **Add Loading States for AI Feedback** - COMPLETE
    - ✅ Spinner shown immediately on tap
@@ -570,14 +565,14 @@
 ## 📊 Estimated Time to TestFlight-Ready
 
 ### P0 Tasks (Must Do)
-1. Drawing persistence: **3-4 hours**
-2. Gallery implementation: **4-6 hours**
-3. Simplify auth: **1-2 hours**
-4. Loading states: **2-3 hours**
-5. Disable DEBUG resets: **5 minutes**
+1. Drawing persistence: **3-4 hours** ⚠️ CRITICAL
+2. Gallery implementation: **1-2 hours** (UI done, just wire up to persistence)
+3. ✅ Simplify auth: **COMPLETE**
+4. ✅ Loading states: **COMPLETE**
+5. ✅ Disable DEBUG resets: **COMPLETE** (configured for dev)
 6. Crash reporting: **1-2 hours**
 
-**P0 Total: 12-18 hours**
+**P0 Total: 5-8 hours remaining**
 
 ### P1 Tasks (Should Do)
 7. Error handling: **2-3 hours**
@@ -596,21 +591,24 @@
 
 ---
 
-### **GRAND TOTAL: 25-41 hours of focused development work**
+### **GRAND TOTAL: ~15-25 hours of focused development work remaining**
+
+**What's Done:** ~15 hours completed (AI feedback, UX fixes, auth removal)
+**What's Left:** ~15-25 hours (persistence, polish, testing)
 
 **Realistic Timeline:**
-- **Aggressive:** 3-4 full days (if focused, no distractions)
-- **Moderate:** 1-2 weeks (normal pace, life happens)
-- **Conservative:** 2-3 weeks (including design work, testing, iteration)
+- **Aggressive:** 2-3 full days (if focused, no distractions)
+- **Moderate:** 1 week (normal pace, life happens)
+- **Conservative:** 1-2 weeks (including design work, testing, iteration)
 
 ---
 
 ## 🎯 Recommended Next Steps
 
-### Immediate (This Week)
-1. **Drawing Persistence** - Users need to save their work
-2. **Gallery View** - Users need to see their past drawings
-3. **Simplify Auth** - Remove blockers, use guest mode
+### Immediate (Next Session)
+1. **Drawing Persistence** - CRITICAL - Users need to save their work
+2. **Gallery Implementation** - Wire up to persistence (UI already done)
+3. **UI Audit** - Test on device, document visual issues
 
 ### Short-Term (Next Week)
 4. **Loading States** - Better UX for AI feedback
