@@ -31,8 +31,8 @@ enum OpenAIError: LocalizedError {
 actor OpenAIManager {
     static let shared = OpenAIManager()
 
-    // Vercel backend URL
-    private let backendURL = "https://draw-evolve-backend.vercel.app/api/feedback"
+    // Cloudflare Worker backend URL
+    private let backendURL = "https://drawevolve-backend.trevorriggle.workers.dev"
 
     // For local testing with Vercel Dev, use:
     // private let backendURL = "http://localhost:3000/api/feedback"
