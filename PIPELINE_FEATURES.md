@@ -370,14 +370,265 @@ DrawEvolve isn't just a drawing app with AI feedback - it's a **creative practic
 
 ---
 
+## 🤖 Phase 7: Portfolio Analysis Pipeline (Agentic System)
+
+**Goal:** Transform DrawEvolve from reactive feedback tool into proactive long-term mentor
+
+### Core Concept
+An autonomous AI system that reviews an artist's portfolio over time, tracks progress, detects patterns, and evolves coaching strategy based on longitudinal data.
+
+### Architecture: Plan → Act → Reflect → Update Loop
+
+**1. Plan Phase (Orchestrator)**
+- Define sub-tasks based on available data
+- Determine analysis scope (new drawings vs full portfolio)
+- Schedule parallel vs sequential operations
+- Set quality thresholds and uncertainty flags
+
+**2. Act Phase (Specialized Agents)**
+- **Fetch Agent:** Retrieve recent drawings + metadata
+- **Compare Agent:** Analyze changes vs last snapshot
+- **Style Agent:** Track visual style evolution via embeddings
+- **Critique Agent:** Generate personalized feedback referencing past work
+- **Metrics Agent:** Calculate quantitative improvement scores
+
+**3. Reflect Phase (Quality Control)**
+- Cross-check agent outputs for consistency
+- Flag contradictions or insufficient data
+- Verify statistical significance of detected trends
+- Surface uncertainty to user when appropriate
+
+**4. Update Phase (Persistence)**
+- Write new portfolio snapshot to database
+- Update user's "artistic profile" (strengths, weaknesses, goals)
+- Generate summary for UI display
+- Prepare personalized challenges for next session
+
+### Technical Implementation
+
+**Data Model:**
+```sql
+-- Portfolio snapshots (periodic artist profile)
+CREATE TABLE portfolio_snapshots (
+  id UUID PRIMARY KEY,
+  user_id UUID REFERENCES users(id),
+  created_at TIMESTAMP,
+
+  -- Quantitative metrics
+  metrics JSONB, -- {anatomy: 7.2, composition: 8.1, color_theory: 6.5, ...}
+
+  -- Qualitative insights
+  strengths TEXT[], -- ["improving line confidence", "developing unique style"]
+  weaknesses TEXT[], -- ["inconsistent proportions", "limited color palette"]
+
+  -- Progress indicators
+  improvement_areas JSONB, -- {anatomy: +1.2, perspective: -0.3, ...}
+
+  -- Summary for display
+  summary_text TEXT,
+
+  -- Reference to drawings analyzed
+  drawing_ids UUID[]
+);
+
+-- Critique history (per-drawing feedback)
+CREATE TABLE critique_history (
+  id UUID PRIMARY KEY,
+  drawing_id UUID REFERENCES drawings(id),
+  created_at TIMESTAMP,
+
+  critique_text TEXT,
+  focus_areas TEXT[], -- ["anatomy", "composition"]
+  ai_model TEXT, -- "gpt-4o-vision"
+
+  -- Link to portfolio snapshot
+  snapshot_id UUID REFERENCES portfolio_snapshots(id)
+);
+
+-- Drawing embeddings (for style tracking)
+CREATE TABLE drawing_embeddings (
+  drawing_id UUID PRIMARY KEY REFERENCES drawings(id),
+  embedding VECTOR(512), -- CLIP or similar
+  created_at TIMESTAMP
+);
+```
+
+**Agent Prompt Templates:**
+
+*Orchestrator Agent:*
+```
+You are the Portfolio Analysis Orchestrator. Your job is to coordinate
+specialized agents to analyze user {user_id}'s artistic progress.
+
+Available data:
+- {num_new_drawings} new drawings since last snapshot
+- Last snapshot date: {last_snapshot_date}
+- User goals: {user_goals}
+
+Plan the analysis workflow:
+1. What sub-tasks are needed?
+2. Which agents should run in parallel?
+3. What's the minimum data threshold for valid analysis?
+4. Should we flag uncertainty if data is insufficient?
+
+Output your plan as JSON.
+```
+
+*Compare Agent:*
+```
+You are the Progress Comparison Agent. Analyze artistic improvement
+over time by comparing current work to past snapshots.
+
+Current drawings: {current_drawings}
+Last snapshot metrics: {last_snapshot_metrics}
+Previous feedback themes: {past_critiques_summary}
+
+For each metric (anatomy, composition, color, etc.):
+- Has it improved? By how much?
+- What specific changes demonstrate this?
+- Are improvements consistent or one-off flukes?
+
+Be statistically honest - say "insufficient data" if sample size is too small.
+```
+
+*Reflection Agent:*
+```
+You are the Quality Control Agent. Review outputs from other agents
+and check for consistency, contradictions, and uncertainty.
+
+Inputs:
+- Compare Agent: {compare_output}
+- Style Agent: {style_output}
+- Critique Agent: {critique_output}
+
+Questions to answer:
+1. Do all agents agree on key findings?
+2. Are there contradictions that need resolution?
+3. Is there enough data to support conclusions?
+4. Should we flag uncertainty to the user?
+
+Output: APPROVE | REVISE | INSUFFICIENT_DATA
+```
+
+### Scheduling & Triggers
+
+**Periodic Analysis:**
+- Weekly snapshots for active users (5+ drawings/week)
+- Monthly deep dives for all users
+- On-demand via "Analyze My Progress" button
+
+**Compute Optimization:**
+- Incremental analysis (only new drawings) for weekly runs
+- Full portfolio re-analysis monthly or when user requests
+- Cache embeddings to avoid re-computing
+- Batch processing during off-peak hours
+
+**Cost Management:**
+- Use smaller model (GPT-4o-mini) for routine comparisons
+- Use GPT-4o only for complex critique generation
+- Store summaries, not full context, for long-term memory
+- Token optimization: summarize old snapshots instead of full history
+
+### User Experience
+
+**Progress Dashboard:**
+```
+┌─────────────────────────────────────────┐
+│  Your Artistic Journey                  │
+├─────────────────────────────────────────┤
+│                                         │
+│  [Radar Chart: Skill Breakdown]         │
+│    Anatomy: ████████░░ 8.2 (+1.5)      │
+│    Composition: ██████░░░ 6.8 (+0.3)   │
+│    Color Theory: ████████ 7.9 (+2.1)   │
+│                                         │
+│  Recent Insights:                       │
+│  ✅ Your line confidence has improved   │
+│     40% since last month!               │
+│  ⚠️  Proportions still inconsistent -   │
+│     try gesture drawing exercises       │
+│                                         │
+│  [View Full Report] [Set New Goals]     │
+└─────────────────────────────────────────┘
+```
+
+**Personalized Coaching:**
+- "Last time you struggled with foreshortening. Let's see if you've improved!"
+- "Your color harmony has plateaued - ready for a new challenge?"
+- "You draw more when feedback is positive - here's extra encouragement!"
+
+### MVP Implementation Path
+
+**Phase 1: Basic Snapshots (Week 1)**
+- Add `portfolio_snapshots` table
+- Simple weekly job: fetch last 10 drawings, generate summary
+- Store as JSON blob (no fancy agents yet)
+- UI: "Last Snapshot" view showing progress summary
+
+**Phase 2: Comparison Logic (Week 2)**
+- Build "before/after" comparison for specific metrics
+- Detect improvement: "Line quality +2 points since last month"
+- Store structured metrics (not just text)
+
+**Phase 3: Agentic Orchestrator (Week 3-4)**
+- Implement Plan → Act → Reflect → Update loop
+- Use LangChain or similar framework
+- Deploy reflection layer for quality control
+- Test with beta users
+
+**Phase 4: Advanced Features (Ongoing)**
+- Style embeddings for visual tracking
+- Multi-agent consensus (3 agents vote on critique)
+- Personalized learning paths based on trends
+- UI visualization (charts, timelines, progress graphs)
+
+### Why This Is a Moat
+
+**Defensibility:**
+- Proprietary data: Your users' progress over time
+- Network effects: More data = better insights
+- Hard to replicate: Requires longitudinal tracking, not just point-in-time feedback
+
+**Retention:**
+- Emotional investment: "I have 6 months of progress here!"
+- Sunk cost: Users won't want to lose their history
+- Gamification: Seeing improvement is addictive
+
+**Differentiation:**
+- Competitors offer one-shot feedback
+- DrawEvolve offers ongoing mentorship
+- "Duolingo for art" - tracks your learning journey
+
+### Open Challenges
+
+**Cold Start:**
+- What to show new users with <5 drawings?
+- Solution: Focus on snapshot critique until enough data for trends
+
+**Privacy:**
+- Some users may not want "AI stalking my progress"
+- Solution: Opt-in system, user can delete snapshots
+
+**Accuracy:**
+- AI might hallucinate trends from noise
+- Solution: Require statistical significance, surface uncertainty
+
+**Compute Cost:**
+- Running embeddings + LLMs on entire portfolio = expensive
+- Solution: Incremental analysis + monthly deep dives
+
+---
+
 ## 💭 Open Questions
 
 1. **Pricing:** What's the right price point for premium? ($4.99? $9.99? $14.99?)
 2. **Platform:** iOS first, or expand to iPad/Mac/Android soon?
 3. **Target Market:** Hobbyists? Students? Professionals? All three?
 4. **Competitive Moat:** What's the ONE thing we do better than everyone else?
+   - **Answer candidate:** Portfolio Analysis Pipeline (Phase 7) - nobody else tracks long-term progress with agentic AI
 5. **Viral Loop:** What's the single best growth lever? (Referrals? Agent sharing? Gallery?)
 6. **AI Costs:** How do we keep OpenAI API costs sustainable at scale?
+   - **Answer candidate:** Incremental analysis, smaller models for routine tasks, cached embeddings
 
 ---
 
