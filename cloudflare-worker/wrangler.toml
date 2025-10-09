@@ -1,0 +1,7 @@
+name = "drawevolve-backend"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+# Environment variables (secrets set via: wrangler secret put OPENAI_API_KEY)
+# [vars]
+# Add any non-secret variables here if needed
