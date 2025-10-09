@@ -72,15 +72,17 @@ struct ContentView: View {
         guard !hasCheckedFirstLaunch else { return }
         hasCheckedFirstLaunch = true
 
-        // DEBUG: Uncomment below to reset auth/onboarding on every launch during development
-        // #if DEBUG
-        // UserDefaults.standard.set(false, forKey: "isAuthenticated")
-        // UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
-        // UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
-        // isAuthenticated = false
-        // hasSeenOnboarding = false
-        // hasCompletedPrompt = false
-        // #endif
+        // DEBUG: Reset auth/onboarding on every launch during development
+        // IMPORTANT: Keep this ENABLED during development to test full user journey including pre-draw prompts
+        // Only DISABLE for TestFlight/production builds
+        #if DEBUG
+        UserDefaults.standard.set(false, forKey: "isAuthenticated")
+        UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
+        UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
+        isAuthenticated = false
+        hasSeenOnboarding = false
+        hasCompletedPrompt = false
+        #endif
     }
 }
 

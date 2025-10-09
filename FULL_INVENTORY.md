@@ -441,12 +441,14 @@
      - Show error if request fails
    - **Estimate:** 2-3 hours
 
-5. **Disable DEBUG Reset Code**
-   - **File:** ContentView.swift (lines 75-83)
-   - **What to do:**
-     - Remove or comment out the DEBUG reset block
-     - Or add conditional: `#if DEBUG && !TESTFLIGHT`
+5. **Disable DEBUG Reset Code (ONLY for TestFlight/Production)**
+   - **File:** ContentView.swift (lines 78-85)
+   - **IMPORTANT:** Keep DEBUG reset ENABLED during development to test full user journey
+   - **What to do for TestFlight:**
+     - Comment out the DEBUG reset block (lines 78-85)
+     - Add conditional: `#if DEBUG && !TESTFLIGHT` if using build flags
    - **Estimate:** 5 minutes
+   - **Note:** Without the reset, you can't test pre-draw prompts which are critical for AI feedback context
 
 6. **Add Crash Reporting**
    - **Options:** Firebase Crashlytics, Sentry, Bugsnag
