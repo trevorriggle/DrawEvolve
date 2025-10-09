@@ -37,6 +37,9 @@ struct DrawingCanvasView: View {
     @StateObject private var storageManager = DrawingStorageManager.shared
     @StateObject private var authManager = AuthManager.shared
 
+    // Clear confirmation
+    @State private var showClearConfirmation = false
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
@@ -144,7 +147,7 @@ struct DrawingCanvasView: View {
 
                             // Clear button
                             ToolButton(icon: "trash", isSelected: false) {
-                                canvasState.clearCanvas()
+                                showClearConfirmation = true
                             }
 
                             // Color picker button
@@ -215,15 +218,7 @@ struct DrawingCanvasView: View {
                 .padding(.top, isToolbarCollapsed ? 8 : 4)
             }
 
-            // Feedback overlay (middle layer)
-            if showFeedback, let feedback = canvasState.feedback {
-                FeedbackOverlay(
-                    feedback: feedback,
-                    isPresented: $showFeedback,
-                    canvasImage: canvasState.exportImage()
-                )
-                .transition(.move(edge: .trailing))
-            }
+            // Feedback overlay removed from here - now using fullScreenCover below
 
             // Top right - User/Gallery button
             if !isToolbarCollapsed {
@@ -364,6 +359,22 @@ struct DrawingCanvasView: View {
         .fullScreenCover(isPresented: $showGallery) {
             GalleryView()
         }
+        .fullScreenCover(isPresented: $showFeedback) {
+            FeedbackOverlay(
+                feedback: canvasState.feedback,
+                isLoading: isRequestingFeedback,
+                isPresented: $showFeedback,
+                canvasImage: canvasState.exportImage()
+            )
+        }
+        .alert("Clear Canvas", isPresented: $showClearConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) {
+                canvasState.clearCanvas()
+            }
+        } message: {
+            Text("Are you sure you want to clear the canvas? This cannot be undone.")
+        }
     }
 
     private func saveDrawing() async {
@@ -392,14 +403,15 @@ struct DrawingCanvasView: View {
     private func requestFeedback() {
         isRequestingFeedback = true
 
+        // Show feedback panel immediately with loading state
+        withAnimation {
+            showFeedback = true
+        }
+
         Task {
             await canvasState.requestFeedback(for: context)
             isRequestingFeedback = false
-            if canvasState.feedback != nil {
-                withAnimation {
-                    showFeedback = true
-                }
-            }
+            // Panel stays open, now showing actual feedback instead of loading
         }
     }
 }

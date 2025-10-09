@@ -8,7 +8,8 @@
 import SwiftUI
 
 struct FeedbackOverlay: View {
-    let feedback: String
+    let feedback: String?
+    let isLoading: Bool
     @Binding var isPresented: Bool
     let canvasImage: UIImage?
 
@@ -40,26 +41,63 @@ struct FeedbackOverlay: View {
 
                     Divider()
 
-                    ScrollView {
-                        Text(feedback)
-                            .font(.body)
-                            .foregroundColor(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Spacer()
-
-                    Button(action: { isPresented = false }) {
-                        HStack {
+                    // Loading state OR feedback content
+                    if isLoading {
+                        VStack(spacing: 24) {
                             Spacer()
-                            Text("Continue Drawing")
-                                .fontWeight(.semibold)
+
+                            ProgressView()
+                                .scaleEffect(1.5)
+                                .tint(.accentColor)
+
+                            Text("Sit tight — your analysis is on the way!")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+
                             Spacer()
                         }
-                        .padding()
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
+                        .frame(maxWidth: .infinity)
+                    } else if let feedbackText = feedback {
+                        ScrollView {
+                            // Render markdown if possible, otherwise plain text
+                            if let attributedString = try? AttributedString(markdown: feedbackText) {
+                                Text(attributedString)
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                // Fallback to plain text if markdown parsing fails
+                                Text(feedbackText)
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+
+                        Spacer()
+
+                        Button(action: { isPresented = false }) {
+                            HStack {
+                                Spacer()
+                                Text("Continue Drawing")
+                                    .fontWeight(.semibold)
+                                Spacer()
+                            }
+                            .padding()
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                        }
+                    } else {
+                        // Empty state (shouldn't happen, but just in case)
+                        Spacer()
+                        Text("No feedback available")
+                            .foregroundColor(.secondary)
+                        Spacer()
                     }
                 }
                 .padding()
@@ -88,6 +126,16 @@ struct FeedbackOverlay: View {
 
         Keep practicing your hatching technique—it's really coming along! (And hey, even Picasso had to start somewhere, right?)
         """,
+        isLoading: false,
+        isPresented: .constant(true),
+        canvasImage: nil
+    )
+}
+
+#Preview("Loading State") {
+    FeedbackOverlay(
+        feedback: nil,
+        isLoading: true,
         isPresented: .constant(true),
         canvasImage: nil
     )

@@ -1,2 +1,0 @@
-This is a test file to verify git pull is working.
-Created at 2025-10-08.
