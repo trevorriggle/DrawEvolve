@@ -1,0 +1,532 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		DE000001 /* DrawEvolveApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100001 /* DrawEvolveApp.swift */; };
+		DE000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100002 /* ContentView.swift */; };
+		DE000003 /* PromptInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100003 /* PromptInputView.swift */; };
+		DE000004 /* DrawingCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100004 /* DrawingCanvasView.swift */; };
+		DE000005 /* FeedbackOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100005 /* FeedbackOverlay.swift */; };
+		DE000006 /* DrawingContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100006 /* DrawingContext.swift */; };
+		DE000007 /* OpenAIManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100007 /* OpenAIManager.swift */; };
+		DE000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200001 /* Assets.xcassets */; };
+		DE000009 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200002 /* Preview Assets.xcassets */; };
+		DE000011 /* LandingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100011 /* LandingView.swift */; };
+		DE000012 /* OnboardingPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100012 /* OnboardingPopup.swift */; };
+		DE000013 /* DrawingLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100013 /* DrawingLayer.swift */; };
+		DE000014 /* DrawingTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100014 /* DrawingTool.swift */; };
+		DE000015 /* CanvasRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100015 /* CanvasRenderer.swift */; };
+		DE000016 /* HistoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100016 /* HistoryManager.swift */; };
+		DE000017 /* MetalCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100017 /* MetalCanvasView.swift */; };
+		DE000018 /* ColorPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100018 /* ColorPicker.swift */; };
+		DE000019 /* LayerPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100019 /* LayerPanelView.swift */; };
+		DE000020 /* BrushSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100020 /* BrushSettingsView.swift */; };
+		DE000021 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = DE100021 /* Shaders.metal */; };
+		DE000022 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100022 /* SupabaseManager.swift */; };
+		DE000023 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100023 /* AuthManager.swift */; };
+		DE000024 /* DrawingStorageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100024 /* DrawingStorageManager.swift */; };
+		DE000025 /* Drawing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100025 /* Drawing.swift */; };
+		DE000026 /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100026 /* SignInView.swift */; };
+		DE000027 /* SignUpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100027 /* SignUpView.swift */; };
+		DE000028 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100028 /* GalleryView.swift */; };
+		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
+		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
+		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
+		DEPACKAGE09 /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE05 /* Storage */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		DE000100 /* DrawEvolve.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DrawEvolve.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DE100001 /* DrawEvolveApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawEvolveApp.swift; sourceTree = "<group>"; };
+		DE100002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		DE100003 /* PromptInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptInputView.swift; sourceTree = "<group>"; };
+		DE100004 /* DrawingCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingCanvasView.swift; sourceTree = "<group>"; };
+		DE100005 /* FeedbackOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackOverlay.swift; sourceTree = "<group>"; };
+		DE100006 /* DrawingContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingContext.swift; sourceTree = "<group>"; };
+		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
+		DE100011 /* LandingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LandingView.swift; sourceTree = "<group>"; };
+		DE100012 /* OnboardingPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPopup.swift; sourceTree = "<group>"; };
+		DE100013 /* DrawingLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingLayer.swift; sourceTree = "<group>"; };
+		DE100014 /* DrawingTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingTool.swift; sourceTree = "<group>"; };
+		DE100015 /* CanvasRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasRenderer.swift; sourceTree = "<group>"; };
+		DE100016 /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
+		DE100017 /* MetalCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCanvasView.swift; sourceTree = "<group>"; };
+		DE100018 /* ColorPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorPicker.swift; sourceTree = "<group>"; };
+		DE100019 /* LayerPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerPanelView.swift; sourceTree = "<group>"; };
+		DE100020 /* BrushSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSettingsView.swift; sourceTree = "<group>"; };
+		DE100021 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
+		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
+		DE400001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		DE100022 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
+		DE100023 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
+		DE100024 /* DrawingStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingStorageManager.swift; sourceTree = "<group>"; };
+		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
+		DE100026 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
+		DE100027 /* SignUpView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignUpView.swift; sourceTree = "<group>"; };
+		DE100028 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		DE000200 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DEPACKAGE06 /* Supabase in Frameworks */,
+				DEPACKAGE07 /* Auth in Frameworks */,
+				DEPACKAGE08 /* PostgREST in Frameworks */,
+				DEPACKAGE09 /* Storage in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		DE000300 = {
+			isa = PBXGroup;
+			children = (
+				DE000301 /* DrawEvolve */,
+				DE000302 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DE000301 /* DrawEvolve */ = {
+			isa = PBXGroup;
+			children = (
+				DE100001 /* DrawEvolveApp.swift */,
+				DE400001 /* Info.plist */,
+				DE000310 /* Views */,
+				DE000311 /* Models */,
+				DE000312 /* Services */,
+				DE000313 /* Config */,
+				DE100021 /* Shaders.metal */,
+				DE200001 /* Assets.xcassets */,
+				DE000314 /* Preview Content */,
+			);
+			path = DrawEvolve;
+			sourceTree = "<group>";
+		};
+		DE000302 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DE000100 /* DrawEvolve.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		DE000310 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				DE100002 /* ContentView.swift */,
+				DE100011 /* LandingView.swift */,
+				DE100012 /* OnboardingPopup.swift */,
+				DE100003 /* PromptInputView.swift */,
+				DE100004 /* DrawingCanvasView.swift */,
+				DE100017 /* MetalCanvasView.swift */,
+				DE100005 /* FeedbackOverlay.swift */,
+				DE100018 /* ColorPicker.swift */,
+				DE100019 /* LayerPanelView.swift */,
+				DE100020 /* BrushSettingsView.swift */,
+				DE100026 /* SignInView.swift */,
+				DE100027 /* SignUpView.swift */,
+				DE100028 /* GalleryView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		DE000311 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				DE100006 /* DrawingContext.swift */,
+				DE100013 /* DrawingLayer.swift */,
+				DE100014 /* DrawingTool.swift */,
+				DE100025 /* Drawing.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		DE000312 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				DE100007 /* OpenAIManager.swift */,
+				DE100015 /* CanvasRenderer.swift */,
+				DE100016 /* HistoryManager.swift */,
+				DE100022 /* SupabaseManager.swift */,
+				DE100023 /* AuthManager.swift */,
+				DE100024 /* DrawingStorageManager.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		DE000313 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				DE300002 /* Config.example.plist */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		DE000314 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				DE200002 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		DE000400 /* DrawEvolve */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DE000401 /* Build configuration list for PBXNativeTarget "DrawEvolve" */;
+			buildPhases = (
+				DE000500 /* Sources */,
+				DE000200 /* Frameworks */,
+				DE000600 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DrawEvolve;
+			packageProductDependencies = (
+				DEPACKAGE02 /* Supabase */,
+				DEPACKAGE03 /* Auth */,
+				DEPACKAGE04 /* PostgREST */,
+				DEPACKAGE05 /* Storage */,
+			);
+			productName = DrawEvolve;
+			productReference = DE000100 /* DrawEvolve.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DE000700 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					DE000400 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = DE000701 /* Build configuration list for PBXProject "DrawEvolve" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = DE000300;
+			packageReferences = (
+				DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
+			productRefGroup = DE000302 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				DE000400 /* DrawEvolve */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		DE000600 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DE000009 /* Preview Assets.xcassets in Resources */,
+				DE000008 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		DE000500 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DE000001 /* DrawEvolveApp.swift in Sources */,
+				DE000002 /* ContentView.swift in Sources */,
+				DE000011 /* LandingView.swift in Sources */,
+				DE000012 /* OnboardingPopup.swift in Sources */,
+				DE000003 /* PromptInputView.swift in Sources */,
+				DE000004 /* DrawingCanvasView.swift in Sources */,
+				DE000017 /* MetalCanvasView.swift in Sources */,
+				DE000005 /* FeedbackOverlay.swift in Sources */,
+				DE000018 /* ColorPicker.swift in Sources */,
+				DE000019 /* LayerPanelView.swift in Sources */,
+				DE000020 /* BrushSettingsView.swift in Sources */,
+				DE000006 /* DrawingContext.swift in Sources */,
+				DE000013 /* DrawingLayer.swift in Sources */,
+				DE000014 /* DrawingTool.swift in Sources */,
+				DE000007 /* OpenAIManager.swift in Sources */,
+				DE000015 /* CanvasRenderer.swift in Sources */,
+				DE000016 /* HistoryManager.swift in Sources */,
+				DE000021 /* Shaders.metal in Sources */,
+				DE000022 /* SupabaseManager.swift in Sources */,
+				DE000023 /* AuthManager.swift in Sources */,
+				DE000024 /* DrawingStorageManager.swift in Sources */,
+				DE000025 /* Drawing.swift in Sources */,
+				DE000026 /* SignInView.swift in Sources */,
+				DE000027 /* SignUpView.swift in Sources */,
+				DE000028 /* GalleryView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		DE000800 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		DE000801 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		DE000802 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"DrawEvolve/Preview Content\"";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DrawEvolve/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.drawevolve.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		DE000803 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"DrawEvolve/Preview Content\"";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = DrawEvolve/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.drawevolve.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		DE000401 /* Build configuration list for PBXNativeTarget "DrawEvolve" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DE000802 /* Debug */,
+				DE000803 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DE000701 /* Build configuration list for PBXProject "DrawEvolve" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DE000800 /* Debug */,
+				DE000801 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		DEPACKAGE02 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+		DEPACKAGE03 /* Auth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Auth;
+		};
+		DEPACKAGE04 /* PostgREST */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = PostgREST;
+		};
+		DEPACKAGE05 /* Storage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DEPACKAGE01 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Storage;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = DE000700 /* Project object */;
+}

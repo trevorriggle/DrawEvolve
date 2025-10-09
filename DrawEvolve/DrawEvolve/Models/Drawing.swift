@@ -10,10 +10,10 @@ import Foundation
 struct Drawing: Codable, Identifiable {
     let id: UUID
     let userId: UUID
-    let title: String
+    var title: String
     let imageData: Data
     let createdAt: Date
-    let updatedAt: Date
+    var updatedAt: Date
 
     enum CodingKeys: String, CodingKey {
         case id

@@ -2,12 +2,12 @@
 //  DrawingStorageManager.swift
 //  DrawEvolve
 //
-//  Manages saving and loading drawings from Supabase.
+//  Manages saving and loading drawings locally.
+//  TODO: Implement persistence (currently stubbed out)
 //
 
 import Foundation
 import SwiftUI
-import Supabase
 
 @MainActor
 class DrawingStorageManager: ObservableObject {
@@ -17,44 +17,27 @@ class DrawingStorageManager: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    private let supabase = SupabaseManager.shared.client
+    private let userID = AnonymousUserManager.shared.userID
 
     // MARK: - Fetch Drawings
 
     func fetchDrawings() async {
-        guard let userId = AuthManager.shared.currentUser?.id else {
-            errorMessage = "User not authenticated"
-            return
-        }
-
+        // TODO: Implement local storage fetch
         isLoading = true
         errorMessage = nil
 
-        do {
-            let response: [Drawing] = try await supabase
-                .from("drawings")
-                .select()
-                .eq("user_id", value: userId.uuidString)
-                .order("created_at", ascending: false)
-                .execute()
-                .value
+        // Simulate loading
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
-            drawings = response
-        } catch {
-            errorMessage = error.localizedDescription
-            print("Error fetching drawings: \(error)")
-        }
-
+        // For now, just return empty
+        drawings = []
         isLoading = false
     }
 
     // MARK: - Save Drawing
 
     func saveDrawing(title: String, imageData: Data) async throws -> Drawing {
-        guard let userId = AuthManager.shared.currentUser?.id else {
-            throw DrawingStorageError.notAuthenticated
-        }
-
+        // TODO: Implement local storage save
         isLoading = true
         errorMessage = nil
 
@@ -62,88 +45,47 @@ class DrawingStorageManager: ObservableObject {
 
         let newDrawing = Drawing(
             id: UUID(),
-            userId: userId,
+            userId: UUID(uuidString: userID) ?? UUID(),
             title: title,
             imageData: imageData,
             createdAt: Date(),
             updatedAt: Date()
         )
 
-        do {
-            let _: Drawing = try await supabase
-                .from("drawings")
-                .insert(newDrawing)
-                .select()
-                .single()
-                .execute()
-                .value
+        // For now, just add to memory (will be lost on app restart)
+        drawings.insert(newDrawing, at: 0)
 
-            // Refresh drawings list
-            await fetchDrawings()
-
-            return newDrawing
-        } catch {
-            errorMessage = error.localizedDescription
-            throw error
-        }
+        return newDrawing
     }
 
     // MARK: - Update Drawing
 
     func updateDrawing(id: UUID, title: String?, imageData: Data?) async throws {
-        guard AuthManager.shared.currentUser != nil else {
-            throw DrawingStorageError.notAuthenticated
-        }
-
+        // TODO: Implement local storage update
         isLoading = true
         errorMessage = nil
 
         defer { isLoading = false }
 
-        do {
-            // For now, only support title updates
-            // Image updates would require re-encoding the drawing
+        if let index = drawings.firstIndex(where: { $0.id == id }) {
             if let title = title {
-                try await supabase
-                    .from("drawings")
-                    .update(["title": title])
-                    .eq("id", value: id.uuidString)
-                    .execute()
-
-                // Refresh drawings list
-                await fetchDrawings()
+                drawings[index].title = title
+                drawings[index].updatedAt = Date()
             }
-        } catch {
-            errorMessage = error.localizedDescription
-            throw error
         }
     }
 
     // MARK: - Delete Drawing
 
     func deleteDrawing(id: UUID) async throws {
-        guard AuthManager.shared.currentUser != nil else {
-            throw DrawingStorageError.notAuthenticated
-        }
-
+        // TODO: Implement local storage delete
         isLoading = true
         errorMessage = nil
 
         defer { isLoading = false }
 
-        do {
-            try await supabase
-                .from("drawings")
-                .delete()
-                .eq("id", value: id.uuidString)
-                .execute()
-
-            // Remove from local array
-            drawings.removeAll { $0.id == id }
-        } catch {
-            errorMessage = error.localizedDescription
-            throw error
-        }
+        // Remove from memory
+        drawings.removeAll { $0.id == id }
     }
 }
 

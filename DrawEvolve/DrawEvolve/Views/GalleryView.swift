@@ -9,7 +9,6 @@ import SwiftUI
 
 struct GalleryView: View {
     @StateObject private var storageManager = DrawingStorageManager.shared
-    @StateObject private var authManager = AuthManager.shared
 
     @State private var showNewDrawing = false
     @State private var showPromptFirst = false
@@ -47,17 +46,9 @@ struct GalleryView: View {
                 }
 
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Menu {
-                        if authManager.currentUser != nil {
-                            Button(role: .destructive, action: {
-                                Task {
-                                    try? await authManager.signOut()
-                                }
-                            }) {
-                                Label("Sign Out", systemImage: "arrow.right.square")
-                            }
-                        }
-                    } label: {
+                    Button(action: {
+                        // User settings placeholder
+                    }) {
                         Image(systemName: "person.circle")
                             .font(.title2)
                     }
