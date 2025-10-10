@@ -12,6 +12,8 @@ struct DrawingDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showCanvas = false
     @State private var drawingContext: DrawingContext
+    @State private var showDeleteAlert = false
+    @ObservedObject private var storageManager = DrawingStorageManager.shared
 
     init(drawing: Drawing) {
         self.drawing = drawing
@@ -33,22 +35,38 @@ struct DrawingDetailView: View {
                             .shadow(radius: 2)
                     }
 
-                    // Continue Drawing button
-                    Button(action: {
-                        showCanvas = true
-                    }) {
-                        HStack(spacing: 12) {
-                            Image(systemName: "paintbrush.pointed.fill")
-                                .font(.system(size: 20))
-                            Text("Continue Drawing")
-                                .font(.headline)
+                    // Action buttons
+                    HStack(spacing: 12) {
+                        // Continue Drawing button
+                        Button(action: {
+                            showCanvas = true
+                        }) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "paintbrush.pointed.fill")
+                                    .font(.system(size: 20))
+                                Text("Continue Drawing")
+                                    .font(.headline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                            .shadow(radius: 4)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
-                        .shadow(radius: 4)
+
+                        // Delete button
+                        Button(action: {
+                            showDeleteAlert = true
+                        }) {
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(.white)
+                                .frame(width: 56, height: 56)
+                                .background(Color.red)
+                                .cornerRadius(12)
+                                .shadow(radius: 4)
+                        }
                     }
 
                     // Drawing context (if available)
@@ -129,6 +147,17 @@ struct DrawingDetailView: View {
         }
         .fullScreenCover(isPresented: $showCanvas) {
             DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
+        }
+        .alert("Delete Drawing", isPresented: $showDeleteAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                Task {
+                    try? await storageManager.deleteDrawing(id: drawing.id)
+                    dismiss()
+                }
+            }
+        } message: {
+            Text("Are you sure you want to delete '\(drawing.title)'? This cannot be undone.")
         }
     }
 }
