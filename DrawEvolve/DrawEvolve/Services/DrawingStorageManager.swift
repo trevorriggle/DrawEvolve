@@ -2,8 +2,7 @@
 //  DrawingStorageManager.swift
 //  DrawEvolve
 //
-//  Manages saving and loading drawings locally.
-//  TODO: Implement persistence (currently stubbed out)
+//  Manages saving and loading drawings locally using FileManager.
 //
 
 import Foundation
@@ -18,26 +17,48 @@ class DrawingStorageManager: ObservableObject {
     @Published var errorMessage: String?
 
     private let userID = AnonymousUserManager.shared.userID
+    private let fileManager = FileManager.default
+
+    private var drawingsDirectory: URL {
+        let documentsPath = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return documentsPath.appendingPathComponent("Drawings", isDirectory: true)
+    }
+
+    init() {
+        // Create drawings directory if it doesn't exist
+        try? fileManager.createDirectory(at: drawingsDirectory, withIntermediateDirectories: true)
+    }
 
     // MARK: - Fetch Drawings
 
     func fetchDrawings() async {
-        // TODO: Implement local storage fetch
         isLoading = true
         errorMessage = nil
 
-        // Simulate loading
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        do {
+            let fileURLs = try fileManager.contentsOfDirectory(at: drawingsDirectory, includingPropertiesForKeys: [.creationDateKey], options: [.skipsHiddenFiles])
 
-        // For now, just return empty
-        drawings = []
+            var loadedDrawings: [Drawing] = []
+
+            for fileURL in fileURLs where fileURL.pathExtension == "json" {
+                let data = try Data(contentsOf: fileURL)
+                let drawing = try JSONDecoder().decode(Drawing.self, from: data)
+                loadedDrawings.append(drawing)
+            }
+
+            // Sort by creation date, newest first
+            drawings = loadedDrawings.sorted { $0.createdAt > $1.createdAt }
+        } catch {
+            print("Error loading drawings: \(error)")
+            errorMessage = "Failed to load drawings"
+        }
+
         isLoading = false
     }
 
     // MARK: - Save Drawing
 
     func saveDrawing(title: String, imageData: Data, feedback: String? = nil, context: DrawingContext? = nil) async throws -> Drawing {
-        // TODO: Implement local storage save
         isLoading = true
         errorMessage = nil
 
@@ -54,7 +75,12 @@ class DrawingStorageManager: ObservableObject {
             context: context
         )
 
-        // For now, just add to memory (will be lost on app restart)
+        // Save to file system
+        let fileURL = drawingsDirectory.appendingPathComponent("\(newDrawing.id.uuidString).json")
+        let data = try JSONEncoder().encode(newDrawing)
+        try data.write(to: fileURL)
+
+        // Add to memory array
         drawings.insert(newDrawing, at: 0)
 
         return newDrawing
@@ -63,7 +89,6 @@ class DrawingStorageManager: ObservableObject {
     // MARK: - Update Drawing
 
     func updateDrawing(id: UUID, title: String? = nil, imageData: Data? = nil, feedback: String? = nil, context: DrawingContext? = nil) async throws {
-        // TODO: Implement local storage update
         isLoading = true
         errorMessage = nil
 
@@ -80,17 +105,25 @@ class DrawingStorageManager: ObservableObject {
                 drawings[index].context = context
             }
             drawings[index].updatedAt = Date()
+
+            // Save updated drawing to file system
+            let fileURL = drawingsDirectory.appendingPathComponent("\(id.uuidString).json")
+            let data = try JSONEncoder().encode(drawings[index])
+            try data.write(to: fileURL)
         }
     }
 
     // MARK: - Delete Drawing
 
     func deleteDrawing(id: UUID) async throws {
-        // TODO: Implement local storage delete
         isLoading = true
         errorMessage = nil
 
         defer { isLoading = false }
+
+        // Delete from file system
+        let fileURL = drawingsDirectory.appendingPathComponent("\(id.uuidString).json")
+        try fileManager.removeItem(at: fileURL)
 
         // Remove from memory
         drawings.removeAll { $0.id == id }

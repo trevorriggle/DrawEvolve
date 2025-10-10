@@ -78,12 +78,13 @@ struct OnboardingPopup: View {
                 .padding(.horizontal)
             }
             .padding(32)
+            .frame(maxWidth: 600, maxHeight: 700)
             .background(
                 RoundedRectangle(cornerRadius: 24)
                     .fill(Color(uiColor: .systemBackground))
                     .shadow(radius: 20)
             )
-            .padding(.horizontal, 32)
+            .padding(40)
         }
     }
 }
