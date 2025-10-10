@@ -16,6 +16,7 @@ struct GalleryView: View {
     @State private var showDeleteAlert = false
     @State private var drawingToDelete: Drawing?
     @State private var drawingContext = DrawingContext()
+    @State private var canvasID = UUID() // Force new canvas instance
 
     let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -60,15 +61,23 @@ struct GalleryView: View {
             .refreshable {
                 await storageManager.fetchDrawings()
             }
-            .sheet(isPresented: $showPromptFirst) {
+            .fullScreenCover(isPresented: $showPromptFirst) {
                 PromptInputView(context: $drawingContext, isPresented: $showPromptFirst)
             }
-            .sheet(isPresented: $showNewDrawing) {
+            .fullScreenCover(isPresented: $showNewDrawing) {
                 DrawingCanvasView(context: $drawingContext)
+                    .id(canvasID) // Force completely new canvas instance
             }
             .onChange(of: showPromptFirst) { _, newValue in
                 if !newValue && drawingContext.isComplete {
                     showNewDrawing = true
+                }
+            }
+            .onChange(of: showNewDrawing) { _, newValue in
+                // Reset everything for next drawing
+                if !newValue {
+                    drawingContext = DrawingContext()
+                    canvasID = UUID() // Create fresh canvas next time
                 }
             }
             .alert("Delete Drawing", isPresented: $showDeleteAlert, presenting: drawingToDelete) { drawing in
