@@ -92,8 +92,8 @@ struct FloatingFeedbackPanel: View {
                     }
                     .onEnded { value in
                         // Update final position
-                        position.x += value.translation.x
-                        position.y += value.translation.y
+                        position.x += value.translation.width
+                        position.y += value.translation.height
 
                         // Constrain to screen bounds
                         let maxX = geometry.size.width - (isExpanded ? expandedSize.width / 2 : collapsedSize.width / 2)
