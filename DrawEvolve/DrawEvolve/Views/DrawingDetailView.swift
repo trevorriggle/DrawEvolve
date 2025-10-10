@@ -10,6 +10,13 @@ import SwiftUI
 struct DrawingDetailView: View {
     let drawing: Drawing
     @Environment(\.dismiss) private var dismiss
+    @State private var showCanvas = false
+    @State private var drawingContext: DrawingContext
+
+    init(drawing: Drawing) {
+        self.drawing = drawing
+        _drawingContext = State(initialValue: drawing.context ?? DrawingContext())
+    }
 
     var body: some View {
         NavigationView {
@@ -24,6 +31,24 @@ struct DrawingDetailView: View {
                             .background(Color(uiColor: .secondarySystemBackground))
                             .cornerRadius(12)
                             .shadow(radius: 2)
+                    }
+
+                    // Continue Drawing button
+                    Button(action: {
+                        showCanvas = true
+                    }) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "paintbrush.pointed.fill")
+                                .font(.system(size: 20))
+                            Text("Continue Drawing")
+                                .font(.headline)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                        .shadow(radius: 4)
                     }
 
                     // Drawing context (if available)
@@ -101,6 +126,9 @@ struct DrawingDetailView: View {
                     }
                 }
             }
+        }
+        .fullScreenCover(isPresented: $showCanvas) {
+            DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
         }
     }
 }

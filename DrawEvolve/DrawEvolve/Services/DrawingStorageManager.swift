@@ -98,6 +98,9 @@ class DrawingStorageManager: ObservableObject {
             if let title = title {
                 drawings[index].title = title
             }
+            if let imageData = imageData {
+                drawings[index].imageData = imageData
+            }
             if let feedback = feedback {
                 drawings[index].feedback = feedback
             }

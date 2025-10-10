@@ -65,7 +65,7 @@ struct GalleryView: View {
                 PromptInputView(context: $drawingContext, isPresented: $showPromptFirst)
             }
             .fullScreenCover(isPresented: $showNewDrawing) {
-                DrawingCanvasView(context: $drawingContext)
+                DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
                     .id(canvasID) // Force completely new canvas instance
             }
             .onChange(of: showPromptFirst) { _, newValue in

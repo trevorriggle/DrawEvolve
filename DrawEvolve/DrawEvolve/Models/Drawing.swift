@@ -11,7 +11,7 @@ struct Drawing: Codable, Identifiable {
     let id: UUID
     let userId: UUID
     var title: String
-    let imageData: Data
+    var imageData: Data
     let createdAt: Date
     var updatedAt: Date
     var feedback: String?

@@ -10,11 +10,14 @@ import SwiftUI
 
 struct DrawingCanvasView: View {
     @Binding var context: DrawingContext
+    let existingDrawing: Drawing? // Optional existing drawing to load
 
     // Canvas state
     @StateObject private var canvasState = CanvasStateManager()
     @State private var showFeedback = false
     @State private var isRequestingFeedback = false
+    @State private var isEditingExisting = false
+    @State private var currentDrawingID: UUID?
 
     // Tool and layer controls
     @State private var showColorPicker = false
@@ -394,6 +397,29 @@ struct DrawingCanvasView: View {
         } message: {
             Text("Are you sure you want to clear the canvas? This cannot be undone.")
         }
+        .onAppear {
+            loadExistingDrawing()
+        }
+    }
+
+    private func loadExistingDrawing() {
+        guard let drawing = existingDrawing else { return }
+
+        // Load the drawing state
+        isEditingExisting = true
+        currentDrawingID = drawing.id
+        drawingTitle = drawing.title
+
+        // Load feedback if exists
+        if let feedback = drawing.feedback {
+            canvasState.feedback = feedback
+            showFeedback = true
+        }
+
+        // Load the image onto the canvas
+        if let uiImage = UIImage(data: drawing.imageData) {
+            canvasState.loadImage(uiImage)
+        }
     }
 
     private func saveDrawing() async {
@@ -409,14 +435,27 @@ struct DrawingCanvasView: View {
         }
 
         do {
-            try await storageManager.saveDrawing(
-                title: drawingTitle,
-                imageData: imageData,
-                feedback: canvasState.feedback,
-                context: context
-            )
-            print("Drawing saved successfully!")
-            drawingTitle = "" // Reset for next save
+            if let drawingID = currentDrawingID {
+                // Update existing drawing
+                try await storageManager.updateDrawing(
+                    id: drawingID,
+                    title: drawingTitle,
+                    imageData: imageData,
+                    feedback: canvasState.feedback,
+                    context: context
+                )
+                print("Drawing updated successfully!")
+            } else {
+                // Create new drawing
+                try await storageManager.saveDrawing(
+                    title: drawingTitle,
+                    imageData: imageData,
+                    feedback: canvasState.feedback,
+                    context: context
+                )
+                print("Drawing saved successfully!")
+                drawingTitle = "" // Reset for next save
+            }
         } catch {
             print("ERROR: Failed to save drawing: \(error)")
         }
@@ -661,6 +700,31 @@ class CanvasStateManager: ObservableObject {
         )
     }
 
+    func loadImage(_ image: UIImage) {
+        guard let renderer = renderer,
+              selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture else {
+            print("ERROR: Cannot load image - renderer or layer not available")
+            return
+        }
+
+        renderer.loadImage(image, into: texture)
+
+        // Update thumbnail
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        let layerId = layers[selectedLayerIndex].id
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == layerId }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+    }
+
     func requestFeedback(for context: DrawingContext) async {
         guard let image = exportImage() else {
             showError(message: "Failed to export drawing")
@@ -685,8 +749,11 @@ class CanvasStateManager: ObservableObject {
 }
 
 #Preview {
-    DrawingCanvasView(context: .constant(DrawingContext(
-        subject: "Portrait",
-        style: "Realism"
-    )))
+    DrawingCanvasView(
+        context: .constant(DrawingContext(
+            subject: "Portrait",
+            style: "Realism"
+        )),
+        existingDrawing: nil
+    )
 }
