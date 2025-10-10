@@ -215,7 +215,13 @@ struct DrawingCanvasView: View {
                 .padding(.top, isToolbarCollapsed ? 8 : 4)
             }
 
-            // Feedback overlay removed from here - now using fullScreenCover below
+            // Floating feedback panel
+            if showFeedback, canvasState.feedback != nil {
+                FloatingFeedbackPanel(
+                    feedback: canvasState.feedback,
+                    isPresented: $showFeedback
+                )
+            }
 
             // Top right - Gallery button
             if !isToolbarCollapsed {
@@ -352,14 +358,6 @@ struct DrawingCanvasView: View {
         .fullScreenCover(isPresented: $showGallery) {
             GalleryView()
         }
-        .fullScreenCover(isPresented: $showFeedback) {
-            FeedbackOverlay(
-                feedback: canvasState.feedback,
-                isLoading: isRequestingFeedback,
-                isPresented: $showFeedback,
-                canvasImage: canvasState.exportImage()
-            )
-        }
         .alert("Clear Canvas", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Clear", role: .destructive) {
@@ -396,15 +394,16 @@ struct DrawingCanvasView: View {
     private func requestFeedback() {
         isRequestingFeedback = true
 
-        // Show feedback panel immediately with loading state
-        withAnimation {
-            showFeedback = true
-        }
-
         Task {
             await canvasState.requestFeedback(for: context)
             isRequestingFeedback = false
-            // Panel stays open, now showing actual feedback instead of loading
+
+            // Show floating panel after feedback is received
+            if canvasState.feedback != nil {
+                withAnimation {
+                    showFeedback = true
+                }
+            }
         }
     }
 }
