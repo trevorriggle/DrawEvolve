@@ -34,8 +34,6 @@
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
 		DEPACKAGE09 /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE05 /* Storage */; };
-		34B4CF39D13648B48082900D /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B3F8630E7EE4CCA81E019F4 /* FloatingFeedbackPanel.swift */; };
-		ED9BA57262144173AB8A3314 /* DrawingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D653C6037424032976FE9EC /* DrawingDetailView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -65,8 +63,6 @@
 		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
 		DE100028 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
 		DE100029 /* AnonymousUserManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnonymousUserManager.swift; sourceTree = "<group>"; };
-		5B3F8630E7EE4CCA81E019F4 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
-		1D653C6037424032976FE9EC /* DrawingDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingDetailView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -129,9 +125,7 @@
 				DE100019 /* LayerPanelView.swift */,
 				DE100020 /* BrushSettingsView.swift */,
 				DE100028 /* GalleryView.swift */,
-			
-				5B3F8630E7EE4CCA81E019F4 /* FloatingFeedbackPanel.swift */,
-				1D653C6037424032976FE9EC /* DrawingDetailView.swift */,);
+			);
 			path = Views;
 			sourceTree = "<group>";
 		};
