@@ -849,6 +849,235 @@ class CanvasRenderer: NSObject {
         print("Image loaded successfully into texture")
     }
 
+    // MARK: - Blur/Sharpen Effects
+
+    /// Apply blur effect to texture at brush position
+    func applyBlur(at point: CGPoint, radius: Float, to texture: MTLTexture, screenSize: CGSize) {
+        guard let computeState = blurComputeState else {
+            print("ERROR: Blur compute state not available")
+            return
+        }
+
+        applyEffect(computeState: computeState, at: point, radius: radius, to: texture, screenSize: screenSize, effectName: "Blur")
+    }
+
+    /// Apply sharpen effect to texture at brush position
+    func applySharpen(at point: CGPoint, radius: Float, to texture: MTLTexture, screenSize: CGSize) {
+        guard let computeState = sharpenComputeState else {
+            print("ERROR: Sharpen compute state not available")
+            return
+        }
+
+        applyEffect(computeState: computeState, at: point, radius: radius, to: texture, screenSize: screenSize, effectName: "Sharpen")
+    }
+
+    /// Generic effect application (blur/sharpen)
+    private func applyEffect(
+        computeState: MTLComputePipelineState,
+        at point: CGPoint,
+        radius: Float,
+        to texture: MTLTexture,
+        screenSize: CGSize,
+        effectName: String
+    ) {
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            print("ERROR: Failed to create command buffer/encoder for \(effectName)")
+            return
+        }
+
+        computeEncoder.setComputePipelineState(computeState)
+        computeEncoder.setTexture(texture, index: 0)
+        computeEncoder.setTexture(texture, index: 1) // Output texture (same as input for in-place operation)
+
+        // Set effect parameters
+        var effectRadius = radius
+        computeEncoder.setBytes(&effectRadius, length: MemoryLayout<Float>.stride, index: 0)
+
+        // Dispatch compute shader on full texture
+        // (For brush-like application, we'd need a custom approach - for now this applies to whole image)
+        let threadgroupSize = MTLSize(width: 8, height: 8, depth: 1)
+        let threadgroups = MTLSize(
+            width: (texture.width + threadgroupSize.width - 1) / threadgroupSize.width,
+            height: (texture.height + threadgroupSize.height - 1) / threadgroupSize.height,
+            depth: 1
+        )
+
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+        computeEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        print("\(effectName) effect applied successfully")
+    }
+
+    // MARK: - Selection Operations
+
+    /// Clear pixels in a rectangular selection
+    func clearRect(_ rect: CGRect, in texture: MTLTexture, screenSize: CGSize) {
+        print("CanvasRenderer: Clearing rect \(rect)")
+
+        // Scale rect from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let scaledRect = CGRect(
+            x: rect.origin.x * scaleX,
+            y: rect.origin.y * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY
+        )
+
+        let x = Int(scaledRect.origin.x)
+        let y = Int(scaledRect.origin.y)
+        let w = Int(scaledRect.width)
+        let h = Int(scaledRect.height)
+
+        // Bounds check
+        guard x >= 0, y >= 0, x + w <= texture.width, y + h <= texture.height else {
+            print("ERROR: Rect outside texture bounds")
+            return
+        }
+
+        // Read texture data
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+        var pixelData = Data(count: dataSize)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        // Clear pixels in the rect (set to transparent)
+        for py in y..<(y + h) {
+            for px in x..<(x + w) {
+                let idx = (py * width + px) * 4
+                guard idx + 3 < pixelData.count else { continue }
+                pixelData[idx] = 0     // B
+                pixelData[idx + 1] = 0 // G
+                pixelData[idx + 2] = 0 // R
+                pixelData[idx + 3] = 0 // A
+            }
+        }
+
+        // Write back to texture
+        pixelData.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
+        }
+
+        print("Rect cleared successfully")
+    }
+
+    /// Clear pixels along a path (for lasso selection)
+    func clearPath(_ path: [CGPoint], in texture: MTLTexture, screenSize: CGSize) {
+        print("CanvasRenderer: Clearing path with \(path.count) points")
+
+        guard path.count >= 3 else {
+            print("ERROR: Path must have at least 3 points")
+            return
+        }
+
+        // Scale path from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let scaledPath = path.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
+
+        // Read texture data
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+        var pixelData = Data(count: dataSize)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        // Use point-in-polygon algorithm to determine which pixels to clear
+        func isPointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
+            var inside = false
+            var j = polygon.count - 1
+            for i in 0..<polygon.count {
+                let xi = polygon[i].x, yi = polygon[i].y
+                let xj = polygon[j].x, yj = polygon[j].y
+
+                if ((yi > point.y) != (yj > point.y)) &&
+                   (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi) {
+                    inside.toggle()
+                }
+                j = i
+            }
+            return inside
+        }
+
+        // Find bounding box of path
+        let minX = max(0, Int(scaledPath.map { $0.x }.min() ?? 0))
+        let maxX = min(width - 1, Int(scaledPath.map { $0.x }.max() ?? CGFloat(width)))
+        let minY = max(0, Int(scaledPath.map { $0.y }.min() ?? 0))
+        let maxY = min(height - 1, Int(scaledPath.map { $0.y }.max() ?? CGFloat(height)))
+
+        // Clear pixels inside the path
+        var clearedCount = 0
+        for py in minY...maxY {
+            for px in minX...maxX {
+                let point = CGPoint(x: CGFloat(px), y: CGFloat(py))
+                if isPointInPolygon(point, polygon: scaledPath) {
+                    let idx = (py * width + px) * 4
+                    guard idx + 3 < pixelData.count else { continue }
+                    pixelData[idx] = 0     // B
+                    pixelData[idx + 1] = 0 // G
+                    pixelData[idx + 2] = 0 // R
+                    pixelData[idx + 3] = 0 // A
+                    clearedCount += 1
+                }
+            }
+        }
+
+        // Write back to texture
+        pixelData.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: bytesPerRow
+            )
+        }
+
+        print("Path cleared successfully (\(clearedCount) pixels)")
+    }
+
     // MARK: - Export Image
 
     /// Exports all visible layers composited into a single image

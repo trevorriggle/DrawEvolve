@@ -125,6 +125,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
         private var shapeStartPoint: CGPoint? // For shape tools
+        private var lassoPath: [CGPoint] = [] // For lasso selection
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
 
@@ -287,6 +288,141 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Handle eyedropper tool - pick color from canvas
+            if currentTool == .eyeDropper {
+                print("Eyedropper: picking color at \(location)")
+                guard selectedLayerIndex < layers.count,
+                      let texture = layers[selectedLayerIndex].texture,
+                      let renderer = renderer else {
+                    print("ERROR: Cannot pick color - invalid layer or texture")
+                    return
+                }
+
+                // Read pixel color at location
+                if let pickedColor = getColorAt(location, in: texture, screenSize: view.bounds.size) {
+                    // Update brush color
+                    brushSettings.color = pickedColor
+                    print("Picked color: \(pickedColor)")
+                }
+
+                return
+            }
+
+            // Handle blur tool - apply blur effect on tap/drag
+            if currentTool == .blur {
+                print("Blur: applying blur at \(location)")
+                guard selectedLayerIndex < layers.count,
+                      let texture = layers[selectedLayerIndex].texture,
+                      let renderer = renderer else {
+                    print("ERROR: Cannot apply blur - invalid layer or texture")
+                    return
+                }
+
+                // Capture before snapshot
+                let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
+                // Apply blur effect
+                let radius = brushSettings.size / 10.0 // Use brush size to control blur radius
+                renderer.applyBlur(at: location, radius: Float(radius), to: texture, screenSize: view.bounds.size)
+
+                // Capture after snapshot
+                let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+                // Record in history
+                if let before = beforeSnapshot, let after = afterSnapshot, let canvasState = canvasState {
+                    let layerId = layers[selectedLayerIndex].id
+                    Task { @MainActor in
+                        canvasState.historyManager.record(.stroke(
+                            layerId: layerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                    }
+                }
+
+                // Update thumbnail
+                let currentLayerIndex = selectedLayerIndex
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        DispatchQueue.main.async {
+                            self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                        }
+                    }
+                }
+
+                return
+            }
+
+            // Handle sharpen tool - apply sharpen effect on tap/drag
+            if currentTool == .sharpen {
+                print("Sharpen: applying sharpen at \(location)")
+                guard selectedLayerIndex < layers.count,
+                      let texture = layers[selectedLayerIndex].texture,
+                      let renderer = renderer else {
+                    print("ERROR: Cannot apply sharpen - invalid layer or texture")
+                    return
+                }
+
+                // Capture before snapshot
+                let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
+                // Apply sharpen effect
+                let radius = brushSettings.size / 10.0 // Use brush size to control sharpen radius
+                renderer.applySharpen(at: location, radius: Float(radius), to: texture, screenSize: view.bounds.size)
+
+                // Capture after snapshot
+                let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+                // Record in history
+                if let before = beforeSnapshot, let after = afterSnapshot, let canvasState = canvasState {
+                    let layerId = layers[selectedLayerIndex].id
+                    Task { @MainActor in
+                        canvasState.historyManager.record(.stroke(
+                            layerId: layerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                    }
+                }
+
+                // Update thumbnail
+                let currentLayerIndex = selectedLayerIndex
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        DispatchQueue.main.async {
+                            self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                        }
+                    }
+                }
+
+                return
+            }
+
+            // Handle selection tools (rectangleSelect, lasso)
+            let isSelectionTool = [.rectangleSelect, .lasso].contains(currentTool)
+
+            if isSelectionTool {
+                // For selection tools, store start point and clear any existing selection
+                shapeStartPoint = location
+                print("Selection tool: stored start point \(location)")
+
+                // For lasso, start building the path
+                if currentTool == .lasso {
+                    lassoPath = [location]
+                    print("Lasso: started path with point \(location)")
+                }
+
+                // Clear previous selection when starting new one
+                if let canvasState = canvasState {
+                    Task { @MainActor in
+                        canvasState.clearSelection()
+                    }
+                }
+
+                // Don't create a stroke for selection tools - they just define the selection area
+                return
+            }
+
             // Check if this is a shape tool
             let isShapeTool = [.line, .rectangle, .circle].contains(currentTool)
 
@@ -316,13 +452,36 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView) {
-            guard let touch = touches.first,
-                  var stroke = currentStroke else {
-                print("touchesMoved: No touch or no current stroke")
+            guard let touch = touches.first else {
+                print("touchesMoved: No touch in set")
                 return
             }
 
             let location = touch.location(in: view)
+
+            // Handle selection tools
+            if currentTool == .rectangleSelect {
+                // For rectangle select, we just need start and current point
+                // The selection rectangle will be created in touchesEnded
+                print("Rectangle select: dragging to \(location)")
+                return
+            }
+
+            if currentTool == .lasso {
+                // For lasso, build up the path as we drag
+                lassoPath.append(location)
+                if lassoPath.count % 5 == 0 { // Log every 5th point to reduce spam
+                    print("Lasso: path now has \(lassoPath.count) points")
+                }
+                return
+            }
+
+            // Regular tools need a current stroke
+            guard var stroke = currentStroke else {
+                print("touchesMoved: No current stroke")
+                return
+            }
+
             let pressure = touch.type == .pencil ? touch.force / touch.maximumPossibleForce : 1.0
             let timestamp = touch.timestamp
 
@@ -382,6 +541,66 @@ struct MetalCanvasView: UIViewRepresentable {
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView) {
             print("=== TOUCH ENDED ===")
+
+            // Handle selection tools
+            guard let touch = touches.first else {
+                print("ERROR: No touch in set")
+                return
+            }
+
+            let endLocation = touch.location(in: view)
+
+            if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
+                print("Rectangle select: creating selection from \(startPoint) to \(endLocation)")
+
+                // Create selection rectangle
+                let minX = min(startPoint.x, endLocation.x)
+                let minY = min(startPoint.y, endLocation.y)
+                let maxX = max(startPoint.x, endLocation.x)
+                let maxY = max(startPoint.y, endLocation.y)
+
+                let selectionRect = CGRect(
+                    x: minX,
+                    y: minY,
+                    width: maxX - minX,
+                    height: maxY - minY
+                )
+
+                // Store selection in canvas state
+                if let canvasState = canvasState {
+                    Task { @MainActor in
+                        canvasState.activeSelection = selectionRect
+                        print("Rectangle selection created: \(selectionRect)")
+                    }
+                }
+
+                shapeStartPoint = nil
+                return
+            }
+
+            if currentTool == .lasso {
+                print("Lasso: creating selection from path with \(lassoPath.count) points")
+
+                // Close the path by connecting back to start
+                if !lassoPath.isEmpty {
+                    lassoPath.append(lassoPath[0])
+
+                    // Store selection in canvas state
+                    if let canvasState = canvasState {
+                        let pathCopy = lassoPath
+                        Task { @MainActor in
+                            canvasState.selectionPath = pathCopy
+                            print("Lasso selection created with \(pathCopy.count) points")
+                        }
+                    }
+                }
+
+                // Clear lasso path
+                lassoPath = []
+                shapeStartPoint = nil
+                return
+            }
+
             guard let stroke = currentStroke else {
                 print("ERROR: No current stroke to commit")
                 return
@@ -470,6 +689,7 @@ struct MetalCanvasView: UIViewRepresentable {
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil
+            lassoPath = []
         }
 
         // MARK: - Shape Generation
@@ -552,23 +772,27 @@ struct MetalCanvasView: UIViewRepresentable {
             pressure: CGFloat,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
+            // Calculate center point and radii for ellipse
             let center = CGPoint(
                 x: (start.x + end.x) / 2,
                 y: (start.y + end.y) / 2
             )
-            let radius = hypot(end.x - start.x, end.y - start.y) / 2
+            let radiusX = abs(end.x - start.x) / 2
+            let radiusY = abs(end.y - start.y) / 2
 
-            // Calculate number of points based on circumference
-            let circumference = 2 * .pi * radius
+            // Calculate number of points based on perimeter approximation
+            // Ramanujan's approximation for ellipse perimeter
+            let h = pow((radiusX - radiusY), 2) / pow((radiusX + radiusY), 2)
+            let perimeter = .pi * (radiusX + radiusY) * (1 + (3 * h) / (10 + sqrt(4 - 3 * h)))
             let spacing = brushSettings.size * brushSettings.spacing
-            let steps = max(Int(circumference / spacing), 16)
+            let steps = max(Int(perimeter / spacing), 16)
 
             var points: [BrushStroke.StrokePoint] = []
             for i in 0...steps {
                 let angle = (CGFloat(i) / CGFloat(steps)) * 2 * .pi
                 let location = CGPoint(
-                    x: center.x + radius * cos(angle),
-                    y: center.y + radius * sin(angle)
+                    x: center.x + radiusX * cos(angle),
+                    y: center.y + radiusY * sin(angle)
                 )
                 points.append(BrushStroke.StrokePoint(
                     location: location,
@@ -603,6 +827,47 @@ struct MetalCanvasView: UIViewRepresentable {
                 ))
             }
             return points
+        }
+
+        // MARK: - Eyedropper Helper
+
+        /// Read color from texture at a specific point
+        private func getColorAt(_ point: CGPoint, in texture: MTLTexture, screenSize: CGSize) -> UIColor? {
+            // Scale coordinates from screen space to texture space
+            let scaleX = CGFloat(texture.width) / screenSize.width
+            let scaleY = CGFloat(texture.height) / screenSize.height
+            let x = Int(point.x * scaleX)
+            let y = Int(point.y * scaleY)
+
+            // Bounds check
+            guard x >= 0, y >= 0, x < texture.width, y < texture.height else {
+                print("Eyedropper: point \(point) out of bounds")
+                return nil
+            }
+
+            // Read pixel data from texture
+            let width = texture.width
+            let bytesPerRow = width * 4  // BGRA format, 1 byte per channel
+            var pixelData = Data(count: bytesPerRow)
+
+            let region = MTLRegion(
+                origin: MTLOrigin(x: 0, y: y, z: 0),
+                size: MTLSize(width: width, height: 1, depth: 1)
+            )
+
+            pixelData.withUnsafeMutableBytes { ptr in
+                guard let baseAddress = ptr.baseAddress else { return }
+                texture.getBytes(baseAddress, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
+            }
+
+            // Extract BGRA color components (Metal uses BGRA format)
+            let pixelIndex = x * 4
+            let b = CGFloat(pixelData[pixelIndex]) / 255.0
+            let g = CGFloat(pixelData[pixelIndex + 1]) / 255.0
+            let r = CGFloat(pixelData[pixelIndex + 2]) / 255.0
+            let a = CGFloat(pixelData[pixelIndex + 3]) / 255.0
+
+            return UIColor(red: r, green: g, blue: b, alpha: a)
         }
     }
 }

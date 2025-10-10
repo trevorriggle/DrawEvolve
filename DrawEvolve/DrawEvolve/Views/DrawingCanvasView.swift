@@ -226,6 +226,64 @@ struct DrawingCanvasView: View {
                 )
             }
 
+            // Selection actions overlay
+            if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 12) {
+                            Text("Selection Active")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            HStack(spacing: 12) {
+                                // Cancel selection button
+                                Button(action: {
+                                    canvasState.clearSelection()
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 16))
+                                        Text("Cancel")
+                                            .font(.subheadline)
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                                    .background(Color.gray)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                                }
+
+                                // Delete selection button
+                                Button(action: {
+                                    canvasState.deleteSelectedPixels()
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "trash.fill")
+                                            .font(.system(size: 16))
+                                        Text("Delete")
+                                            .font(.subheadline)
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                                    .background(Color.red)
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                                }
+                            }
+                        }
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(12)
+                        .shadow(radius: 5)
+                        .padding(.trailing, 12)
+                        .padding(.bottom, 200) // Position above Save/Feedback buttons
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
             // Top right - Gallery button
             if !isToolbarCollapsed {
                 VStack {
@@ -522,6 +580,8 @@ class CanvasStateManager: ObservableObject {
     @Published var feedback: String?
     @Published var showError = false
     @Published var errorMessage = ""
+    @Published var activeSelection: CGRect? = nil // Active selection rectangle
+    @Published var selectionPath: [CGPoint]? = nil // For lasso selection
 
     let historyManager = HistoryManager()
     var renderer: CanvasRenderer?
@@ -760,6 +820,62 @@ class CanvasStateManager: ObservableObject {
     private func showError(message: String) {
         errorMessage = message
         showError = true
+    }
+
+    // MARK: - Selection Management
+
+    func clearSelection() {
+        activeSelection = nil
+        selectionPath = nil
+    }
+
+    func deleteSelectedPixels() {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer else {
+            print("ERROR: Cannot delete selection - invalid layer or texture")
+            return
+        }
+
+        // Capture before snapshot
+        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
+        // Delete pixels in selection
+        if let rect = activeSelection {
+            renderer.clearRect(rect, in: texture, screenSize: screenSize)
+        } else if let path = selectionPath {
+            renderer.clearPath(path, in: texture, screenSize: screenSize)
+        }
+
+        // Capture after snapshot
+        let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+        // Record in history
+        if let before = beforeSnapshot, let after = afterSnapshot {
+            let layerId = layers[selectedLayerIndex].id
+            historyManager.record(.stroke(
+                layerId: layerId,
+                beforeSnapshot: before,
+                afterSnapshot: after
+            ))
+        }
+
+        // Update thumbnail
+        let currentLayerIndex = selectedLayerIndex
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+
+        // Clear selection after deleting
+        clearSelection()
     }
 }
 
