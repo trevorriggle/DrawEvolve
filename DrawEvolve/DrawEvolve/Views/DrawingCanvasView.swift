@@ -246,34 +246,62 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            // Bottom right - Get Feedback button (collapses with toolbar)
+            // Bottom right - Action buttons (collapses with toolbar)
             if !isToolbarCollapsed {
                 VStack {
                     Spacer()
                     HStack {
                         Spacer()
 
-                        Button(action: requestFeedback) {
-                            HStack(spacing: 8) {
-                                if isRequestingFeedback {
-                                    ProgressView()
-                                        .tint(.white)
-                                } else {
-                                    Image(systemName: "sparkles")
-                                        .font(.system(size: 18))
-                                    Text("Get Feedback")
-                                        .font(.headline)
+                        VStack(spacing: 12) {
+                            // Save to Gallery button
+                            Button(action: {
+                                showSaveDialog = true
+                            }) {
+                                HStack(spacing: 8) {
+                                    if isSaving {
+                                        ProgressView()
+                                            .tint(.white)
+                                    } else {
+                                        Image(systemName: "square.and.arrow.down")
+                                            .font(.system(size: 18))
+                                        Text("Save to Gallery")
+                                            .font(.headline)
+                                    }
                                 }
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 14)
+                                .background(Color.green)
+                                .foregroundColor(.white)
+                                .cornerRadius(12)
+                                .shadow(radius: 4)
                             }
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 14)
-                            .background(Color.accentColor)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                            .shadow(radius: 4)
+                            .disabled(isSaving || canvasState.isEmpty)
+                            .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+
+                            // Get Feedback button
+                            Button(action: requestFeedback) {
+                                HStack(spacing: 8) {
+                                    if isRequestingFeedback {
+                                        ProgressView()
+                                            .tint(.white)
+                                    } else {
+                                        Image(systemName: "sparkles")
+                                            .font(.system(size: 18))
+                                        Text("Get Feedback")
+                                            .font(.headline)
+                                    }
+                                }
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 14)
+                                .background(Color.accentColor)
+                                .foregroundColor(.white)
+                                .cornerRadius(12)
+                                .shadow(radius: 4)
+                            }
+                            .disabled(isRequestingFeedback || canvasState.isEmpty)
+                            .opacity(canvasState.isEmpty ? 0.5 : 1.0)
                         }
-                        .disabled(isRequestingFeedback || canvasState.isEmpty)
-                        .opacity(canvasState.isEmpty ? 0.5 : 1.0)
                         .padding(.trailing, 12)
                         .padding(.bottom, 12)
                     }
