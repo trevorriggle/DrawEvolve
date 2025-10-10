@@ -66,7 +66,7 @@ struct GalleryView: View {
             .sheet(isPresented: $showNewDrawing) {
                 DrawingCanvasView(context: $drawingContext)
             }
-            .onChange(of: showPromptFirst) { newValue in
+            .onChange(of: showPromptFirst) { _, newValue in
                 if !newValue && drawingContext.isComplete {
                     showNewDrawing = true
                 }
