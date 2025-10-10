@@ -8,7 +8,7 @@ A professional drawing app with Metal-based rendering and real-time AI feedback 
 
 ## 🎯 Current Status
 
-**Last Updated:** 2025-10-09
+**Last Updated:** 2025-10-10
 
 ### ✅ What's Working (MVP Complete!)
 - ✅ Metal rendering engine (60fps, smooth)
@@ -18,12 +18,15 @@ A professional drawing app with Metal-based rendering and real-time AI feedback 
 - ✅ **AI feedback working end-to-end!** 🎉
 - ✅ Backend deployed to Cloudflare Workers
 - ✅ Export to Photos
+- ✅ **Drawing persistence (FileManager-based local storage)** 🆕
+- ✅ **Gallery view with thumbnail grid** 🆕
+- ✅ **Floating feedback panel (draggable, collapsible)** 🆕
+- ✅ **Drawing detail view with continue editing** 🆕
+- ✅ **Anonymous user system (no auth required)** 🆕
 
 ### 🚧 In Progress (Pre-TestFlight)
-- 🔧 Drawing persistence (local storage)
-- 🔧 Gallery view
-- 🔧 UI/UX polish
-- 🔧 Auth simplification
+- 🔧 UI/UX polish (scroll behavior, button placement)
+- 🔧 Continue drawing feature (loads but needs UX fixes)
 
 ### 📅 Timeline
 **Target:** TestFlight launch in 2-3 weeks
@@ -277,10 +280,15 @@ wrangler deploy
 ### Known Issues
 See **[UX_AUDIT.md](./UX_AUDIT.md)** for complete list.
 
-**Critical:**
-- AI feedback panel overlaps UI
-- No drawing persistence (lose work on app close)
-- iPad keyboard doesn't appear
+**Current:**
+- Continue Drawing button requires scrolling to see (UX issue)
+- Continue Drawing loads image but may need canvas state fixes
+- Some UI elements need better scroll behavior
+
+**Fixed:**
+- ~~AI feedback panel overlaps UI~~ → Now draggable floating panel
+- ~~No drawing persistence~~ → FileManager-based storage working
+- ~~iPad keyboard doesn't appear~~ → Simulator-specific issue
 
 **See docs for full list and fix instructions.**
 
@@ -363,4 +371,4 @@ Trevor Riggle - trevorriggle@gmail.com
 
 ---
 
-**Last significant update:** 2025-10-09 - AI feedback feature completed! 🎉
+**Last significant update:** 2025-10-10 - Gallery, persistence, and floating feedback panel completed! 🎉
