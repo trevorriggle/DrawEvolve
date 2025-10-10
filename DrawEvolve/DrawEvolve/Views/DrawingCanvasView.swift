@@ -381,7 +381,12 @@ struct DrawingCanvasView: View {
         }
 
         do {
-            try await storageManager.saveDrawing(title: drawingTitle, imageData: imageData)
+            try await storageManager.saveDrawing(
+                title: drawingTitle,
+                imageData: imageData,
+                feedback: canvasState.feedback,
+                context: context
+            )
             print("Drawing saved successfully!")
             drawingTitle = "" // Reset for next save
         } catch {

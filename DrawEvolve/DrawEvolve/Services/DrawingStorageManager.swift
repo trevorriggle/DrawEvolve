@@ -36,7 +36,7 @@ class DrawingStorageManager: ObservableObject {
 
     // MARK: - Save Drawing
 
-    func saveDrawing(title: String, imageData: Data) async throws -> Drawing {
+    func saveDrawing(title: String, imageData: Data, feedback: String? = nil, context: DrawingContext? = nil) async throws -> Drawing {
         // TODO: Implement local storage save
         isLoading = true
         errorMessage = nil
@@ -49,7 +49,9 @@ class DrawingStorageManager: ObservableObject {
             title: title,
             imageData: imageData,
             createdAt: Date(),
-            updatedAt: Date()
+            updatedAt: Date(),
+            feedback: feedback,
+            context: context
         )
 
         // For now, just add to memory (will be lost on app restart)
@@ -60,7 +62,7 @@ class DrawingStorageManager: ObservableObject {
 
     // MARK: - Update Drawing
 
-    func updateDrawing(id: UUID, title: String?, imageData: Data?) async throws {
+    func updateDrawing(id: UUID, title: String? = nil, imageData: Data? = nil, feedback: String? = nil, context: DrawingContext? = nil) async throws {
         // TODO: Implement local storage update
         isLoading = true
         errorMessage = nil
@@ -70,8 +72,14 @@ class DrawingStorageManager: ObservableObject {
         if let index = drawings.firstIndex(where: { $0.id == id }) {
             if let title = title {
                 drawings[index].title = title
-                drawings[index].updatedAt = Date()
             }
+            if let feedback = feedback {
+                drawings[index].feedback = feedback
+            }
+            if let context = context {
+                drawings[index].context = context
+            }
+            drawings[index].updatedAt = Date()
         }
     }
 

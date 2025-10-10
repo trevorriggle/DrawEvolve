@@ -14,6 +14,8 @@ struct Drawing: Codable, Identifiable {
     let imageData: Data
     let createdAt: Date
     var updatedAt: Date
+    var feedback: String?
+    var context: DrawingContext?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -22,5 +24,7 @@ struct Drawing: Codable, Identifiable {
         case imageData = "image_data"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case feedback
+        case context
     }
 }

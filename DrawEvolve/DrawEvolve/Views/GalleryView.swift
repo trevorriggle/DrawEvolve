@@ -124,13 +124,21 @@ struct GalleryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
-                    DrawingCard(drawing: drawing) {
-                        drawingToDelete = drawing
-                        showDeleteAlert = true
+                    Button(action: {
+                        selectedDrawing = drawing
+                    }) {
+                        DrawingCard(drawing: drawing) {
+                            drawingToDelete = drawing
+                            showDeleteAlert = true
+                        }
                     }
+                    .buttonStyle(PlainButtonStyle())
                 }
             }
             .padding()
+        }
+        .sheet(item: $selectedDrawing) { drawing in
+            DrawingDetailView(drawing: drawing)
         }
     }
 }
@@ -144,23 +152,41 @@ struct DrawingCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Drawing thumbnail
-            if let uiImage = UIImage(data: drawing.imageData) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(height: 200)
-                    .clipped()
-                    .cornerRadius(12)
-            } else {
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.2))
-                    .frame(height: 200)
-                    .cornerRadius(12)
-                    .overlay(
-                        Image(systemName: "photo")
-                            .font(.largeTitle)
-                            .foregroundColor(.secondary)
-                    )
+            ZStack(alignment: .topTrailing) {
+                if let uiImage = UIImage(data: drawing.imageData) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(height: 200)
+                        .clipped()
+                        .cornerRadius(12)
+                } else {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.2))
+                        .frame(height: 200)
+                        .cornerRadius(12)
+                        .overlay(
+                            Image(systemName: "photo")
+                                .font(.largeTitle)
+                                .foregroundColor(.secondary)
+                        )
+                }
+
+                // Feedback badge
+                if drawing.feedback != nil {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12))
+                        Text("AI")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.accentColor)
+                    .cornerRadius(8)
+                    .padding(8)
+                }
             }
 
             // Title and metadata
