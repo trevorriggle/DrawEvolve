@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct GalleryView: View {
-    @StateObject private var storageManager = DrawingStorageManager.shared
+    @ObservedObject private var storageManager = DrawingStorageManager.shared
 
     @State private var showNewDrawing = false
     @State private var showPromptFirst = false

@@ -82,35 +82,51 @@ struct FloatingFeedbackPanel: View {
                 }
             }
             .position(
-                x: position.x + dragOffset.width,
-                y: position.y + dragOffset.height
+                x: position.x,
+                y: position.y
             )
             .gesture(
                 DragGesture()
                     .onChanged { value in
-                        dragOffset = value.translation
+                        // Update position in real-time with animation
+                        withAnimation(.interactiveSpring()) {
+                            position.x = value.location.x
+                            position.y = value.location.y
+                        }
                     }
                     .onEnded { value in
-                        // Update final position
-                        position.x += value.translation.width
-                        position.y += value.translation.height
+                        // Constrain to screen bounds with safe margins
+                        withAnimation(.spring(response: 0.3)) {
+                            let currentSize = isExpanded ? expandedSize : collapsedSize
 
-                        // Constrain to screen bounds
-                        let maxX = geometry.size.width - (isExpanded ? expandedSize.width / 2 : collapsedSize.width / 2)
-                        let maxY = geometry.size.height - (isExpanded ? expandedSize.height / 2 : collapsedSize.height / 2)
-                        let minX = isExpanded ? expandedSize.width / 2 : collapsedSize.width / 2
-                        let minY = isExpanded ? expandedSize.height / 2 : collapsedSize.height / 2
+                            // Ensure the collapse button is always visible (70pt from top minimum)
+                            let minY = max(currentSize.height / 2, 70)
+                            let maxY = geometry.size.height - currentSize.height / 2
+                            let minX = currentSize.width / 2
+                            let maxX = geometry.size.width - currentSize.width / 2
 
-                        position.x = min(max(position.x, minX), maxX)
-                        position.y = min(max(position.y, minY), maxY)
-
-                        dragOffset = .zero
+                            position.x = min(max(position.x, minX), maxX)
+                            position.y = min(max(position.y, minY), maxY)
+                        }
                     }
             )
+            .onChange(of: isExpanded) { _, newValue in
+                // Re-constrain when expanding/collapsing
+                withAnimation(.spring(response: 0.3)) {
+                    let currentSize = newValue ? expandedSize : collapsedSize
+                    let minY = max(currentSize.height / 2, 70)
+                    let maxY = geometry.size.height - currentSize.height / 2
+                    let minX = currentSize.width / 2
+                    let maxX = geometry.size.width - currentSize.width / 2
+
+                    position.x = min(max(position.x, minX), maxX)
+                    position.y = min(max(position.y, minY), maxY)
+                }
+            }
             .onAppear {
-                // Position in top-right corner initially
+                // Position in top-right corner initially, with safe margin from top
                 let initialX = geometry.size.width - expandedSize.width / 2 - 20
-                let initialY = expandedSize.height / 2 + 60
+                let initialY = max(expandedSize.height / 2 + 20, 70)
                 position = CGPoint(x: initialX, y: initialY)
             }
         }
