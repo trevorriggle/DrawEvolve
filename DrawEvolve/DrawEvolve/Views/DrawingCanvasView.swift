@@ -413,12 +413,27 @@ struct DrawingCanvasView: View {
         // Load feedback if exists
         if let feedback = drawing.feedback {
             canvasState.feedback = feedback
-            showFeedback = true
         }
 
-        // Load the image onto the canvas
+        // Load the image onto the canvas - delay until renderer is ready
         if let uiImage = UIImage(data: drawing.imageData) {
-            canvasState.loadImage(uiImage)
+            // Retry loading until renderer is initialized
+            Task {
+                var attempts = 0
+                while canvasState.renderer == nil && attempts < 10 {
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                    attempts += 1
+                }
+
+                await MainActor.run {
+                    if canvasState.renderer != nil {
+                        canvasState.loadImage(uiImage)
+                        print("Successfully loaded existing drawing image")
+                    } else {
+                        print("ERROR: Failed to load drawing - renderer not initialized")
+                    }
+                }
+            }
         }
     }
 

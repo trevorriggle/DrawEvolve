@@ -83,24 +83,31 @@ struct PromptInputView: View {
                         }
                     }
                     .padding(24)
+                    .padding(.bottom, 100) // Extra space for keyboard + button
                 }
+                .scrollDismissesKeyboard(.interactively)
 
-                // Start Drawing button
-                Button(action: {
-                    if context.isComplete {
-                        isPresented = false
+                // Sticky Start Drawing button
+                VStack(spacing: 0) {
+                    Divider()
+
+                    Button(action: {
+                        if context.isComplete {
+                            isPresented = false
+                        }
+                    }) {
+                        Text("Start Drawing")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(context.isComplete ? Color.accentColor : Color.gray)
+                            .cornerRadius(12)
                     }
-                }) {
-                    Text("Start Drawing")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(context.isComplete ? Color.accentColor : Color.gray)
-                        .cornerRadius(12)
+                    .disabled(!context.isComplete)
+                    .padding()
+                    .background(.ultraThinMaterial)
                 }
-                .disabled(!context.isComplete)
-                .padding(24)
             }
             .frame(maxWidth: 600, maxHeight: 700)
             .background(Color(uiColor: .systemBackground))
