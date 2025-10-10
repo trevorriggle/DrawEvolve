@@ -17,7 +17,7 @@ struct ContentView: View {
 
     var body: some View {
         // Main drawing canvas (no auth required)
-        DrawingCanvasView(context: $drawingContext)
+        DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
             .onAppear {
                 performFirstLaunchCheck()
             }
