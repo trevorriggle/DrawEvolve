@@ -447,13 +447,13 @@ struct DrawingCanvasView: View {
                 print("Drawing updated successfully!")
             } else {
                 // Create new drawing
-                try await storageManager.saveDrawing(
+                let savedDrawing = try await storageManager.saveDrawing(
                     title: drawingTitle,
                     imageData: imageData,
                     feedback: canvasState.feedback,
                     context: context
                 )
-                print("Drawing saved successfully!")
+                print("Drawing saved successfully with ID: \(savedDrawing.id)")
                 drawingTitle = "" // Reset for next save
             }
         } catch {

@@ -791,6 +791,64 @@ class CanvasRenderer: NSObject {
         print("  Text rendered successfully")
     }
 
+    // MARK: - Load Image
+
+    /// Load a UIImage into a texture (for editing existing drawings)
+    func loadImage(_ image: UIImage, into texture: MTLTexture) {
+        print("CanvasRenderer: Loading image into texture")
+
+        guard let cgImage = image.cgImage else {
+            print("ERROR: Failed to get CGImage from UIImage")
+            return
+        }
+
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+
+        // Create a CGContext to render the image
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("ERROR: Failed to create CGContext")
+            return
+        }
+
+        // Draw the image into the context (scaling to fit texture)
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Get pixel data
+        guard let data = context.data else {
+            print("ERROR: Failed to get context data")
+            return
+        }
+
+        // Copy pixel data into the texture
+        let region = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: width, height: height, depth: 1)
+        )
+
+        texture.replace(
+            region: region,
+            mipmapLevel: 0,
+            withBytes: data,
+            bytesPerRow: bytesPerRow
+        )
+
+        print("Image loaded successfully into texture")
+    }
+
     // MARK: - Export Image
 
     /// Exports all visible layers composited into a single image
