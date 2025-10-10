@@ -126,6 +126,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var lastTimestamp: TimeInterval = 0
         private var shapeStartPoint: CGPoint? // For shape tools
         private var lassoPath: [CGPoint] = [] // For lasso selection
+        private var polygonPoints: [CGPoint] = [] // For polygon tool
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
 
@@ -190,7 +191,8 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // IMPORTANT: Render current stroke preview on top
             // Use bounds.size (screen space) for preview, matching touch coordinates
-            if let stroke = currentStroke, !stroke.points.isEmpty {
+            // DON'T show preview for eraser - it looks weird
+            if let stroke = currentStroke, !stroke.points.isEmpty, stroke.tool != .eraser {
                 renderer?.renderStrokePreview(stroke, to: renderEncoder, viewportSize: view.bounds.size)
             }
 
@@ -395,6 +397,72 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
 
+                return
+            }
+
+            // Handle polygon tool - multi-tap to add points
+            if currentTool == .polygon {
+                print("Polygon: adding point \(location)")
+
+                // Check if we're closing the polygon (tap near first point)
+                if polygonPoints.count >= 3 {
+                    let firstPoint = polygonPoints[0]
+                    let distanceToFirst = hypot(location.x - firstPoint.x, location.y - firstPoint.y)
+
+                    // If within 40 points of first point, close the polygon
+                    if distanceToFirst < 40 {
+                        print("Polygon: closing polygon with \(polygonPoints.count) points")
+
+                        // Generate stroke from polygon points
+                        let points = generatePolygonPoints(polygonPoints: polygonPoints, pressure: pressure, timestamp: timestamp)
+
+                        // Create and commit the stroke
+                        let stroke = BrushStroke(
+                            points: points,
+                            settings: brushSettings,
+                            tool: currentTool,
+                            layerId: layers[selectedLayerIndex].id
+                        )
+
+                        // Commit stroke immediately
+                        if let texture = layers[selectedLayerIndex].texture, let renderer = renderer {
+                            let beforeSnapshot = renderer.captureSnapshot(of: texture)
+                            renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
+                            let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+                            if let before = beforeSnapshot, let after = afterSnapshot, let canvasState = canvasState {
+                                let layerId = layers[selectedLayerIndex].id
+                                Task { @MainActor in
+                                    canvasState.historyManager.record(.stroke(
+                                        layerId: layerId,
+                                        beforeSnapshot: before,
+                                        afterSnapshot: after
+                                    ))
+                                }
+                            }
+
+                            // Update thumbnail
+                            let currentLayerIndex = selectedLayerIndex
+                            DispatchQueue.global(qos: .utility).async { [weak self] in
+                                if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                                    DispatchQueue.main.async {
+                                        self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clear polygon points
+                        polygonPoints = []
+                        return
+                    }
+                }
+
+                // Add point to polygon
+                polygonPoints.append(location)
+                print("Polygon: now has \(polygonPoints.count) points")
+
+                // Don't create a stroke - polygon is built from taps
                 return
             }
 
@@ -690,6 +758,7 @@ struct MetalCanvasView: UIViewRepresentable {
             lastPoint = nil
             shapeStartPoint = nil
             lassoPath = []
+            polygonPoints = []
         }
 
         // MARK: - Shape Generation
@@ -826,6 +895,34 @@ struct MetalCanvasView: UIViewRepresentable {
                     timestamp: timestamp
                 ))
             }
+            return points
+        }
+
+        private func generatePolygonPoints(
+            polygonPoints: [CGPoint],
+            pressure: CGFloat,
+            timestamp: TimeInterval
+        ) -> [BrushStroke.StrokePoint] {
+            guard polygonPoints.count >= 2 else { return [] }
+
+            let spacing = brushSettings.size * brushSettings.spacing
+            var points: [BrushStroke.StrokePoint] = []
+
+            // Draw lines between all consecutive points
+            for i in 0..<polygonPoints.count {
+                let nextIndex = (i + 1) % polygonPoints.count
+                let start = polygonPoints[i]
+                let end = polygonPoints[nextIndex]
+
+                points.append(contentsOf: generateLineSegment(
+                    from: start,
+                    to: end,
+                    spacing: spacing,
+                    pressure: pressure,
+                    timestamp: timestamp
+                ))
+            }
+
             return points
         }
 
