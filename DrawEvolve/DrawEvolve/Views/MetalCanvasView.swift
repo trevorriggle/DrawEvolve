@@ -129,6 +129,8 @@ struct MetalCanvasView: UIViewRepresentable {
         private var polygonPoints: [CGPoint] = [] // For polygon tool
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
+        private var isDraggingSelection = false // Track if we're dragging a selection
+        private var selectionDragStart: CGPoint? // Where the drag started
 
         init(
             layers: Binding<[DrawingLayer]>,
@@ -473,6 +475,16 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Check if we're touching inside an existing selection (for any tool)
+            if isPointInSelection(location), let canvasState = canvasState,
+               canvasState.selectionPixels != nil {
+                // Start dragging the selection
+                isDraggingSelection = true
+                selectionDragStart = location
+                print("Started dragging selection at \(location)")
+                return
+            }
+
             // Handle selection tools (rectangleSelect, lasso)
             let isSelectionTool = [.rectangleSelect, .lasso].contains(currentTool)
 
@@ -533,6 +545,23 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             let location = touch.location(in: view)
+
+            // Handle dragging an existing selection
+            if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
+                let offset = CGPoint(
+                    x: location.x - dragStart.x,
+                    y: location.y - dragStart.y
+                )
+
+                Task { @MainActor in
+                    canvasState.selectionOffset = offset
+                }
+
+                if hypot(offset.x, offset.y) > 5 { // Log only if moved more than 5 points
+                    print("Dragging selection with offset: \(offset)")
+                }
+                return
+            }
 
             // Handle selection tools
             if currentTool == .rectangleSelect {
@@ -617,6 +646,21 @@ struct MetalCanvasView: UIViewRepresentable {
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView) {
             print("=== TOUCH ENDED ===")
 
+            // Handle ending a selection drag
+            if isDraggingSelection {
+                print("Finished dragging selection, committing to layer")
+                isDraggingSelection = false
+                selectionDragStart = nil
+
+                // Commit the selection to the layer
+                if let canvasState = canvasState {
+                    Task { @MainActor in
+                        canvasState.commitSelection()
+                    }
+                }
+                return
+            }
+
             // Handle selection tools
             guard let touch = touches.first else {
                 print("ERROR: No touch in set")
@@ -641,11 +685,13 @@ struct MetalCanvasView: UIViewRepresentable {
                     height: maxY - minY
                 )
 
-                // Store selection in canvas state
+                // Store selection in canvas state and extract pixels
                 if let canvasState = canvasState {
                     Task { @MainActor in
                         canvasState.activeSelection = selectionRect
                         print("Rectangle selection created: \(selectionRect)")
+                        // Extract pixels for moving
+                        canvasState.extractSelectionPixels()
                     }
                 }
 
@@ -660,12 +706,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 if !lassoPath.isEmpty {
                     lassoPath.append(lassoPath[0])
 
-                    // Store selection in canvas state
+                    // Store selection in canvas state and extract pixels
                     if let canvasState = canvasState {
                         let pathCopy = lassoPath
                         Task { @MainActor in
                             canvasState.selectionPath = pathCopy
                             print("Lasso selection created with \(pathCopy.count) points")
+                            // Extract pixels for moving
+                            canvasState.extractSelectionPixels()
                         }
                     }
                 }
@@ -766,6 +814,8 @@ struct MetalCanvasView: UIViewRepresentable {
             shapeStartPoint = nil
             lassoPath = []
             polygonPoints = []
+            isDraggingSelection = false
+            selectionDragStart = nil
         }
 
         // MARK: - Shape Generation
@@ -931,6 +981,49 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             return points
+        }
+
+        // MARK: - Selection Helpers
+
+        /// Check if a point is inside the current selection
+        private func isPointInSelection(_ point: CGPoint) -> Bool {
+            guard let canvasState = canvasState else { return false }
+
+            // Check rectangle selection
+            if let rect = canvasState.activeSelection {
+                return rect.contains(point)
+            }
+
+            // Check lasso selection using point-in-polygon test
+            if let path = canvasState.selectionPath, !path.isEmpty {
+                return pointInPolygon(point: point, polygon: path)
+            }
+
+            return false
+        }
+
+        /// Point-in-polygon test using ray casting algorithm
+        private func pointInPolygon(point: CGPoint, polygon: [CGPoint]) -> Bool {
+            guard polygon.count >= 3 else { return false }
+
+            var inside = false
+            var j = polygon.count - 1
+
+            for i in 0..<polygon.count {
+                let xi = polygon[i].x, yi = polygon[i].y
+                let xj = polygon[j].x, yj = polygon[j].y
+
+                let intersect = ((yi > point.y) != (yj > point.y)) &&
+                    (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)
+
+                if intersect {
+                    inside = !inside
+                }
+
+                j = i
+            }
+
+            return inside
         }
 
         // MARK: - Eyedropper Helper

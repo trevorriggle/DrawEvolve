@@ -71,6 +71,21 @@ struct DrawingCanvasView: View {
                     .allowsHitTesting(false)
             }
 
+            // Show selection pixels being moved
+            if let pixels = canvasState.selectionPixels,
+               let originalRect = canvasState.selectionOriginalRect,
+               canvasState.selectionOffset != .zero {
+                Image(uiImage: pixels)
+                    .resizable()
+                    .frame(width: originalRect.width, height: originalRect.height)
+                    .position(
+                        x: originalRect.origin.x + originalRect.width / 2 + canvasState.selectionOffset.x,
+                        y: originalRect.origin.y + originalRect.height / 2 + canvasState.selectionOffset.y
+                    )
+                    .allowsHitTesting(false)
+                    .opacity(0.8) // Slightly transparent to show it's being moved
+            }
+
             // Floating toolbar overlay (top layer, left side)
             VStack(alignment: .leading, spacing: 0) {
                 if !isToolbarCollapsed {
@@ -469,6 +484,12 @@ struct DrawingCanvasView: View {
             }
         } message: {
             Text("Are you sure you want to clear the canvas? This cannot be undone.")
+        }
+        .onChange(of: canvasState.currentTool) { _, _ in
+            // When tool changes, commit any active selection
+            if canvasState.selectionPixels != nil {
+                canvasState.commitSelection()
+            }
         }
         .onAppear {
             loadExistingDrawing()
