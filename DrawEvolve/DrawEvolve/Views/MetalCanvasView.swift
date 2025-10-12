@@ -303,8 +303,7 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .eyeDropper {
                 print("Eyedropper: picking color at \(location)")
                 guard selectedLayerIndex < layers.count,
-                      let texture = layers[selectedLayerIndex].texture,
-                      let renderer = renderer else {
+                      let texture = layers[selectedLayerIndex].texture else {
                     print("ERROR: Cannot pick color - invalid layer or texture")
                     return
                 }
@@ -476,7 +475,8 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Check if we're touching inside an existing selection (for any tool)
-            if isPointInSelection(location), let canvasState = canvasState,
+            if let canvasState = canvasState,
+               isPointInSelection(location),
                canvasState.selectionPixels != nil {
                 // Start dragging the selection
                 isDraggingSelection = true
@@ -986,6 +986,7 @@ struct MetalCanvasView: UIViewRepresentable {
         // MARK: - Selection Helpers
 
         /// Check if a point is inside the current selection
+        @MainActor
         private func isPointInSelection(_ point: CGPoint) -> Bool {
             guard let canvasState = canvasState else { return false }
 

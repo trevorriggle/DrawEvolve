@@ -813,7 +813,6 @@ class CanvasRenderer: NSObject {
         let width = texture.width
         let height = texture.height
         let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
 
         // Create a CGContext to render the image
         let colorSpace = CGColorSpaceCreateDeviceRGB()
