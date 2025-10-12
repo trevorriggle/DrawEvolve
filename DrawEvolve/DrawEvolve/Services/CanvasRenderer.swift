@@ -1100,4 +1100,366 @@ class CanvasRenderer: NSObject {
         print("CanvasRenderer: Exporting image with \(layers.count) layers")
         return compositeLayersToImage(layers: layers)
     }
+
+    // MARK: - Pixel Extraction for Selection Movement
+
+    /// Extract pixels from a rectangular selection
+    func extractPixels(from rect: CGRect, in texture: MTLTexture, screenSize: CGSize) -> UIImage? {
+        print("CanvasRenderer: Extracting pixels from rect \(rect)")
+
+        // Scale rect from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let scaledRect = CGRect(
+            x: rect.origin.x * scaleX,
+            y: rect.origin.y * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY
+        )
+
+        let x = Int(scaledRect.origin.x)
+        let y = Int(scaledRect.origin.y)
+        let w = Int(scaledRect.width)
+        let h = Int(scaledRect.height)
+
+        // Bounds check
+        guard x >= 0, y >= 0, x + w <= texture.width, y + h <= texture.height, w > 0, h > 0 else {
+            print("ERROR: Rect outside texture bounds or invalid dimensions")
+            return nil
+        }
+
+        // Read full texture data
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+        var pixelData = Data(count: dataSize)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        // Extract the selected rectangle into a new buffer
+        let selectionBytesPerRow = w * 4
+        var selectionData = Data(count: selectionBytesPerRow * h)
+
+        selectionData.withUnsafeMutableBytes { selPtr in
+            pixelData.withUnsafeBytes { srcPtr in
+                guard let selBase = selPtr.baseAddress,
+                      let srcBase = srcPtr.baseAddress else { return }
+
+                for row in 0..<h {
+                    let srcOffset = ((y + row) * width + x) * 4
+                    let dstOffset = row * w * 4
+                    memcpy(selBase + dstOffset, srcBase + srcOffset, w * 4)
+                }
+            }
+        }
+
+        // Convert to UIImage
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+
+        guard let context = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: selectionBytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("ERROR: Failed to create CGContext for selection")
+            return nil
+        }
+
+        selectionData.withUnsafeBytes { ptr in
+            guard let srcBase = ptr.baseAddress else { return }
+            if let data = context.data {
+                memcpy(data, srcBase, selectionData.count)
+            }
+        }
+
+        guard let cgImage = context.makeImage() else {
+            print("ERROR: Failed to create CGImage from selection")
+            return nil
+        }
+
+        print("✂️ Extracted selection: \(w)x\(h) pixels")
+        return UIImage(cgImage: cgImage)
+    }
+
+    /// Extract pixels from a lasso/path selection with alpha masking
+    func extractPixels(fromPath path: [CGPoint], in texture: MTLTexture, screenSize: CGSize) -> UIImage? {
+        print("CanvasRenderer: Extracting pixels from path with \(path.count) points")
+
+        guard path.count >= 3 else {
+            print("ERROR: Path must have at least 3 points")
+            return nil
+        }
+
+        // Scale path from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let scaledPath = path.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
+
+        // Find bounding box
+        let minX = max(0, Int(scaledPath.map { $0.x }.min() ?? 0))
+        let maxX = min(texture.width - 1, Int(scaledPath.map { $0.x }.max() ?? CGFloat(texture.width)))
+        let minY = max(0, Int(scaledPath.map { $0.y }.min() ?? 0))
+        let maxY = min(texture.height - 1, Int(scaledPath.map { $0.y }.max() ?? CGFloat(texture.height)))
+
+        let w = maxX - minX + 1
+        let h = maxY - minY + 1
+
+        guard w > 0, h > 0 else {
+            print("ERROR: Invalid bounding box")
+            return nil
+        }
+
+        // Read full texture data
+        let width = texture.width
+        let height = texture.height
+        let bytesPerRow = width * 4
+        let dataSize = bytesPerRow * height
+        var pixelData = Data(count: dataSize)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: bytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: width, height: height, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        // Point-in-polygon test
+        func isPointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
+            var inside = false
+            var j = polygon.count - 1
+            for i in 0..<polygon.count {
+                let xi = polygon[i].x, yi = polygon[i].y
+                let xj = polygon[j].x, yj = polygon[j].y
+
+                if ((yi > point.y) != (yj > point.y)) &&
+                   (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi) {
+                    inside.toggle()
+                }
+                j = i
+            }
+            return inside
+        }
+
+        // Extract pixels in bounding box with alpha mask
+        let selectionBytesPerRow = w * 4
+        var selectionData = Data(count: selectionBytesPerRow * h)
+
+        selectionData.withUnsafeMutableBytes { selPtr in
+            pixelData.withUnsafeBytes { srcPtr in
+                guard let selBase = selPtr.baseAddress,
+                      let srcBase = srcPtr.baseAddress else { return }
+
+                for row in 0..<h {
+                    for col in 0..<w {
+                        let texX = minX + col
+                        let texY = minY + row
+                        let point = CGPoint(x: CGFloat(texX), y: CGFloat(texY))
+
+                        let srcOffset = (texY * width + texX) * 4
+                        let dstOffset = (row * w + col) * 4
+
+                        if isPointInPolygon(point, polygon: scaledPath) {
+                            // Copy pixel if inside path
+                            memcpy(selBase + dstOffset, srcBase + srcOffset, 4)
+                        } else {
+                            // Set to transparent if outside path
+                            (selBase + dstOffset).storeBytes(of: UInt32(0), as: UInt32.self)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert to UIImage
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+
+        guard let context = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: selectionBytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("ERROR: Failed to create CGContext for lasso selection")
+            return nil
+        }
+
+        selectionData.withUnsafeBytes { ptr in
+            guard let srcBase = ptr.baseAddress else { return }
+            if let data = context.data {
+                memcpy(data, srcBase, selectionData.count)
+            }
+        }
+
+        guard let cgImage = context.makeImage() else {
+            print("ERROR: Failed to create CGImage from lasso selection")
+            return nil
+        }
+
+        print("✂️ Extracted lasso selection: \(w)x\(h) pixels")
+        return UIImage(cgImage: cgImage)
+    }
+
+    /// Render an image (extracted selection pixels) at a specific position
+    func renderImage(_ image: UIImage, at rect: CGRect, to texture: MTLTexture, screenSize: CGSize) {
+        print("CanvasRenderer: Rendering image at \(rect)")
+
+        guard let cgImage = image.cgImage else {
+            print("ERROR: Failed to get CGImage")
+            return
+        }
+
+        // Scale rect from screen space to texture space
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let scaledRect = CGRect(
+            x: rect.origin.x * scaleX,
+            y: rect.origin.y * scaleY,
+            width: rect.width * scaleX,
+            height: rect.height * scaleY
+        )
+
+        let x = Int(scaledRect.origin.x)
+        let y = Int(scaledRect.origin.y)
+        let w = Int(scaledRect.width)
+        let h = Int(scaledRect.height)
+
+        // Bounds check
+        guard w > 0, h > 0 else {
+            print("ERROR: Invalid dimensions")
+            return
+        }
+
+        // Create a context to render the image at the desired size
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        let bytesPerRow = w * 4
+
+        guard let context = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("ERROR: Failed to create CGContext")
+            return
+        }
+
+        // Draw the image
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        guard let data = context.data else {
+            print("ERROR: Failed to get context data")
+            return
+        }
+
+        // Read current texture data
+        let texWidth = texture.width
+        let texHeight = texture.height
+        let texBytesPerRow = texWidth * 4
+        let texDataSize = texBytesPerRow * texHeight
+        var texPixelData = Data(count: texDataSize)
+
+        texPixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: texBytesPerRow,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: texWidth, height: texHeight, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+
+        // Composite image onto texture with alpha blending
+        texPixelData.withUnsafeMutableBytes { texPtr in
+            guard let texBase = texPtr.baseAddress else { return }
+
+            data.withMemoryRebound(to: UInt8.self, capacity: w * h * 4) { imgPtr in
+                for row in 0..<h {
+                    for col in 0..<w {
+                        let texX = x + col
+                        let texY = y + row
+
+                        // Bounds check for texture
+                        guard texX >= 0, texY >= 0, texX < texWidth, texY < texHeight else { continue }
+
+                        let imgOffset = (row * w + col) * 4
+                        let texOffset = (texY * texWidth + texX) * 4
+
+                        // Read source pixel (BGRA)
+                        let srcB = CGFloat(imgPtr[imgOffset]) / 255.0
+                        let srcG = CGFloat(imgPtr[imgOffset + 1]) / 255.0
+                        let srcR = CGFloat(imgPtr[imgOffset + 2]) / 255.0
+                        let srcA = CGFloat(imgPtr[imgOffset + 3]) / 255.0
+
+                        // Read dest pixel (BGRA)
+                        let dstB = CGFloat((texBase + texOffset).load(as: UInt8.self)) / 255.0
+                        let dstG = CGFloat((texBase + texOffset + 1).load(as: UInt8.self)) / 255.0
+                        let dstR = CGFloat((texBase + texOffset + 2).load(as: UInt8.self)) / 255.0
+                        let dstA = CGFloat((texBase + texOffset + 3).load(as: UInt8.self)) / 255.0
+
+                        // Alpha compositing (Porter-Duff over)
+                        let outA = srcA + dstA * (1 - srcA)
+                        let outR = (srcR * srcA + dstR * dstA * (1 - srcA)) / (outA + 0.0001)
+                        let outG = (srcG * srcA + dstG * dstA * (1 - srcA)) / (outA + 0.0001)
+                        let outB = (srcB * srcA + dstB * dstA * (1 - srcA)) / (outA + 0.0001)
+
+                        // Write back (BGRA)
+                        (texBase + texOffset).storeBytes(of: UInt8(outB * 255), as: UInt8.self)
+                        (texBase + texOffset + 1).storeBytes(of: UInt8(outG * 255), as: UInt8.self)
+                        (texBase + texOffset + 2).storeBytes(of: UInt8(outR * 255), as: UInt8.self)
+                        (texBase + texOffset + 3).storeBytes(of: UInt8(outA * 255), as: UInt8.self)
+                    }
+                }
+            }
+        }
+
+        // Write modified texture data back
+        texPixelData.withUnsafeBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: texWidth, height: texHeight, depth: 1)
+                ),
+                mipmapLevel: 0,
+                withBytes: baseAddress,
+                bytesPerRow: texBytesPerRow
+            )
+        }
+
+        print("✅ Image rendered successfully at position (\(x), \(y))")
+    }
 }
