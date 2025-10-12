@@ -284,28 +284,26 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            // Top right - Gallery button
-            if !isToolbarCollapsed {
-                VStack {
-                    HStack {
-                        Spacer()
-
-                        Button(action: { showGallery = true }) {
-                            Image(systemName: "photo.on.rectangle")
-                                .font(.system(size: 32))
-                                .foregroundColor(.accentColor)
-                                .frame(width: 50, height: 50)
-                                .background(Color(uiColor: .systemBackground).opacity(0.95))
-                                .clipShape(Circle())
-                                .shadow(radius: 4)
-                        }
-                        .padding(.top, 12)
-                        .padding(.trailing, 12)
-                    }
+            // Top right - Gallery button (always visible)
+            VStack {
+                HStack {
                     Spacer()
+
+                    Button(action: { showGallery = true }) {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 32))
+                            .foregroundColor(.accentColor)
+                            .frame(width: 50, height: 50)
+                            .background(Color(uiColor: .systemBackground).opacity(0.95))
+                            .clipShape(Circle())
+                            .shadow(radius: 4)
+                    }
+                    .padding(.top, 12)
+                    .padding(.trailing, 12)
                 }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                Spacer()
             }
+            .transition(.move(edge: .trailing).combined(with: .opacity))
 
             // Bottom right - Action buttons (collapses with toolbar)
             if !isToolbarCollapsed {
