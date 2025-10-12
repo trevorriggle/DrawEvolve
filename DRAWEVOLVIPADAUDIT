@@ -203,6 +203,22 @@ This stabilization cycle isn't a slowdown — it's the multiplier that makes eve
    - Files: FeedbackOverlay.swift:112-218, FloatingFeedbackPanel.swift:57
    - Details: Now uses iOS native markdown rendering (AttributedString) with proper formatting. Falls back to custom parser if needed. Applied to both FeedbackOverlay and FloatingFeedbackPanel.
 
+✅ P2 FIXES COMPLETED:
+
+1. **Selection tools** ✅ FIXED
+   - Status: RESOLVED
+   - Solution: Implemented complete selection tools with marching ants UI, pixel extraction, and touch-drag movement
+   - Commits: ce39e94, d2e006b, 5b7610c
+   - Details:
+     * Marching ants animation for both rectangle and lasso selections (DrawingCanvasView.swift:1020-1106)
+     * CPU-based pixel extraction with proper alpha masking (CanvasRenderer.swift:1107-1464)
+     * Touch-drag selection movement with real-time visual feedback (MetalCanvasView.swift:479-563)
+     * Point-in-polygon hit testing for lasso selections (MetalCanvasView.swift:962-983)
+     * Auto-commit on tool change to finalize moved pixels (DrawingCanvasView.swift:488-493)
+     * Delete selection capability with proper history tracking
+     * Selection Actions UI overlay for Cancel/Delete buttons (DrawingCanvasView.swift:192-247)
+   - Feature Complete: Rectangle select, lasso select, move, delete, with full undo/redo support
+
 🟨 P0 ISSUES REMAINING:
 
 1. **Canvas rotation distorts drawing** 🔴 NOT STARTED
@@ -227,16 +243,24 @@ This stabilization cycle isn't a slowdown — it's the multiplier that makes eve
 
 🟨 P2 ISSUES REMAINING:
 
-All P2 issues remain as documented in section 3️⃣.
+1. **Loading screen, app icon, name** 🟡 NOT STARTED
+   - Est. hours: 2–3
+
+2. **Critique history** 🟡 NOT STARTED
+   - Est. hours: 4–6
+
+3. **Auth?** 🟡 NOT STARTED
+   - Est. hours: TBD
 
 ⸻
 
 📊 PROGRESS SUMMARY:
 
-✅ Completed: 6 fixes (3 P0, 3 P1)
+✅ Completed: 7 fixes (3 P0, 3 P1, 1 P2)
 🔴 Remaining P0: 2 issues (~10h)
 🟡 Remaining P1: 3 issues (~7-8h)
-⏳ Total remaining critical path: ~17-18 hours
+🟡 Remaining P2: 3 issues (~6-9h + TBD)
+⏳ Total remaining critical path: ~17-18 hours for P0+P1
 
 Key achievements:
 - Gallery navigation fully functional
@@ -244,6 +268,7 @@ Key achievements:
 - Dark mode visual polish complete
 - Onboarding copy refined
 - Markdown rendering professional-grade
+- Selection tools fully operational (rectangle, lasso, move, delete)
 - Foundation stable for next development phase
 
 Next priorities:
