@@ -621,9 +621,29 @@ class CanvasStateManager: ObservableObject {
     let historyManager = HistoryManager()
     var renderer: CanvasRenderer?
     var screenSize: CGSize = .zero
+    var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 
     var isEmpty: Bool {
-        layers.allSatisfy { $0.texture == nil }
+        // Canvas is empty if:
+        // 1. All layers have nil textures, OR
+        // 2. All textures exist but have no history (never been drawn on)
+        // IMPORTANT: If we've loaded an existing drawing, we should NOT be empty
+        if layers.isEmpty {
+            return true
+        }
+
+        // If we've loaded an existing image, we're not empty
+        if hasLoadedExistingImage {
+            return false
+        }
+
+        // If there's any history, we have content
+        if historyManager.canUndo {
+            return false
+        }
+
+        // Check if all layers have nil or empty textures
+        return layers.allSatisfy { $0.texture == nil }
     }
 
     init() {
@@ -819,6 +839,10 @@ class CanvasStateManager: ObservableObject {
         }
 
         renderer.loadImage(image, into: texture)
+
+        // IMPORTANT: Mark that we've loaded an existing image so buttons enable
+        hasLoadedExistingImage = true
+        print("  - hasLoadedExistingImage set to true (buttons should now be enabled)")
 
         // Update thumbnail
         nonisolated(unsafe) let unsafeRenderer = renderer

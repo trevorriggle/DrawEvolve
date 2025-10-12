@@ -170,6 +170,10 @@ struct DrawingCard: View {
                     }
                     .frame(height: 200)
                     .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.black, lineWidth: 2)
+                    )
                 } else {
                     Rectangle()
                         .fill(Color.secondary.opacity(0.2))
