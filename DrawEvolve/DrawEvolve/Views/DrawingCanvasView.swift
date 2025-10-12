@@ -182,11 +182,9 @@ struct DrawingCanvasView: View {
                             }
                             .disabled(!canvasState.historyManager.canRedo)
 
-                            // Gallery button (hide if editing existing drawing to avoid nested navigation)
-                            if existingDrawing == nil {
-                                ToolButton(icon: "photo.on.rectangle", isSelected: false) {
-                                    showGallery = true
-                                }
+                            // Gallery button
+                            ToolButton(icon: "photo.on.rectangle", isSelected: false) {
+                                showGallery = true
                             }
                         }
                         .padding(.top, 12)
@@ -286,8 +284,8 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            // Top right - Gallery button (hide if editing existing drawing to avoid nested navigation)
-            if !isToolbarCollapsed && existingDrawing == nil {
+            // Top right - Gallery button
+            if !isToolbarCollapsed {
                 VStack {
                     HStack {
                         Spacer()
