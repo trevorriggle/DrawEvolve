@@ -60,6 +60,17 @@ struct DrawingCanvasView: View {
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
 
+            // Marching ants selection overlay
+            if let selection = canvasState.activeSelection {
+                MarchingAntsRectangle(rect: selection)
+                    .allowsHitTesting(false)
+            }
+
+            if let path = canvasState.selectionPath {
+                MarchingAntsPath(path: path)
+                    .allowsHitTesting(false)
+            }
+
             // Floating toolbar overlay (top layer, left side)
             VStack(alignment: .leading, spacing: 0) {
                 if !isToolbarCollapsed {
@@ -615,6 +626,11 @@ class CanvasStateManager: ObservableObject {
     @Published var errorMessage = ""
     @Published var activeSelection: CGRect? = nil // Active selection rectangle
     @Published var selectionPath: [CGPoint]? = nil // For lasso selection
+    @Published var selectionOffset: CGPoint = .zero // Offset for moving selection
+
+    // Selection pixel data (extracted when selection is made)
+    var selectionPixels: UIImage? = nil
+    var selectionOriginalRect: CGRect? = nil // Original position before moving
 
     let historyManager = HistoryManager()
     var renderer: CanvasRenderer?
@@ -933,6 +949,208 @@ class CanvasStateManager: ObservableObject {
 
         // Clear selection after deleting
         clearSelection()
+    }
+
+    /// Extract pixels from the selection and store them for moving
+    func extractSelectionPixels() {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer else {
+            print("ERROR: Cannot extract selection - invalid layer or texture")
+            return
+        }
+
+        if let rect = activeSelection {
+            // Extract pixels from rectangular selection
+            selectionPixels = renderer.extractPixels(from: rect, in: texture, screenSize: screenSize)
+            selectionOriginalRect = rect
+            selectionOffset = .zero
+            print("✂️ Extracted rectangular selection: \(rect)")
+        } else if let path = selectionPath {
+            // For lasso, find bounding box and extract with mask
+            let boundingRect = calculateBoundingRect(for: path)
+            selectionPixels = renderer.extractPixels(fromPath: path, in: texture, screenSize: screenSize)
+            selectionOriginalRect = boundingRect
+            selectionOffset = .zero
+            print("✂️ Extracted lasso selection, bounding rect: \(boundingRect)")
+        }
+    }
+
+    /// Commit the moved selection back to the texture
+    func commitSelection() {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer,
+              let pixels = selectionPixels,
+              let originalRect = selectionOriginalRect else {
+            print("ERROR: Cannot commit selection - missing data")
+            return
+        }
+
+        // Capture before snapshot
+        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
+        // Clear the original position (if selection moved)
+        if selectionOffset != .zero {
+            if let rect = activeSelection {
+                renderer.clearRect(originalRect, in: texture, screenSize: screenSize)
+            } else if let path = selectionPath {
+                renderer.clearPath(path, in: texture, screenSize: screenSize)
+            }
+        }
+
+        // Render pixels at new position
+        let newRect = CGRect(
+            x: originalRect.origin.x + selectionOffset.x,
+            y: originalRect.origin.y + selectionOffset.y,
+            width: originalRect.width,
+            height: originalRect.height
+        )
+        renderer.renderImage(pixels, at: newRect, to: texture, screenSize: screenSize)
+
+        // Capture after snapshot
+        let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+        // Record in history
+        if let before = beforeSnapshot, let after = afterSnapshot {
+            let layerId = layers[selectedLayerIndex].id
+            historyManager.record(.stroke(
+                layerId: layerId,
+                beforeSnapshot: before,
+                afterSnapshot: after
+            ))
+        }
+
+        // Update thumbnail
+        let currentLayerIndex = selectedLayerIndex
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+
+        // Clear selection data
+        selectionPixels = nil
+        selectionOriginalRect = nil
+        selectionOffset = .zero
+        clearSelection()
+        print("✅ Selection committed to texture")
+    }
+
+    /// Calculate bounding rectangle for a path
+    private func calculateBoundingRect(for path: [CGPoint]) -> CGRect {
+        guard !path.isEmpty else { return .zero }
+
+        var minX = path[0].x
+        var minY = path[0].y
+        var maxX = path[0].x
+        var maxY = path[0].y
+
+        for point in path {
+            minX = min(minX, point.x)
+            minY = min(minY, point.y)
+            maxX = max(maxX, point.x)
+            maxY = max(maxY, point.y)
+        }
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+}
+
+// MARK: - Marching Ants Selection Views
+
+/// Animated marching ants border for rectangular selections
+struct MarchingAntsRectangle: View {
+    let rect: CGRect
+    @State private var dashPhase: CGFloat = 0
+
+    var body: some View {
+        Rectangle()
+            .path(in: rect)
+            .stroke(style: StrokeStyle(
+                lineWidth: 2,
+                lineCap: .round,
+                lineJoin: .round,
+                dash: [8, 4],
+                dashPhase: dashPhase
+            ))
+            .foregroundColor(.white)
+            .overlay(
+                Rectangle()
+                    .path(in: rect)
+                    .stroke(style: StrokeStyle(
+                        lineWidth: 2,
+                        lineCap: .round,
+                        lineJoin: .round,
+                        dash: [8, 4],
+                        dashPhase: dashPhase - 6 // Offset for double-line effect
+                    ))
+                    .foregroundColor(.black)
+            )
+            .onAppear {
+                withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                    dashPhase = -12 // Full cycle of dash pattern
+                }
+            }
+    }
+}
+
+/// Animated marching ants border for lasso/path selections
+struct MarchingAntsPath: View {
+    let path: [CGPoint]
+    @State private var dashPhase: CGFloat = 0
+
+    var body: some View {
+        Path { p in
+            guard !path.isEmpty else { return }
+            p.move(to: path[0])
+            for point in path.dropFirst() {
+                p.addLine(to: point)
+            }
+            // Close the path
+            if let first = path.first {
+                p.addLine(to: first)
+            }
+        }
+        .stroke(style: StrokeStyle(
+            lineWidth: 2,
+            lineCap: .round,
+            lineJoin: .round,
+            dash: [8, 4],
+            dashPhase: dashPhase
+        ))
+        .foregroundColor(.white)
+        .overlay(
+            Path { p in
+                guard !path.isEmpty else { return }
+                p.move(to: path[0])
+                for point in path.dropFirst() {
+                    p.addLine(to: point)
+                }
+                if let first = path.first {
+                    p.addLine(to: first)
+                }
+            }
+            .stroke(style: StrokeStyle(
+                lineWidth: 2,
+                lineCap: .round,
+                lineJoin: .round,
+                dash: [8, 4],
+                dashPhase: dashPhase - 6
+            ))
+            .foregroundColor(.black)
+        )
+        .onAppear {
+            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                dashPhase = -12
+            }
+        }
     }
 }
 
