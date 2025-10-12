@@ -475,14 +475,19 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Check if we're touching inside an existing selection (for any tool)
-            if let canvasState = canvasState,
-               isPointInSelection(location),
-               canvasState.selectionPixels != nil {
-                // Start dragging the selection
-                isDraggingSelection = true
-                selectionDragStart = location
-                print("Started dragging selection at \(location)")
-                return
+            if let canvasState = canvasState {
+                let shouldStartDragging = MainActor.assumeIsolated {
+                    guard canvasState.selectionPixels != nil else { return false }
+                    return isPointInSelection(location)
+                }
+
+                if shouldStartDragging {
+                    // Start dragging the selection
+                    isDraggingSelection = true
+                    selectionDragStart = location
+                    print("Started dragging selection at \(location)")
+                    return
+                }
             }
 
             // Handle selection tools (rectangleSelect, lasso)
