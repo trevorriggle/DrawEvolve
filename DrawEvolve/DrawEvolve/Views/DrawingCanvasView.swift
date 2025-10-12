@@ -467,20 +467,32 @@ struct DrawingCanvasView: View {
     }
 
     private func loadExistingDrawing() {
-        guard let drawing = existingDrawing else { return }
+        guard let drawing = existingDrawing else {
+            print("DrawingCanvasView: No existing drawing to load")
+            return
+        }
 
         // Load the drawing state
         isEditingExisting = true
         currentDrawingID = drawing.id
         drawingTitle = drawing.title
 
+        print("DrawingCanvasView: Loading existing drawing")
+        print("  - Drawing ID: \(drawing.id)")
+        print("  - Title: \(drawing.title)")
+        print("  - Image data size: \(drawing.imageData.count) bytes")
+
         // Load feedback if exists
         if let feedback = drawing.feedback {
             canvasState.feedback = feedback
+            print("  - Has feedback: YES")
+        } else {
+            print("  - Has feedback: NO")
         }
 
         // Load the image onto the canvas - delay until renderer is ready
         if let uiImage = UIImage(data: drawing.imageData) {
+            print("  - UIImage created successfully: \(uiImage.size)")
             // Retry loading until renderer is initialized
             Task {
                 var attempts = 0
@@ -492,30 +504,43 @@ struct DrawingCanvasView: View {
                 await MainActor.run {
                     if canvasState.renderer != nil {
                         canvasState.loadImage(uiImage)
-                        print("Successfully loaded existing drawing image")
+                        print("✅ Successfully loaded existing drawing image onto canvas")
                     } else {
-                        print("ERROR: Failed to load drawing - renderer not initialized")
+                        print("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
                     }
                 }
             }
+        } else {
+            print("❌ ERROR: Failed to create UIImage from drawing data")
         }
     }
 
     private func saveDrawing() async {
-        guard !drawingTitle.isEmpty else { return }
+        guard !drawingTitle.isEmpty else {
+            print("❌ Save cancelled: Title is empty")
+            return
+        }
 
         isSaving = true
 
+        print("💾 Saving drawing...")
+        print("  - Title: \(drawingTitle)")
+        print("  - Current Drawing ID: \(currentDrawingID?.uuidString ?? "nil (new drawing)")")
+        print("  - Is editing existing: \(isEditingExisting)")
+
         guard let image = canvasState.exportImage(),
               let imageData = image.pngData() else {
-            print("ERROR: Failed to export image")
+            print("❌ ERROR: Failed to export image")
             isSaving = false
             return
         }
 
+        print("  - Image exported: \(imageData.count) bytes")
+
         do {
             if let drawingID = currentDrawingID {
                 // Update existing drawing
+                print("  - Updating existing drawing with ID: \(drawingID)")
                 try await storageManager.updateDrawing(
                     id: drawingID,
                     title: drawingTitle,
@@ -523,20 +548,24 @@ struct DrawingCanvasView: View {
                     feedback: canvasState.feedback,
                     context: context
                 )
-                print("Drawing updated successfully!")
+                print("✅ Drawing updated successfully!")
             } else {
                 // Create new drawing
+                print("  - Creating new drawing")
                 let savedDrawing = try await storageManager.saveDrawing(
                     title: drawingTitle,
                     imageData: imageData,
                     feedback: canvasState.feedback,
                     context: context
                 )
-                print("Drawing saved successfully with ID: \(savedDrawing.id)")
-                drawingTitle = "" // Reset for next save
+                // IMPORTANT: Set the currentDrawingID so subsequent saves update instead of creating new
+                currentDrawingID = savedDrawing.id
+                isEditingExisting = true
+                print("✅ Drawing saved successfully with ID: \(savedDrawing.id)")
+                print("  - Future saves will UPDATE this drawing, not create new ones")
             }
         } catch {
-            print("ERROR: Failed to save drawing: \(error)")
+            print("❌ ERROR: Failed to save drawing: \(error)")
         }
 
         isSaving = false

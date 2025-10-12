@@ -75,13 +75,17 @@ class DrawingStorageManager: ObservableObject {
             context: context
         )
 
+        print("DrawingStorageManager: Saving new drawing '\(title)'")
+
         // Save to file system
         let fileURL = drawingsDirectory.appendingPathComponent("\(newDrawing.id.uuidString).json")
         let data = try JSONEncoder().encode(newDrawing)
         try data.write(to: fileURL)
+        print("  - Saved to file: \(fileURL.lastPathComponent)")
 
-        // Add to memory array
+        // Add to memory array (insert at beginning for newest-first)
         drawings.insert(newDrawing, at: 0)
+        print("  - Added to in-memory array (now \(drawings.count) drawings)")
 
         return newDrawing
     }
@@ -94,18 +98,26 @@ class DrawingStorageManager: ObservableObject {
 
         defer { isLoading = false }
 
+        print("DrawingStorageManager: Updating drawing \(id)")
+
         if let index = drawings.firstIndex(where: { $0.id == id }) {
+            let oldTitle = drawings[index].title
+
             if let title = title {
                 drawings[index].title = title
+                print("  - Title: '\(oldTitle)' → '\(title)'")
             }
             if let imageData = imageData {
+                print("  - Updated image data: \(imageData.count) bytes")
                 drawings[index].imageData = imageData
             }
             if let feedback = feedback {
                 drawings[index].feedback = feedback
+                print("  - Updated feedback")
             }
             if let context = context {
                 drawings[index].context = context
+                print("  - Updated context")
             }
             drawings[index].updatedAt = Date()
 
@@ -113,6 +125,10 @@ class DrawingStorageManager: ObservableObject {
             let fileURL = drawingsDirectory.appendingPathComponent("\(id.uuidString).json")
             let data = try JSONEncoder().encode(drawings[index])
             try data.write(to: fileURL)
+            print("  - Saved to file: \(fileURL.lastPathComponent)")
+            print("✅ Drawing update complete")
+        } else {
+            print("❌ ERROR: Drawing with ID \(id) not found in memory")
         }
     }
 

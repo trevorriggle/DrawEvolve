@@ -161,12 +161,15 @@ struct DrawingCard: View {
             // Drawing thumbnail
             ZStack(alignment: .topTrailing) {
                 if let uiImage = UIImage(data: drawing.imageData) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(height: 200)
-                        .clipped()
-                        .cornerRadius(12)
+                    GeometryReader { geometry in
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: geometry.size.width, height: 200)
+                            .clipped()
+                    }
+                    .frame(height: 200)
+                    .cornerRadius(12)
                 } else {
                     Rectangle()
                         .fill(Color.secondary.opacity(0.2))
