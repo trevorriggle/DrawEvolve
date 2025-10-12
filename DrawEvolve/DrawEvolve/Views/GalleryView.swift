@@ -9,6 +9,7 @@ import SwiftUI
 
 struct GalleryView: View {
     @ObservedObject private var storageManager = DrawingStorageManager.shared
+    @Environment(\.dismiss) private var dismiss
 
     @State private var showNewDrawing = false
     @State private var showPromptFirst = false
@@ -47,11 +48,8 @@ struct GalleryView: View {
                 }
 
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: {
-                        // User settings placeholder
-                    }) {
-                        Image(systemName: "person.circle")
-                            .font(.title2)
+                    Button("Close") {
+                        dismiss()
                     }
                 }
             }

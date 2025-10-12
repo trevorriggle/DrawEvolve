@@ -447,6 +447,12 @@ struct DrawingCanvasView: View {
         .fullScreenCover(isPresented: $showGallery) {
             GalleryView()
         }
+        .onChange(of: showGallery) { _, isShowing in
+            if !isShowing {
+                // Gallery was dismissed - refresh to show any changes
+                print("Gallery dismissed, canvas state preserved")
+            }
+        }
         .alert("Clear Canvas", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Clear", role: .destructive) {

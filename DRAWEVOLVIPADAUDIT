@@ -1,0 +1,157 @@
+📘 DrawEvolve iPad Foundation Audit + Stabilization Plan (v1)
+
+Author
+
+Trevor Riggle (RIG Tech) — October 2025
+
+⸻
+
+1️⃣ Project Context
+
+DrawEvolve is an iOS-first AI-assisted drawing app built with Next.js (for backend web) and native SwiftUI/Metal for iPad. Its mission: help artists evolve their technique through personalized, non-judgmental feedback while keeping the human act of drawing first.
+
+This audit follows the first live iPad build, where on-device canvas testing exposed early structural and UX-level bugs.
+
+Goal: stabilize foundation before adding advanced features (social, critique history, user feeds, etc.).
+
+2️⃣ Full Bug & Issue List (Transcribed)
+
+From handwritten notes:
+
+- Need landing screen, loads too fast → “DrawEvolve Continue”
+- Dark mode? Toggle?
+- Onboarding — use “personalized,” not “AI”
+- Canvas setup — when horizontal, 2×2 input fields
+- Dark mode: gallery thumbnails need white bg
+- Re-entering drawing: can’t save (overwrite) or get AI feedback
+- Need dark/light mode logo variants
+- Gallery can be broken when creating new art or revisiting drawings
+- Need loading, app icon, app name
+- Brush strokes get thicker when release
+- Feedback markdown rendering
+- Canvas: no zoom
+- Canvas rotation distorts drawing
+- Finish selection tools
+- Critique history (Pencil UI + timestamp)
+- Gallery traps you (can’t get back to drawing; redundant profile icon)
+- Auth?
+
+3️⃣ Priority Breakdown
+Priority	Type	Task	Est. Hours	Description
+🟥 P0	Core Bug	Gallery trap / return-to-drawing failure	3–4	Router/state machine refactor
+🟥 P0	Core Bug	Re-enter drawing can’t save/overwrite	4	Autosave, versioned bundle
+🟥 P0	Core UX	Canvas rotation distorts drawing	5–6	Maintain doc-space coordinates
+🟥 P0	Core UX	No zoom	4–5	Add pinch/scroll gesture layer
+🟥 P0	Core System	Gallery breaks on new/revisit	3–4	Async transactional writes
+🟧 P1	UX	Landing screen loads too fast	2	Add skeleton + “Continue”
+🟧 P1	Brush	Brush thickens on release	3	Clamp width post-smoothing
+🟧 P1	UI	Dark mode toggle + logo variants	2–3	Asset swap, system preference
+🟧 P1	UI	Dark mode thumbnails need bg	1	Style fix
+🟧 P1	Feedback	Markdown rendering	2	AttributedString(markdown:)
+🟧 P1	Copy	Onboarding tone (“personalized”)	1	UX copy edit
+🟨 P2	UI	Loading screen, app icon, name	2–3	Launch storyboard pass
+🟨 P2	Feature	Critique history	4–6	Log + UI
+🟨 P2	Feature	Selection tools	5–8	Implement or hide
+🟨 P2	System	Auth?	TBD	Sign in w/ Apple or guest mode
+
+Totals:
+	•	P0: ~25h
+	•	P1: ~12h
+	•	P2: ~14h
+→ ~1 focused week of stabilization for TestFlight readiness.
+
+⸻
+
+4️⃣ Potential Foundational Risks
+
+A. Navigation & State Machine
+	•	Smell: Multiple sources of truth (e.g., view controller state vs. app state).
+	•	Fix: Create one reducer-style state machine:
+
+enum Mode { case gallery, editor, feedback }
+struct AppState { var mode: Mode; var currentDocId: UUID? }
+
+B. Document Lifecycle
+	•	Smell: Re-entering drawing doesn’t save properly.
+	•	Fix: Treat each drawing as a .drawevolve bundle containing JSON model, preview PNG, critique log. Autosave on brush lift + background.
+
+C. Coordinate System / Transform
+	•	Smell: Rotation distorts strokes.
+	•	Fix: Store all strokes in document coordinates; view layer only applies a single transform matrix.
+
+D. Input Pipeline
+	•	Smell: Stroke width changes on touchesEnded.
+	•	Fix: Freeze width at last coalesced Pencil sample. End event closes geometry only.
+
+E. Async Persistence
+	•	Smell: Gallery breaks when creating or revisiting docs.
+	•	Fix: Make doc writes atomic: only show gallery updates after save completes.
+
+⸻
+
+5️⃣ Key Invariants to Lock Down
+	1.	Single source of truth:
+Only one AppState controls navigation and document IDs.
+	2.	Document-space consistency:
+Strokes, layers, selections live in doc coordinates — never view coordinates.
+	3.	Transactional persistence:
+Every create/open/save action is atomic and returns the same doc version.
+	4.	Input determinism:
+Pencil input pipeline = samples → smooth → width → mesh. End events never modify stroke data.
+	5.	Autosave & recovery:
+Always recoverable without user intervention. App kill → relaunch = doc restored.
+
+⸻
+
+6️⃣ Diagnostic Checklist
+
+✅ State audit — ensure only one currentDocId
+✅ Transform audit — doc-space invariants hold during zoom/rotation
+✅ Autosave probe — kill app mid-stroke, relaunch
+✅ Concurrency probe — hammer create/open cycles
+✅ End-event check — log width stability
+
+⸻
+
+7️⃣ Stabilization Sprint Plan (5 Days)
+
+Day 1–2:
+	•	Router refactor
+	•	Document lifecycle
+	•	Autosave & preview versioning
+
+Day 3:
+	•	Transform matrix cleanup
+	•	Zoom & rotation fix
+
+Day 4:
+	•	Brush width finalization
+	•	Dark/light UI assets
+	•	Loading skeleton
+
+Day 5:
+	•	Markdown renderer
+	•	Copy polish
+	•	Hide unfinished tools
+	•	Smoke test → TestFlight build
+
+⸻
+
+8️⃣ Next Milestone: Post-Stabilization
+
+Once this sprint passes:
+	•	Introduce Accounts (guest → Apple Sign-In)
+	•	Critique History Log
+	•	Layer System QA
+	•	AI Coach Iteration (Feedback Engine v2)
+	•	Social Features (Phase II) — only when doc model + sync are bulletproof.
+
+⸻
+
+9️⃣ Mindset Recap
+
+You caught the perfect inflection point:
+
+“From functional prototype to reliable app.”
+
+This stabilization cycle isn’t a slowdown — it’s the multiplier that makes every next feature safe, testable, and scalable.
