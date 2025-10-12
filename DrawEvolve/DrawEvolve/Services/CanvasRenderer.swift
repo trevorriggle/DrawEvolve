@@ -158,9 +158,13 @@ class CanvasRenderer: NSObject {
     /// Render a brush stroke to a texture
     /// Stroke coordinates are in screen space, need to be scaled to texture space
     func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture, screenSize: CGSize) {
-        print("CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
+        print("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
+        print("  Texture ID: \(ObjectIdentifier(texture))")
         print("  Screen size: \(screenSize.width)x\(screenSize.height)")
         print("  Texture size: \(texture.width)x\(texture.height)")
+        print("  Tool: \(stroke.tool)")
+        print("  Brush color: \(stroke.settings.color)")
+        print("  Brush size: \(stroke.settings.size)")
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             print("CanvasRenderer: Failed to create command buffer")
@@ -796,6 +800,10 @@ class CanvasRenderer: NSObject {
     /// Load a UIImage into a texture (for editing existing drawings)
     func loadImage(_ image: UIImage, into texture: MTLTexture) {
         print("CanvasRenderer: Loading image into texture")
+        print("  Texture ID: \(ObjectIdentifier(texture))")
+        print("  Texture size: \(texture.width)x\(texture.height)")
+        print("  Texture usage: \(texture.usage.rawValue)")
+        print("  Texture storage mode: \(texture.storageMode.rawValue)")
 
         guard let cgImage = image.cgImage else {
             print("ERROR: Failed to get CGImage from UIImage")
@@ -846,7 +854,14 @@ class CanvasRenderer: NSObject {
             bytesPerRow: bytesPerRow
         )
 
-        print("Image loaded successfully into texture")
+        print("✅ Image loaded successfully into texture")
+        print("  First 4 pixels (BGRA): ", terminator: "")
+        data.withMemoryRebound(to: UInt8.self, capacity: 16) { ptr in
+            for i in 0..<16 {
+                print("\(ptr[i])", terminator: i % 4 == 3 ? " " : ",")
+            }
+        }
+        print()
     }
 
     // MARK: - Blur/Sharpen Effects

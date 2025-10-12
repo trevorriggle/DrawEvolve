@@ -222,7 +222,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // Touch handling for drawing
         func touchesBegan(_ touches: Set<UITouch>, in view: MTKView) {
-            print("=== TOUCH BEGAN ===")
+            print("👆 === TOUCH BEGAN ===")
             guard let touch = touches.first else {
                 print("ERROR: No touch in set")
                 return
@@ -237,7 +237,14 @@ struct MetalCanvasView: UIViewRepresentable {
 
             print("Touch began at \(location) with pressure \(pressure), tool: \(currentTool)")
             print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
-            print("Layer has texture: \(layers[safe: selectedLayerIndex]?.texture != nil)")
+            if let layer = layers[safe: selectedLayerIndex] {
+                print("Layer has texture: \(layer.texture != nil)")
+                if let texture = layer.texture {
+                    print("  Texture ID: \(ObjectIdentifier(texture))")
+                }
+            } else {
+                print("ERROR: Invalid layer index!")
+            }
 
             // Handle text tool - show text input dialog
             if currentTool == .text {
