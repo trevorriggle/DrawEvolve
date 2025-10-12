@@ -28,7 +28,7 @@ struct GalleryView: View {
     ]
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 if storageManager.isLoading && storageManager.drawings.isEmpty {
                     ProgressView("Loading your drawings...")

@@ -21,7 +21,7 @@ struct DrawingDetailView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 0) {
                 // Scrollable content area
                 ScrollView {
