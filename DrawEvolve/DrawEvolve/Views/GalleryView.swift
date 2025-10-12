@@ -19,6 +19,9 @@ struct GalleryView: View {
     @State private var drawingContext = DrawingContext()
     @State private var canvasID = UUID() // Force new canvas instance
 
+    // Debug: Clear all drawings
+    @State private var showClearAllAlert = false
+
     let columns = [
         GridItem(.flexible(), spacing: 16),
         GridItem(.flexible(), spacing: 16)
@@ -52,6 +55,18 @@ struct GalleryView: View {
                         dismiss()
                     }
                 }
+
+                // DEBUG ONLY: Clear all drawings button
+                #if DEBUG
+                ToolbarItem(placement: .bottomBar) {
+                    Button(action: {
+                        showClearAllAlert = true
+                    }) {
+                        Label("Clear All", systemImage: "trash.fill")
+                            .foregroundColor(.red)
+                    }
+                }
+                #endif
             }
             .task {
                 await storageManager.fetchDrawings()
@@ -87,6 +102,16 @@ struct GalleryView: View {
                 }
             } message: { drawing in
                 Text("Are you sure you want to delete '\(drawing.title)'?")
+            }
+            .alert("Clear All Drawings", isPresented: $showClearAllAlert) {
+                Button("Cancel", role: .cancel) {}
+                Button("Clear All", role: .destructive) {
+                    Task {
+                        try? await storageManager.clearAllDrawings()
+                    }
+                }
+            } message: {
+                Text("This will permanently delete ALL drawings. This cannot be undone.")
             }
         }
     }

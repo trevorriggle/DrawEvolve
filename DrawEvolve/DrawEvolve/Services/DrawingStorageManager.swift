@@ -147,6 +147,28 @@ class DrawingStorageManager: ObservableObject {
         // Remove from memory
         drawings.removeAll { $0.id == id }
     }
+
+    // MARK: - Debug: Clear All Drawings
+
+    func clearAllDrawings() async throws {
+        isLoading = true
+        errorMessage = nil
+
+        defer { isLoading = false }
+
+        print("🗑️ DEBUG: Clearing all drawings...")
+
+        // Delete all files in drawings directory
+        let fileURLs = try fileManager.contentsOfDirectory(at: drawingsDirectory, includingPropertiesForKeys: nil)
+        for fileURL in fileURLs where fileURL.pathExtension == "json" {
+            try fileManager.removeItem(at: fileURL)
+            print("  - Deleted: \(fileURL.lastPathComponent)")
+        }
+
+        // Clear memory
+        drawings.removeAll()
+        print("✅ All drawings cleared")
+    }
 }
 
 // MARK: - Errors
