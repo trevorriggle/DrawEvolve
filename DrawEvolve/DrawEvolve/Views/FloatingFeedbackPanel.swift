@@ -54,8 +54,7 @@ struct FloatingFeedbackPanel: View {
 
                         // Feedback content
                         ScrollView {
-                            Text(feedbackText)
-                                .font(.body)
+                            FormattedMarkdownView(text: feedbackText)
                                 .padding()
                                 .textSelection(.enabled)
                         }

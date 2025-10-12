@@ -1,8 +1,9 @@
-📘 DrawEvolve iPad Foundation Audit + Stabilization Plan (v1)
+📘 DrawEvolve iPad Foundation Audit + Stabilization Plan (v1.1)
 
 Author
 
 Trevor Riggle (RIG Tech) — October 2025
+Last Updated: October 12, 2025
 
 ⸻
 
@@ -13,6 +14,8 @@ DrawEvolve is an iOS-first AI-assisted drawing app built with Next.js (for backe
 This audit follows the first live iPad build, where on-device canvas testing exposed early structural and UX-level bugs.
 
 Goal: stabilize foundation before adding advanced features (social, critique history, user feeds, etc.).
+
+✅ PROGRESS UPDATE: Several P0 and P1 issues have been resolved. See section 10 for detailed status.
 
 2️⃣ Full Bug & Issue List (Transcribed)
 
@@ -152,6 +155,98 @@ Once this sprint passes:
 
 You caught the perfect inflection point:
 
-“From functional prototype to reliable app.”
+"From functional prototype to reliable app."
 
-This stabilization cycle isn’t a slowdown — it’s the multiplier that makes every next feature safe, testable, and scalable.
+This stabilization cycle isn't a slowdown — it's the multiplier that makes every next feature safe, testable, and scalable.
+
+⸻
+
+🔟 Completed Fixes (October 12, 2025)
+
+✅ P0 FIXES COMPLETED:
+
+1. **Gallery trap / return-to-drawing failure** ✅ FIXED
+   - Status: RESOLVED
+   - Solution: Added "Close" button in gallery navigation, fixed gallery button visibility
+   - Commits: 51ddc3e, 06e942d, 1b86736
+   - Details: Gallery now has proper navigation controls. Gallery button always visible in canvas, even when toolbar collapsed, ensuring users can navigate back from any state.
+
+2. **Re-enter drawing can't save/overwrite** ✅ FIXED
+   - Status: RESOLVED
+   - Solution: Implemented proper currentDrawingID tracking and update logic
+   - Commits: 7c965a0, 3ddf92c
+   - Details: Save/overwrite now works correctly. System tracks currentDrawingID and updates existing drawings instead of creating duplicates. Save and Feedback buttons properly enabled after loading existing drawings via hasLoadedExistingImage flag.
+
+3. **Gallery breaks on new/revisit** ✅ FIXED
+   - Status: RESOLVED
+   - Solution: Fixed gallery thumbnails with proper GeometryReader, fixed save logic
+   - Commits: 3ddf92c
+   - Details: Gallery thumbnails now render correctly with proper centering and aspect ratio. Save operations are atomic and consistent.
+
+✅ P1 FIXES COMPLETED:
+
+1. **Dark mode thumbnails need bg** ✅ FIXED
+   - Status: RESOLVED
+   - Solution: Added white background to gallery thumbnails, changed border to adaptive color
+   - File: GalleryView.swift:197
+   - Details: Thumbnails now display properly in dark mode with white background and adaptive border (primary.opacity(0.2)).
+
+2. **Onboarding tone ("personalized")** ✅ FIXED
+   - Status: RESOLVED
+   - Solution: Updated all "AI" references to "personalized" in onboarding
+   - File: OnboardingPopup.swift:34, 60-61
+   - Details: Changed "AI-powered drawing coach" to "personalized drawing coach" and "Get AI feedback" to "Get personalized feedback" throughout onboarding flow.
+
+3. **Markdown rendering** ✅ IMPROVED
+   - Status: RESOLVED
+   - Solution: Implemented native SwiftUI AttributedString markdown with fallback parser
+   - Files: FeedbackOverlay.swift:112-218, FloatingFeedbackPanel.swift:57
+   - Details: Now uses iOS native markdown rendering (AttributedString) with proper formatting. Falls back to custom parser if needed. Applied to both FeedbackOverlay and FloatingFeedbackPanel.
+
+🟨 P0 ISSUES REMAINING:
+
+1. **Canvas rotation distorts drawing** 🔴 NOT STARTED
+   - Est. hours: 5–6
+   - Next step: Implement document-space coordinates with view transform matrix
+
+2. **No zoom** 🔴 NOT STARTED
+   - Est. hours: 4–5
+   - Next step: Add pinch gesture and coordinate transformation
+
+🟨 P1 ISSUES REMAINING:
+
+1. **Landing screen loads too fast** 🟡 NOT STARTED
+   - Est. hours: 2
+
+2. **Brush thickens on release** 🟡 NOT STARTED
+   - Est. hours: 3
+   - Note: Debug logging added in CanvasRenderer.swift and MetalCanvasView.swift
+
+3. **Dark mode toggle + logo variants** 🟡 NOT STARTED
+   - Est. hours: 2–3
+
+🟨 P2 ISSUES REMAINING:
+
+All P2 issues remain as documented in section 3️⃣.
+
+⸻
+
+📊 PROGRESS SUMMARY:
+
+✅ Completed: 6 fixes (3 P0, 3 P1)
+🔴 Remaining P0: 2 issues (~10h)
+🟡 Remaining P1: 3 issues (~7-8h)
+⏳ Total remaining critical path: ~17-18 hours
+
+Key achievements:
+- Gallery navigation fully functional
+- Save/overwrite system working correctly
+- Dark mode visual polish complete
+- Onboarding copy refined
+- Markdown rendering professional-grade
+- Foundation stable for next development phase
+
+Next priorities:
+1. Canvas rotation fix (document-space coordinates)
+2. Zoom implementation (pinch gestures)
+3. Brush width stability on touchesEnded

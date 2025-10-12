@@ -109,21 +109,38 @@ struct FeedbackOverlay: View {
     }
 }
 
-// Custom markdown view with proper styling
+// Custom markdown view with proper styling using native SwiftUI markdown support
 struct FormattedMarkdownView: View {
     let text: String
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let attributedString = try? AttributedString(markdown: text, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                // Use native markdown rendering with custom styling
+                Text(attributedString)
+                    .font(.body)
+                    .foregroundColor(.primary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                // Fallback to custom parser if native markdown fails
+                customMarkdownView
+            }
+        }
+    }
+
+    // Fallback custom markdown renderer
+    private var customMarkdownView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Parse markdown and render with custom styling
             ForEach(parseSections(text), id: \.title) { section in
                 VStack(alignment: .leading, spacing: 8) {
                     // Section header (big and bold)
                     if !section.title.isEmpty {
                         Text(section.title)
-                            .font(.title2)
+                            .font(.title3)
                             .fontWeight(.bold)
                             .foregroundColor(.primary)
+                            .padding(.top, 4)
                     }
 
                     // Section content
@@ -153,7 +170,7 @@ struct FormattedMarkdownView: View {
         }
     }
 
-    // Parse markdown into sections
+    // Parse markdown into sections (fallback)
     func parseSections(_ markdown: String) -> [(title: String, items: [String])] {
         var sections: [(title: String, items: [String])] = []
         var currentTitle = ""

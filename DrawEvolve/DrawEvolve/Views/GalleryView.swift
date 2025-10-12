@@ -194,10 +194,11 @@ struct DrawingCard: View {
                             .clipped()
                     }
                     .frame(height: 200)
+                    .background(Color.white) // White background for dark mode
                     .cornerRadius(12)
                     .overlay(
                         RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.black, lineWidth: 2)
+                            .stroke(Color.primary.opacity(0.2), lineWidth: 2)
                     )
                 } else {
                     Rectangle()

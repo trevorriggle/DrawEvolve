@@ -31,7 +31,7 @@ struct OnboardingPopup: View {
                         .font(.title2)
                         .fontWeight(.bold)
 
-                    Text("Your AI-powered drawing coach")
+                    Text("Your personalized drawing coach")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -57,8 +57,8 @@ struct OnboardingPopup: View {
 
                     OnboardingStep(
                         icon: "sparkles",
-                        title: "Get AI feedback",
-                        description: "Receive personalized, encouraging feedback to improve your skills"
+                        title: "Get personalized feedback",
+                        description: "Receive encouraging, tailored guidance to improve your skills"
                     )
                 }
                 .padding(.horizontal)
