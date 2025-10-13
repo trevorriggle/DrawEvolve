@@ -43,7 +43,7 @@ struct DrawingCanvasView: View {
     @State private var showClearConfirmation = false
 
     // Dark mode toggle
-    @AppStorage("userPreferredColorScheme") private var userPreferredColorScheme: String = "system"
+    @AppStorage("userPreferredColorScheme") private var userPreferredColorScheme: String = "light"
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -205,7 +205,7 @@ struct DrawingCanvasView: View {
                                 icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
                                 isSelected: false
                             ) {
-                                cycleColorScheme()
+                                toggleColorScheme()
                             }
 
                             // Undo/Redo
@@ -515,21 +515,13 @@ struct DrawingCanvasView: View {
         case "dark":
             return .dark
         default:
-            return nil // System default
+            return .light // Default to light mode
         }
     }
 
-    private func cycleColorScheme() {
-        switch userPreferredColorScheme {
-        case "system":
-            userPreferredColorScheme = "light"
-        case "light":
-            userPreferredColorScheme = "dark"
-        case "dark":
-            userPreferredColorScheme = "system"
-        default:
-            userPreferredColorScheme = "system"
-        }
+    private func toggleColorScheme() {
+        // Simple toggle between light and dark
+        userPreferredColorScheme = (userPreferredColorScheme == "dark") ? "light" : "dark"
     }
 
     private func loadExistingDrawing() {
