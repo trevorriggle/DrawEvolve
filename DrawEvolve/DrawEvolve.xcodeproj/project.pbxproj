@@ -32,6 +32,8 @@
 		DE000029 /* AnonymousUserManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100029 /* AnonymousUserManager.swift */; };
 		DE000030 /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100030 /* FloatingFeedbackPanel.swift */; };
 		DE000031 /* DrawingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100031 /* DrawingDetailView.swift */; };
+		DE000032 /* CritiqueHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100032 /* CritiqueHistory.swift */; };
+		DE000033 /* CritiqueHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100033 /* CritiqueHistoryView.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -67,6 +69,8 @@
 		DE100029 /* AnonymousUserManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnonymousUserManager.swift; sourceTree = "<group>"; };
 		DE100030 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
 		DE100031 /* DrawingDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingDetailView.swift; sourceTree = "<group>"; };
+		DE100032 /* CritiqueHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistory.swift; sourceTree = "<group>"; };
+		DE100033 /* CritiqueHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistoryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -131,6 +135,7 @@
 				DE100028 /* GalleryView.swift */,
 				DE100030 /* FloatingFeedbackPanel.swift */,
 				DE100031 /* DrawingDetailView.swift */,
+				DE100033 /* CritiqueHistoryView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -142,6 +147,7 @@
 				DE100013 /* DrawingLayer.swift */,
 				DE100014 /* DrawingTool.swift */,
 				DE100025 /* Drawing.swift */,
+				DE100032 /* CritiqueHistory.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -276,6 +282,8 @@
 				DE000029 /* AnonymousUserManager.swift in Sources */,
 				DE000030 /* FloatingFeedbackPanel.swift in Sources */,
 				DE000031 /* DrawingDetailView.swift in Sources */,
+				DE000032 /* CritiqueHistory.swift in Sources */,
+				DE000033 /* CritiqueHistoryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
