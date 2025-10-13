@@ -1,8 +1,8 @@
-# DrawEvolve - iOS Drawing App
+# DrawEvolve - Project Status
 
-## Current Status: MVP Complete
+## Current Status: Core Features Complete
 
-A professional iOS drawing app with AI feedback, built with SwiftUI + Metal.
+A professional iPad drawing app with AI-powered feedback, built with SwiftUI + Metal.
 
 ## Core Features (Working)
 
@@ -81,28 +81,39 @@ DrawEvolve/
 - **UIKit** - Touch handling, image manipulation
 - **OpenAI Vision API** - AI feedback (requires API key)
 
-## Recently Completed
-- ✅ Polygon tool (multi-tap shape creation) - tap points, tap near first to close
-- ✅ Eraser preview fix (no longer shows ghost overlay)
-- ✅ Circle tool now draws ellipses/ovals
-- ✅ Continue drawing feature from gallery
-- ✅ Delete button in detail view
-- ✅ Full-screen canvas with floating UI
+## Recent Session (2025-01-13)
 
-## Partially Implemented (Needs Rework)
-- ⚠️ **Rectangle Select & Lasso**: Currently implemented as "select-to-delete" tools, NOT proper selection tools
-  - **What they do now**: Drag to select area → Delete button appears → removes pixels
-  - **What they SHOULD do**: Drag to select → show marching ants → drag selection to move pixels
-  - **Missing**: Marching ants preview, pixel extraction/movement, recompositing
-  - **Status**: Basic selection detection works, but wrong UX paradigm
-  - **Files**: MetalCanvasView.swift:469-602 (selection), DrawingCanvasView.swift:229-285 (UI)
-  - **To fix**: Need to extract selected pixels to temporary texture, allow dragging, composite back on release
+### CRITICAL BUG FIXED
+**Brush strokes were jumping 70-100 pixels to the left on release**
 
-## Known Limitations
-- **Unimplemented Tools**: Magic Wand, Smudge, Clone Stamp, Move, Rotate, Scale
-- **Effect Tools**: Blur/Sharpen apply to whole canvas (not brush-based)
-- **No Preview**: Polygon points don't show visual feedback while building
-- **No Multi-Select**: Can't select multiple tools or combine selections
+Root cause: Coordinate scaling in `CanvasRenderer.swift` was using:
+```swift
+let uniformScale = Float(texture.width) / Float(max(screenSize.width, screenSize.height))
+```
+
+Fixed by using separate X/Y scales:
+```swift
+let scaleX = Float(texture.width) / Float(screenSize.width)
+let scaleY = Float(texture.height) / Float(screenSize.height)
+```
+
+### Features Added
+- ✅ Markdown rendering in feedback panel
+- ✅ Updated documentation files
+
+## Known Issues / Deferred Features
+
+### Zoom/Pan/Rotate (Deferred)
+- Gesture recognizers exist in code but disabled
+- Touch coordinate transformations were causing the stroke offset bug
+- **Decision**: Test and implement with physical iPad in future session
+
+### Untested Features
+- ⚠️ Critique history - Implementation complete but needs end-to-end testing
+
+### Unimplemented Tools
+- Magic Wand, Smudge, Clone Stamp, Move, Rotate, Scale
+- Effect tools (blur/sharpen) apply to whole canvas, not brush-based
 
 ## Getting Started
 
@@ -128,27 +139,29 @@ OpenAI Vision API calls are made when user clicks "Get Feedback":
 - Receives: Markdown-formatted feedback
 - Cost: ~$0.01-0.05 per request (depending on image size)
 
-## Next Steps (If Continuing Development)
-1. **Magic Wand** - Color-based selection (similar to flood fill algorithm)
-2. **Move Tool** - Drag selected pixels to new location
-3. **Transform Tools** - Rotate, scale selected areas
-4. **Smudge/Clone** - Require custom Metal shaders
-5. **Export Options** - PNG, JPEG, PSD with layers
-6. **Cloud Sync** - iCloud/Cloudflare integration
-7. **Brush Presets** - Save/load custom brushes
-8. **Performance** - Optimize for larger canvases/more layers
+## Next Session Priorities
 
-## File Notes
-- `MetalCanvasView.swift:403-467` - Polygon tool implementation
-- `MetalCanvasView.swift:469-492` - Selection tool handlers
-- `CanvasRenderer.swift:916-1079` - Selection pixel deletion (clearRect, clearPath)
-- `DrawingCanvasView.swift:229-285` - Selection UI overlay
-- All tools use screen-to-texture coordinate scaling for proper rendering
+### High Priority (Test with Physical iPad)
+1. **Verify stroke fix** - Confirm strokes land exactly where drawn
+2. **Test critique history** - Get multiple feedbacks, verify history view works
+3. **Implement zoom/pan** - With device in hand, properly implement gesture transforms
 
-## Testing
-Run on device for best performance (Metal rendering is faster on hardware).
-Test Apple Pencil pressure sensitivity on iPad.
+### Future Features (If Requested)
+- Magic Wand selection
+- Smudge/Clone tools
+- Transform tools (rotate, scale selections)
+- Brush presets
+- Export options (PNG, JPEG with layers)
+- Performance optimization for large canvases
+
+## Key Files
+- `MetalCanvasView.swift` - Touch handling and drawing surface
+- `CanvasRenderer.swift` - Metal rendering engine (**line 218-220: coordinate fix**)
+- `DrawingCanvasView.swift` - Main UI with toolbar and panels
+- `CanvasStateManager.swift` - State management (zoom/pan code exists but unused)
+- `OpenAIManager.swift` - AI feedback integration
+- `FloatingFeedbackPanel.swift` - Feedback display with markdown rendering
 
 ---
-**Last Updated**: October 10, 2025
-**MVP Status**: Feature complete, ready for user testing
+**Last Updated**: January 13, 2025
+**Status**: Core features complete, stroke bug fixed, ready for iPad testing
