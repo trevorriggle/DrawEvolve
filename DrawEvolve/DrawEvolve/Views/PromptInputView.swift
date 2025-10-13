@@ -21,10 +21,6 @@ struct PromptInputView: View {
             VStack(spacing: 0) {
                 // Header
                 VStack(spacing: 12) {
-                    Image(systemName: "paintbrush.pointed.fill")
-                        .font(.system(size: 50))
-                        .foregroundColor(.accentColor)
-
                     Text("Let's Set Up Your Canvas")
                         .font(.title)
                         .fontWeight(.bold)

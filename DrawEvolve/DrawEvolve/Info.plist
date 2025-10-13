@@ -33,8 +33,6 @@
 	<dict>
 		<key>UIImageName</key>
 		<string>DrawEvolveLoadingScreen</string>
-		<key>UIColorName</key>
-		<string>AccentColor</string>
 		<key>UIImageRespectsSafeAreaInsets</key>
 		<false/>
 	</dict>
