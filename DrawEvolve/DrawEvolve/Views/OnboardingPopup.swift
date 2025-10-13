@@ -74,7 +74,9 @@ struct OnboardingPopup: View {
                 }
                 .padding(.horizontal)
             }
-            .padding(32)
+            .padding(.horizontal, 32)
+            .padding(.bottom, 32)
+            .padding(.top, 16)
             .frame(maxWidth: 600, maxHeight: 700)
             .background(
                 RoundedRectangle(cornerRadius: 24)

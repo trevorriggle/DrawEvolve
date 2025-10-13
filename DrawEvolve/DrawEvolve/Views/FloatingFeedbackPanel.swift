@@ -9,10 +9,12 @@ import SwiftUI
 
 struct FloatingFeedbackPanel: View {
     let feedback: String?
+    let critiqueHistory: [CritiqueEntry]
     @Binding var isPresented: Bool
     @State private var isExpanded = true
     @State private var position: CGPoint = CGPoint(x: UIScreen.main.bounds.width - 200, y: 100)
     @State private var dragOffset: CGSize = .zero
+    @State private var showHistory = false
 
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
     private let expandedSize: CGSize = CGSize(width: 350, height: 500)
@@ -54,9 +56,27 @@ struct FloatingFeedbackPanel: View {
 
                         // Feedback content
                         ScrollView {
-                            FormattedMarkdownView(text: feedbackText)
-                                .padding()
-                                .textSelection(.enabled)
+                            VStack(spacing: 16) {
+                                FormattedMarkdownView(text: feedbackText)
+                                    .textSelection(.enabled)
+
+                                // History button if there are multiple critiques
+                                if critiqueHistory.count > 1 {
+                                    Button(action: { showHistory = true }) {
+                                        HStack {
+                                            Image(systemName: "clock.arrow.circlepath")
+                                            Text("View History (\(critiqueHistory.count))")
+                                                .font(.subheadline)
+                                        }
+                                        .padding(.vertical, 10)
+                                        .padding(.horizontal, 16)
+                                        .background(Color.accentColor.opacity(0.1))
+                                        .foregroundColor(.accentColor)
+                                        .cornerRadius(8)
+                                    }
+                                }
+                            }
+                            .padding()
                         }
                         .background(Color(uiColor: .systemBackground))
                     }
@@ -129,6 +149,9 @@ struct FloatingFeedbackPanel: View {
                 position = CGPoint(x: initialX, y: initialY)
             }
         }
+        .sheet(isPresented: $showHistory) {
+            CritiqueHistoryView(critiqueHistory: critiqueHistory)
+        }
     }
 }
 
@@ -148,6 +171,10 @@ struct FloatingFeedbackPanel: View {
             - Soften shadow transitions
             - Adjust ear positioning
             """,
+            critiqueHistory: [
+                CritiqueEntry(feedback: "First critique", timestamp: Date().addingTimeInterval(-86400)),
+                CritiqueEntry(feedback: "Second critique", timestamp: Date())
+            ],
             isPresented: .constant(true)
         )
     }

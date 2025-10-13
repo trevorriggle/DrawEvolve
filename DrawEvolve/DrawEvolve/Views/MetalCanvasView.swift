@@ -268,18 +268,13 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure layer textures exist
             ensureLayerTextures()
 
-            // Get touch location in screen space
-            let screenLocation = touch.location(in: view)
-
-            // Transform to document space (accounting for zoom and pan)
-            let location = MainActor.assumeIsolated {
-                canvasState?.screenToDocument(screenLocation) ?? screenLocation
-            }
+            // Get touch location in screen space - use it directly
+            let location = touch.location(in: view)
 
             let pressure = touch.type == .pencil ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 1.0) : 1.0
             let timestamp = touch.timestamp
 
-            print("Touch began at screen: \(screenLocation), document: \(location) with pressure \(pressure), tool: \(currentTool)")
+            print("Touch began at: \(location) with pressure \(pressure), tool: \(currentTool)")
             print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
             if let layer = layers[safe: selectedLayerIndex] {
                 print("Layer has texture: \(layer.texture != nil)")
@@ -591,13 +586,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get touch location in screen space
-            let screenLocation = touch.location(in: view)
-
-            // Transform to document space (accounting for zoom and pan)
-            let location = MainActor.assumeIsolated {
-                canvasState?.screenToDocument(screenLocation) ?? screenLocation
-            }
+            // Get touch location in screen space - use it directly
+            let location = touch.location(in: view)
 
             // Handle dragging an existing selection
             if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
@@ -720,13 +710,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get touch location in screen space
-            let screenEndLocation = touch.location(in: view)
-
-            // Transform to document space (accounting for zoom and pan)
-            let endLocation = MainActor.assumeIsolated {
-                canvasState?.screenToDocument(screenEndLocation) ?? screenEndLocation
-            }
+            // Get touch location in screen space - use it directly
+            let endLocation = touch.location(in: view)
 
             if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
                 print("Rectangle select: creating selection from \(startPoint) to \(endLocation)")

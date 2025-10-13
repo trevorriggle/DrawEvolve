@@ -112,8 +112,15 @@ class DrawingStorageManager: ObservableObject {
                 drawings[index].imageData = imageData
             }
             if let feedback = feedback {
+                // Add new critique to history
+                let critiqueEntry = CritiqueEntry(
+                    feedback: feedback,
+                    timestamp: Date(),
+                    context: context ?? drawings[index].context
+                )
+                drawings[index].critiqueHistory.append(critiqueEntry)
                 drawings[index].feedback = feedback
-                print("  - Updated feedback")
+                print("  - Added feedback to critique history (now \(drawings[index].critiqueHistory.count) entries)")
             }
             if let context = context {
                 drawings[index].context = context

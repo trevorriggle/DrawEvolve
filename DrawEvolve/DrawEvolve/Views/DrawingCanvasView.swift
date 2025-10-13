@@ -42,6 +42,9 @@ struct DrawingCanvasView: View {
     // Clear confirmation
     @State private var showClearConfirmation = false
 
+    // Critique history
+    @State private var critiqueHistory: [CritiqueEntry] = []
+
     // Dark mode toggle
     @AppStorage("userPreferredColorScheme") private var userPreferredColorScheme: String = "light"
 
@@ -259,6 +262,7 @@ struct DrawingCanvasView: View {
             if showFeedback, canvasState.feedback != nil {
                 FloatingFeedbackPanel(
                     feedback: canvasState.feedback,
+                    critiqueHistory: critiqueHistory,
                     isPresented: $showFeedback
                 )
             }
@@ -548,6 +552,10 @@ struct DrawingCanvasView: View {
             print("  - Has feedback: NO")
         }
 
+        // Load critique history
+        critiqueHistory = drawing.critiqueHistory
+        print("  - Critique history: \(critiqueHistory.count) entries")
+
         // Load the image onto the canvas - delay until renderer is ready
         if let uiImage = UIImage(data: drawing.imageData) {
             print("  - UIImage created successfully: \(uiImage.size)")
@@ -636,8 +644,17 @@ struct DrawingCanvasView: View {
             await canvasState.requestFeedback(for: context)
             isRequestingFeedback = false
 
-            // Show floating panel after feedback is received
-            if canvasState.feedback != nil {
+            // Add new feedback to critique history
+            if let feedback = canvasState.feedback {
+                let critiqueEntry = CritiqueEntry(
+                    feedback: feedback,
+                    timestamp: Date(),
+                    context: context
+                )
+                critiqueHistory.append(critiqueEntry)
+                print("Added critique to history (now \(critiqueHistory.count) entries)")
+
+                // Show floating panel after feedback is received
                 withAnimation {
                     showFeedback = true
                 }
