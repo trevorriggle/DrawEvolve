@@ -55,10 +55,32 @@ vertex VertexOut brushVertexShader(uint vertexID [[vertex_id]],
     return out;
 }
 
-// Vertex shader for full-screen quad (compositing)
-vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]],
-                                   constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, unused]
-                                   constant float2 *viewportSize [[buffer(1)]]) {
+// Vertex shader for full-screen quad (compositing) - basic version
+vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
+    VertexOut out;
+
+    // Generate full-screen quad
+    float2 positions[6] = {
+        float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0),
+        float2(-1.0, 1.0), float2(1.0, -1.0), float2(1.0, 1.0)
+    };
+
+    float2 texCoords[6] = {
+        float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0),
+        float2(0.0, 0.0), float2(1.0, 1.0), float2(1.0, 0.0)
+    };
+
+    out.position = float4(positions[vertexID], 0.0, 1.0);
+    out.texCoord = texCoords[vertexID];
+    out.pointSize = 1.0;
+
+    return out;
+}
+
+// Vertex shader for full-screen quad with zoom and pan support
+vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
+                                                constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, unused]
+                                                constant float2 *viewportSize [[buffer(1)]]) {
     VertexOut out;
 
     // Generate full-screen quad

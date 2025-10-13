@@ -17,6 +17,7 @@ class CanvasRenderer: NSObject {
     private var eraserPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
+    private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
     private var blurComputeState: MTLComputePipelineState?
     private var sharpenComputeState: MTLComputePipelineState?
 
@@ -47,6 +48,7 @@ class CanvasRenderer: NSObject {
               let brushFragment = library.makeFunction(name: "brushFragmentShader"),
               let eraserFragment = library.makeFunction(name: "eraserFragmentShader"),
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
+              let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
               let compositeFragment = library.makeFunction(name: "compositeFragmentShader"),
               let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader"),
               let blurKernel = library.makeFunction(name: "blurKernel"),
@@ -101,11 +103,22 @@ class CanvasRenderer: NSObject {
         textureDisplayDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         textureDisplayDescriptor.colorAttachments[0].rgbBlendOperation = .add
 
+        // Texture display pipeline with zoom/pan transform support
+        let textureDisplayWithTransformDescriptor = MTLRenderPipelineDescriptor()
+        textureDisplayWithTransformDescriptor.vertexFunction = quadVertexWithTransform
+        textureDisplayWithTransformDescriptor.fragmentFunction = textureDisplayFragment
+        textureDisplayWithTransformDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        textureDisplayWithTransformDescriptor.colorAttachments[0].isBlendingEnabled = true
+        textureDisplayWithTransformDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        textureDisplayWithTransformDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        textureDisplayWithTransformDescriptor.colorAttachments[0].rgbBlendOperation = .add
+
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
+            textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
             blurComputeState = try device.makeComputePipelineState(function: blurKernel)
             sharpenComputeState = try device.makeComputePipelineState(function: sharpenKernel)
         } catch {
@@ -402,16 +415,21 @@ class CanvasRenderer: NSObject {
         panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
         viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
-        guard let pipeline = textureDisplayPipelineState else { return }
+        // Always use the transform pipeline for consistency
+        // Pass identity transform when zoom/pan is not active
+        guard let pipelineState = textureDisplayWithTransformPipelineState else {
+            print("ERROR: Transform pipeline state not available")
+            return
+        }
 
-        renderEncoder.setRenderPipelineState(pipeline)
+        renderEncoder.setRenderPipelineState(pipelineState)
         renderEncoder.setFragmentTexture(texture, index: 0)
 
         // Pass opacity to shader
         var opacityValue = opacity
         renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
 
-        // Pass zoom/pan transform to vertex shader
+        // Pass zoom/pan transform to vertex shader (always required for transform pipeline)
         var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, 0)
         renderEncoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
 
@@ -419,7 +437,6 @@ class CanvasRenderer: NSObject {
         renderEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
-        // The quadVertexShader generates these automatically
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
