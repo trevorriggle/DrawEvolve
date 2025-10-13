@@ -56,7 +56,9 @@ vertex VertexOut brushVertexShader(uint vertexID [[vertex_id]],
 }
 
 // Vertex shader for full-screen quad (compositing)
-vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
+vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]],
+                                   constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, unused]
+                                   constant float2 *viewportSize [[buffer(1)]]) {
     VertexOut out;
 
     // Generate full-screen quad
@@ -70,8 +72,29 @@ vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
         float2(0.0, 0.0), float2(1.0, 1.0), float2(1.0, 0.0)
     };
 
-    out.position = float4(positions[vertexID], 0.0, 1.0);
-    out.texCoord = texCoords[vertexID];
+    // Apply zoom and pan transform (parameters always provided, use zoom=1.0, pan=0 for no transform)
+    float zoom = transform[0][0];
+    float2 pan = float2(transform[0][1], transform[0][2]);
+    float2 viewport = viewportSize[0];
+
+    float2 finalPos = positions[vertexID];
+    float2 finalTexCoord = texCoords[vertexID];
+
+    // Only apply transform if zoom is not default (1.0)
+    if (zoom != 1.0 || pan.x != 0.0 || pan.y != 0.0) {
+        // Apply zoom and pan transform
+        // Convert NDC position to screen space, apply transform, convert back to NDC
+        float2 screenPos = (finalPos * 0.5 + 0.5) * viewport;  // NDC to screen
+        screenPos = screenPos * zoom + pan;                     // Apply zoom and pan
+        finalPos = (screenPos / viewport) * 2.0 - 1.0;         // Screen to NDC
+
+        // Adjust texture coordinates for zoom (sample from zoomed region)
+        finalTexCoord = (finalTexCoord - 0.5) / zoom + 0.5;
+        finalTexCoord = finalTexCoord - pan / (viewport * zoom);
+    }
+
+    out.position = float4(finalPos, 0.0, 1.0);
+    out.texCoord = finalTexCoord;
     out.pointSize = 1.0;
 
     return out;

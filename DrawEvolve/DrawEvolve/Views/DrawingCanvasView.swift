@@ -42,6 +42,9 @@ struct DrawingCanvasView: View {
     // Clear confirmation
     @State private var showClearConfirmation = false
 
+    // Dark mode toggle
+    @AppStorage("userPreferredColorScheme") private var userPreferredColorScheme: String = "system"
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
@@ -195,6 +198,14 @@ struct DrawingCanvasView: View {
                             // Layers
                             ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
                                 showLayerPanel.toggle()
+                            }
+
+                            // Dark mode toggle
+                            ToolButton(
+                                icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
+                                isSelected: false
+                            ) {
+                                cycleColorScheme()
                             }
 
                             // Undo/Redo
@@ -494,6 +505,31 @@ struct DrawingCanvasView: View {
         .onAppear {
             loadExistingDrawing()
         }
+        .preferredColorScheme(colorSchemeValue)
+    }
+
+    private var colorSchemeValue: ColorScheme? {
+        switch userPreferredColorScheme {
+        case "light":
+            return .light
+        case "dark":
+            return .dark
+        default:
+            return nil // System default
+        }
+    }
+
+    private func cycleColorScheme() {
+        switch userPreferredColorScheme {
+        case "system":
+            userPreferredColorScheme = "light"
+        case "light":
+            userPreferredColorScheme = "dark"
+        case "dark":
+            userPreferredColorScheme = "system"
+        default:
+            userPreferredColorScheme = "system"
+        }
     }
 
     private func loadExistingDrawing() {
@@ -652,6 +688,14 @@ class CanvasStateManager: ObservableObject {
     // Selection pixel data (extracted when selection is made)
     var selectionPixels: UIImage? = nil
     var selectionOriginalRect: CGRect? = nil // Original position before moving
+
+    // Zoom and Pan state (for canvas navigation)
+    @Published var zoomScale: CGFloat = 1.0 // Current zoom level (1.0 = 100%)
+    @Published var panOffset: CGPoint = .zero // Current pan offset in screen space
+
+    // Zoom constraints
+    let minZoom: CGFloat = 0.1 // 10% minimum zoom
+    let maxZoom: CGFloat = 10.0 // 1000% maximum zoom
 
     let historyManager = HistoryManager()
     var renderer: CanvasRenderer?
@@ -1081,6 +1125,53 @@ class CanvasStateManager: ObservableObject {
         }
 
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    // MARK: - Zoom and Pan Management
+
+    /// Transform a point from view/screen space to document space (accounting for zoom and pan)
+    func screenToDocument(_ point: CGPoint) -> CGPoint {
+        // Reverse the pan offset, then reverse the zoom scale
+        let adjustedX = (point.x - panOffset.x) / zoomScale
+        let adjustedY = (point.y - panOffset.y) / zoomScale
+        return CGPoint(x: adjustedX, y: adjustedY)
+    }
+
+    /// Transform a point from document space to view/screen space (applying zoom and pan)
+    func documentToScreen(_ point: CGPoint) -> CGPoint {
+        // Apply zoom scale, then apply pan offset
+        let scaledX = point.x * zoomScale
+        let scaledY = point.y * zoomScale
+        return CGPoint(x: scaledX + panOffset.x, y: scaledY + panOffset.y)
+    }
+
+    /// Apply zoom centered at a specific point in screen space
+    func zoom(scale: CGFloat, centerPoint: CGPoint) {
+        // Clamp the new scale to min/max bounds
+        let newScale = min(max(scale, minZoom), maxZoom)
+
+        // Calculate the document-space point that should remain fixed
+        let docPoint = screenToDocument(centerPoint)
+
+        // Update the zoom scale
+        zoomScale = newScale
+
+        // Adjust pan offset so the document point stays at the same screen position
+        let newScreenPoint = CGPoint(x: docPoint.x * zoomScale, y: docPoint.y * zoomScale)
+        panOffset.x += centerPoint.x - newScreenPoint.x
+        panOffset.y += centerPoint.y - newScreenPoint.y
+    }
+
+    /// Pan the canvas by a delta in screen space
+    func pan(delta: CGPoint) {
+        panOffset.x += delta.x
+        panOffset.y += delta.y
+    }
+
+    /// Reset zoom and pan to defaults
+    func resetZoomAndPan() {
+        zoomScale = 1.0
+        panOffset = .zero
     }
 }
 

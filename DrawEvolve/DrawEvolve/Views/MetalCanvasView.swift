@@ -90,7 +90,18 @@ struct MetalCanvasView: UIViewRepresentable {
         // Connect touch events to coordinator
         metalView.touchDelegate = context.coordinator
 
-        print("MetalCanvasView: MTKView configured successfully")
+        // Add gesture recognizers for zoom and pan
+        let pinchGesture = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinchGesture.delegate = context.coordinator
+        metalView.addGestureRecognizer(pinchGesture)
+
+        let panGesture = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        panGesture.minimumNumberOfTouches = 2 // Two-finger pan for canvas navigation
+        panGesture.maximumNumberOfTouches = 2
+        panGesture.delegate = context.coordinator
+        metalView.addGestureRecognizer(panGesture)
+
+        print("MetalCanvasView: MTKView configured successfully with gesture recognizers")
 
         return metalView
     }
@@ -114,7 +125,7 @@ struct MetalCanvasView: UIViewRepresentable {
         )
     }
 
-    class Coordinator: NSObject, MTKViewDelegate, TouchHandling {
+    class Coordinator: NSObject, MTKViewDelegate, TouchHandling, UIGestureRecognizerDelegate {
         @Binding var layers: [DrawingLayer]
         @Binding var currentTool: DrawingTool
         @Binding var brushSettings: BrushSettings
@@ -151,7 +162,16 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            // Handle view size changes
+            // Handle view size changes (e.g., rotation)
+            print("MTKView: Drawable size changed to \(size)")
+
+            // Update screen size in canvas state
+            if let canvasState = canvasState {
+                Task { @MainActor in
+                    canvasState.screenSize = size
+                    print("  - Updated canvasState.screenSize to \(size)")
+                }
+            }
         }
 
         func draw(in view: MTKView) {
@@ -184,10 +204,25 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Composite all visible layers to screen
+            // Get zoom and pan state for rendering
+            let zoomScale = MainActor.assumeIsolated {
+                canvasState?.zoomScale ?? 1.0
+            }
+            let panOffset = MainActor.assumeIsolated {
+                canvasState?.panOffset ?? .zero
+            }
+
+            // Composite all visible layers to screen with zoom/pan transform
             for layer in layers where layer.isVisible {
                 if let texture = layer.texture {
-                    renderer?.renderTextureToScreen(texture, to: renderEncoder, opacity: layer.opacity)
+                    renderer?.renderTextureToScreen(
+                        texture,
+                        to: renderEncoder,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                    )
                 }
             }
 
@@ -233,11 +268,18 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure layer textures exist
             ensureLayerTextures()
 
-            let location = touch.location(in: view)
+            // Get touch location in screen space
+            let screenLocation = touch.location(in: view)
+
+            // Transform to document space (accounting for zoom and pan)
+            let location = MainActor.assumeIsolated {
+                canvasState?.screenToDocument(screenLocation) ?? screenLocation
+            }
+
             let pressure = touch.type == .pencil ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 1.0) : 1.0
             let timestamp = touch.timestamp
 
-            print("Touch began at \(location) with pressure \(pressure), tool: \(currentTool)")
+            print("Touch began at screen: \(screenLocation), document: \(location) with pressure \(pressure), tool: \(currentTool)")
             print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
             if let layer = layers[safe: selectedLayerIndex] {
                 print("Layer has texture: \(layer.texture != nil)")
@@ -549,7 +591,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            let location = touch.location(in: view)
+            // Get touch location in screen space
+            let screenLocation = touch.location(in: view)
+
+            // Transform to document space (accounting for zoom and pan)
+            let location = MainActor.assumeIsolated {
+                canvasState?.screenToDocument(screenLocation) ?? screenLocation
+            }
 
             // Handle dragging an existing selection
             if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
@@ -672,7 +720,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            let endLocation = touch.location(in: view)
+            // Get touch location in screen space
+            let screenEndLocation = touch.location(in: view)
+
+            // Transform to document space (accounting for zoom and pan)
+            let endLocation = MainActor.assumeIsolated {
+                canvasState?.screenToDocument(screenEndLocation) ?? screenEndLocation
+            }
 
             if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
                 print("Rectangle select: creating selection from \(startPoint) to \(endLocation)")
@@ -1071,6 +1125,67 @@ struct MetalCanvasView: UIViewRepresentable {
             let a = CGFloat(pixelData[pixelIndex + 3]) / 255.0
 
             return UIColor(red: r, green: g, blue: b, alpha: a)
+        }
+
+        // MARK: - Gesture Recognizers
+
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            guard let canvasState = canvasState, let view = gesture.view else { return }
+
+            let location = gesture.location(in: view)
+
+            switch gesture.state {
+            case .began:
+                print("Pinch began at \(location), scale: \(gesture.scale)")
+
+            case .changed:
+                // Apply zoom centered at pinch location
+                Task { @MainActor in
+                    let currentScale = canvasState.zoomScale
+                    let newScale = currentScale * gesture.scale
+                    canvasState.zoom(scale: newScale, centerPoint: location)
+                }
+                // Reset gesture scale so we get incremental changes
+                gesture.scale = 1.0
+
+            case .ended, .cancelled:
+                print("Pinch ended, final zoom: \(canvasState.zoomScale)")
+
+            default:
+                break
+            }
+        }
+
+        @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
+            guard let canvasState = canvasState, let view = gesture.view else { return }
+
+            switch gesture.state {
+            case .began:
+                print("Two-finger pan began")
+
+            case .changed:
+                let translation = gesture.translation(in: view)
+                // Apply pan delta
+                Task { @MainActor in
+                    canvasState.pan(delta: translation)
+                }
+                // Reset translation so we get incremental changes
+                gesture.setTranslation(.zero, in: view)
+
+            case .ended, .cancelled:
+                print("Two-finger pan ended")
+
+            default:
+                break
+            }
+        }
+
+        // MARK: - UIGestureRecognizerDelegate
+
+        /// Allow pinch and pan gestures to work simultaneously
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            // Allow pinch and pan to work together
+            return true
         }
     }
 }

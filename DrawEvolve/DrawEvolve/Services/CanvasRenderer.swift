@@ -200,16 +200,18 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // CRITICAL: Scale coordinates from screen space to texture space
-        let scaleX = Float(texture.width) / Float(screenSize.width)
-        let scaleY = Float(texture.height) / Float(screenSize.height)
-        print("  Coordinate scale: \(scaleX)x, \(scaleY)y")
+        // CRITICAL: Scale coordinates from document/screen space to texture space
+        // Document space coordinates come from screenToDocument(), which returns unzoomed screen coordinates
+        // We need to scale these to the fixed texture size (2048x2048)
+        // Use uniform scale based on the maximum dimension to prevent distortion on rotation
+        let uniformScale = Float(texture.width) / Float(max(screenSize.width, screenSize.height))
+        print("  Coordinate scale (uniform): \(uniformScale) (texture: \(texture.width), screen: \(screenSize))")
 
-        // Convert stroke points to positions and scale to texture space
+        // Convert stroke points to positions and scale to texture space with uniform scaling
         let positions = stroke.points.map { point in
             SIMD2<Float>(
-                Float(point.location.x) * scaleX,
-                Float(point.location.y) * scaleY
+                Float(point.location.x) * uniformScale,
+                Float(point.location.y) * uniformScale
             )
         }
         let viewportSize = SIMD2<Float>(Float(texture.width), Float(texture.height))
@@ -391,11 +393,14 @@ class CanvasRenderer: NSObject {
         return textureToUIImage(thumbnailTexture)
     }
 
-    /// Render a texture as a fullscreen quad
+    /// Render a texture as a fullscreen quad with optional zoom and pan
     func renderTextureToScreen(
         _ texture: MTLTexture,
         to renderEncoder: MTLRenderCommandEncoder,
-        opacity: Float = 1.0
+        opacity: Float = 1.0,
+        zoomScale: Float = 1.0,
+        panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
         guard let pipeline = textureDisplayPipelineState else { return }
 
@@ -405,6 +410,13 @@ class CanvasRenderer: NSObject {
         // Pass opacity to shader
         var opacityValue = opacity
         renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+
+        // Pass zoom/pan transform to vertex shader
+        var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, 0)
+        renderEncoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+
+        var viewport = viewportSize
+        renderEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
         // The quadVertexShader generates these automatically
