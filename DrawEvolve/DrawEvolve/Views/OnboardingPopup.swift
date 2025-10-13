@@ -23,13 +23,10 @@ struct OnboardingPopup: View {
             VStack(spacing: 24) {
                 // Header
                 VStack(spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 50))
-                        .foregroundColor(.accentColor)
-
-                    Text("Welcome to DrawEvolve!")
-                        .font(.title2)
-                        .fontWeight(.bold)
+                    Image("DrawEvolveLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 120)
 
                     Text("Your personalized drawing coach")
                         .font(.subheadline)
