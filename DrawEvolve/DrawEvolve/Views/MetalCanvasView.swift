@@ -188,10 +188,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 renderer = CanvasRenderer(metalDevice: device)
 
                 // Share renderer and screen size with canvas state (for text rendering)
+                // IMPORTANT: Use drawable size, not view.bounds.size!
                 if let canvasState = canvasState {
                     canvasState.renderer = renderer
-                    canvasState.screenSize = view.bounds.size
-                    print("MetalCanvasView.draw: Shared renderer with canvas state, screen size: \(view.bounds.size)")
+                    canvasState.screenSize = drawable.texture.size
+                    print("MetalCanvasView.draw: Shared renderer with canvas state, screen size: \(drawable.texture.size)")
                 }
             }
 
@@ -305,8 +306,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture before snapshot
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Perform flood fill
-                renderer.floodFill(at: location, with: brushSettings.color, in: texture, screenSize: view.bounds.size)
+                // Perform flood fill - use texture size for consistent coordinate system
+                let textureSize = CGSize(width: texture.width, height: texture.height)
+                renderer.floodFill(at: location, with: brushSettings.color, in: texture, screenSize: textureSize)
 
                 // Capture after snapshot
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -345,8 +347,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
 
-                // Read pixel color at location
-                if let pickedColor = getColorAt(location, in: texture, screenSize: view.bounds.size) {
+                // Read pixel color at location - use texture size for consistent coordinate system
+                let textureSize = CGSize(width: texture.width, height: texture.height)
+                if let pickedColor = getColorAt(location, in: texture, screenSize: textureSize) {
                     // Update brush color
                     brushSettings.color = pickedColor
                     print("Picked color: \(pickedColor)")
@@ -368,9 +371,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture before snapshot
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Apply blur effect
+                // Apply blur effect - use texture size for consistent coordinate system
                 let radius = brushSettings.size / 10.0 // Use brush size to control blur radius
-                renderer.applyBlur(at: location, radius: Float(radius), to: texture, screenSize: view.bounds.size)
+                let textureSize = CGSize(width: texture.width, height: texture.height)
+                renderer.applyBlur(at: location, radius: Float(radius), to: texture, screenSize: textureSize)
 
                 // Capture after snapshot
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -413,9 +417,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture before snapshot
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Apply sharpen effect
+                // Apply sharpen effect - use texture size for consistent coordinate system
                 let radius = brushSettings.size / 10.0 // Use brush size to control sharpen radius
-                renderer.applySharpen(at: location, radius: Float(radius), to: texture, screenSize: view.bounds.size)
+                let textureSize = CGSize(width: texture.width, height: texture.height)
+                renderer.applySharpen(at: location, radius: Float(radius), to: texture, screenSize: textureSize)
 
                 // Capture after snapshot
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -472,7 +477,9 @@ struct MetalCanvasView: UIViewRepresentable {
                         // Commit stroke immediately
                         if let texture = layers[selectedLayerIndex].texture, let renderer = renderer {
                             let beforeSnapshot = renderer.captureSnapshot(of: texture)
-                            renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
+                            // Use texture size for consistent coordinate system
+                            let textureSize = CGSize(width: texture.width, height: texture.height)
+                            renderer.renderStroke(stroke, to: texture, screenSize: textureSize)
                             let afterSnapshot = renderer.captureSnapshot(of: texture)
 
                             if let before = beforeSnapshot, let after = afterSnapshot, let canvasState = canvasState {
@@ -804,7 +811,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
 
                 // Render the stroke (waits for GPU completion)
-                renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
+                // IMPORTANT: Use texture size for consistent coordinate system, not view.bounds.size!
+                let textureSize = CGSize(width: texture.width, height: texture.height)
+                renderer.renderStroke(stroke, to: texture, screenSize: textureSize)
                 print("Stroke committed successfully - texture should now contain the stroke")
 
                 // Capture snapshot AFTER rendering stroke (GPU is done now)

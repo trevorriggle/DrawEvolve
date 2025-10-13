@@ -33,6 +33,10 @@
 	<dict>
 		<key>UIImageName</key>
 		<string>DrawEvolveLoadingScreen</string>
+		<key>UIColorName</key>
+		<string></string>
+		<key>UILaunchScreenBackgroundColor</key>
+		<string>#000000</string>
 		<key>UIImageRespectsSafeAreaInsets</key>
 		<false/>
 	</dict>
