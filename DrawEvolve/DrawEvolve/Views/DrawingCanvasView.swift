@@ -1066,7 +1066,7 @@ class CanvasStateManager: ObservableObject {
 
         // Clear the original position (if selection moved)
         if selectionOffset != .zero {
-            if let rect = activeSelection {
+            if activeSelection != nil {
                 renderer.clearRect(originalRect, in: texture, screenSize: screenSize)
             } else if let path = selectionPath {
                 renderer.clearPath(path, in: texture, screenSize: screenSize)

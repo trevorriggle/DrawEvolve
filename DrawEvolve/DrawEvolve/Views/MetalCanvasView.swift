@@ -191,8 +191,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 // IMPORTANT: Use drawable size, not view.bounds.size!
                 if let canvasState = canvasState {
                     canvasState.renderer = renderer
-                    canvasState.screenSize = drawable.texture.size
-                    print("MetalCanvasView.draw: Shared renderer with canvas state, screen size: \(drawable.texture.size)")
+                    let textureSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
+                    canvasState.screenSize = textureSize
+                    print("MetalCanvasView.draw: Shared renderer with canvas state, screen size: \(textureSize)")
                 }
             }
 
