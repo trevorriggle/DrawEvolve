@@ -213,18 +213,17 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // CRITICAL: Scale coordinates from document/screen space to texture space
-        // Document space coordinates come from screenToDocument(), which returns unzoomed screen coordinates
-        // We need to scale these to the fixed texture size (2048x2048)
-        // Use uniform scale based on the maximum dimension to prevent distortion on rotation
-        let uniformScale = Float(texture.width) / Float(max(screenSize.width, screenSize.height))
-        print("  Coordinate scale (uniform): \(uniformScale) (texture: \(texture.width), screen: \(screenSize))")
+        // CRITICAL: Scale coordinates from screen space to texture space
+        // Use separate X and Y scales to handle non-square screen/texture dimensions correctly
+        let scaleX = Float(texture.width) / Float(screenSize.width)
+        let scaleY = Float(texture.height) / Float(screenSize.height)
+        print("  Coordinate scale: X=\(scaleX), Y=\(scaleY) (texture: \(texture.width)x\(texture.height), screen: \(screenSize))")
 
-        // Convert stroke points to positions and scale to texture space with uniform scaling
+        // Convert stroke points to positions and scale to texture space
         let positions = stroke.points.map { point in
             SIMD2<Float>(
-                Float(point.location.x) * uniformScale,
-                Float(point.location.y) * uniformScale
+                Float(point.location.x) * scaleX,
+                Float(point.location.y) * scaleY
             )
         }
         let viewportSize = SIMD2<Float>(Float(texture.width), Float(texture.height))
