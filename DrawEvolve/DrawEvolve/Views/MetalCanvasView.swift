@@ -607,16 +607,42 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Handle selection tools
-            if currentTool == .rectangleSelect {
-                // For rectangle select, we just need start and current point
-                // The selection rectangle will be created in touchesEnded
-                print("Rectangle select: dragging to \(location)")
+            if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
+                // For rectangle select, show preview while dragging
+                let minX = min(startPoint.x, location.x)
+                let minY = min(startPoint.y, location.y)
+                let maxX = max(startPoint.x, location.x)
+                let maxY = max(startPoint.y, location.y)
+
+                let previewRect = CGRect(
+                    x: minX,
+                    y: minY,
+                    width: maxX - minX,
+                    height: maxY - minY
+                )
+
+                if let canvasState = canvasState {
+                    Task { @MainActor in
+                        canvasState.previewSelection = previewRect
+                    }
+                }
+
+                if hypot(location.x - startPoint.x, location.y - startPoint.y) > 10 {
+                    print("Rectangle select: dragging preview \(previewRect)")
+                }
                 return
             }
 
             if currentTool == .lasso {
-                // For lasso, build up the path as we drag
+                // For lasso, build up the path as we drag and show preview
                 lassoPath.append(location)
+
+                if let canvasState = canvasState {
+                    Task { @MainActor in
+                        canvasState.previewLassoPath = lassoPath
+                    }
+                }
+
                 if lassoPath.count % 5 == 0 { // Log every 5th point to reduce spam
                     print("Lasso: path now has \(lassoPath.count) points")
                 }
@@ -732,6 +758,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Store selection in canvas state and extract pixels
                 if let canvasState = canvasState {
                     Task { @MainActor in
+                        canvasState.previewSelection = nil // Clear preview
                         canvasState.activeSelection = selectionRect
                         print("Rectangle selection created: \(selectionRect)")
                         // Extract pixels for moving
@@ -754,6 +781,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     if let canvasState = canvasState {
                         let pathCopy = lassoPath
                         Task { @MainActor in
+                            canvasState.previewLassoPath = nil // Clear preview
                             canvasState.selectionPath = pathCopy
                             print("Lasso selection created with \(pathCopy.count) points")
                             // Extract pixels for moving
@@ -860,6 +888,14 @@ struct MetalCanvasView: UIViewRepresentable {
             polygonPoints = []
             isDraggingSelection = false
             selectionDragStart = nil
+
+            // Clear selection previews
+            if let canvasState = canvasState {
+                Task { @MainActor in
+                    canvasState.previewSelection = nil
+                    canvasState.previewLassoPath = nil
+                }
+            }
         }
 
         // MARK: - Shape Generation

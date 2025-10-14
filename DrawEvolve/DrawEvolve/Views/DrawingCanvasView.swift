@@ -66,7 +66,26 @@ struct DrawingCanvasView: View {
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
 
-            // Marching ants selection overlay
+            // Blue preview stroke while dragging selection
+            if let previewRect = canvasState.previewSelection {
+                Rectangle()
+                    .path(in: previewRect)
+                    .stroke(Color.blue, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+
+            if let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
+                Path { p in
+                    p.move(to: previewPath[0])
+                    for point in previewPath.dropFirst() {
+                        p.addLine(to: point)
+                    }
+                }
+                .stroke(Color.blue, lineWidth: 2)
+                .allowsHitTesting(false)
+            }
+
+            // Marching ants selection overlay (after selection is made)
             if let selection = canvasState.activeSelection {
                 MarchingAntsRectangle(rect: selection)
                     .allowsHitTesting(false)
@@ -693,6 +712,8 @@ class CanvasStateManager: ObservableObject {
     @Published var activeSelection: CGRect? = nil // Active selection rectangle
     @Published var selectionPath: [CGPoint]? = nil // For lasso selection
     @Published var selectionOffset: CGPoint = .zero // Offset for moving selection
+    @Published var previewSelection: CGRect? = nil // Preview rectangle while dragging
+    @Published var previewLassoPath: [CGPoint]? = nil // Preview lasso path while dragging
 
     // Selection pixel data (extracted when selection is made)
     var selectionPixels: UIImage? = nil
