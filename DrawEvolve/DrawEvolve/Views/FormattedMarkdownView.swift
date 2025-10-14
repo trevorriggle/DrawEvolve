@@ -11,25 +11,163 @@ struct FormattedMarkdownView: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // SwiftUI's Text supports markdown natively in iOS 15+
-            // Using .full to support headers, lists, bold, italic, code blocks, etc.
-            if let attributedText = try? AttributedString(
-                markdown: text,
-                options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .full)
-            ) {
-                Text(attributedText)
-                    .font(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                // Fallback if markdown parsing fails
-                Text(text)
-                    .font(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(parseMarkdownBlocks(text), id: \.id) { block in
+                blockView(for: block)
             }
         }
+    }
+
+    @ViewBuilder
+    private func blockView(for block: MarkdownBlock) -> some View {
+        switch block.type {
+        case .header1:
+            markdownText(block.content)
+                .font(.title2)
+                .fontWeight(.bold)
+                .padding(.top, 8)
+        case .header2:
+            markdownText(block.content)
+                .font(.title3)
+                .fontWeight(.bold)
+                .padding(.top, 6)
+        case .header3:
+            markdownText(block.content)
+                .font(.headline)
+                .fontWeight(.semibold)
+                .padding(.top, 4)
+        case .bulletList:
+            HStack(alignment: .top, spacing: 8) {
+                Text("•")
+                    .foregroundColor(.accentColor)
+                    .fontWeight(.bold)
+                markdownText(block.content)
+                    .font(.body)
+            }
+            .padding(.leading, 8)
+        case .numberedList:
+            HStack(alignment: .top, spacing: 8) {
+                Text("\(block.number ?? 1).")
+                    .foregroundColor(.accentColor)
+                    .fontWeight(.semibold)
+                markdownText(block.content)
+                    .font(.body)
+            }
+            .padding(.leading, 8)
+        case .paragraph:
+            markdownText(block.content)
+                .font(.body)
+                .lineSpacing(4)
+        }
+    }
+
+    private func markdownText(_ text: String) -> Text {
+        // Parse inline markdown (bold, italic, code)
+        if let attributed = try? AttributedString(markdown: text) {
+            return Text(attributed)
+        }
+        return Text(text)
+    }
+
+    private func parseMarkdownBlocks(_ markdown: String) -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
+        let lines = markdown.components(separatedBy: .newlines)
+        var currentParagraph: [String] = []
+        var listCounter = 1
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Empty line - end current paragraph
+            if trimmed.isEmpty {
+                if !currentParagraph.isEmpty {
+                    blocks.append(MarkdownBlock(
+                        type: .paragraph,
+                        content: currentParagraph.joined(separator: " ")
+                    ))
+                    currentParagraph = []
+                }
+                listCounter = 1
+                continue
+            }
+
+            // Header 1 (# or ##)
+            if trimmed.hasPrefix("## ") {
+                if !currentParagraph.isEmpty {
+                    blocks.append(MarkdownBlock(type: .paragraph, content: currentParagraph.joined(separator: " ")))
+                    currentParagraph = []
+                }
+                blocks.append(MarkdownBlock(type: .header2, content: trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)))
+                listCounter = 1
+                continue
+            } else if trimmed.hasPrefix("# ") {
+                if !currentParagraph.isEmpty {
+                    blocks.append(MarkdownBlock(type: .paragraph, content: currentParagraph.joined(separator: " ")))
+                    currentParagraph = []
+                }
+                blocks.append(MarkdownBlock(type: .header1, content: trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)))
+                listCounter = 1
+                continue
+            }
+
+            // Header 3 (###)
+            if trimmed.hasPrefix("### ") {
+                if !currentParagraph.isEmpty {
+                    blocks.append(MarkdownBlock(type: .paragraph, content: currentParagraph.joined(separator: " ")))
+                    currentParagraph = []
+                }
+                blocks.append(MarkdownBlock(type: .header3, content: trimmed.dropFirst(4).trimmingCharacters(in: .whitespaces)))
+                listCounter = 1
+                continue
+            }
+
+            // Bullet list
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                if !currentParagraph.isEmpty {
+                    blocks.append(MarkdownBlock(type: .paragraph, content: currentParagraph.joined(separator: " ")))
+                    currentParagraph = []
+                }
+                blocks.append(MarkdownBlock(type: .bulletList, content: trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)))
+                continue
+            }
+
+            // Numbered list
+            if let match = trimmed.firstMatch(of: /^(\d+)\.\s+(.+)/) {
+                if !currentParagraph.isEmpty {
+                    blocks.append(MarkdownBlock(type: .paragraph, content: currentParagraph.joined(separator: " ")))
+                    currentParagraph = []
+                }
+                blocks.append(MarkdownBlock(
+                    type: .numberedList,
+                    content: String(match.2),
+                    number: Int(match.1)
+                ))
+                continue
+            }
+
+            // Regular paragraph text
+            currentParagraph.append(trimmed)
+        }
+
+        // Add final paragraph if exists
+        if !currentParagraph.isEmpty {
+            blocks.append(MarkdownBlock(type: .paragraph, content: currentParagraph.joined(separator: " ")))
+        }
+
+        return blocks
+    }
+}
+
+struct MarkdownBlock: Identifiable {
+    let id = UUID()
+    let type: BlockType
+    let content: String
+    var number: Int? = nil
+
+    enum BlockType {
+        case header1, header2, header3
+        case bulletList, numberedList
+        case paragraph
     }
 }
 
