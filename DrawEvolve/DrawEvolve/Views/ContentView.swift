@@ -68,18 +68,6 @@ struct ContentView: View {
         // Initialize anonymous user ID on first launch
         _ = AnonymousUserManager.shared.userID
 
-        // DEBUG: Reset onboarding on every launch during development
-        // IMPORTANT: Keep this ENABLED during development to test full user journey including pre-draw prompts
-        // Only DISABLE for TestFlight/production builds
-        #if DEBUG
-        UserDefaults.standard.set(false, forKey: "hasSeenBetaTransparency")
-        UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
-        UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
-        hasSeenBetaTransparency = false
-        hasSeenOnboarding = false
-        hasCompletedPrompt = false
-        #endif
-
         // Show beta transparency first, then onboarding
         if !hasSeenBetaTransparency {
             showBetaTransparency = true

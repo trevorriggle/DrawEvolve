@@ -50,6 +50,7 @@ class DrawingStorageManager: ObservableObject {
             drawings = loadedDrawings.sorted { $0.createdAt > $1.createdAt }
         } catch {
             print("Error loading drawings: \(error)")
+            error.log(context: "DrawingStorageManager.fetchDrawings")
             errorMessage = "Failed to load drawings"
         }
 

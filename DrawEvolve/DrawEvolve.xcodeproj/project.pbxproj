@@ -36,6 +36,7 @@
 		DE000032 /* CritiqueHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100032 /* CritiqueHistory.swift */; };
 		DE000033 /* CritiqueHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100033 /* CritiqueHistoryView.swift */; };
 		DE000034 /* FormattedMarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100034 /* FormattedMarkdownView.swift */; };
+		DE000036 /* CrashReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100036 /* CrashReporter.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -75,6 +76,7 @@
 		DE100032 /* CritiqueHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistory.swift; sourceTree = "<group>"; };
 		DE100033 /* CritiqueHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistoryView.swift; sourceTree = "<group>"; };
 		DE100034 /* FormattedMarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattedMarkdownView.swift; sourceTree = "<group>"; };
+		DE100036 /* CrashReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashReporter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -166,6 +168,7 @@
 				DE100016 /* HistoryManager.swift */,
 				DE100024 /* DrawingStorageManager.swift */,
 				DE100029 /* AnonymousUserManager.swift */,
+				DE100036 /* CrashReporter.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -292,6 +295,7 @@
 				DE000031 /* DrawingDetailView.swift in Sources */,
 				DE000032 /* CritiqueHistory.swift in Sources */,
 				DE000033 /* CritiqueHistoryView.swift in Sources */,
+				DE000036 /* CrashReporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

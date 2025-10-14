@@ -45,7 +45,9 @@ actor OpenAIManager {
     func requestFeedback(image: UIImage, context: DrawingContext) async throws -> String {
         // Convert image to base64
         guard let imageData = image.jpegData(compressionQuality: 0.8) else {
-            throw OpenAIError.imageEncodingFailed
+            let error = OpenAIError.imageEncodingFailed
+            CrashReporter.shared.logError(error, context: "OpenAIManager.requestFeedback - Image encoding failed")
+            throw error
         }
         let base64Image = imageData.base64EncodedString()
 
@@ -82,15 +84,21 @@ actor OpenAIManager {
         guard httpResponse.statusCode == 200 else {
             if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let errorMessage = errorJson["error"] as? String {
-                throw OpenAIError.serverError(errorMessage)
+                let error = OpenAIError.serverError(errorMessage)
+                CrashReporter.shared.logError(error, context: "OpenAIManager.requestFeedback - Server error: \(errorMessage)")
+                throw error
             }
-            throw OpenAIError.serverError("HTTP \(httpResponse.statusCode)")
+            let error = OpenAIError.serverError("HTTP \(httpResponse.statusCode)")
+            CrashReporter.shared.logError(error, context: "OpenAIManager.requestFeedback - HTTP \(httpResponse.statusCode)")
+            throw error
         }
 
         // Parse backend response
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let feedback = json["feedback"] as? String else {
-            throw OpenAIError.invalidResponse
+            let error = OpenAIError.invalidResponse
+            CrashReporter.shared.logError(error, context: "OpenAIManager.requestFeedback - Invalid response format")
+            throw error
         }
 
         return feedback
