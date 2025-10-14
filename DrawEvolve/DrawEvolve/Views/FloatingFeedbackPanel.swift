@@ -15,20 +15,102 @@ struct FloatingFeedbackPanel: View {
     @State private var position: CGPoint = CGPoint(x: UIScreen.main.bounds.width - 200, y: 100)
     @State private var dragOffset: CGSize = .zero
     @State private var showHistory = false
+    @State private var showHistoryMenu = false
+    @State private var selectedHistoryIndex = 0
 
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
     private let expandedSize: CGSize = CGSize(width: 350, height: 500)
+    private let historyMenuWidth: CGFloat = 200
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
+            ZStack(alignment: .topLeading) {
+                // History menu (appears to the left of the panel)
+                if showHistoryMenu && !critiqueHistory.isEmpty {
+                    VStack(spacing: 0) {
+                        // History menu header
+                        HStack {
+                            Text("History")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(uiColor: .secondarySystemBackground))
+
+                        Divider()
+
+                        // History list
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(Array(critiqueHistory.enumerated()), id: \.element.id) { index, entry in
+                                    Button(action: {
+                                        selectedHistoryIndex = index
+                                        withAnimation(.spring(response: 0.25)) {
+                                            showHistoryMenu = false
+                                        }
+                                    }) {
+                                        HStack(spacing: 8) {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(formatTimestamp(entry.timestamp))
+                                                    .font(.subheadline)
+                                                    .fontWeight(.medium)
+                                                    .foregroundColor(.primary)
+
+                                                Text(entry.feedback.prefix(50) + (entry.feedback.count > 50 ? "..." : ""))
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(2)
+                                            }
+                                            Spacer()
+
+                                            if index == selectedHistoryIndex {
+                                                Image(systemName: "checkmark")
+                                                    .foregroundColor(.accentColor)
+                                                    .font(.caption)
+                                            }
+                                        }
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 10)
+                                        .background(index == selectedHistoryIndex ? Color.accentColor.opacity(0.1) : Color.clear)
+                                    }
+
+                                    if index < critiqueHistory.count - 1 {
+                                        Divider()
+                                            .padding(.leading, 12)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .frame(width: historyMenuWidth)
+                    .background(Color(uiColor: .systemBackground))
+                    .cornerRadius(12)
+                    .shadow(radius: 8)
+                    .position(
+                        x: position.x - expandedSize.width / 2 - historyMenuWidth / 2 - 8,
+                        y: position.y
+                    )
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+
                 if isExpanded, let feedbackText = feedback {
                     // Expanded panel
                     VStack(spacing: 0) {
                         // Header with drag handle and controls
                         HStack {
-                            Image(systemName: "line.3.horizontal")
-                                .foregroundColor(.secondary)
+                            Button(action: {
+                                withAnimation(.spring(response: 0.25)) {
+                                    showHistoryMenu.toggle()
+                                }
+                            }) {
+                                Image(systemName: "line.3.horizontal")
+                                    .foregroundColor(showHistoryMenu ? .accentColor : .secondary)
+                                    .font(.title3)
+                            }
+                            .disabled(critiqueHistory.isEmpty)
 
                             Spacer()
 
@@ -57,24 +139,25 @@ struct FloatingFeedbackPanel: View {
                         // Feedback content
                         ScrollView {
                             VStack(spacing: 16) {
-                                FormattedMarkdownView(text: feedbackText)
-                                    .textSelection(.enabled)
-
-                                // History button if there are multiple critiques
-                                if critiqueHistory.count > 1 {
-                                    Button(action: { showHistory = true }) {
-                                        HStack {
-                                            Image(systemName: "clock.arrow.circlepath")
-                                            Text("View History (\(critiqueHistory.count))")
-                                                .font(.subheadline)
-                                        }
-                                        .padding(.vertical, 10)
-                                        .padding(.horizontal, 16)
-                                        .background(Color.accentColor.opacity(0.1))
-                                        .foregroundColor(.accentColor)
-                                        .cornerRadius(8)
+                                // Show timestamp of current feedback
+                                if !critiqueHistory.isEmpty && selectedHistoryIndex < critiqueHistory.count {
+                                    HStack {
+                                        Image(systemName: "clock")
+                                            .foregroundColor(.secondary)
+                                            .font(.caption)
+                                        Text(formatTimestamp(critiqueHistory[selectedHistoryIndex].timestamp))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                        Text("\(selectedHistoryIndex + 1) of \(critiqueHistory.count)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
                                     }
+                                    .padding(.horizontal, 4)
                                 }
+
+                                FormattedMarkdownView(text: displayedFeedback)
+                                    .textSelection(.enabled)
                             }
                             .padding()
                         }
@@ -150,6 +233,26 @@ struct FloatingFeedbackPanel: View {
         .sheet(isPresented: $showHistory) {
             CritiqueHistoryView(critiqueHistory: critiqueHistory)
         }
+    }
+
+    private var displayedFeedback: String {
+        if !critiqueHistory.isEmpty && selectedHistoryIndex < critiqueHistory.count {
+            return critiqueHistory[selectedHistoryIndex].feedback
+        }
+        return feedback ?? ""
+    }
+
+    private func formatTimestamp(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        let relative = formatter.localizedString(for: date, relativeTo: Date())
+
+        // Also show absolute time for clarity
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateStyle = .short
+        timeFormatter.timeStyle = .short
+
+        return "\(relative) • \(timeFormatter.string(from: date))"
     }
 }
 
