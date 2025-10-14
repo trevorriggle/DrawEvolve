@@ -11,13 +11,24 @@ struct FormattedMarkdownView: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             // SwiftUI's Text supports markdown natively in iOS 15+
-            // Handles: **bold**, *italic*, `code`, [links](url), lists, headers, etc.
-            Text(try! AttributedString(markdown: text, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-                .font(.body)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Using .full to support headers, lists, bold, italic, code blocks, etc.
+            if let attributedText = try? AttributedString(
+                markdown: text,
+                options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .full)
+            ) {
+                Text(attributedText)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                // Fallback if markdown parsing fails
+                Text(text)
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
