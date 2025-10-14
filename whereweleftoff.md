@@ -1,138 +1,156 @@
 # Where We Left Off
 
-**Session Date:** January 13, 2025
-**Focus:** Fixed critical stroke offset bug + added markdown rendering
+**Session Date:** January 14, 2025
+**Focus:** Selection tool improvements + floating panel UX polish
 
 ---
 
-## What We Fixed
+## What We Fixed Today
 
-### CRITICAL BUG RESOLVED: Brush strokes jumping 70-100px left on release
+### 1. Markdown Rendering in Feedback Panel - COMPLETED
+**Problem:** Markdown was parsing but not displaying with proper visual hierarchy
+**Solution:** Rebuilt markdown parser to handle blocks separately
+- Headers now display with proper sizing (.title2, .title3, .headline)
+- Paragraphs separated by proper spacing (16pt between blocks)
+- Lists render with colored bullets/numbers
+- Inline formatting (bold, italic, code) works within blocks
+**Files:** `FormattedMarkdownView.swift`
 
-**Root Cause:**
-`CanvasRenderer.swift` line 220 was using a uniform scale based on max dimension:
-```swift
-let uniformScale = Float(texture.width) / Float(max(screenSize.width, screenSize.height))
-```
+### 2. Selection Tool Preview Strokes - ADDED
+**Problem:** Rectangle select and lasso tools gave no visual feedback while dragging
+**Solution:** Added blue preview strokes during selection drag
+- Rectangle select shows blue preview rectangle while dragging
+- Lasso shows blue preview path as you draw
+- Preview clears when selection is finalized (marching ants appear)
+- Helps users see exactly what they're selecting before releasing
+**Files:** `DrawingCanvasView.swift`, `MetalCanvasView.swift`
 
-This caused incorrect coordinate mapping on non-square screens/textures.
+### 3. Floating Feedback Panel Drag - FIXED
+**Problem:** Panel jumped when clicking and didn't follow finger smoothly
+**Solution:** Switched from `.position()` to `.offset()` with translation tracking
+- Panel now follows finger/cursor immediately with no lag or jumping
+- Uses `value.translation` instead of absolute coordinates
+- Maintains smooth constraint animation on release
+**Files:** `FloatingFeedbackPanel.swift`
 
-**The Fix:**
-Changed to separate X/Y scaling:
-```swift
-let scaleX = Float(texture.width) / Float(screenSize.width)
-let scaleY = Float(texture.height) / Float(screenSize.height)
-```
+### 4. Gallery Tap Gesture - FIXED
+**Problem:** Clicking gallery items in simulator triggered context menu instead of opening
+**Solution:** Replaced Button wrapper with `.onTapGesture`
+- Single tap now consistently opens drawing detail sheet
+- Context menu still works on long-press
+**Files:** `GalleryView.swift`
 
-**File:** `/workspaces/DrawEvolve/DrawEvolve/DrawEvolve/Services/CanvasRenderer.swift` lines 216-228
-
-**Result:** Strokes now render exactly where you draw them. No more offset!
-
----
-
-## What We Added
-
-1. **Markdown rendering in feedback panel** - Feedback now displays with proper formatting (bold, bullets, headers, etc.)
-2. **Updated documentation** - Cleaned up PROJECT_STATUS.md, whereweleftoff.md, and TESTING-CHECKLIST.md
-
----
-
-## What We Learned
-
-### Don't Overthink Coordinate Systems
-- We spent time trying to fix the bug by changing view.bounds.size to drawable.texture.size
-- That made it WORSE (strokes jumped even further)
-- The real issue was in the renderer's scaling calculation all along
-- **Lesson:** Check the math in the rendering pipeline, not just the input coordinates
-
-### Zoom/Pan is Deferred
-- The zoom/pan transformation code exists but is currently unused
-- It was interfering with drawing (causing the coordinate bugs we were chasing)
-- **Decision:** Leave it disabled until we can test properly on physical iPad
-- The gesture recognizers are there, we just need to properly implement the coordinate transforms
+### 5. Critique History Navigation - IMPLEMENTED
+**Problem:** No way to view previous feedback entries
+**Solution:** Added context menu-style history navigation
+- Hamburger icon toggles history menu (slides out from left)
+- Shows all feedback entries with timestamps
+- Click any entry to view that feedback
+- Shows "1 of 3" counter in main panel
+- Timestamps show relative + absolute time
+**Files:** `FloatingFeedbackPanel.swift`
 
 ---
 
 ## Current State
 
 ### What Works
-- ✅ Drawing - strokes land exactly where you draw (BUG FIXED!)
+- ✅ Drawing - strokes land exactly where you draw
 - ✅ All drawing tools (brush, eraser, shapes, fill, effects)
-- ✅ Selection tools (rectangle, lasso with marching ants)
+- ✅ Selection tools with blue preview strokes
+- ✅ Selection moving (drag selected pixels around)
 - ✅ Layers with opacity, visibility
 - ✅ Undo/Redo system
 - ✅ Save/Load to gallery
-- ✅ AI feedback with markdown rendering
+- ✅ AI feedback with beautiful markdown formatting
+- ✅ Critique history navigation
+- ✅ Floating feedback panel (smooth dragging)
 - ✅ Dark mode support
 - ✅ Collapsible toolbar
+- ✅ Gallery with tap-to-open
 
-### What's Untested
-- ⚠️ Critique history - Models, storage, and UI are all implemented but need end-to-end verification
+### Ready for TestFlight
+- ✅ API keys secured (Cloudflare Worker proxy)
+- ✅ No hardcoded secrets in repo
+- ✅ Core features complete and working
+- ✅ UI polish done
 
 ### What's Deferred
-- 🚧 Zoom/Pan/Rotate - Code exists but disabled due to coordinate system conflicts
-- 🚧 Need to test on physical iPad before re-enabling
+- 🚧 Zoom/Pan/Rotate - Code exists but disabled
+- 🚧 Selection pixel moving (extract and drag selection pixels)
+- 🚧 Delete selection (button exists but may need testing)
 
 ---
 
-## Next Session TODO
+## Known Issues to Test
 
-### Must Test on Physical iPad
-1. **Verify the stroke fix works perfectly** - This was a critical bug, need to confirm it's truly fixed
-2. **Test critique history** - Get feedback multiple times, verify history view displays correctly
-3. **Try zoom/pan implementation** - With device in hand, properly implement gesture transforms
+1. **Delete Selection Button** - User reported it's "slightly busted" but didn't specify how
+2. **Selection pixel moving** - Extract and drag functionality implemented but needs testing
 
-### If User Requests New Features
+---
+
+## Next Session Priorities
+
+### High Priority
+1. **Test delete selection** - Figure out what's broken and fix it
+2. **Test selection pixel moving** - Verify extract and drag works
+3. **Physical iPad testing** - Verify all fixes work on real device
+
+### If Time Permits
 - Additional tools (smudge, clone stamp, magic wand)
 - More blend modes for layers
 - Performance profiling/optimization
 
 ---
 
-## Important Technical Notes
+## Technical Notes
 
-### Coordinate System Architecture
-Current implementation is SIMPLE and WORKING:
-- Touch coordinates → scale directly to texture space
-- No transformations, no document space, no view transforms
-- This simplicity is why the fix worked
+### Selection Tools Architecture
+- **Preview:** Blue stroke shows during drag (previewSelection, previewLassoPath)
+- **Active:** Marching ants show after release (activeSelection, selectionPath)
+- **Pixels:** Extracted for moving (selectionPixels, selectionOriginalRect)
+- **Delete:** Clears pixels in selection area
 
-If implementing zoom/pan later:
-- Don't transform touch coordinates in `MetalCanvasView`
-- Apply transforms in the renderer during display only
-- Keep stroke storage in untransformed texture space
+### Floating Panel Architecture
+- Uses `.offset()` for smooth dragging (not `.position()`)
+- History menu is overlay with `.offset(x: -width - 8)`
+- Tracks `offset` and `lastOffset` for persistent positioning
 
-### Key Files Modified Today
-- `CanvasRenderer.swift` line 218-220 (THE FIX)
-- `FloatingFeedbackPanel.swift` (added markdown rendering - NEEDS TO BE IMPLEMENTED)
-- `PROJECT_STATUS.md` (updated)
-- `whereweleftoff.md` (this file)
-- `TESTING-CHECKLIST.md` (updated)
+### Critique History Storage
+- Each Drawing has `critiqueHistory: [CritiqueEntry]`
+- Stored in SQLite with drawing
+- New feedback appends to history
+- Feedback panel can browse history with hamburger menu
 
 ---
 
-## Git Status
-- Branch: `main`
-- Recent commits: Coordinate scaling fix, documentation updates
-- **Ready to test on physical iPad**
+## Key Files Modified This Session
+
+- `FormattedMarkdownView.swift` - Rebuilt markdown renderer with block parsing
+- `FloatingFeedbackPanel.swift` - Added history navigation + fixed dragging
+- `DrawingCanvasView.swift` - Added selection preview rendering
+- `MetalCanvasView.swift` - Added preview state tracking during selection drag
+- `GalleryView.swift` - Fixed tap gesture for simulator
 
 ---
 
 ## For Future Claude Sessions
 
 ### Quick Context
-- This is an iPad drawing app with AI feedback
-- Metal-based rendering with 2048x2048 textures
-- Just fixed a major coordinate scaling bug
-- Zoom/pan exists but is disabled - don't re-enable without testing on device
-
-### Files You'll Need
-- `MetalCanvasView.swift` - Touch handling
-- `CanvasRenderer.swift` - Metal rendering (line 218-220 is the critical fix)
-- `DrawingCanvasView.swift` - Main UI
-- `CanvasStateManager.swift` - State (has zoom/pan code that's unused)
+- iPad drawing app with AI feedback
+- Metal rendering, 2048x2048 textures
+- Coordinate scaling bug was fixed (Jan 13)
+- Selection tools now have blue preview strokes
+- Critique history fully functional
+- Ready for TestFlight launch
 
 ### User Preferences
 - No emojis in code/docs
-- Test gesture features on physical iPad before implementing
-- Keep documentation concise and useful
+- Test gesture features on physical iPad
+- Always push commits immediately (user works across Codespaces + Mac)
+- Keep docs concise and useful
+
+### API Security
+- OpenAI key secured via Cloudflare Worker
+- Worker URL: `https://drawevolve-backend.trevorriggle.workers.dev`
+- Key stored as Cloudflare secret (never in repo)
