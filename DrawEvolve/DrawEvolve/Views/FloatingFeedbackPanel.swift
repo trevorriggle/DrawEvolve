@@ -12,8 +12,8 @@ struct FloatingFeedbackPanel: View {
     let critiqueHistory: [CritiqueEntry]
     @Binding var isPresented: Bool
     @State private var isExpanded = true
-    @State private var position: CGPoint = CGPoint(x: UIScreen.main.bounds.width - 200, y: 100)
-    @State private var isDragging = false
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
     @State private var showHistory = false
     @State private var showHistoryMenu = false
     @State private var selectedHistoryIndex = 0
@@ -181,55 +181,53 @@ struct FloatingFeedbackPanel: View {
                     }
                 }
             }
-            .position(
-                x: position.x,
-                y: position.y
-            )
+            .offset(x: offset.width, y: offset.height)
             .gesture(
-                DragGesture(coordinateSpace: .global)
+                DragGesture()
                     .onChanged { value in
-                        // Update position in real-time WITHOUT animation for immediate response
-                        // Use translation from start location to track drag
-                        if !isDragging {
-                            isDragging = true
-                        }
-                        position = value.location
+                        // Update offset in real-time for immediate response
+                        offset = CGSize(
+                            width: lastOffset.width + value.translation.width,
+                            height: lastOffset.height + value.translation.height
+                        )
                     }
                     .onEnded { value in
-                        isDragging = false
-                        // Constrain to screen bounds with safe margins (WITH animation for snap effect)
+                        // Save the final offset
+                        lastOffset = offset
+
+                        // Optionally constrain to screen bounds
                         withAnimation(.spring(response: 0.3)) {
-                            let currentSize = isExpanded ? expandedSize : collapsedSize
+                            let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
+                            let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
 
-                            // Ensure the collapse button is always visible (70pt from top minimum)
-                            let minY = max(currentSize.height / 2, 70)
-                            let maxY = geometry.size.height - currentSize.height / 2
-                            let minX = currentSize.width / 2
-                            let maxX = geometry.size.width - currentSize.width / 2
+                            // Calculate current position (center of view + offset)
+                            let centerX = geometry.size.width / 2 + offset.width
+                            let centerY = geometry.size.height / 2 + offset.height
 
-                            position.x = min(max(position.x, minX), maxX)
-                            position.y = min(max(position.y, minY), maxY)
+                            // Constrain to keep view visible
+                            let minX = currentWidth / 2
+                            let maxX = geometry.size.width - currentWidth / 2
+                            let minY = max(currentHeight / 2, 70)
+                            let maxY = geometry.size.height - currentHeight / 2
+
+                            let constrainedX = min(max(centerX, minX), maxX)
+                            let constrainedY = min(max(centerY, minY), maxY)
+
+                            // Update offset to constrained position
+                            offset = CGSize(
+                                width: constrainedX - geometry.size.width / 2,
+                                height: constrainedY - geometry.size.height / 2
+                            )
+                            lastOffset = offset
                         }
                     }
             )
-            .onChange(of: isExpanded) { _, newValue in
-                // Re-constrain when expanding/collapsing
-                withAnimation(.spring(response: 0.3)) {
-                    let currentSize = newValue ? expandedSize : collapsedSize
-                    let minY = max(currentSize.height / 2, 70)
-                    let maxY = geometry.size.height - currentSize.height / 2
-                    let minX = currentSize.width / 2
-                    let maxX = geometry.size.width - currentSize.width / 2
-
-                    position.x = min(max(position.x, minX), maxX)
-                    position.y = min(max(position.y, minY), maxY)
-                }
-            }
             .onAppear {
-                // Position in top-right corner initially, with safe margin from top
-                let initialX = geometry.size.width - expandedSize.width / 2 - 20
-                let initialY = max(expandedSize.height / 2 + 20, 70)
-                position = CGPoint(x: initialX, y: initialY)
+                // Position in top-right corner initially
+                let initialX = geometry.size.width / 2 - 200 // Offset from center to put in top-right
+                let initialY = -geometry.size.height / 2 + 150 // Offset from center to put near top
+                offset = CGSize(width: initialX, height: initialY)
+                lastOffset = offset
             }
         }
         .sheet(isPresented: $showHistory) {
