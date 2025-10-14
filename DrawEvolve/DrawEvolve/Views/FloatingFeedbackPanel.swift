@@ -13,7 +13,7 @@ struct FloatingFeedbackPanel: View {
     @Binding var isPresented: Bool
     @State private var isExpanded = true
     @State private var position: CGPoint = CGPoint(x: UIScreen.main.bounds.width - 200, y: 100)
-    @State private var dragOffset: CGSize = .zero
+    @State private var isDragging = false
     @State private var showHistory = false
     @State private var showHistoryMenu = false
     @State private var selectedHistoryIndex = 0
@@ -186,13 +186,17 @@ struct FloatingFeedbackPanel: View {
                 y: position.y
             )
             .gesture(
-                DragGesture()
+                DragGesture(coordinateSpace: .global)
                     .onChanged { value in
                         // Update position in real-time WITHOUT animation for immediate response
-                        position.x = value.location.x
-                        position.y = value.location.y
+                        // Use translation from start location to track drag
+                        if !isDragging {
+                            isDragging = true
+                        }
+                        position = value.location
                     }
                     .onEnded { value in
+                        isDragging = false
                         // Constrain to screen bounds with safe margins (WITH animation for snap effect)
                         withAnimation(.spring(response: 0.3)) {
                             let currentSize = isExpanded ? expandedSize : collapsedSize
