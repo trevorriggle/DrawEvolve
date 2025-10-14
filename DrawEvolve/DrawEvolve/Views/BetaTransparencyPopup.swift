@@ -93,10 +93,6 @@ struct BetaTransparencyPopup: View {
                                     icon: "sparkles",
                                     text: "GPT-4o Vision AI feedback with personalized, encouraging guidance"
                                 )
-                                BetaFeatureItem(
-                                    icon: "photo.fill",
-                                    text: "Export your artwork to images"
-                                )
                             }
                         }
 
