@@ -156,15 +156,13 @@ struct GalleryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
-                    Button(action: {
-                        selectedDrawing = drawing
-                    }) {
-                        DrawingCard(drawing: drawing) {
-                            drawingToDelete = drawing
-                            showDeleteAlert = true
-                        }
+                    DrawingCard(drawing: drawing) {
+                        drawingToDelete = drawing
+                        showDeleteAlert = true
                     }
-                    .buttonStyle(PlainButtonStyle())
+                    .onTapGesture {
+                        selectedDrawing = drawing
+                    }
                 }
             }
             .padding()
