@@ -24,78 +24,7 @@ struct FloatingFeedbackPanel: View {
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
-                // History menu (appears to the left of the panel)
-                if showHistoryMenu && !critiqueHistory.isEmpty {
-                    VStack(spacing: 0) {
-                        // History menu header
-                        HStack {
-                            Text("History")
-                                .font(.subheadline)
-                                .fontWeight(.semibold)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(uiColor: .secondarySystemBackground))
-
-                        Divider()
-
-                        // History list
-                        ScrollView {
-                            VStack(spacing: 0) {
-                                ForEach(Array(critiqueHistory.enumerated()), id: \.element.id) { index, entry in
-                                    Button(action: {
-                                        selectedHistoryIndex = index
-                                        withAnimation(.spring(response: 0.25)) {
-                                            showHistoryMenu = false
-                                        }
-                                    }) {
-                                        HStack(spacing: 8) {
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                Text(formatTimestamp(entry.timestamp))
-                                                    .font(.subheadline)
-                                                    .fontWeight(.medium)
-                                                    .foregroundColor(.primary)
-
-                                                Text(entry.feedback.prefix(50) + (entry.feedback.count > 50 ? "..." : ""))
-                                                    .font(.caption)
-                                                    .foregroundColor(.secondary)
-                                                    .lineLimit(2)
-                                            }
-                                            Spacer()
-
-                                            if index == selectedHistoryIndex {
-                                                Image(systemName: "checkmark")
-                                                    .foregroundColor(.accentColor)
-                                                    .font(.caption)
-                                            }
-                                        }
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 10)
-                                        .background(index == selectedHistoryIndex ? Color.accentColor.opacity(0.1) : Color.clear)
-                                    }
-
-                                    if index < critiqueHistory.count - 1 {
-                                        Divider()
-                                            .padding(.leading, 12)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .frame(width: historyMenuWidth)
-                    .background(Color(uiColor: .systemBackground))
-                    .cornerRadius(12)
-                    .shadow(radius: 8)
-                    .position(
-                        x: position.x - expandedSize.width / 2 - historyMenuWidth / 2 - 8,
-                        y: position.y
-                    )
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-
+            ZStack {
                 if isExpanded, let feedbackText = feedback {
                     // Expanded panel
                     VStack(spacing: 0) {
@@ -167,6 +96,75 @@ struct FloatingFeedbackPanel: View {
                     .background(Color(uiColor: .systemBackground))
                     .cornerRadius(16)
                     .shadow(radius: 10)
+                    .overlay(alignment: .leading) {
+                        // History menu overlay - appears to the left
+                        if showHistoryMenu && !critiqueHistory.isEmpty {
+                            VStack(spacing: 0) {
+                                // History menu header
+                                HStack {
+                                    Text("History")
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color(uiColor: .secondarySystemBackground))
+
+                                Divider()
+
+                                // History list
+                                ScrollView {
+                                    VStack(spacing: 0) {
+                                        ForEach(Array(critiqueHistory.enumerated()), id: \.element.id) { index, entry in
+                                            Button(action: {
+                                                selectedHistoryIndex = index
+                                                withAnimation(.spring(response: 0.25)) {
+                                                    showHistoryMenu = false
+                                                }
+                                            }) {
+                                                HStack(spacing: 8) {
+                                                    VStack(alignment: .leading, spacing: 4) {
+                                                        Text(formatTimestamp(entry.timestamp))
+                                                            .font(.subheadline)
+                                                            .fontWeight(.medium)
+                                                            .foregroundColor(.primary)
+
+                                                        Text(entry.feedback.prefix(50) + (entry.feedback.count > 50 ? "..." : ""))
+                                                            .font(.caption)
+                                                            .foregroundColor(.secondary)
+                                                            .lineLimit(2)
+                                                    }
+                                                    Spacer()
+
+                                                    if index == selectedHistoryIndex {
+                                                        Image(systemName: "checkmark")
+                                                            .foregroundColor(.accentColor)
+                                                            .font(.caption)
+                                                    }
+                                                }
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 10)
+                                                .background(index == selectedHistoryIndex ? Color.accentColor.opacity(0.1) : Color.clear)
+                                            }
+
+                                            if index < critiqueHistory.count - 1 {
+                                                Divider()
+                                                    .padding(.leading, 12)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(width: historyMenuWidth, height: expandedSize.height)
+                            .background(Color(uiColor: .systemBackground))
+                            .cornerRadius(12)
+                            .shadow(radius: 8)
+                            .offset(x: -historyMenuWidth - 8)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                        }
+                    }
                 } else {
                     // Collapsed icon
                     Button(action: { withAnimation(.spring(response: 0.3)) { isExpanded = true } }) {
