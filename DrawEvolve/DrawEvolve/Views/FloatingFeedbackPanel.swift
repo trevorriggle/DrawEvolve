@@ -107,14 +107,12 @@ struct FloatingFeedbackPanel: View {
             .gesture(
                 DragGesture()
                     .onChanged { value in
-                        // Update position in real-time with animation
-                        withAnimation(.interactiveSpring()) {
-                            position.x = value.location.x
-                            position.y = value.location.y
-                        }
+                        // Update position in real-time WITHOUT animation for immediate response
+                        position.x = value.location.x
+                        position.y = value.location.y
                     }
                     .onEnded { value in
-                        // Constrain to screen bounds with safe margins
+                        // Constrain to screen bounds with safe margins (WITH animation for snap effect)
                         withAnimation(.spring(response: 0.3)) {
                             let currentSize = isExpanded ? expandedSize : collapsedSize
 
