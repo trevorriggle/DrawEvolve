@@ -10,6 +10,7 @@ import SwiftUI
 struct PromptInputView: View {
     @Binding var context: DrawingContext
     @Binding var isPresented: Bool
+    @State private var showGallery = false
 
     var body: some View {
         ZStack {
@@ -83,24 +84,41 @@ struct PromptInputView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
 
-                // Sticky Start Drawing button
+                // Sticky buttons at bottom
                 VStack(spacing: 0) {
                     Divider()
 
-                    Button(action: {
-                        if context.isComplete {
-                            isPresented = false
+                    VStack(spacing: 12) {
+                        Button(action: {
+                            if context.isComplete {
+                                isPresented = false
+                            }
+                        }) {
+                            Text("Start Drawing")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(context.isComplete ? Color.accentColor : Color.gray)
+                                .cornerRadius(12)
                         }
-                    }) {
-                        Text("Start Drawing")
-                            .font(.headline)
-                            .foregroundColor(.white)
+                        .disabled(!context.isComplete)
+
+                        Button(action: {
+                            showGallery = true
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "photo.on.rectangle")
+                                Text("View Gallery")
+                            }
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(context.isComplete ? Color.accentColor : Color.gray)
-                            .cornerRadius(12)
+                            .padding(.vertical, 12)
+                            .background(Color(uiColor: .secondarySystemBackground))
+                            .cornerRadius(10)
+                        }
                     }
-                    .disabled(!context.isComplete)
                     .padding()
                     .background(.ultraThinMaterial)
                 }
@@ -110,6 +128,9 @@ struct PromptInputView: View {
             .cornerRadius(20)
             .shadow(radius: 20)
             .padding(40)
+        }
+        .fullScreenCover(isPresented: $showGallery) {
+            GalleryView()
         }
     }
 }

@@ -240,11 +240,6 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
-
-                            // Gallery button
-                            ToolButton(icon: "photo.on.rectangle", isSelected: false) {
-                                showGallery = true
-                            }
                         }
                         .padding(.top, 12)
                         .padding(.horizontal, 8)
