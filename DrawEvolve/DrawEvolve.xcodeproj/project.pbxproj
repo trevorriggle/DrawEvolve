@@ -17,6 +17,7 @@
 		DE000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200001 /* Assets.xcassets */; };
 		DE000009 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200002 /* Preview Assets.xcassets */; };
 		DE000012 /* OnboardingPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100012 /* OnboardingPopup.swift */; };
+		DE000035 /* BetaTransparencyPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100035 /* BetaTransparencyPopup.swift */; };
 		DE000013 /* DrawingLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100013 /* DrawingLayer.swift */; };
 		DE000014 /* DrawingTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100014 /* DrawingTool.swift */; };
 		DE000015 /* CanvasRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100015 /* CanvasRenderer.swift */; };
@@ -51,6 +52,7 @@
 		DE100006 /* DrawingContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingContext.swift; sourceTree = "<group>"; };
 		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
 		DE100012 /* OnboardingPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPopup.swift; sourceTree = "<group>"; };
+		DE100035 /* BetaTransparencyPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetaTransparencyPopup.swift; sourceTree = "<group>"; };
 		DE100013 /* DrawingLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingLayer.swift; sourceTree = "<group>"; };
 		DE100014 /* DrawingTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingTool.swift; sourceTree = "<group>"; };
 		DE100015 /* CanvasRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasRenderer.swift; sourceTree = "<group>"; };
@@ -126,6 +128,7 @@
 			isa = PBXGroup;
 			children = (
 				DE100002 /* ContentView.swift */,
+				DE100035 /* BetaTransparencyPopup.swift */,
 				DE100012 /* OnboardingPopup.swift */,
 				DE100003 /* PromptInputView.swift */,
 				DE100004 /* DrawingCanvasView.swift */,
@@ -264,6 +267,7 @@
 			files = (
 				DE000001 /* DrawEvolveApp.swift in Sources */,
 				DE000002 /* ContentView.swift in Sources */,
+				DE000035 /* BetaTransparencyPopup.swift in Sources */,
 				DE000012 /* OnboardingPopup.swift in Sources */,
 				DE000003 /* PromptInputView.swift in Sources */,
 				DE000004 /* DrawingCanvasView.swift in Sources */,

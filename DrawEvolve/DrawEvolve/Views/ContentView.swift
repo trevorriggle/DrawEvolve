@@ -8,8 +8,10 @@
 import SwiftUI
 
 struct ContentView: View {
+    @AppStorage("hasSeenBetaTransparency") private var hasSeenBetaTransparency = false
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
     @AppStorage("hasCompletedPrompt") private var hasCompletedPrompt = false
+    @State private var showBetaTransparency = false
     @State private var showOnboarding = false
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
@@ -20,6 +22,12 @@ struct ContentView: View {
         DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
             .onAppear {
                 performFirstLaunchCheck()
+            }
+            .overlay {
+                // Beta transparency popup (shown first)
+                if showBetaTransparency {
+                    BetaTransparencyPopup(isPresented: $showBetaTransparency)
+                }
             }
             .overlay {
                 // First-time onboarding popup
@@ -34,6 +42,11 @@ struct ContentView: View {
                         context: $drawingContext,
                         isPresented: $showPromptInput
                     )
+                }
+            }
+            .onChange(of: showBetaTransparency) { _, newValue in
+                if !newValue && !hasSeenOnboarding {
+                    showOnboarding = true
                 }
             }
             .onChange(of: showOnboarding) { _, newValue in
@@ -59,14 +72,19 @@ struct ContentView: View {
         // IMPORTANT: Keep this ENABLED during development to test full user journey including pre-draw prompts
         // Only DISABLE for TestFlight/production builds
         #if DEBUG
+        UserDefaults.standard.set(false, forKey: "hasSeenBetaTransparency")
         UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
         UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
+        hasSeenBetaTransparency = false
         hasSeenOnboarding = false
         hasCompletedPrompt = false
         #endif
 
-        // Show onboarding if first time
-        if !hasSeenOnboarding {
+        // Show beta transparency first, then onboarding
+        if !hasSeenBetaTransparency {
+            showBetaTransparency = true
+            hasSeenBetaTransparency = true
+        } else if !hasSeenOnboarding {
             showOnboarding = true
             hasSeenOnboarding = true
         }
