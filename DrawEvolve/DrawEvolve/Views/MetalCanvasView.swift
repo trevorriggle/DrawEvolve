@@ -773,20 +773,55 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .lasso {
                 print("Lasso: creating selection from path with \(lassoPath.count) points")
 
-                // Close the path by connecting back to start
-                if !lassoPath.isEmpty {
-                    lassoPath.append(lassoPath[0])
-
-                    // Store selection in canvas state and extract pixels
+                // IMPORTANT: Need at least 3 unique points for a valid lasso selection
+                // (After closing the path with the first point, we need at least 4 total)
+                if lassoPath.count < 3 {
+                    print("Lasso: path too short (\(lassoPath.count) points), ignoring selection")
+                    // Clear lasso path and preview
+                    lassoPath = []
+                    shapeStartPoint = nil
                     if let canvasState = canvasState {
-                        let pathCopy = lassoPath
                         Task { @MainActor in
-                            canvasState.previewLassoPath = nil // Clear preview
-                            canvasState.selectionPath = pathCopy
-                            print("Lasso selection created with \(pathCopy.count) points")
-                            // Extract pixels for moving
-                            canvasState.extractSelectionPixels()
+                            canvasState.previewLassoPath = nil
                         }
+                    }
+                    return
+                }
+
+                // Validate the path covers a minimum area (avoid tiny accidental selections)
+                let minX = lassoPath.map { $0.x }.min() ?? 0
+                let maxX = lassoPath.map { $0.x }.max() ?? 0
+                let minY = lassoPath.map { $0.y }.min() ?? 0
+                let maxY = lassoPath.map { $0.y }.max() ?? 0
+                let width = maxX - minX
+                let height = maxY - minY
+                let minSelectionSize: CGFloat = 10 // Minimum 10x10 pixel area
+
+                if width < minSelectionSize || height < minSelectionSize {
+                    print("Lasso: selection too small (\(width)x\(height)), ignoring")
+                    // Clear lasso path and preview
+                    lassoPath = []
+                    shapeStartPoint = nil
+                    if let canvasState = canvasState {
+                        Task { @MainActor in
+                            canvasState.previewLassoPath = nil
+                        }
+                    }
+                    return
+                }
+
+                // Close the path by connecting back to start
+                lassoPath.append(lassoPath[0])
+
+                // Store selection in canvas state and extract pixels
+                if let canvasState = canvasState {
+                    let pathCopy = lassoPath
+                    Task { @MainActor in
+                        canvasState.previewLassoPath = nil // Clear preview
+                        canvasState.selectionPath = pathCopy
+                        print("Lasso selection created with \(pathCopy.count) points")
+                        // Extract pixels for moving
+                        canvasState.extractSelectionPixels()
                     }
                 }
 

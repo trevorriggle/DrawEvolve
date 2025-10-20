@@ -17,6 +17,7 @@ struct FloatingFeedbackPanel: View {
     @State private var showHistory = false
     @State private var showHistoryMenu = false
     @State private var selectedHistoryIndex = 0
+    @State private var screenSize: CGSize = .zero
 
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
     private let expandedSize: CGSize = CGSize(width: 350, height: 500)
@@ -49,6 +50,13 @@ struct FloatingFeedbackPanel: View {
                             Spacer()
 
                             HStack(spacing: 12) {
+                                // Reset position button
+                                Button(action: { resetPosition() }) {
+                                    Image(systemName: "arrow.counterclockwise.circle.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .help("Reset panel position")
+
                                 Button(action: { withAnimation(.spring(response: 0.3)) { isExpanded = false } }) {
                                     Image(systemName: "chevron.down.circle.fill")
                                         .foregroundColor(.secondary)
@@ -223,9 +231,26 @@ struct FloatingFeedbackPanel: View {
                     }
             )
             .onAppear {
-                // Position in top-right corner initially
-                let initialX = geometry.size.width / 2 - 200 // Offset from center to put in top-right
-                let initialY = -geometry.size.height / 2 + 150 // Offset from center to put near top
+                // Store screen size for reset function
+                screenSize = geometry.size
+
+                // Position in top-right corner initially, ensuring it stays on screen
+                let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
+                let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+
+                // Calculate safe position from screen edges
+                let padding: CGFloat = 20 // Minimum padding from screen edges
+                let topPadding: CGFloat = 80 // Extra padding from top to avoid toolbar
+
+                // Position in top-right with safe margins
+                // Target position: right edge minus panel width minus padding
+                let targetX = geometry.size.width - currentWidth / 2 - padding
+                let targetY = currentHeight / 2 + topPadding
+
+                // Convert to offset from center (since GeometryReader uses center-based coords)
+                let initialX = targetX - geometry.size.width / 2
+                let initialY = targetY - geometry.size.height / 2
+
                 offset = CGSize(width: initialX, height: initialY)
                 lastOffset = offset
             }
@@ -253,6 +278,26 @@ struct FloatingFeedbackPanel: View {
         timeFormatter.timeStyle = .short
 
         return "\(relative) • \(timeFormatter.string(from: date))"
+    }
+
+    private func resetPosition() {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            // Reset to default top-right position
+            let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
+            let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+
+            let padding: CGFloat = 20
+            let topPadding: CGFloat = 80
+
+            let targetX = screenSize.width - currentWidth / 2 - padding
+            let targetY = currentHeight / 2 + topPadding
+
+            let initialX = targetX - screenSize.width / 2
+            let initialY = targetY - screenSize.height / 2
+
+            offset = CGSize(width: initialX, height: initialY)
+            lastOffset = offset
+        }
     }
 }
 

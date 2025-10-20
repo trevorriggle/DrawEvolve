@@ -1055,14 +1055,43 @@ class CanvasStateManager: ObservableObject {
             selectionPixels = renderer.extractPixels(from: rect, in: texture, screenSize: screenSize)
             selectionOriginalRect = rect
             selectionOffset = .zero
-            print("✂️ Extracted rectangular selection: \(rect)")
+
+            // Verify extraction succeeded
+            if selectionPixels == nil {
+                print("❌ ERROR: Failed to extract rectangular selection")
+                clearSelection() // Clear invalid selection
+            } else {
+                print("✂️ Extracted rectangular selection: \(rect)")
+            }
         } else if let path = selectionPath {
+            // Validate path has enough points
+            guard path.count >= 3 else {
+                print("❌ ERROR: Lasso path too short (\(path.count) points), cannot extract")
+                clearSelection() // Clear invalid selection
+                return
+            }
+
             // For lasso, find bounding box and extract with mask
             let boundingRect = calculateBoundingRect(for: path)
+
+            // Validate bounding rect is not empty/invalid
+            guard boundingRect.width > 0 && boundingRect.height > 0 else {
+                print("❌ ERROR: Invalid lasso selection bounding rect: \(boundingRect)")
+                clearSelection() // Clear invalid selection
+                return
+            }
+
             selectionPixels = renderer.extractPixels(fromPath: path, in: texture, screenSize: screenSize)
             selectionOriginalRect = boundingRect
             selectionOffset = .zero
-            print("✂️ Extracted lasso selection, bounding rect: \(boundingRect)")
+
+            // Verify extraction succeeded
+            if selectionPixels == nil {
+                print("❌ ERROR: Failed to extract lasso selection")
+                clearSelection() // Clear invalid selection
+            } else {
+                print("✂️ Extracted lasso selection, bounding rect: \(boundingRect)")
+            }
         }
     }
 

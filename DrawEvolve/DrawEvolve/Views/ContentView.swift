@@ -27,12 +27,18 @@ struct ContentView: View {
                 // Beta transparency popup (shown first)
                 if showBetaTransparency {
                     BetaTransparencyPopup(isPresented: $showBetaTransparency)
+                } else {
+                    // CRITICAL: Overlay blocks hit testing even when empty
+                    // Must explicitly allow hit testing when overlay is not visible
+                    Color.clear.allowsHitTesting(false)
                 }
             }
             .overlay {
                 // First-time onboarding popup
                 if showOnboarding {
                     OnboardingPopup(isPresented: $showOnboarding)
+                } else {
+                    Color.clear.allowsHitTesting(false)
                 }
             }
             .overlay {
@@ -42,6 +48,8 @@ struct ContentView: View {
                         context: $drawingContext,
                         isPresented: $showPromptInput
                     )
+                } else {
+                    Color.clear.allowsHitTesting(false)
                 }
             }
             .onChange(of: showBetaTransparency) { _, newValue in
