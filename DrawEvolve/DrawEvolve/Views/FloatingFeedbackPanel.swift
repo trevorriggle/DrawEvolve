@@ -122,10 +122,10 @@ struct FloatingFeedbackPanel: View {
 
                                 Divider()
 
-                                // History list
+                                // History list (most recent first)
                                 ScrollView {
                                     VStack(spacing: 0) {
-                                        ForEach(Array(critiqueHistory.enumerated()), id: \.element.id) { index, entry in
+                                        ForEach(Array(critiqueHistory.enumerated().reversed()), id: \.element.id) { index, entry in
                                             Button(action: {
                                                 selectedHistoryIndex = index
                                                 withAnimation(.spring(response: 0.25)) {
@@ -157,7 +157,8 @@ struct FloatingFeedbackPanel: View {
                                                 .background(index == selectedHistoryIndex ? Color.accentColor.opacity(0.1) : Color.clear)
                                             }
 
-                                            if index < critiqueHistory.count - 1 {
+                                            // Show divider except after the last item
+                                            if index > 0 {
                                                 Divider()
                                                     .padding(.leading, 12)
                                             }

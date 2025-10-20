@@ -81,9 +81,33 @@ DrawEvolve/
 - **UIKit** - Touch handling, image manipulation
 - **OpenAI Vision API** - AI feedback (requires API key)
 
-## Recent Session (2025-01-13)
+## Recent Sessions
 
-### CRITICAL BUG FIXED
+### Session 2025-01-20
+
+#### CRITICAL BUG FIXED: Apple Pencil Not Working
+**Problem:** Apple Pencil and touch input completely stopped responding
+**Root Cause:** SwiftUI overlays blocking hit testing even when empty
+**Solution:** Added `Color.clear.allowsHitTesting(false)` to empty overlay branches in ContentView.swift
+
+#### Delete Selection Bug Fixed
+**Problem:** Delete selection was "slightly busted" - pixels weren't clearing properly
+**Root Cause:** `clearSelection()` only cleared activeSelection and selectionPath but not selectionPixels, selectionOriginalRect, or selectionOffset
+**Solution:** Updated `clearSelection()` to comprehensively clear all selection-related state (lines 1002-1010)
+
+#### Feedback Panel UX Improvements
+- ✅ Fixed offscreen spawning - rewrote positioning logic with absolute coordinates
+- ✅ Added reset position button (counterclockwise arrow icon)
+- ✅ Fixed collapsed icon drag - replaced Button with .onTapGesture
+- ✅ Added AI feedback toolbar button (sparkles icon) to reopen panel
+- ✅ Reversed critique history order (newest first)
+- ✅ Updated paint bucket icon to "drop.fill"
+
+**Files Modified:** ContentView.swift, FloatingFeedbackPanel.swift, DrawingCanvasView.swift, DrawingTool.swift
+
+### Session 2025-01-13
+
+#### CRITICAL BUG FIXED: Stroke Offset
 **Brush strokes were jumping 70-100 pixels to the left on release**
 
 Root cause: Coordinate scaling in `CanvasRenderer.swift` was using:
@@ -97,8 +121,10 @@ let scaleX = Float(texture.width) / Float(screenSize.width)
 let scaleY = Float(texture.height) / Float(screenSize.height)
 ```
 
-### Features Added
+#### Features Added
 - ✅ Markdown rendering in feedback panel
+- ✅ Selection tool preview strokes
+- ✅ Critique history navigation
 - ✅ Updated documentation files
 
 ## Known Issues / Deferred Features
@@ -109,7 +135,7 @@ let scaleY = Float(texture.height) / Float(screenSize.height)
 - **Decision**: Test and implement with physical iPad in future session
 
 ### Untested Features
-- ⚠️ Critique history - Implementation complete but needs end-to-end testing
+- ⚠️ Selection pixel moving - Extract and drag functionality implemented but needs testing
 
 ### Unimplemented Tools
 - Magic Wand, Smudge, Clone Stamp, Move, Rotate, Scale
@@ -142,8 +168,8 @@ OpenAI Vision API calls are made when user clicks "Get Feedback":
 ## Next Session Priorities
 
 ### High Priority (Test with Physical iPad)
-1. **Verify stroke fix** - Confirm strokes land exactly where drawn
-2. **Test critique history** - Get multiple feedbacks, verify history view works
+1. **Verify all fixes** - Confirm Apple Pencil input, delete selection, feedback panel positioning all work
+2. **Test selection pixel moving** - Verify extract and drag functionality works
 3. **Implement zoom/pan** - With device in hand, properly implement gesture transforms
 
 ### Future Features (If Requested)
@@ -157,11 +183,12 @@ OpenAI Vision API calls are made when user clicks "Get Feedback":
 ## Key Files
 - `MetalCanvasView.swift` - Touch handling and drawing surface
 - `CanvasRenderer.swift` - Metal rendering engine (**line 218-220: coordinate fix**)
-- `DrawingCanvasView.swift` - Main UI with toolbar and panels
+- `DrawingCanvasView.swift` - Main UI with toolbar, panels, selection management (**lines 1002-1010: clearSelection fix**)
+- `ContentView.swift` - App entry point (**lines 26-54: overlay hit testing fix**)
+- `FloatingFeedbackPanel.swift` - Feedback display with positioning, history navigation
 - `CanvasStateManager.swift` - State management (zoom/pan code exists but unused)
 - `OpenAIManager.swift` - AI feedback integration
-- `FloatingFeedbackPanel.swift` - Feedback display with markdown rendering
 
 ---
-**Last Updated**: January 13, 2025
-**Status**: Core features complete, stroke bug fixed, ready for iPad testing
+**Last Updated**: January 20, 2025
+**Status**: Core features complete, critical bugs fixed (Apple Pencil, selection deletion), ready for iPad testing

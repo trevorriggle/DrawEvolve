@@ -240,6 +240,18 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
+
+                            // AI Feedback button
+                            ToolButton(icon: "sparkles", isSelected: showFeedback) {
+                                if canvasState.feedback != nil {
+                                    // If we have feedback, show the panel
+                                    showFeedback = true
+                                } else {
+                                    // If no feedback yet, request it
+                                    requestFeedback()
+                                }
+                            }
+                            .disabled(canvasState.isEmpty)
                         }
                         .padding(.top, 12)
                         .padding(.horizontal, 8)
@@ -990,6 +1002,11 @@ class CanvasStateManager: ObservableObject {
     func clearSelection() {
         activeSelection = nil
         selectionPath = nil
+        selectionPixels = nil
+        selectionOriginalRect = nil
+        selectionOffset = .zero
+        previewSelection = nil
+        previewLassoPath = nil
     }
 
     func deleteSelectedPixels() {
@@ -1154,10 +1171,7 @@ class CanvasStateManager: ObservableObject {
             }
         }
 
-        // Clear selection data
-        selectionPixels = nil
-        selectionOriginalRect = nil
-        selectionOffset = .zero
+        // Clear all selection data (pixels, rects, previews, etc.)
         clearSelection()
         print("✅ Selection committed to texture")
     }

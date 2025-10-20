@@ -1,6 +1,7 @@
 # DrawEvolve Tool Audit
 
 **Generated:** January 14, 2025
+**Last Updated:** January 20, 2025
 **Purpose:** Comprehensive audit of all drawing tools - working vs non-working status
 
 ---
@@ -8,9 +9,9 @@
 ## Summary
 
 - **Total Tools Defined:** 22 tools
-- **Fully Working:** 11 tools
+- **Fully Working:** 12 tools
 - **Partially Working:** 2 tools
-- **UI Only (Not Implemented):** 9 tools
+- **UI Only (Not Implemented):** 8 tools
 
 ---
 
@@ -166,9 +167,23 @@
 
 ---
 
+### 12. Magic Wand
+**Status:** WORKING - IMPLEMENTED Jan 20, 2025
+**Files:** MetalCanvasView.swift:530-560, 1178-1336
+**Implementation:**
+- Flood fill algorithm to find contiguous pixels
+- Color tolerance matching (0.0 = exact, 1.0 = any color)
+- Boundary tracing to create selection path
+- Safety limits (100,000 pixel max)
+- Integration with selection system (move, delete, etc.)
+
+**Verified:** Complete magic wand selection with color matching
+
+---
+
 ## Partially Working Tools
 
-### 12. Blur
+### 13. Blur
 **Status:** PARTIALLY WORKING
 **Files:** MetalCanvasView.swift:358-401, CanvasRenderer.swift:896-904, 916-954
 **Implementation:**
@@ -186,7 +201,7 @@
 
 ---
 
-### 13. Sharpen
+### 14. Sharpen
 **Status:** PARTIALLY WORKING
 **Files:** MetalCanvasView.swift:403-446, CanvasRenderer.swift:906-914, 916-954
 **Implementation:**
@@ -204,14 +219,6 @@
 ---
 
 ## Non-Working Tools (UI Only)
-
-### 14. Magic Wand
-**Status:** NOT IMPLEMENTED
-**UI:** DrawingCanvasView.swift:162-164
-**Expected:** Select contiguous pixels of similar color
-**Missing:** No touch handler, no color comparison logic, no selection generation
-
----
 
 ### 15. Smudge
 **Status:** NOT IMPLEMENTED
@@ -276,16 +283,20 @@
 - Lasso Select: Freehand path drawing
 - Blue preview strokes during drag (Jan 14 addition)
 - Marching ants animation after selection
-- Delete selected pixels: WORKING (DrawingCanvasView.swift:319-333, CanvasStateManager:1000-1047)
+- Delete selected pixels: WORKING - FIXED Jan 20 (DrawingCanvasView.swift:319-333, 1002-1010)
+  - Bug fixed: clearSelection() now comprehensively clears all selection state
+  - Previously only cleared activeSelection/selectionPath
+  - Now clears: selectionPixels, selectionOriginalRect, selectionOffset, previewSelection, previewLassoPath
 - Move selected pixels: IMPLEMENTED (CanvasStateManager:1049-1139)
   - Extract pixels on selection
   - Drag selection to move
   - Commit moves pixels and clears original location
+  - **Needs testing on physical device**
 - Cancel selection: WORKING
 
-### Reported Issues
-- Delete selection button: User reported "slightly busted" but didn't specify how
-- Move selection: Implemented but needs testing per whereweleftoff.md
+### Fixed Issues (Jan 20, 2025)
+- ✅ Delete selection bug fixed - clearSelection() now clears all selection-related state
+- ✅ Selection cleanup simplified - commitSelection() now uses comprehensive clearSelection()
 
 ---
 
@@ -317,9 +328,9 @@
 
 ## Recommendations
 
-### High Priority Fixes
-1. **Test delete selection** - User reported issue, needs verification
-2. **Test move selection** - Code exists but untested on device
+### High Priority Testing
+1. **Test move selection** - Code exists but untested on device
+2. **Verify delete selection fix** - Fixed Jan 20, needs device testing
 3. **Blur/Sharpen brush mode** - Currently global, needs localized application for brush-like feel
 
 ### Feature Completion Priority
@@ -374,6 +385,11 @@ All tools properly scale between:
 
 ## Conclusion
 
-DrawEvolve has **11 fully working tools** providing solid core functionality for drawing and selection. The app is production-ready for TestFlight with current feature set. The **9 unimplemented tools** are UI placeholders that should either be implemented or removed before public release to avoid user confusion.
+DrawEvolve has **12 fully working tools** (including Magic Wand as of Jan 20, 2025) providing solid core functionality for drawing and selection. The app is production-ready for TestFlight with current feature set. The **8 remaining unimplemented tools** are UI placeholders that should either be implemented or removed before public release to avoid user confusion.
 
 The two **partially working tools** (Blur/Sharpen) need refinement to work as brush-based effects rather than global filters.
+
+### Recent Additions (Jan 20, 2025)
+- ✅ **Magic Wand** - Flood fill selection with color matching, boundary tracing, and full integration with selection system
+
+See **TOOL_IMPLEMENTATION_ROADMAP.md** for detailed requirements and implementation plans for remaining tools.

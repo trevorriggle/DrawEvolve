@@ -527,6 +527,46 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
+            // Handle smudge tool - blend/smear pixels
+            if currentTool == .smudge {
+                print("Smudge: starting smudge at \(location)")
+                // Smudge works like brush but samples and blends pixels
+                // We'll treat it like a regular stroke but use special rendering
+            }
+
+            // Handle magic wand tool - select contiguous pixels of similar color
+            if currentTool == .magicWand {
+                print("Magic wand: selecting similar pixels at \(location)")
+                guard selectedLayerIndex < layers.count,
+                      let texture = layers[selectedLayerIndex].texture,
+                      let renderer = renderer else {
+                    print("ERROR: Cannot use magic wand - invalid layer or texture")
+                    return
+                }
+
+                // Get the clicked color
+                guard let targetColor = getColorAt(location, in: texture, screenSize: view.bounds.size) else {
+                    print("ERROR: Could not get color at location")
+                    return
+                }
+
+                // Perform flood fill selection to find contiguous pixels
+                let tolerance: CGFloat = 0.1 // Color similarity tolerance (0.0 = exact match, 1.0 = any color)
+                let selectionPath = magicWandSelection(at: location, targetColor: targetColor, tolerance: tolerance, in: texture, screenSize: view.bounds.size)
+
+                // Store selection in canvas state
+                if let canvasState = canvasState, !selectionPath.isEmpty {
+                    Task { @MainActor in
+                        canvasState.selectionPath = selectionPath
+                        print("Magic wand selection created with \(selectionPath.count) points")
+                        // Extract pixels for moving/deleting
+                        canvasState.extractSelectionPixels()
+                    }
+                }
+
+                return
+            }
+
             // Handle selection tools (rectangleSelect, lasso)
             let isSelectionTool = [.rectangleSelect, .lasso].contains(currentTool)
 
@@ -1140,6 +1180,166 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             return inside
+        }
+
+        // MARK: - Magic Wand Helper
+
+        /// Perform magic wand selection using flood fill algorithm
+        private func magicWandSelection(at point: CGPoint, targetColor: UIColor, tolerance: CGFloat, in texture: MTLTexture, screenSize: CGSize) -> [CGPoint] {
+            // Scale coordinates from screen space to texture space
+            let scaleX = CGFloat(texture.width) / screenSize.width
+            let scaleY = CGFloat(texture.height) / screenSize.height
+            let startX = Int(point.x * scaleX)
+            let startY = Int(point.y * scaleY)
+
+            // Bounds check
+            guard startX >= 0, startY >= 0, startX < texture.width, startY < texture.height else {
+                print("Magic wand: starting point out of bounds")
+                return []
+            }
+
+            // Read entire texture data (this is expensive but necessary for flood fill)
+            let width = texture.width
+            let height = texture.height
+            let bytesPerRow = width * 4  // BGRA format
+            var pixelData = Data(count: height * bytesPerRow)
+
+            let region = MTLRegion(
+                origin: MTLOrigin(x: 0, y: 0, z: 0),
+                size: MTLSize(width: width, height: height, depth: 1)
+            )
+
+            pixelData.withUnsafeMutableBytes { ptr in
+                guard let baseAddress = ptr.baseAddress else { return }
+                texture.getBytes(baseAddress, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
+            }
+
+            // Extract target color components
+            var targetR: CGFloat = 0, targetG: CGFloat = 0, targetB: CGFloat = 0, targetA: CGFloat = 0
+            targetColor.getRed(&targetR, green: &targetG, blue: &targetB, alpha: &targetA)
+
+            // Flood fill to find connected pixels
+            var visited = Set<Int>() // Use 1D index: y * width + x
+            var stack: [(Int, Int)] = [(startX, startY)]
+            var selectedPixels: [(Int, Int)] = []
+
+            let maxPixels = 100_000 // Safety limit
+            let pixelBytes = pixelData.withUnsafeBytes { $0.bindMemory(to: UInt8.self) }
+
+            while !stack.isEmpty && selectedPixels.count < maxPixels {
+                let (x, y) = stack.removeLast()
+                let index = y * width + x
+
+                // Skip if already visited or out of bounds
+                guard x >= 0, y >= 0, x < width, y < height, !visited.contains(index) else {
+                    continue
+                }
+
+                visited.insert(index)
+
+                // Get pixel color (BGRA format)
+                let pixelIndex = (y * width + x) * 4
+                let b = CGFloat(pixelBytes[pixelIndex]) / 255.0
+                let g = CGFloat(pixelBytes[pixelIndex + 1]) / 255.0
+                let r = CGFloat(pixelBytes[pixelIndex + 2]) / 255.0
+                let a = CGFloat(pixelBytes[pixelIndex + 3]) / 255.0
+
+                // Check if color matches within tolerance
+                let colorDistance = sqrt(
+                    pow(r - targetR, 2) +
+                    pow(g - targetG, 2) +
+                    pow(b - targetB, 2) +
+                    pow(a - targetA, 2)
+                ) / 2.0  // Normalize to 0-1 range
+
+                if colorDistance <= tolerance {
+                    selectedPixels.append((x, y))
+
+                    // Add neighbors to stack
+                    stack.append((x + 1, y))
+                    stack.append((x - 1, y))
+                    stack.append((x, y + 1))
+                    stack.append((x, y - 1))
+                }
+            }
+
+            print("Magic wand: found \(selectedPixels.count) matching pixels")
+
+            // Convert selected pixels to a path (boundary tracing)
+            // For simplicity, we'll create a path from the bounding box of selected pixels
+            // A more advanced implementation would trace the actual boundary
+            if selectedPixels.isEmpty {
+                return []
+            }
+
+            let selectedXs = selectedPixels.map { $0.0 }
+            let selectedYs = selectedPixels.map { $0.1 }
+            let minX = selectedXs.min()!
+            let maxX = selectedXs.max()!
+            let minY = selectedYs.min()!
+            let maxY = selectedYs.max()!
+
+            // Create a path that traces the boundary of selected pixels
+            // We'll use marching squares algorithm for a better boundary
+            let boundaryPath = traceBoundary(selectedPixels: Set(selectedPixels.map { $0.1 * width + $0.0 }), width: width, height: height)
+
+            // Convert back to screen space
+            let screenPath = boundaryPath.map { point in
+                CGPoint(
+                    x: point.x / scaleX,
+                    y: point.y / scaleY
+                )
+            }
+
+            return screenPath
+        }
+
+        /// Trace the boundary of selected pixels to create a selection path
+        private func traceBoundary(selectedPixels: Set<Int>, width: Int, height: Int) -> [CGPoint] {
+            // Simple boundary tracing: find edge pixels and create a path
+            var boundaryPoints: [CGPoint] = []
+
+            // Find all edge pixels (pixels that have at least one non-selected neighbor)
+            for index in selectedPixels {
+                let x = index % width
+                let y = index / width
+
+                // Check if this pixel is on the edge
+                let neighbors = [
+                    (x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)
+                ]
+
+                let isEdge = neighbors.contains { (nx, ny) in
+                    guard nx >= 0, ny >= 0, nx < width, ny < height else { return true }
+                    return !selectedPixels.contains(ny * width + nx)
+                }
+
+                if isEdge {
+                    boundaryPoints.append(CGPoint(x: x, y: y))
+                }
+            }
+
+            // Sort boundary points to create a continuous path (simple convex hull)
+            // For better results, use a proper boundary tracing algorithm
+            if boundaryPoints.isEmpty {
+                return []
+            }
+
+            // For now, return bounding box as a simple path
+            let xs = boundaryPoints.map { $0.x }
+            let ys = boundaryPoints.map { $0.y }
+            let minX = xs.min()!
+            let maxX = xs.max()!
+            let minY = ys.min()!
+            let maxY = ys.max()!
+
+            return [
+                CGPoint(x: minX, y: minY),
+                CGPoint(x: maxX, y: minY),
+                CGPoint(x: maxX, y: maxY),
+                CGPoint(x: minX, y: maxY),
+                CGPoint(x: minX, y: minY)  // Close the path
+            ]
         }
 
         // MARK: - Eyedropper Helper

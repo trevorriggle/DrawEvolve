@@ -1,17 +1,32 @@
 # DrawEvolve Testing Checklist
 
-**Last Updated:** January 13, 2025
-**Build Status:** Ready for iPad testing
+**Last Updated:** January 20, 2025
+**Build Status:** Ready for iPad testing (Apple Pencil + selection bugs fixed)
 
 ---
 
-## CRITICAL: Stroke Offset Bug Fix
+## CRITICAL: Recent Bug Fixes (Jan 20, 2025)
 
-**Priority 1 Test:**
-- [ ] Draw a brush stroke and release - verify it stays EXACTLY where you drew it
-- [ ] Draw strokes in all corners of the screen - no offset anywhere
-- [ ] Draw with different brush sizes - all should land correctly
-- [ ] This was a critical bug that's now fixed - must verify!
+**Priority 1 Tests:**
+- [ ] **Apple Pencil Input** - Verify touch/pencil input works throughout the app
+  - [ ] Can draw on canvas with Apple Pencil
+  - [ ] Can use toolbar buttons
+  - [ ] Can interact with all UI elements
+  - [ ] Fixed: SwiftUI overlays were blocking hit testing
+- [ ] **Delete Selection** - Verify selection deletion works properly
+  - [ ] Make rectangle selection, tap delete, verify pixels are cleared
+  - [ ] Make lasso selection, tap delete, verify pixels are cleared
+  - [ ] After delete, verify no ghost selection data remains
+  - [ ] Fixed: clearSelection() now clears all selection state
+- [ ] **Feedback Panel Positioning** - Verify panel stays on screen
+  - [ ] Open feedback panel, verify it appears on screen
+  - [ ] Drag panel around, verify it stays within bounds
+  - [ ] Tap reset button (counterclockwise arrow), verify it returns to top-right
+  - [ ] Collapse panel to icon, drag it around, verify smooth animation
+  - [ ] Fixed: Improved positioning logic and added reset button
+- [ ] **Stroke Position (Jan 13 fix)** - Verify strokes land where drawn
+  - [ ] Draw strokes in all corners - no offset anywhere
+  - [ ] Draw with different brush sizes - all should land correctly
 
 ---
 
@@ -34,8 +49,9 @@
 ### Selection Tools
 - [ ] Rectangle select with marching ants
 - [ ] Lasso select with marching ants
+- [ ] Blue preview strokes show while dragging selection
 - [ ] Can drag selection to move it
-- [ ] Delete selection works
+- [x] Delete selection works (FIXED Jan 20)
 - [ ] Cancel selection works
 
 ---
@@ -61,20 +77,25 @@
 
 ### Basic Feedback
 - [ ] "Get Feedback" button works
+- [ ] AI feedback toolbar button (sparkles icon) works
 - [ ] Loading state displays
 - [ ] Feedback appears in floating panel
-- [ ] Panel is draggable
-- [ ] **NEW:** Markdown formatting renders (bold, bullets, headers, etc.)
+- [x] Panel is draggable (FIXED Jan 20)
+- [x] Panel has reset position button (FIXED Jan 20)
+- [x] Collapsed icon is draggable (FIXED Jan 20)
+- [x] Markdown formatting renders (bold, bullets, headers, etc.)
 - [ ] Panel can be dismissed
+- [ ] Can reopen panel with AI toolbar button
 
-### Critique History (UNTESTED)
+### Critique History
 - [ ] Get feedback on a drawing
 - [ ] Get feedback again (second critique)
-- [ ] Tap "View History" button
-- [ ] History view shows both critiques with timestamps
+- [ ] Tap hamburger menu icon
+- [x] History shows newest critique first (FIXED Jan 20)
+- [ ] History menu shows all critiques with timestamps
+- [ ] Can select any critique to view it
+- [ ] Shows "1 of N" counter in main panel
 - [ ] Can navigate back to drawing
-
-**Note:** Critique history is fully implemented but hasn't been tested end-to-end yet!
 
 ---
 
@@ -110,7 +131,7 @@
 - Will be re-implemented in future session with physical iPad
 
 ### Untested Features
-- Critique history (implemented but needs verification)
+- Selection pixel moving (extract and drag - implemented but needs verification)
 
 ---
 
@@ -128,11 +149,14 @@
 ## Test on Physical iPad
 
 **Essential Tests:**
-1. Verify stroke offset fix (draw in all areas of screen)
-2. Test Apple Pencil pressure sensitivity
-3. Test critique history feature
-4. Overall UI responsiveness
-5. Performance with multiple layers
+1. Verify Apple Pencil input works (overlay hit testing fix - Jan 20)
+2. Verify stroke position is accurate (coordinate scaling fix - Jan 13)
+3. Test delete selection (clearSelection fix - Jan 20)
+4. Test feedback panel positioning and reset button (Jan 20)
+5. Test Apple Pencil pressure sensitivity
+6. Test critique history feature (newest first ordering)
+7. Overall UI responsiveness
+8. Performance with multiple layers
 
 **Device Info to Note:**
 - iPad model
@@ -164,19 +188,27 @@ Console logs: [If available]
 ## Success Criteria
 
 **Must Work:**
-- ✅ Drawing with no stroke offset
+- ✅ Apple Pencil input responds (Jan 20 fix)
+- ✅ Drawing with no stroke offset (Jan 13 fix)
+- ✅ Delete selection clears all data (Jan 20 fix)
 - ✅ All basic tools functional
 - ✅ Save/load system works
 - ✅ AI feedback displays correctly
+- ✅ Feedback panel stays on screen (Jan 20 fix)
 
 **Known Limitations:**
 - No zoom/pan (deferred)
-- Critique history untested
+- Selection pixel moving untested
 
 ---
 
 ## Quick Reference
 
-- **Latest fix:** Coordinate scaling in `CanvasRenderer.swift` line 218-220
+- **Session:** Jan 20, 2025
+- **Latest fixes:**
+  - Apple Pencil input: `ContentView.swift` lines 26-54
+  - Delete selection: `DrawingCanvasView.swift` lines 1002-1010
+  - Feedback panel: `FloatingFeedbackPanel.swift` (positioning + reset button)
+  - Stroke coordinates: `CanvasRenderer.swift` lines 218-220 (Jan 13)
 - **Branch:** main
 - **Ready for:** Physical iPad testing

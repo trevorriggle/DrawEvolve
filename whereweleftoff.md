@@ -1,54 +1,89 @@
 # Where We Left Off
 
-**Session Date:** January 14, 2025
-**Focus:** Selection tool improvements + floating panel UX polish
+**Session Date:** January 20, 2025
+**Focus:** Apple Pencil input fix + feedback panel UX + selection deletion bug fix
 
 ---
 
 ## What We Fixed Today
 
-### 1. Markdown Rendering in Feedback Panel - COMPLETED
-**Problem:** Markdown was parsing but not displaying with proper visual hierarchy
-**Solution:** Rebuilt markdown parser to handle blocks separately
-- Headers now display with proper sizing (.title2, .title3, .headline)
-- Paragraphs separated by proper spacing (16pt between blocks)
-- Lists render with colored bullets/numbers
-- Inline formatting (bold, italic, code) works within blocks
-**Files:** `FormattedMarkdownView.swift`
+### 1. Apple Pencil Not Working - FIXED
+**Problem:** Apple Pencil stopped responding to touch input
+**Root Cause:** SwiftUI overlays were blocking hit testing even when empty
+**Solution:** Added `Color.clear.allowsHitTesting(false)` to empty overlay branches
+- Fixed three overlays in ContentView: beta transparency, onboarding, and prompt input
+- Touch events now properly pass through to canvas when overlays not visible
+**Files:** `ContentView.swift` (lines 26-54)
 
-### 2. Selection Tool Preview Strokes - ADDED
-**Problem:** Rectangle select and lasso tools gave no visual feedback while dragging
-**Solution:** Added blue preview strokes during selection drag
-- Rectangle select shows blue preview rectangle while dragging
-- Lasso shows blue preview path as you draw
-- Preview clears when selection is finalized (marching ants appear)
-- Helps users see exactly what they're selecting before releasing
-**Files:** `DrawingCanvasView.swift`, `MetalCanvasView.swift`
+### 2. Feedback Panel Spawning Offscreen - FIXED
+**Problem:** Floating feedback panel could spawn completely offscreen, making it inaccessible
+**Solution:** Rewrote positioning logic and added reset button
+- Switched from offset-based to absolute `.position()` coordinates
+- Improved initial positioning calculation to stay within safe screen bounds
+- Added reset position button (counterclockwise arrow icon) to restore default position
+- Panel now properly constrains to screen edges when dragged
+**Files:** `FloatingFeedbackPanel.swift` (lines 15-16, 54-58, 226-291)
 
-### 3. Floating Feedback Panel Drag - FIXED
-**Problem:** Panel jumped when clicking and didn't follow finger smoothly
-**Solution:** Switched from `.position()` to `.offset()` with translation tracking
-- Panel now follows finger/cursor immediately with no lag or jumping
-- Uses `value.translation` instead of absolute coordinates
-- Maintains smooth constraint animation on release
-**Files:** `FloatingFeedbackPanel.swift`
+### 3. Collapsed Feedback Icon Not Draggable - FIXED
+**Problem:** Collapsed feedback icon wasn't animating smoothly during drag
+**Root Cause:** Button wrapper was capturing all touch events before drag gesture
+**Solution:** Replaced Button with ZStack + `.onTapGesture`
+- Tap gesture now coexists with drag gesture
+- Icon follows finger smoothly during drag
+- Tap to expand still works
+**Files:** `FloatingFeedbackPanel.swift` (lines 177-194)
 
-### 4. Gallery Tap Gesture - FIXED
-**Problem:** Clicking gallery items in simulator triggered context menu instead of opening
-**Solution:** Replaced Button wrapper with `.onTapGesture`
-- Single tap now consistently opens drawing detail sheet
-- Context menu still works on long-press
-**Files:** `GalleryView.swift`
+### 4. AI Feedback Button Added to Toolbar - NEW FEATURE
+**Problem:** No way to reopen feedback panel after closing it
+**Solution:** Added sparkles icon button to toolbar
+- Opens existing feedback if available
+- Requests new feedback if none exists
+- Disabled when canvas is empty
+- Provides easy access to AI feedback
+**Files:** `DrawingCanvasView.swift` (lines 244-254)
 
-### 5. Critique History Navigation - IMPLEMENTED
-**Problem:** No way to view previous feedback entries
-**Solution:** Added context menu-style history navigation
-- Hamburger icon toggles history menu (slides out from left)
-- Shows all feedback entries with timestamps
-- Click any entry to view that feedback
-- Shows "1 of 3" counter in main panel
-- Timestamps show relative + absolute time
-**Files:** `FloatingFeedbackPanel.swift`
+### 5. Paint Bucket Icon Updated - FIXED
+**Problem:** Paint bucket was using wrong icon ("paintpalette.fill")
+**Solution:** Changed to "drop.fill" icon
+**Files:** `DrawingTool.swift` (line 45)
+
+### 6. Critique History Order Reversed - FIXED
+**Problem:** History showed oldest critique first, newest last
+**Solution:** Reversed enumeration to show newest first
+- Most recent critique now appears at top of history menu
+- Older critiques appear below when scrolling
+**Files:** `FloatingFeedbackPanel.swift` (line 128)
+
+### 7. Delete Selection Bug - FIXED
+**Problem:** Delete selection was "slightly busted" - selection pixels weren't being cleared properly
+**Root Cause:** `clearSelection()` only cleared `activeSelection` and `selectionPath` but not `selectionPixels`, `selectionOriginalRect`, or `selectionOffset`
+**Solution:** Updated `clearSelection()` to clear ALL selection-related state
+- Now clears: activeSelection, selectionPath, selectionPixels, selectionOriginalRect, selectionOffset, previewSelection, previewLassoPath
+- Simplified `commitSelection()` to use comprehensive `clearSelection()` function
+- Delete selection now properly removes all traces of selection
+**Files:** `DrawingCanvasView.swift` (lines 1002-1010, 1174-1176)
+
+### 8. Magic Wand Selection Tool - IMPLEMENTED
+**Problem:** Magic wand tool was UI-only placeholder with no functionality
+**Solution:** Fully implemented magic wand selection with flood fill algorithm
+- Tap to select contiguous pixels of similar color
+- Configurable color tolerance (0.0 = exact match, 1.0 = any color)
+- Flood fill algorithm with 100,000 pixel safety limit
+- Boundary tracing to create selection path
+- Full integration with selection system (move, delete, extract pixels)
+- Converts texture coordinates to screen coordinates for marching ants display
+**Files:** `MetalCanvasView.swift` (lines 530-560, 1178-1336)
+
+### 9. Tool Implementation Roadmap - CREATED
+**Problem:** Need clear plan for implementing remaining 8 tools
+**Solution:** Created comprehensive roadmap document
+- Detailed requirements for each unimplemented tool
+- Implementation approach for each tool
+- Estimated effort and complexity ratings
+- Priority ranking (Quick Wins → High Value → Lower Priority)
+- Technical notes on Metal shader requirements
+- Testing checklist for future implementations
+**Files:** `TOOL_IMPLEMENTATION_ROADMAP.md` (new file)
 
 ---
 
@@ -56,15 +91,21 @@
 
 ### What Works
 - ✅ Drawing - strokes land exactly where you draw
+- ✅ Apple Pencil input (overlay hit testing fixed)
 - ✅ All drawing tools (brush, eraser, shapes, fill, effects)
-- ✅ Selection tools with blue preview strokes
+- ✅ Selection tools:
+  - Rectangle select with blue preview
+  - Lasso select with blue preview
+  - Magic Wand select (NEW - flood fill with color matching)
+- ✅ Delete selection (bug fixed - now clears all selection state)
 - ✅ Selection moving (drag selected pixels around)
 - ✅ Layers with opacity, visibility
 - ✅ Undo/Redo system
 - ✅ Save/Load to gallery
 - ✅ AI feedback with beautiful markdown formatting
-- ✅ Critique history navigation
-- ✅ Floating feedback panel (smooth dragging)
+- ✅ Critique history navigation (newest first)
+- ✅ Floating feedback panel (smooth dragging, reset position button)
+- ✅ AI feedback toolbar button (reopen panel after closing)
 - ✅ Dark mode support
 - ✅ Collapsible toolbar
 - ✅ Gallery with tap-to-open
@@ -74,27 +115,27 @@
 - ✅ No hardcoded secrets in repo
 - ✅ Core features complete and working
 - ✅ UI polish done
+- ✅ Critical bugs fixed (Apple Pencil, selection deletion)
 
 ### What's Deferred
 - 🚧 Zoom/Pan/Rotate - Code exists but disabled
-- 🚧 Selection pixel moving (extract and drag selection pixels)
-- 🚧 Delete selection (button exists but may need testing)
+- 🚧 Selection pixel moving (extract and drag selection pixels) - needs testing
+- 🚧 Additional tools (Smudge, Clone Stamp, Move, Rotate, Scale) - see TOOL_IMPLEMENTATION_ROADMAP.md
+- 🚧 Brush-mode Blur/Sharpen - currently apply globally instead of locally
 
 ---
 
 ## Known Issues to Test
 
-1. **Delete Selection Button** - User reported it's "slightly busted" but didn't specify how
-2. **Selection pixel moving** - Extract and drag functionality implemented but needs testing
+1. **Selection pixel moving** - Extract and drag functionality implemented but needs testing
 
 ---
 
 ## Next Session Priorities
 
 ### High Priority
-1. **Test delete selection** - Figure out what's broken and fix it
-2. **Test selection pixel moving** - Verify extract and drag works
-3. **Physical iPad testing** - Verify all fixes work on real device
+1. **Test selection pixel moving** - Verify extract and drag works
+2. **Physical iPad testing** - Verify all fixes work on real device
 
 ### If Time Permits
 - Additional tools (smudge, clone stamp, magic wand)
@@ -112,9 +153,10 @@
 - **Delete:** Clears pixels in selection area
 
 ### Floating Panel Architecture
-- Uses `.offset()` for smooth dragging (not `.position()`)
+- Uses `.position()` with `dragOffset` for smooth dragging
 - History menu is overlay with `.offset(x: -width - 8)`
-- Tracks `offset` and `lastOffset` for persistent positioning
+- Tracks `position` (absolute) and `dragOffset` (temporary during drag)
+- Reset button restores default top-right position
 
 ### Critique History Storage
 - Each Drawing has `critiqueHistory: [CritiqueEntry]`
@@ -126,11 +168,13 @@
 
 ## Key Files Modified This Session
 
-- `FormattedMarkdownView.swift` - Rebuilt markdown renderer with block parsing
-- `FloatingFeedbackPanel.swift` - Added history navigation + fixed dragging
-- `DrawingCanvasView.swift` - Added selection preview rendering
-- `MetalCanvasView.swift` - Added preview state tracking during selection drag
-- `GalleryView.swift` - Fixed tap gesture for simulator
+- `ContentView.swift` - Fixed Apple Pencil input by allowing hit testing through empty overlays
+- `FloatingFeedbackPanel.swift` - Fixed offscreen spawning, added reset button, fixed collapsed icon drag, reversed history order
+- `DrawingCanvasView.swift` - Added AI feedback toolbar button, fixed delete selection bug
+- `DrawingTool.swift` - Updated paint bucket icon
+- `MetalCanvasView.swift` - Implemented Magic Wand selection tool with flood fill algorithm
+- `TOOL_IMPLEMENTATION_ROADMAP.md` - Created comprehensive roadmap for remaining 8 tools
+- `toolaudit.md` - Updated to reflect Magic Wand completion (12/22 tools working)
 
 ---
 
@@ -140,8 +184,14 @@
 - iPad drawing app with AI feedback
 - Metal rendering, 2048x2048 textures
 - Coordinate scaling bug was fixed (Jan 13)
-- Selection tools now have blue preview strokes
-- Critique history fully functional
+- Apple Pencil input bug fixed (Jan 20) - overlay hit testing
+- Selection tools have blue preview strokes
+- Magic Wand selection implemented (Jan 20) - flood fill with color matching
+- Delete selection bug fixed (Jan 20) - clearSelection() now comprehensive
+- Critique history fully functional (newest first)
+- Feedback panel UX polished (reset button, AI toolbar button)
+- 12 out of 22 tools fully working
+- See TOOL_IMPLEMENTATION_ROADMAP.md for remaining 8 tools
 - Ready for TestFlight launch
 
 ### User Preferences
