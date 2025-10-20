@@ -42,7 +42,7 @@ enum DrawingTool {
         switch self {
         case .brush: return "paintbrush.pointed.fill"
         case .eraser: return "eraser.fill"
-        case .paintBucket: return "paintbrush.fill"
+        case .paintBucket: return "drop.fill"
         case .eyeDropper: return "eyedropper"
         case .line: return "line.diagonal"
         case .rectangle: return "rectangle"

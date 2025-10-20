@@ -12,8 +12,8 @@ struct FloatingFeedbackPanel: View {
     let critiqueHistory: [CritiqueEntry]
     @Binding var isPresented: Bool
     @State private var isExpanded = true
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
+    @State private var position: CGPoint = .zero
+    @State private var dragOffset: CGSize = .zero
     @State private var showHistory = false
     @State private var showHistoryMenu = false
     @State private var selectedHistoryIndex = 0
@@ -175,58 +175,55 @@ struct FloatingFeedbackPanel: View {
                     }
                 } else {
                     // Collapsed icon
-                    Button(action: { withAnimation(.spring(response: 0.3)) { isExpanded = true } }) {
-                        ZStack {
-                            Circle()
-                                .fill(Color.accentColor)
-                                .frame(width: collapsedSize.width, height: collapsedSize.height)
-                                .shadow(radius: 5)
+                    ZStack {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: collapsedSize.width, height: collapsedSize.height)
+                            .shadow(radius: 5)
 
-                            Image(systemName: "pencil.tip.crop.circle")
-                                .font(.system(size: 30))
-                                .foregroundColor(.white)
+                        Image(systemName: "pencil.tip.crop.circle")
+                            .font(.system(size: 30))
+                            .foregroundColor(.white)
+                    }
+                    .onTapGesture {
+                        // Tap to expand (doesn't interfere with drag)
+                        withAnimation(.spring(response: 0.3)) {
+                            isExpanded = true
                         }
                     }
                 }
             }
-            .offset(x: offset.width, y: offset.height)
+            .position(
+                x: position.x + dragOffset.width,
+                y: position.y + dragOffset.height
+            )
             .gesture(
                 DragGesture()
                     .onChanged { value in
-                        // Update offset in real-time for immediate response
-                        offset = CGSize(
-                            width: lastOffset.width + value.translation.width,
-                            height: lastOffset.height + value.translation.height
-                        )
+                        // Update drag offset in real-time for immediate response
+                        dragOffset = value.translation
                     }
                     .onEnded { value in
-                        // Save the final offset
-                        lastOffset = offset
+                        // Apply drag to position and reset drag offset
+                        let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
+                        let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
 
-                        // Optionally constrain to screen bounds
+                        // Calculate new position
+                        var newX = position.x + value.translation.width
+                        var newY = position.y + value.translation.height
+
+                        // Constrain to keep view visible on screen
+                        let minX = currentWidth / 2 + 20
+                        let maxX = geometry.size.width - currentWidth / 2 - 20
+                        let minY = currentHeight / 2 + 80
+                        let maxY = geometry.size.height - currentHeight / 2 - 20
+
+                        newX = min(max(newX, minX), maxX)
+                        newY = min(max(newY, minY), maxY)
+
                         withAnimation(.spring(response: 0.3)) {
-                            let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
-                            let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
-
-                            // Calculate current position (center of view + offset)
-                            let centerX = geometry.size.width / 2 + offset.width
-                            let centerY = geometry.size.height / 2 + offset.height
-
-                            // Constrain to keep view visible
-                            let minX = currentWidth / 2
-                            let maxX = geometry.size.width - currentWidth / 2
-                            let minY = max(currentHeight / 2, 70)
-                            let maxY = geometry.size.height - currentHeight / 2
-
-                            let constrainedX = min(max(centerX, minX), maxX)
-                            let constrainedY = min(max(centerY, minY), maxY)
-
-                            // Update offset to constrained position
-                            offset = CGSize(
-                                width: constrainedX - geometry.size.width / 2,
-                                height: constrainedY - geometry.size.height / 2
-                            )
-                            lastOffset = offset
+                            position = CGPoint(x: newX, y: newY)
+                            dragOffset = .zero
                         }
                     }
             )
@@ -239,20 +236,15 @@ struct FloatingFeedbackPanel: View {
                 let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
 
                 // Calculate safe position from screen edges
-                let padding: CGFloat = 20 // Minimum padding from screen edges
-                let topPadding: CGFloat = 80 // Extra padding from top to avoid toolbar
+                let padding: CGFloat = 20
+                let topPadding: CGFloat = 80
 
-                // Position in top-right with safe margins
-                // Target position: right edge minus panel width minus padding
-                let targetX = geometry.size.width - currentWidth / 2 - padding
-                let targetY = currentHeight / 2 + topPadding
+                // Position using absolute coordinates (top-right corner)
+                let x = geometry.size.width - currentWidth / 2 - padding
+                let y = currentHeight / 2 + topPadding
 
-                // Convert to offset from center (since GeometryReader uses center-based coords)
-                let initialX = targetX - geometry.size.width / 2
-                let initialY = targetY - geometry.size.height / 2
-
-                offset = CGSize(width: initialX, height: initialY)
-                lastOffset = offset
+                position = CGPoint(x: x, y: y)
+                dragOffset = .zero
             }
         }
         .sheet(isPresented: $showHistory) {
@@ -289,14 +281,11 @@ struct FloatingFeedbackPanel: View {
             let padding: CGFloat = 20
             let topPadding: CGFloat = 80
 
-            let targetX = screenSize.width - currentWidth / 2 - padding
-            let targetY = currentHeight / 2 + topPadding
+            let x = screenSize.width - currentWidth / 2 - padding
+            let y = currentHeight / 2 + topPadding
 
-            let initialX = targetX - screenSize.width / 2
-            let initialY = targetY - screenSize.height / 2
-
-            offset = CGSize(width: initialX, height: initialY)
-            lastOffset = offset
+            position = CGPoint(x: x, y: y)
+            dragOffset = .zero
         }
     }
 }
