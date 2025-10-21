@@ -89,26 +89,43 @@ struct DrawingCanvasView: View {
             if let selection = canvasState.activeSelection {
                 MarchingAntsRectangle(rect: selection)
                     .allowsHitTesting(false)
+
+                // Transform handles for rectangular selection
+                SelectionTransformHandles(rect: selection, canvasState: canvasState)
             }
 
             if let path = canvasState.selectionPath {
                 MarchingAntsPath(path: path)
                     .allowsHitTesting(false)
+
+                // Transform handles for lasso selection (use bounding rect)
+                let boundingRect = canvasState.calculateBoundingRect(for: path)
+                SelectionTransformHandles(rect: boundingRect, canvasState: canvasState)
             }
 
-            // Show selection pixels being moved
+            // Show selection pixels being moved/transformed
             if let pixels = canvasState.selectionPixels,
-               let originalRect = canvasState.selectionOriginalRect,
-               canvasState.selectionOffset != .zero {
-                Image(uiImage: pixels)
-                    .resizable()
-                    .frame(width: originalRect.width, height: originalRect.height)
-                    .position(
-                        x: originalRect.origin.x + originalRect.width / 2 + canvasState.selectionOffset.x,
-                        y: originalRect.origin.y + originalRect.height / 2 + canvasState.selectionOffset.y
-                    )
-                    .allowsHitTesting(false)
-                    .opacity(0.8) // Slightly transparent to show it's being moved
+               let originalRect = canvasState.selectionOriginalRect {
+                // Apply transforms to selection pixels
+                let hasOffset = canvasState.selectionOffset != .zero
+                let hasScale = canvasState.selectionScale != 1.0
+                let hasRotation = canvasState.selectionRotation != .zero
+
+                if hasOffset || hasScale || hasRotation {
+                    Image(uiImage: pixels)
+                        .resizable()
+                        .frame(
+                            width: originalRect.width * canvasState.selectionScale,
+                            height: originalRect.height * canvasState.selectionScale
+                        )
+                        .rotationEffect(canvasState.selectionRotation)
+                        .position(
+                            x: originalRect.origin.x + originalRect.width / 2 + canvasState.selectionOffset.x,
+                            y: originalRect.origin.y + originalRect.height / 2 + canvasState.selectionOffset.y
+                        )
+                        .allowsHitTesting(false)
+                        .opacity(0.8) // Slightly transparent to show it's being transformed
+                }
             }
 
             // Floating toolbar overlay (top layer, left side)
@@ -183,15 +200,6 @@ struct DrawingCanvasView: View {
 
                             ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
                                 canvasState.currentTool = .move
-                            }
-
-                            // Transform tools
-                            ToolButton(icon: DrawingTool.rotate.icon, isSelected: canvasState.currentTool == .rotate) {
-                                canvasState.currentTool = .rotate
-                            }
-
-                            ToolButton(icon: DrawingTool.scale.icon, isSelected: canvasState.currentTool == .scale) {
-                                canvasState.currentTool = .scale
                             }
 
                             ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
@@ -726,6 +734,11 @@ class CanvasStateManager: ObservableObject {
     var selectionPixels: UIImage? = nil
     var selectionOriginalRect: CGRect? = nil // Original position before moving
 
+    // Transform state for selection
+    @Published var selectionScale: CGFloat = 1.0 // Scale factor for selection
+    @Published var selectionRotation: Angle = .zero // Rotation angle for selection
+    @Published var isTransformingSelection = false // True when dragging transform handles
+
     // Zoom and Pan state (for canvas navigation)
     @Published var zoomScale: CGFloat = 1.0 // Current zoom level (1.0 = 100%)
     @Published var panOffset: CGPoint = .zero // Current pan offset in screen space
@@ -1007,6 +1020,9 @@ class CanvasStateManager: ObservableObject {
         selectionOffset = .zero
         previewSelection = nil
         previewLassoPath = nil
+        selectionScale = 1.0
+        selectionRotation = .zero
+        isTransformingSelection = false
     }
 
     func deleteSelectedPixels() {
@@ -1117,7 +1133,7 @@ class CanvasStateManager: ObservableObject {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
               let renderer = renderer,
-              let pixels = selectionPixels,
+              var pixels = selectionPixels,
               let originalRect = selectionOriginalRect else {
             print("ERROR: Cannot commit selection - missing data")
             return
@@ -1126,8 +1142,11 @@ class CanvasStateManager: ObservableObject {
         // Capture before snapshot
         let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-        // Clear the original position (if selection moved)
-        if selectionOffset != .zero {
+        // Check if we need to transform the pixels
+        let hasTransform = selectionScale != 1.0 || selectionRotation != .zero || selectionOffset != .zero
+
+        // Clear the original position if moved or transformed
+        if hasTransform {
             if activeSelection != nil {
                 renderer.clearRect(originalRect, in: texture, screenSize: screenSize)
             } else if let path = selectionPath {
@@ -1135,13 +1154,25 @@ class CanvasStateManager: ObservableObject {
             }
         }
 
-        // Render pixels at new position
-        let newRect = CGRect(
-            x: originalRect.origin.x + selectionOffset.x,
-            y: originalRect.origin.y + selectionOffset.y,
-            width: originalRect.width,
-            height: originalRect.height
+        // Apply scale and rotation transforms to the pixels if needed
+        if selectionScale != 1.0 || selectionRotation != .zero {
+            pixels = applyTransforms(to: pixels, scale: selectionScale, rotation: selectionRotation)
+        }
+
+        // Calculate new position and size
+        let scaledSize = CGSize(
+            width: originalRect.width * selectionScale,
+            height: originalRect.height * selectionScale
         )
+
+        let newRect = CGRect(
+            x: originalRect.origin.x + selectionOffset.x - (scaledSize.width - originalRect.width) / 2,
+            y: originalRect.origin.y + selectionOffset.y - (scaledSize.height - originalRect.height) / 2,
+            width: scaledSize.width,
+            height: scaledSize.height
+        )
+
+        // Render transformed pixels at new position
         renderer.renderImage(pixels, at: newRect, to: texture, screenSize: screenSize)
 
         // Capture after snapshot
@@ -1174,6 +1205,28 @@ class CanvasStateManager: ObservableObject {
         // Clear all selection data (pixels, rects, previews, etc.)
         clearSelection()
         print("✅ Selection committed to texture")
+    }
+
+    /// Apply scale and rotation transforms to a UIImage
+    private func applyTransforms(to image: UIImage, scale: CGFloat, rotation: Angle) -> UIImage {
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+
+        UIGraphicsBeginImageContextWithOptions(size, false, image.scale)
+        defer { UIGraphicsEndImageContext() }
+
+        guard let context = UIGraphicsGetCurrentContext() else { return image }
+
+        // Move to center
+        context.translateBy(x: size.width / 2, y: size.height / 2)
+
+        // Apply rotation
+        context.rotate(by: CGFloat(rotation.radians))
+
+        // Draw image centered
+        let rect = CGRect(x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height)
+        image.draw(in: rect)
+
+        return UIGraphicsGetImageFromCurrentImageContext() ?? image
     }
 
     /// Calculate bounding rectangle for a path
@@ -1329,6 +1382,114 @@ struct MarchingAntsPath: View {
         .onAppear {
             withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
                 dashPhase = -12
+            }
+        }
+    }
+}
+
+// MARK: - Selection Transform Handles
+
+struct SelectionTransformHandles: View {
+    let rect: CGRect
+    @ObservedObject var canvasState: CanvasStateManager
+
+    private let handleSize: CGFloat = 24
+    private let rotationHandleOffset: CGFloat = 40
+
+    var body: some View {
+        ZStack {
+            // Corner handles for scaling
+            ForEach(0..<4) { index in
+                HandleView(type: .corner)
+                    .position(cornerPosition(index))
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                handleCornerDrag(index: index, location: value.location)
+                            }
+                            .onEnded { _ in
+                                canvasState.isTransformingSelection = false
+                            }
+                    )
+            }
+
+            // Rotation handle above selection
+            HandleView(type: .rotation)
+                .position(x: rect.midX, y: rect.minY - rotationHandleOffset)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            handleRotationDrag(location: value.location)
+                        }
+                        .onEnded { _ in
+                            canvasState.isTransformingSelection = false
+                        }
+                )
+        }
+    }
+
+    private func cornerPosition(_ index: Int) -> CGPoint {
+        switch index {
+        case 0: return CGPoint(x: rect.minX, y: rect.minY) // Top-left
+        case 1: return CGPoint(x: rect.maxX, y: rect.minY) // Top-right
+        case 2: return CGPoint(x: rect.minX, y: rect.maxY) // Bottom-left
+        case 3: return CGPoint(x: rect.maxX, y: rect.maxY) // Bottom-right
+        default: return .zero
+        }
+    }
+
+    private func handleCornerDrag(index: Int, location: CGPoint) {
+        canvasState.isTransformingSelection = true
+
+        // Calculate scale based on corner being dragged
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let originalDistance = hypot(
+            cornerPosition(index).x - center.x,
+            cornerPosition(index).y - center.y
+        )
+        let newDistance = hypot(location.x - center.x, location.y - center.y)
+
+        let newScale = newDistance / originalDistance
+        canvasState.selectionScale = max(0.1, min(5.0, newScale)) // Clamp between 0.1x and 5x
+    }
+
+    private func handleRotationDrag(location: CGPoint) {
+        canvasState.isTransformingSelection = true
+
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let angle = atan2(location.y - center.y, location.x - center.x)
+        canvasState.selectionRotation = Angle(radians: Double(angle) + .pi / 2)
+    }
+}
+
+struct HandleView: View {
+    enum HandleType {
+        case corner
+        case rotation
+    }
+
+    let type: HandleType
+
+    var body: some View {
+        Group {
+            switch type {
+            case .corner:
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 24, height: 24)
+                    .overlay(Circle().stroke(Color.blue, lineWidth: 2))
+                    .shadow(radius: 2)
+            case .rotation:
+                ZStack {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 28, height: 28)
+                        .overlay(Circle().stroke(Color.green, lineWidth: 2))
+                        .shadow(radius: 2)
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundColor(.green)
+                        .font(.system(size: 14))
+                }
             }
         }
     }

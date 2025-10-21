@@ -35,8 +35,8 @@ enum DrawingTool {
     // Other tools
     case text
     case move
-    case rotate
-    case scale
+    case rotate  // DEPRECATED: Now integrated into selection transform handles
+    case scale   // DEPRECATED: Now integrated into selection transform handles
 
     var icon: String {
         switch self {

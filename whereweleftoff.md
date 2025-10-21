@@ -1,11 +1,28 @@
 # Where We Left Off
 
-**Session Date:** January 20, 2025
-**Focus:** Apple Pencil input fix + feedback panel UX + selection deletion bug fix
+**Session Date:** October 21, 2025
+**Focus:** Selection transform handles (rotate + scale integrated into selections)
 
 ---
 
-## What We Fixed Today
+## What We Implemented Today
+
+### 1. Selection Transform Handles - NEW FEATURE
+**Problem:** Rotate and scale were separate toolbar tools with no implementation
+**Solution:** Integrated transform handles directly into selection tools
+- Added corner handles (4 blue circles) for scaling selections
+- Added rotation handle (green circle with rotation icon) above selections
+- Drag corner handles to scale selection from 0.1x to 5x
+- Drag rotation handle to rotate selection around center
+- Transforms apply to both rectangle and lasso selections
+- Visual feedback shows transformed selection in real-time
+- Transforms commit to canvas when tapping outside or switching tools
+- Removed separate rotate/scale tools from toolbar (now deprecated)
+**Files:** `DrawingCanvasView.swift` (lines 89-129, 729-732, 1007-1017, 1141-1239, 1347-1451), `DrawingTool.swift` (lines 38-39)
+
+---
+
+## Previous Session (January 20, 2025)
 
 ### 1. Apple Pencil Not Working - FIXED
 **Problem:** Apple Pencil stopped responding to touch input
@@ -96,9 +113,12 @@
 - ✅ Selection tools:
   - Rectangle select with blue preview
   - Lasso select with blue preview
-  - Magic Wand select (NEW - flood fill with color matching)
+  - Magic Wand select (flood fill with color matching)
+  - Transform handles (NEW - scale + rotate directly on selection)
 - ✅ Delete selection (bug fixed - now clears all selection state)
 - ✅ Selection moving (drag selected pixels around)
+- ✅ Selection scaling (drag corner handles to resize 0.1x-5x)
+- ✅ Selection rotation (drag green handle to rotate around center)
 - ✅ Layers with opacity, visibility
 - ✅ Undo/Redo system
 - ✅ Save/Load to gallery
@@ -116,31 +136,34 @@
 - ✅ Core features complete and working
 - ✅ UI polish done
 - ✅ Critical bugs fixed (Apple Pencil, selection deletion)
+- ✅ Transform handles integrated (rotate/scale removed from toolbar)
 
 ### What's Deferred
-- 🚧 Zoom/Pan/Rotate - Code exists but disabled
-- 🚧 Selection pixel moving (extract and drag selection pixels) - needs testing
-- 🚧 Additional tools (Smudge, Clone Stamp, Move, Rotate, Scale) - see TOOL_IMPLEMENTATION_ROADMAP.md
+- 🚧 Zoom/Pan - Code exists but disabled
+- 🚧 Additional tools (Smudge, Clone Stamp, Move) - see TOOL_IMPLEMENTATION_ROADMAP.md
 - 🚧 Brush-mode Blur/Sharpen - currently apply globally instead of locally
 
 ---
 
 ## Known Issues to Test
 
-1. **Selection pixel moving** - Extract and drag functionality implemented but needs testing
+1. **Transform handles on real iPad** - Verify scaling/rotation gestures work smoothly with Apple Pencil
+2. **Selection pixel extraction** - Verify extract and transform works for both rect and lasso selections
 
 ---
 
 ## Next Session Priorities
 
 ### High Priority
-1. **Test selection pixel moving** - Verify extract and drag works
-2. **Physical iPad testing** - Verify all fixes work on real device
+1. **Physical iPad testing** - Verify transform handles work smoothly with Apple Pencil
+2. **Test selection transforms** - Verify scale/rotate/move all work together
+3. **Edge case testing** - Test extreme scales, multiple transforms, lasso transforms
 
 ### If Time Permits
-- Additional tools (smudge, clone stamp, magic wand)
+- Additional tools (smudge, clone stamp, move)
 - More blend modes for layers
 - Performance profiling/optimization
+- Zoom/pan implementation
 
 ---
 
@@ -149,7 +172,13 @@
 ### Selection Tools Architecture
 - **Preview:** Blue stroke shows during drag (previewSelection, previewLassoPath)
 - **Active:** Marching ants show after release (activeSelection, selectionPath)
-- **Pixels:** Extracted for moving (selectionPixels, selectionOriginalRect)
+- **Pixels:** Extracted for transforming (selectionPixels, selectionOriginalRect)
+- **Transform Handles:**
+  - 4 corner handles (blue circles) for scaling
+  - 1 rotation handle (green circle with icon) above selection
+  - Handles shown for both rectangle and lasso selections
+  - Lasso uses bounding rect for transform handles
+- **Transform State:** selectionScale, selectionRotation, selectionOffset
 - **Delete:** Clears pixels in selection area
 
 ### Floating Panel Architecture
@@ -168,13 +197,9 @@
 
 ## Key Files Modified This Session
 
-- `ContentView.swift` - Fixed Apple Pencil input by allowing hit testing through empty overlays
-- `FloatingFeedbackPanel.swift` - Fixed offscreen spawning, added reset button, fixed collapsed icon drag, reversed history order
-- `DrawingCanvasView.swift` - Added AI feedback toolbar button, fixed delete selection bug
-- `DrawingTool.swift` - Updated paint bucket icon
-- `MetalCanvasView.swift` - Implemented Magic Wand selection tool with flood fill algorithm
-- `TOOL_IMPLEMENTATION_ROADMAP.md` - Created comprehensive roadmap for remaining 8 tools
-- `toolaudit.md` - Updated to reflect Magic Wand completion (12/22 tools working)
+- `DrawingCanvasView.swift` - Added transform handles overlay, transform state, applyTransforms() function
+- `DrawingTool.swift` - Marked rotate/scale as deprecated (now integrated into selections)
+- `whereweleftoff.md` - Updated with transform handles implementation
 
 ---
 
@@ -185,13 +210,14 @@
 - Metal rendering, 2048x2048 textures
 - Coordinate scaling bug was fixed (Jan 13)
 - Apple Pencil input bug fixed (Jan 20) - overlay hit testing
-- Selection tools have blue preview strokes
+- Selection tools have blue preview strokes and transform handles
+- Transform handles (Oct 21) - scale/rotate integrated into selections
 - Magic Wand selection implemented (Jan 20) - flood fill with color matching
 - Delete selection bug fixed (Jan 20) - clearSelection() now comprehensive
 - Critique history fully functional (newest first)
 - Feedback panel UX polished (reset button, AI toolbar button)
-- 12 out of 22 tools fully working
-- See TOOL_IMPLEMENTATION_ROADMAP.md for remaining 8 tools
+- 12 out of 20 active tools working (rotate/scale deprecated, now in selection)
+- See TOOL_IMPLEMENTATION_ROADMAP.md for remaining tools
 - Ready for TestFlight launch
 
 ### User Preferences
