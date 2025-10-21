@@ -154,6 +154,14 @@
 
 ## Next Session Priorities
 
+### CRITICAL - Code Quality
+1. **Refactor DrawingCanvasView.swift** - File is 1,506 lines, needs to be split
+   - See REFACTORING_GUIDE.md for detailed plan
+   - Extract CanvasStateManager to ViewModels/CanvasStateManager.swift (~580 lines)
+   - Extract selection overlays to SelectionOverlays.swift (~200 lines)
+   - Extract ToolButton to Components/ToolButton.swift (~15 lines)
+   - IMPORTANT: Do this when you have 100k+ tokens available
+
 ### High Priority
 1. **Physical iPad testing** - Verify transform handles work smoothly with Apple Pencil
 2. **Test selection transforms** - Verify scale/rotate/move all work together
