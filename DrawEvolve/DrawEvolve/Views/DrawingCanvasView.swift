@@ -1230,7 +1230,7 @@ class CanvasStateManager: ObservableObject {
     }
 
     /// Calculate bounding rectangle for a path
-    private func calculateBoundingRect(for path: [CGPoint]) -> CGRect {
+    func calculateBoundingRect(for path: [CGPoint]) -> CGRect {
         guard !path.isEmpty else { return .zero }
 
         var minX = path[0].x
