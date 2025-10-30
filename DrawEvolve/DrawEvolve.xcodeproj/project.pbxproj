@@ -37,6 +37,9 @@
 		DE000033 /* CritiqueHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100033 /* CritiqueHistoryView.swift */; };
 		DE000034 /* FormattedMarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100034 /* FormattedMarkdownView.swift */; };
 		DE000036 /* CrashReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100036 /* CrashReporter.swift */; };
+		DE000037 /* CanvasStateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100037 /* CanvasStateManager.swift */; };
+		DE000038 /* SelectionOverlays.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100038 /* SelectionOverlays.swift */; };
+		DE000039 /* ToolButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100039 /* ToolButton.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -77,6 +80,9 @@
 		DE100033 /* CritiqueHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistoryView.swift; sourceTree = "<group>"; };
 		DE100034 /* FormattedMarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattedMarkdownView.swift; sourceTree = "<group>"; };
 		DE100036 /* CrashReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashReporter.swift; sourceTree = "<group>"; };
+		DE100037 /* CanvasStateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasStateManager.swift; sourceTree = "<group>"; };
+		DE100038 /* SelectionOverlays.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionOverlays.swift; sourceTree = "<group>"; };
+		DE100039 /* ToolButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolButton.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +114,7 @@
 				DE100001 /* DrawEvolveApp.swift */,
 				DE400001 /* Info.plist */,
 				DE000310 /* Views */,
+				DE000315 /* ViewModels */,
 				DE000311 /* Models */,
 				DE000312 /* Services */,
 				DE000313 /* Config */,
@@ -144,6 +151,8 @@
 				DE100034 /* FormattedMarkdownView.swift */,
 				DE100031 /* DrawingDetailView.swift */,
 				DE100033 /* CritiqueHistoryView.swift */,
+				DE100038 /* SelectionOverlays.swift */,
+				DE000316 /* Components */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -187,6 +196,22 @@
 				DE200002 /* Preview Assets.xcassets */,
 			);
 			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		DE000315 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				DE100037 /* CanvasStateManager.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		DE000316 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				DE100039 /* ToolButton.swift */,
+			);
+			path = Components;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -296,6 +321,9 @@
 				DE000032 /* CritiqueHistory.swift in Sources */,
 				DE000033 /* CritiqueHistoryView.swift in Sources */,
 				DE000036 /* CrashReporter.swift in Sources */,
+				DE000037 /* CanvasStateManager.swift in Sources */,
+				DE000038 /* SelectionOverlays.swift in Sources */,
+				DE000039 /* ToolButton.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
