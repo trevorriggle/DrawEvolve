@@ -26,7 +26,7 @@ struct FloatingFeedbackPanel: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                if isExpanded, let feedbackText = feedback {
+                if isExpanded, feedback != nil {
                     // Expanded panel
                     VStack(spacing: 0) {
                         // Header with drag handle and controls

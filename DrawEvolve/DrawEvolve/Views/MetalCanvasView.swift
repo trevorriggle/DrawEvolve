@@ -539,7 +539,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Magic wand: selecting similar pixels at \(location)")
                 guard selectedLayerIndex < layers.count,
                       let texture = layers[selectedLayerIndex].texture,
-                      let renderer = renderer else {
+                      renderer != nil else {
                     print("ERROR: Cannot use magic wand - invalid layer or texture")
                     return
                 }
@@ -1271,13 +1271,6 @@ struct MetalCanvasView: UIViewRepresentable {
             if selectedPixels.isEmpty {
                 return []
             }
-
-            let selectedXs = selectedPixels.map { $0.0 }
-            let selectedYs = selectedPixels.map { $0.1 }
-            let minX = selectedXs.min()!
-            let maxX = selectedXs.max()!
-            let minY = selectedYs.min()!
-            let maxY = selectedYs.max()!
 
             // Create a path that traces the boundary of selected pixels
             // We'll use marching squares algorithm for a better boundary

@@ -73,7 +73,6 @@ struct FormattedMarkdownView: View {
         var blocks: [MarkdownBlock] = []
         let lines = markdown.components(separatedBy: .newlines)
         var currentParagraph: [String] = []
-        var listCounter = 1
 
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -87,7 +86,6 @@ struct FormattedMarkdownView: View {
                     ))
                     currentParagraph = []
                 }
-                listCounter = 1
                 continue
             }
 
@@ -98,7 +96,6 @@ struct FormattedMarkdownView: View {
                     currentParagraph = []
                 }
                 blocks.append(MarkdownBlock(type: .header2, content: trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)))
-                listCounter = 1
                 continue
             } else if trimmed.hasPrefix("# ") {
                 if !currentParagraph.isEmpty {
@@ -106,7 +103,6 @@ struct FormattedMarkdownView: View {
                     currentParagraph = []
                 }
                 blocks.append(MarkdownBlock(type: .header1, content: trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)))
-                listCounter = 1
                 continue
             }
 
@@ -117,7 +113,6 @@ struct FormattedMarkdownView: View {
                     currentParagraph = []
                 }
                 blocks.append(MarkdownBlock(type: .header3, content: trimmed.dropFirst(4).trimmingCharacters(in: .whitespaces)))
-                listCounter = 1
                 continue
             }
 
