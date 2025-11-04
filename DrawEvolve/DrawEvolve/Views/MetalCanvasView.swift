@@ -169,11 +169,12 @@ struct MetalCanvasView: UIViewRepresentable {
             // Handle view size changes (e.g., rotation)
             print("MTKView: Drawable size changed to \(size)")
 
-            // Update screen size in canvas state
+            // Update screen size in canvas state (use bounds, not drawable size)
+            // Touch coordinates are in bounds space (logical points), not pixels
             if let canvasState = canvasState {
                 Task { @MainActor in
-                    canvasState.screenSize = size
-                    print("  - Updated canvasState.screenSize to \(size)")
+                    canvasState.screenSize = view.bounds.size
+                    print("  - Updated canvasState.screenSize to \(view.bounds.size) (bounds, not drawable size)")
                 }
             }
         }
