@@ -90,7 +90,7 @@ struct MetalCanvasView: UIViewRepresentable {
         // Connect touch events to coordinator
         metalView.touchDelegate = context.coordinator
 
-        // Add gesture recognizers for zoom and pan
+        // Add gesture recognizers for zoom, pan, and rotation
         let pinchGesture = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
         pinchGesture.delegate = context.coordinator
         metalView.addGestureRecognizer(pinchGesture)
@@ -101,7 +101,11 @@ struct MetalCanvasView: UIViewRepresentable {
         panGesture.delegate = context.coordinator
         metalView.addGestureRecognizer(panGesture)
 
-        print("MetalCanvasView: MTKView configured successfully with gesture recognizers")
+        let rotationGesture = UIRotationGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleRotation(_:)))
+        rotationGesture.delegate = context.coordinator
+        metalView.addGestureRecognizer(rotationGesture)
+
+        print("MetalCanvasView: MTKView configured successfully with gesture recognizers (pinch, pan, rotation)")
 
         return metalView
     }
@@ -204,15 +208,18 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get zoom and pan state for rendering
+            // Get zoom, pan, and rotation state for rendering
             let zoomScale = MainActor.assumeIsolated {
                 canvasState?.zoomScale ?? 1.0
             }
             let panOffset = MainActor.assumeIsolated {
                 canvasState?.panOffset ?? .zero
             }
+            let rotation = MainActor.assumeIsolated {
+                canvasState?.canvasRotation.radians ?? 0.0
+            }
 
-            // Composite all visible layers to screen with zoom/pan transform
+            // Composite all visible layers to screen with zoom/pan/rotation transform
             for layer in layers where layer.isVisible {
                 if let texture = layer.texture {
                     renderer?.renderTextureToScreen(
@@ -221,6 +228,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         opacity: layer.opacity,
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
                         viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
                     )
                 }
@@ -268,13 +276,14 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure layer textures exist
             ensureLayerTextures()
 
-            // Get touch location in screen space - use it directly
-            let location = touch.location(in: view)
+            // Get touch location and transform from screen space to document space
+            let screenLocation = touch.location(in: view)
+            let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
 
             let pressure = touch.type == .pencil ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 1.0) : 1.0
             let timestamp = touch.timestamp
 
-            print("Touch began at: \(location) with pressure \(pressure), tool: \(currentTool)")
+            print("Touch began at screen: \(screenLocation) → document: \(location) with pressure \(pressure), tool: \(currentTool)")
             print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
             if let layer = layers[safe: selectedLayerIndex] {
                 print("Layer has texture: \(layer.texture != nil)")
@@ -305,8 +314,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture before snapshot
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Perform flood fill
-                renderer.floodFill(at: location, with: brushSettings.color, in: texture, screenSize: view.bounds.size)
+                // Perform flood fill (using document size for coordinate scaling)
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                renderer.floodFill(at: location, with: brushSettings.color, in: texture, screenSize: documentSize)
 
                 // Capture after snapshot
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -345,8 +355,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
 
-                // Read pixel color at location
-                if let pickedColor = getColorAt(location, in: texture, screenSize: view.bounds.size) {
+                // Read pixel color at location (using document size for coordinate scaling)
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                if let pickedColor = getColorAt(location, in: texture, screenSize: documentSize) {
                     // Update brush color
                     brushSettings.color = pickedColor
                     print("Picked color: \(pickedColor)")
@@ -368,9 +379,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture before snapshot
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Apply blur effect
+                // Apply blur effect (using document size for coordinate scaling)
                 let radius = brushSettings.size / 10.0 // Use brush size to control blur radius
-                renderer.applyBlur(at: location, radius: Float(radius), to: texture, screenSize: view.bounds.size)
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                renderer.applyBlur(at: location, radius: Float(radius), to: texture, screenSize: documentSize)
 
                 // Capture after snapshot
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -413,9 +425,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Capture before snapshot
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Apply sharpen effect
+                // Apply sharpen effect (using document size for coordinate scaling)
                 let radius = brushSettings.size / 10.0 // Use brush size to control sharpen radius
-                renderer.applySharpen(at: location, radius: Float(radius), to: texture, screenSize: view.bounds.size)
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                renderer.applySharpen(at: location, radius: Float(radius), to: texture, screenSize: documentSize)
 
                 // Capture after snapshot
                 let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -469,10 +482,11 @@ struct MetalCanvasView: UIViewRepresentable {
                             layerId: layers[selectedLayerIndex].id
                         )
 
-                        // Commit stroke immediately
+                        // Commit stroke immediately (using document size for coordinate scaling)
                         if let texture = layers[selectedLayerIndex].texture, let renderer = renderer {
                             let beforeSnapshot = renderer.captureSnapshot(of: texture)
-                            renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
+                            let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                            renderer.renderStroke(stroke, to: texture, screenSize: documentSize)
                             let afterSnapshot = renderer.captureSnapshot(of: texture)
 
                             if let before = beforeSnapshot, let after = afterSnapshot, let canvasState = canvasState {
@@ -544,15 +558,16 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
 
-                // Get the clicked color
-                guard let targetColor = getColorAt(location, in: texture, screenSize: view.bounds.size) else {
+                // Get the clicked color (using document size for coordinate scaling)
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                guard let targetColor = getColorAt(location, in: texture, screenSize: documentSize) else {
                     print("ERROR: Could not get color at location")
                     return
                 }
 
                 // Perform flood fill selection to find contiguous pixels
                 let tolerance: CGFloat = 0.1 // Color similarity tolerance (0.0 = exact match, 1.0 = any color)
-                let selectionPath = magicWandSelection(at: location, targetColor: targetColor, tolerance: tolerance, in: texture, screenSize: view.bounds.size)
+                let selectionPath = magicWandSelection(at: location, targetColor: targetColor, tolerance: tolerance, in: texture, screenSize: documentSize)
 
                 // Store selection in canvas state
                 if let canvasState = canvasState, !selectionPath.isEmpty {
@@ -626,11 +641,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get touch location in screen space - use it directly
-            let location = touch.location(in: view)
+            // Get touch location and transform from screen space to document space
+            let screenLocation = touch.location(in: view)
+            let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
 
             // Handle dragging an existing selection
             if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
+                // Calculate offset in document space
                 let offset = CGPoint(
                     x: location.x - dragStart.x,
                     y: location.y - dragStart.y
@@ -776,8 +793,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get touch location in screen space - use it directly
-            let endLocation = touch.location(in: view)
+            // Get touch location and transform from screen space to document space
+            let screenEndLocation = touch.location(in: view)
+            let endLocation = canvasState?.screenToDocument(screenEndLocation) ?? screenEndLocation
 
             if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
                 print("Rectangle select: creating selection from \(startPoint) to \(endLocation)")
@@ -896,8 +914,9 @@ struct MetalCanvasView: UIViewRepresentable {
             print("Layer has texture: \(layer.texture != nil)")
 
             if let texture = layer.texture, let renderer = renderer {
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
                 print("Rendering stroke to layer \(selectedLayerIndex) texture (width: \(texture.width), height: \(texture.height))")
-                print("View size: \(view.bounds.size.width)x\(view.bounds.size.height)")
+                print("Document size: \(documentSize.width)x\(documentSize.height), View size: \(view.bounds.size.width)x\(view.bounds.size.height)")
 
                 // Capture snapshot BEFORE rendering stroke
                 print("Capturing BEFORE snapshot...")
@@ -906,8 +925,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("WARNING: Failed to capture before snapshot")
                 }
 
-                // Render the stroke (waits for GPU completion)
-                renderer.renderStroke(stroke, to: texture, screenSize: view.bounds.size)
+                // Render the stroke (using document size for coordinate scaling)
+                renderer.renderStroke(stroke, to: texture, screenSize: documentSize)
                 print("Stroke committed successfully - texture should now contain the stroke")
 
                 // Capture snapshot AFTER rendering stroke (GPU is done now)
@@ -1429,11 +1448,58 @@ struct MetalCanvasView: UIViewRepresentable {
             }
         }
 
+        @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+            guard let canvasState = canvasState else { return }
+
+            switch gesture.state {
+            case .began:
+                print("Rotation began")
+
+            case .changed:
+                let rotationAngle = Angle(radians: gesture.rotation)
+
+                Task { @MainActor in
+                    // Disable snapping if user holds down option key (on iPad with keyboard)
+                    let snapToGrid = !gesture.modifierFlags.contains(.alternate)
+                    canvasState.rotate(by: rotationAngle, snapToGrid: snapToGrid)
+                }
+
+                // Reset rotation so we get incremental changes
+                gesture.rotation = 0
+
+            case .ended:
+                print("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
+
+                // Optionally snap to nearest 90° on release if very close
+                let currentDegrees = canvasState.canvasRotation.degrees
+                let nearest90 = round(currentDegrees / 90) * 90
+
+                if abs(currentDegrees - nearest90) < 5 {  // Within 5° of 90° increment
+                    Task { @MainActor in
+                        canvasState.canvasRotation = .degrees(nearest90)
+                        print("Snapped to nearest 90°: \(nearest90)°")
+                    }
+                }
+
+            default:
+                break
+            }
+        }
+
         // MARK: - UIGestureRecognizerDelegate
 
-        /// Allow pinch and pan gestures to work simultaneously
+        /// Allow pinch, pan, and rotation gestures to work simultaneously
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            // Allow pinch and pan to work together
+            // Allow all transform gestures to work together (pinch + pan + rotation)
+            return true
+        }
+
+        /// Block transform gestures while actively drawing
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            // Disable transform gestures while actively drawing
+            if currentStroke != nil {
+                return false
+            }
             return true
         }
     }

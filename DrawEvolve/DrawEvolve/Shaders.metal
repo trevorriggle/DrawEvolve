@@ -77,9 +77,9 @@ vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
     return out;
 }
 
-// Vertex shader for full-screen quad with zoom and pan support
+// Vertex shader for full-screen quad with zoom, pan, and rotation support
 vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
-                                                constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, unused]
+                                                constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, rotation]
                                                 constant float2 *viewportSize [[buffer(1)]]) {
     VertexOut out;
 
@@ -94,26 +94,59 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
         float2(0.0, 0.0), float2(1.0, 1.0), float2(1.0, 0.0)
     };
 
-    // Apply zoom and pan transform (parameters always provided, use zoom=1.0, pan=0 for no transform)
+    // Unpack transform parameters
     float zoom = transform[0][0];
     float2 pan = float2(transform[0][1], transform[0][2]);
+    float rotation = transform[0][3];  // Rotation angle in radians
     float2 viewport = viewportSize[0];
 
     float2 finalPos = positions[vertexID];
     float2 finalTexCoord = texCoords[vertexID];
 
-    // Only apply transform if zoom is not default (1.0)
-    if (zoom != 1.0 || pan.x != 0.0 || pan.y != 0.0) {
-        // Apply zoom and pan transform
-        // Convert NDC position to screen space, apply transform, convert back to NDC
-        float2 screenPos = (finalPos * 0.5 + 0.5) * viewport;  // NDC to screen
-        screenPos = screenPos * zoom + pan;                     // Apply zoom and pan
-        finalPos = (screenPos / viewport) * 2.0 - 1.0;         // Screen to NDC
+    // Apply transform: Zoom → Rotate → Pan
+    // Convert NDC position to screen space
+    float2 screenPos = (finalPos * 0.5 + 0.5) * viewport;  // NDC to screen
 
-        // Adjust texture coordinates for zoom (sample from zoomed region)
-        finalTexCoord = (finalTexCoord - 0.5) / zoom + 0.5;
-        finalTexCoord = finalTexCoord - pan / (viewport * zoom);
+    // Step 1: Apply zoom (scale around viewport center)
+    float2 center = viewport * 0.5;
+    screenPos = (screenPos - center) * zoom + center;
+
+    // Step 2: Apply rotation (rotate around viewport center)
+    if (rotation != 0.0) {
+        float2 rotated = screenPos - center;
+        float cosAngle = cos(rotation);
+        float sinAngle = sin(rotation);
+        screenPos.x = rotated.x * cosAngle - rotated.y * sinAngle + center.x;
+        screenPos.y = rotated.x * sinAngle + rotated.y * cosAngle + center.y;
     }
+
+    // Step 3: Apply pan
+    screenPos += pan;
+
+    // Convert back to NDC
+    finalPos = (screenPos / viewport) * 2.0 - 1.0;
+
+    // Transform texture coordinates inversely (Inverse: Unpan → Unrotate → Unzoom)
+    float2 texScreenPos = finalTexCoord * viewport;
+
+    // Inverse pan
+    texScreenPos -= pan;
+
+    // Inverse rotation
+    if (rotation != 0.0) {
+        float2 texRotated = texScreenPos - center;
+        float cosAngle = cos(rotation);
+        float sinAngle = sin(rotation);
+        // Inverse rotation: negate the angle
+        texScreenPos.x = texRotated.x * cosAngle + texRotated.y * sinAngle + center.x;
+        texScreenPos.y = texRotated.y * cosAngle - texRotated.x * sinAngle + center.y;
+    }
+
+    // Inverse zoom
+    texScreenPos = (texScreenPos - center) / zoom + center;
+
+    // Convert back to normalized texture coordinates
+    finalTexCoord = texScreenPos / viewport;
 
     out.position = float4(finalPos, 0.0, 1.0);
     out.texCoord = finalTexCoord;

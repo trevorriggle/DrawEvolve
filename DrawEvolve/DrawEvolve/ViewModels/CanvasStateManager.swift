@@ -36,14 +36,25 @@ class CanvasStateManager: ObservableObject {
     // Zoom and Pan state (for canvas navigation)
     @Published var zoomScale: CGFloat = 1.0 // Current zoom level (1.0 = 100%)
     @Published var panOffset: CGPoint = .zero // Current pan offset in screen space
+    @Published var canvasRotation: Angle = .zero // Current rotation angle
 
     // Zoom constraints
     let minZoom: CGFloat = 0.1 // 10% minimum zoom
     let maxZoom: CGFloat = 10.0 // 1000% maximum zoom
 
+    // Rotation settings
+    let rotationSnappingInterval: Angle = .degrees(15) // Snap to 15° increments
+    var enableRotationSnapping: Bool = true
+
     let historyManager = HistoryManager()
     var renderer: CanvasRenderer?
-    var screenSize: CGSize = .zero
+    var screenSize: CGSize = .zero // Current viewport/screen size
+
+    // Document size is the coordinate space for stored drawing data
+    // Currently equals screenSize, but could be fixed (e.g., 2048x2048) for resolution independence
+    var documentSize: CGSize {
+        return screenSize
+    }
     var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 
     var isEmpty: Bool {
@@ -544,20 +555,67 @@ class CanvasStateManager: ObservableObject {
 
     // MARK: - Zoom and Pan Management
 
-    /// Transform a point from view/screen space to document space (accounting for zoom and pan)
+    /// Transform a point from view/screen space to document space (accounting for zoom, pan, and rotation)
     func screenToDocument(_ point: CGPoint) -> CGPoint {
-        // Reverse the pan offset, then reverse the zoom scale
-        let adjustedX = (point.x - panOffset.x) / zoomScale
-        let adjustedY = (point.y - panOffset.y) / zoomScale
-        return CGPoint(x: adjustedX, y: adjustedY)
+        // Step 1: Translate to origin (remove pan)
+        var pt = CGPoint(
+            x: point.x - panOffset.x,
+            y: point.y - panOffset.y
+        )
+
+        // Get viewport center for rotation pivot
+        let centerX = screenSize.width / 2
+        let centerY = screenSize.height / 2
+
+        // Step 2: Translate to rotation origin
+        pt.x -= centerX
+        pt.y -= centerY
+
+        // Step 3: Apply inverse rotation
+        let angle = -canvasRotation.radians // Negative for inverse
+        let cosAngle = cos(angle)
+        let sinAngle = sin(angle)
+        let rotatedX = pt.x * cosAngle - pt.y * sinAngle
+        let rotatedY = pt.x * sinAngle + pt.y * cosAngle
+
+        // Step 4: Translate back from rotation origin
+        pt.x = rotatedX + centerX
+        pt.y = rotatedY + centerY
+
+        // Step 5: Apply inverse zoom
+        pt.x /= zoomScale
+        pt.y /= zoomScale
+
+        return pt
     }
 
-    /// Transform a point from document space to view/screen space (applying zoom and pan)
+    /// Transform a point from document space to view/screen space (applying zoom, pan, and rotation)
     func documentToScreen(_ point: CGPoint) -> CGPoint {
-        // Apply zoom scale, then apply pan offset
-        let scaledX = point.x * zoomScale
-        let scaledY = point.y * zoomScale
-        return CGPoint(x: scaledX + panOffset.x, y: scaledY + panOffset.y)
+        let centerX = screenSize.width / 2
+        let centerY = screenSize.height / 2
+
+        // Step 1: Apply zoom
+        var pt = CGPoint(
+            x: point.x * zoomScale,
+            y: point.y * zoomScale
+        )
+
+        // Step 2: Translate to rotation origin
+        pt.x -= centerX
+        pt.y -= centerY
+
+        // Step 3: Apply rotation
+        let angle = canvasRotation.radians
+        let cosAngle = cos(angle)
+        let sinAngle = sin(angle)
+        let rotatedX = pt.x * cosAngle - pt.y * sinAngle
+        let rotatedY = pt.x * sinAngle + pt.y * cosAngle
+
+        // Step 4: Translate back and apply pan
+        pt.x = rotatedX + centerX + panOffset.x
+        pt.y = rotatedY + centerY + panOffset.y
+
+        return pt
     }
 
     /// Apply zoom centered at a specific point in screen space
@@ -583,9 +641,42 @@ class CanvasStateManager: ObservableObject {
         panOffset.y += delta.y
     }
 
-    /// Reset zoom and pan to defaults
+    /// Rotate the canvas by an angle increment
+    func rotate(by angle: Angle, snapToGrid: Bool = true) {
+        // Prevent rotation if change is negligible
+        guard abs(angle.degrees) > 0.1 else { return }
+
+        var newRotation = canvasRotation + angle
+
+        // Normalize to 0-360° to prevent overflow
+        newRotation = .degrees(newRotation.degrees.truncatingRemainder(dividingBy: 360))
+        if newRotation.degrees < 0 {
+            newRotation = .degrees(newRotation.degrees + 360)
+        }
+
+        // Snap to grid if enabled
+        if snapToGrid && enableRotationSnapping {
+            let snappedDegrees = round(newRotation.degrees / rotationSnappingInterval.degrees) * rotationSnappingInterval.degrees
+            newRotation = .degrees(snappedDegrees)
+        }
+
+        canvasRotation = newRotation
+    }
+
+    /// Reset rotation to 0°
+    func resetRotation() {
+        canvasRotation = .zero
+    }
+
+    /// Reset zoom, pan, and rotation to defaults
     func resetZoomAndPan() {
         zoomScale = 1.0
         panOffset = .zero
+        canvasRotation = .zero
+    }
+
+    /// Reset all transforms
+    func resetAllTransforms() {
+        resetZoomAndPan()
     }
 }

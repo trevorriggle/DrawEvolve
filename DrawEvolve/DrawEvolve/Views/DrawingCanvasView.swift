@@ -94,6 +94,41 @@ struct DrawingCanvasView: View {
                 SelectionTransformHandles(rect: selection, canvasState: canvasState)
             }
 
+            // Canvas transform indicators (top-right)
+            VStack(alignment: .trailing, spacing: 4) {
+                // Zoom indicator
+                if canvasState.zoomScale != 1.0 {
+                    Text("\(Int(canvasState.zoomScale * 100))%")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(8)
+                        .transition(.opacity)
+                }
+
+                // Rotation indicator
+                if canvasState.canvasRotation.degrees != 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "rotate.right")
+                            .font(.caption2)
+                        Text("\(Int(canvasState.canvasRotation.degrees))°")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(8)
+                    .transition(.opacity)
+                }
+            }
+            .padding(.top, 8)
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .allowsHitTesting(false)
+
             if let path = canvasState.selectionPath {
                 MarchingAntsPath(path: path)
                     .allowsHitTesting(false)
@@ -248,6 +283,23 @@ struct DrawingCanvasView: View {
                                 canvasState.redo()
                             }
                             .disabled(!canvasState.historyManager.canRedo)
+
+                            // Canvas Transform Controls
+                            ToolButton(icon: "rotate.left", isSelected: false) {
+                                canvasState.rotate(by: .degrees(-90), snapToGrid: true)
+                            }
+                            .help("Rotate canvas left 90°")
+
+                            ToolButton(icon: "rotate.right", isSelected: false) {
+                                canvasState.rotate(by: .degrees(90), snapToGrid: true)
+                            }
+                            .help("Rotate canvas right 90°")
+
+                            ToolButton(icon: "arrow.counterclockwise", isSelected: false) {
+                                canvasState.resetAllTransforms()
+                            }
+                            .help("Reset zoom, pan, and rotation")
+                            .disabled(canvasState.zoomScale == 1.0 && canvasState.panOffset == .zero && canvasState.canvasRotation == .zero)
 
                             // AI Feedback button
                             ToolButton(icon: "sparkles", isSelected: showFeedback) {

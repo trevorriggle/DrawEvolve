@@ -412,10 +412,11 @@ class CanvasRenderer: NSObject {
         opacity: Float = 1.0,
         zoomScale: Float = 1.0,
         panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
+        canvasRotation: Float = 0.0,
         viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
         // Always use the transform pipeline for consistency
-        // Pass identity transform when zoom/pan is not active
+        // Pass identity transform when zoom/pan/rotation is not active
         guard let pipelineState = textureDisplayWithTransformPipelineState else {
             print("ERROR: Transform pipeline state not available")
             return
@@ -428,8 +429,8 @@ class CanvasRenderer: NSObject {
         var opacityValue = opacity
         renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
 
-        // Pass zoom/pan transform to vertex shader (always required for transform pipeline)
-        var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, 0)
+        // Pass zoom/pan/rotation transform to vertex shader (always required for transform pipeline)
+        var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, canvasRotation)
         renderEncoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
 
         var viewport = viewportSize
