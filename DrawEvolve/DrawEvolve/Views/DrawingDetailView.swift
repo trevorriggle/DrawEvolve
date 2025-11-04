@@ -67,17 +67,35 @@ struct DrawingDetailView: View {
                             }
                         }
 
-                        // AI Feedback (if available)
-                        if let feedback = drawing.feedback {
+                        // AI Feedback History
+                        if !drawing.critiqueHistory.isEmpty {
                             VStack(alignment: .leading, spacing: 16) {
-                                Label("AI Feedback", systemImage: "sparkles")
+                                Label("AI Feedback History", systemImage: "sparkles")
                                     .font(.headline)
                                     .foregroundColor(.accentColor)
 
-                                FormattedMarkdownView(text: feedback)
+                                // Show all critiques in reverse chronological order (newest first)
+                                ForEach(drawing.critiqueHistory.reversed()) { entry in
+                                    VStack(alignment: .leading, spacing: 12) {
+                                        // Timestamp
+                                        HStack {
+                                            Image(systemName: "clock")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                            Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+
+                                        Divider()
+
+                                        // Feedback content
+                                        FormattedMarkdownView(text: entry.feedback)
+                                    }
                                     .padding()
                                     .background(Color(uiColor: .secondarySystemBackground))
                                     .cornerRadius(12)
+                                }
                             }
                         } else {
                             // No feedback available

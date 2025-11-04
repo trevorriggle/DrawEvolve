@@ -167,7 +167,7 @@ struct GalleryView: View {
             }
             .padding()
         }
-        .sheet(item: $selectedDrawing) { drawing in
+        .fullScreenCover(item: $selectedDrawing) { drawing in
             DrawingDetailView(drawing: drawing)
         }
     }

@@ -146,7 +146,6 @@ struct MetalCanvasView: UIViewRepresentable {
         private var onTextRequest: ((CGPoint) -> Void)?
         private var isDraggingSelection = false // Track if we're dragging a selection
         private var selectionDragStart: CGPoint? // Where the drag started
-        private var isGestureActive = false // Track if transform gesture is active
 
         init(
             layers: Binding<[DrawingLayer]>,
@@ -270,13 +269,6 @@ struct MetalCanvasView: UIViewRepresentable {
         // Touch handling for drawing
         func touchesBegan(_ touches: Set<UITouch>, in view: MTKView) {
             print("👆 === TOUCH BEGAN ===")
-
-            // Don't process drawing touches if a transform gesture is active
-            if isGestureActive {
-                print("Ignoring touch - gesture is active")
-                return
-            }
-
             guard let touch = touches.first else {
                 print("ERROR: No touch in set")
                 return
@@ -645,11 +637,6 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView) {
-            // Don't process drawing touches if a transform gesture is active
-            if isGestureActive {
-                return
-            }
-
             guard let touch = touches.first else {
                 print("touchesMoved: No touch in set")
                 return
@@ -1418,7 +1405,6 @@ struct MetalCanvasView: UIViewRepresentable {
 
             switch gesture.state {
             case .began:
-                isGestureActive = true
                 print("Pinch began at \(location), scale: \(gesture.scale)")
 
             case .changed:
@@ -1432,7 +1418,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 gesture.scale = 1.0
 
             case .ended, .cancelled:
-                isGestureActive = false
                 print("Pinch ended, final zoom: \(canvasState.zoomScale)")
 
             default:
@@ -1445,7 +1430,6 @@ struct MetalCanvasView: UIViewRepresentable {
 
             switch gesture.state {
             case .began:
-                isGestureActive = true
                 print("Two-finger pan began")
 
             case .changed:
@@ -1458,7 +1442,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 gesture.setTranslation(.zero, in: view)
 
             case .ended, .cancelled:
-                isGestureActive = false
                 print("Two-finger pan ended")
 
             default:
@@ -1471,7 +1454,6 @@ struct MetalCanvasView: UIViewRepresentable {
 
             switch gesture.state {
             case .began:
-                isGestureActive = true
                 print("Rotation began")
 
             case .changed:
@@ -1486,8 +1468,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Reset rotation so we get incremental changes
                 gesture.rotation = 0
 
-            case .ended, .cancelled:
-                isGestureActive = false
+            case .ended:
                 print("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
 
                 // Optionally snap to nearest 90° on release if very close
