@@ -210,8 +210,8 @@ struct DrawingCard: View {
                         )
                 }
 
-                // Feedback badge
-                if drawing.feedback != nil {
+                // Feedback badge - show if there's any feedback or critique history
+                if drawing.feedback != nil || !drawing.critiqueHistory.isEmpty {
                     HStack(spacing: 4) {
                         Image(systemName: "sparkles")
                             .font(.system(size: 12))

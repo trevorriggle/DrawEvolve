@@ -633,7 +633,8 @@ struct DrawingCanvasView: View {
         // Load feedback if exists
         if let feedback = drawing.feedback {
             canvasState.feedback = feedback
-            print("  - Has feedback: YES")
+            showFeedback = true // Show feedback panel immediately
+            print("  - Has feedback: YES (showing feedback panel)")
         } else {
             print("  - Has feedback: NO")
         }
