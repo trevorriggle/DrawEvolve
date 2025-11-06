@@ -221,8 +221,7 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Composite all visible layers to screen with zoom/pan/rotation transform
-            var compositedCount = 0
-            for (index, layer) in layers.enumerated() where layer.isVisible {
+            for layer in layers where layer.isVisible {
                 if let texture = layer.texture {
                     renderer?.renderTextureToScreen(
                         texture,
@@ -233,11 +232,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         canvasRotation: Float(rotation),
                         viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
                     )
-                    compositedCount += 1
                 }
-            }
-            if compositedCount > 1 {
-                print("🎨 Composited \(compositedCount) layers to screen")
             }
 
             // IMPORTANT: Render current stroke preview on top
@@ -266,31 +261,32 @@ struct MetalCanvasView: UIViewRepresentable {
         func ensureLayerTextures() {
             guard let renderer = renderer else { return }
 
-            // ALWAYS check all layers, not just on first run
-            // This ensures new layers get textures when added
+            var created = false
+
+            // Check all layers for missing textures
             for i in 0..<layers.count {
                 if layers[i].texture == nil {
+                    print("⚠️ Layer \(i) '\(layers[i].name)' has NIL texture - creating new one. Layer ID: \(layers[i].id)")
                     layers[i].texture = renderer.createLayerTexture()
                     if let tex = layers[i].texture {
-                        print("🆕 Created texture for Layer \(i) '\(layers[i].name)': \(ObjectIdentifier(tex))")
+                        print("   ✅ Created texture: \(ObjectIdentifier(tex))")
+                        created = true
+                    } else {
+                        print("   ❌ FAILED to create texture!")
                     }
                 }
             }
 
-            // Verify all layers have UNIQUE textures
-            print("📋 Layer texture map:")
-            var textureIDs = Set<ObjectIdentifier>()
-            for (i, layer) in layers.enumerated() {
-                if let tex = layer.texture {
-                    let id = ObjectIdentifier(tex)
-                    textureIDs.insert(id)
-                    print("  Layer \(i) '\(layer.name)': \(id)")
-                } else {
-                    print("  Layer \(i) '\(layer.name)': ❌ NO TEXTURE")
+            // Only verify if we created textures
+            if created {
+                print("📋 Current layer state:")
+                for (i, layer) in layers.enumerated() {
+                    if let tex = layer.texture {
+                        print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: Texture \(ObjectIdentifier(tex))")
+                    } else {
+                        print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: ❌ NO TEXTURE")
+                    }
                 }
-            }
-            if textureIDs.count != layers.count {
-                print("⚠️ WARNING: \(layers.count) layers but only \(textureIDs.count) unique textures!")
             }
         }
 
