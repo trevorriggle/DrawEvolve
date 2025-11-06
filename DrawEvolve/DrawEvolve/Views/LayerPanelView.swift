@@ -17,20 +17,21 @@ struct LayerPanelView: View {
         List {
             ForEach(Array(layers.enumerated().reversed()), id: \.element.id) { index, layer in
                 Button(action: {
-                    let newIndex = layers.count - 1 - index
-                    print("🎯 Layer tapped: '\(layer.name)' - Setting selectedIndex to \(newIndex)")
-                    selectedIndex = newIndex
+                    // index already has the correct layer index from enumerated()
+                    print("🎯 Layer tapped: '\(layer.name)' at index \(index) - Setting selectedIndex to \(index)")
+                    selectedIndex = index
                 }) {
                     LayerRow(
                         layer: layer,
-                        isSelected: selectedIndex == (layers.count - 1 - index)
+                        isSelected: selectedIndex == index
                     )
                 }
                 .buttonStyle(.plain)
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     if layers.count > 1 {
                         Button(role: .destructive) {
-                            onDeleteLayer(layers.count - 1 - index)
+                            print("🗑️ Deleting layer at index \(index)")
+                            onDeleteLayer(index)
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
