@@ -171,10 +171,13 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Update screen size in canvas state (use bounds, not drawable size)
             // Touch coordinates are in bounds space (logical points), not pixels
-            if let canvasState = canvasState {
+            if let canvasState = canvasState, let renderer = renderer {
                 Task { @MainActor in
                     canvasState.screenSize = view.bounds.size
+                    // Update canvas size to match new screen dimensions (via diagonal calculation)
+                    renderer.updateCanvasSize(for: view.bounds.size)
                     print("  - Updated canvasState.screenSize to \(view.bounds.size) (bounds, not drawable size)")
+                    print("  - Canvas size updated to \(renderer.canvasSize)")
                 }
             }
         }
@@ -193,10 +196,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 renderer = CanvasRenderer(metalDevice: device)
 
                 // Share renderer and screen size with canvas state (for text rendering)
-                if let canvasState = canvasState {
-                    canvasState.renderer = renderer
+                if let canvasState = canvasState, let renderer = renderer {
+                    // IMPORTANT: Set screen size first, which will trigger canvas size calculation
                     canvasState.screenSize = view.bounds.size
-                    print("MetalCanvasView.draw: Shared renderer with canvas state, screen size: \(view.bounds.size)")
+                    canvasState.renderer = renderer
+                    // Ensure canvas size is immediately updated based on screen size
+                    renderer.updateCanvasSize(for: view.bounds.size)
+                    print("MetalCanvasView.draw: Shared renderer with canvas state")
+                    print("  - Screen size: \(view.bounds.size)")
+                    print("  - Canvas size: \(renderer.canvasSize)")
                 }
             }
 

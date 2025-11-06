@@ -50,13 +50,23 @@ class CanvasStateManager: ObservableObject {
 
     let historyManager = HistoryManager()
     var renderer: CanvasRenderer?
-    var screenSize: CGSize = .zero // Current viewport/screen size
+    private var _screenSize: CGSize = .zero
+    var screenSize: CGSize {
+        get { return _screenSize }
+        set {
+            _screenSize = newValue
+            // Update canvas size based on new screen size
+            if let renderer = renderer {
+                renderer.updateCanvasSize(for: newValue)
+            }
+        }
+    }
 
     // Document size is the coordinate space for stored drawing data
-    // FIXED SIZE - the canvas is always square, like a piece of paper
-    // The screen size can change (rotation), but the canvas never changes
+    // DYNAMIC SIZE - the canvas is always a square sized to be bigger than the screen diagonal
+    // This ensures no clipping/distortion when the canvas is rotated
     var documentSize: CGSize {
-        return CGSize(width: 2048, height: 2048)
+        return renderer?.canvasSize ?? CGSize(width: 2048, height: 2048)
     }
     var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 

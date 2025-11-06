@@ -21,8 +21,28 @@ class CanvasRenderer: NSObject {
     private var blurComputeState: MTLComputePipelineState?
     private var sharpenComputeState: MTLComputePipelineState?
 
-    // Canvas dimensions
-    var canvasSize: CGSize = CGSize(width: 2048, height: 2048)
+    // Canvas dimensions - dynamically calculated to be a square larger than screen diagonal
+    // This ensures no clipping/distortion when rotating the canvas
+    private var _canvasSize: CGSize = CGSize(width: 2048, height: 2048)
+    var canvasSize: CGSize {
+        get { return _canvasSize }
+        set { _canvasSize = newValue }
+    }
+
+    /// Update canvas size based on screen dimensions
+    /// Canvas should be a square with side length = ceil(screen diagonal) to avoid clipping when rotated
+    func updateCanvasSize(for screenSize: CGSize) {
+        let diagonal = ceil(sqrt(screenSize.width * screenSize.width + screenSize.height * screenSize.height))
+        // Round up to nearest power of 2 for better GPU performance
+        let size = pow(2, ceil(log2(diagonal)))
+        let newSize = CGSize(width: size, height: size)
+
+        // Only update if size actually changed
+        if newSize != _canvasSize {
+            print("📐 Canvas size updated from \(_canvasSize) to \(newSize) based on screen \(screenSize)")
+            _canvasSize = newSize
+        }
+    }
 
     init?(metalDevice: MTLDevice) {
         self.device = metalDevice

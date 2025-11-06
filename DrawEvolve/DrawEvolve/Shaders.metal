@@ -107,8 +107,26 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
 
     // VERTEX POSITIONING (screen/viewport space)
     // Apply transform: Zoom → Rotate → Pan
+
+    // IMPORTANT: Aspect ratio correction
+    // Canvas is square, but viewport may be rectangular
+    // Scale canvas to fit within viewport while maintaining 1:1 aspect ratio
+    float viewportAspect = viewport.x / viewport.y;
+    float2 scale = float2(1.0, 1.0);
+
+    if (viewportAspect > 1.0) {
+        // Landscape: viewport is wider than tall, pillarbox the canvas
+        scale.x = 1.0 / viewportAspect;
+    } else {
+        // Portrait: viewport is taller than wide, letterbox the canvas
+        scale.y = viewportAspect;
+    }
+
+    // Apply aspect ratio correction to vertex position
+    float2 correctedPos = finalPos * scale;
+
     // Convert NDC position to screen space
-    float2 screenPos = (finalPos * 0.5 + 0.5) * viewport;  // NDC to screen
+    float2 screenPos = (correctedPos * 0.5 + 0.5) * viewport;  // NDC to screen
 
     // Step 1: Apply zoom (scale around viewport center)
     float2 screenCenter = viewport * 0.5;
