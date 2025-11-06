@@ -1,7 +1,18 @@
 # DrawEvolve - Pipeline Features & Roadmap
 
-**Last Updated:** 2025-10-09
-**Status:** MVP Complete ✅
+**Last Updated:** 2025-11-06
+**Status:** MVP+ Complete with Known Issues
+
+---
+
+## ⚠️ Known Issues (November 2025)
+
+### Critical
+1. **Canvas Rotation Stretching** - Rotating the canvas causes drawings to stretch and distort. Proportions are not maintained during rotation, causing circles to become ellipses and squares to become rectangles. See `ROTATION_STRETCHING_FIX_PLAN.md` for detailed analysis and fix plan.
+
+### Deferred Features
+2. **Unimplemented Tools** - 8 tools remain unimplemented (Smudge, Clone Stamp, Move). See `TOOL_IMPLEMENTATION_ROADMAP.md` and `toolaudit.md` for details.
+3. **Blur/Sharpen Brush Mode** - Currently apply globally to entire layer instead of brush-based application.
 
 ---
 
@@ -13,17 +24,18 @@ DrawEvolve isn't just a drawing app with AI feedback - it's a **creative practic
 
 ## ✅ MVP + (Current - EXCEEDS MVP)
 
-### Drawing Engine ✅ COMPLETE
+### Drawing Engine ✅ MOSTLY COMPLETE
 - ✅ Metal-based rendering (60 FPS, GPU-accelerated)
 - ✅ Multi-layer system with thumbnails and blend modes
-- ✅ **17 Professional Tools:**
-  - Drawing: Brush, Eraser, Smudge
+- ✅ **12 Working Tools:**
+  - Drawing: Brush, Eraser
   - Shapes: Line, Rectangle, Circle, Polygon
   - Fill/Color: Paint Bucket, Eyedropper
   - Selection: Rectangle Select, Lasso, Magic Wand
-  - Effects: Blur, Sharpen, Clone Stamp
-  - Utility: Move, Text
-- ✅ **Canvas Transforms:** Zoom (0.1x-10x), Pan, Rotation with gestures
+  - Effects: Blur (global), Sharpen (global)
+  - Utility: Text
+- ⚠️ **Canvas Transforms:** Zoom (0.1x-10x), Pan working, Rotation has stretching issues (see ROTATION_STRETCHING_FIX_PLAN.md)
+- ⚠️ **Transform Handles:** Scale and rotate integrated into selection tools (Oct 21, 2025)
 - ✅ Undo/redo system with texture snapshots
 - ✅ Export to image
 - ✅ Pressure sensitivity (Apple Pencil support)
