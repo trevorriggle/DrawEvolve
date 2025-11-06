@@ -601,6 +601,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         print("Magic wand selection created with \(selectionPath.count) points")
                         // Extract pixels for moving/deleting
                         canvasState.extractSelectionPixels()
+                        // Render them back immediately at original position so they don't disappear
+                        canvasState.renderSelectionInRealTime()
                     }
                 }
 
@@ -848,6 +850,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         print("Rectangle selection created: \(selectionRect)")
                         // Extract pixels for moving
                         canvasState.extractSelectionPixels()
+                        // Render them back immediately at original position so they don't disappear
+                        canvasState.renderSelectionInRealTime()
                     }
                 }
 
@@ -907,6 +911,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         print("Lasso selection created with \(pathCopy.count) points")
                         // Extract pixels for moving
                         canvasState.extractSelectionPixels()
+                        // Render them back immediately at original position so they don't disappear
+                        canvasState.renderSelectionInRealTime()
                     }
                 }
 
@@ -937,8 +943,11 @@ struct MetalCanvasView: UIViewRepresentable {
             let layer = layers[selectedLayerIndex]
 
             if let texture = layer.texture, let renderer = renderer {
-                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                // Stroke points are in document space which matches texture space
+                // Use texture size directly for 1:1 coordinate mapping
+                let textureSize = CGSize(width: texture.width, height: texture.height)
                 print("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)' - Texture ID: \(ObjectIdentifier(texture))")
+                print("  Texture size: \(textureSize.width)x\(textureSize.height)")
 
                 // Capture snapshot BEFORE rendering stroke
                 print("Capturing BEFORE snapshot...")
@@ -947,8 +956,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("WARNING: Failed to capture before snapshot")
                 }
 
-                // Render the stroke (using document size for coordinate scaling)
-                renderer.renderStroke(stroke, to: texture, screenSize: documentSize)
+                // Render the stroke (stroke points are in document/texture space already)
+                renderer.renderStroke(stroke, to: texture, screenSize: textureSize)
                 print("Stroke committed successfully - texture should now contain the stroke")
 
                 // Capture snapshot AFTER rendering stroke (GPU is done now)

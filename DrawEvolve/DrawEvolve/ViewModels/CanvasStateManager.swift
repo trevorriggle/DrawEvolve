@@ -347,11 +347,11 @@ class CanvasStateManager: ObservableObject {
         // Capture before snapshot
         let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-        // Delete pixels in selection
+        // Delete pixels in selection (use documentSize for 1:1 coordinate mapping)
         if let rect = activeSelection {
-            renderer.clearRect(rect, in: texture, screenSize: screenSize)
+            renderer.clearRect(rect, in: texture, screenSize: documentSize)
         } else if let path = selectionPath {
-            renderer.clearPath(path, in: texture, screenSize: screenSize)
+            renderer.clearPath(path, in: texture, screenSize: documentSize)
         }
 
         // Capture after snapshot
@@ -400,17 +400,19 @@ class CanvasStateManager: ObservableObject {
 
         if let rect = activeSelection {
             // Extract pixels from rectangular selection
-            selectionPixels = renderer.extractPixels(from: rect, in: texture, screenSize: screenSize)
+            // IMPORTANT: rect is in document space, so pass documentSize for 1:1 coordinate mapping
+            selectionPixels = renderer.extractPixels(from: rect, in: texture, screenSize: documentSize)
             selectionOriginalRect = rect
             selectionOffset = .zero
 
             // Verify extraction succeeded
             if selectionPixels == nil {
                 print("❌ ERROR: Failed to extract rectangular selection")
+                print("  Rect: \(rect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
                 clearSelection() // Clear invalid selection
             } else {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                renderer.clearRect(rect, in: texture, screenSize: screenSize)
+                renderer.clearRect(rect, in: texture, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
                 selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
                 print("✂️ Extracted rectangular selection: \(rect) and cleared original")
@@ -433,17 +435,19 @@ class CanvasStateManager: ObservableObject {
                 return
             }
 
-            selectionPixels = renderer.extractPixels(fromPath: path, in: texture, screenSize: screenSize)
+            // IMPORTANT: path is in document space, so pass documentSize for 1:1 coordinate mapping
+            selectionPixels = renderer.extractPixels(fromPath: path, in: texture, screenSize: documentSize)
             selectionOriginalRect = boundingRect
             selectionOffset = .zero
 
             // Verify extraction succeeded
             if selectionPixels == nil {
                 print("❌ ERROR: Failed to extract lasso selection")
+                print("  Bounding rect: \(boundingRect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
                 clearSelection() // Clear invalid selection
             } else {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                renderer.clearPath(path, in: texture, screenSize: screenSize)
+                renderer.clearPath(path, in: texture, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
                 selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
                 print("✂️ Extracted lasso selection, bounding rect: \(boundingRect) and cleared original")
@@ -474,8 +478,8 @@ class CanvasStateManager: ObservableObject {
             height: originalRect.height * selectionScale
         )
 
-        // Step 3: Render the pixels at the new position
-        renderer.renderImage(pixels, at: currentRect, to: texture, screenSize: screenSize)
+        // Step 3: Render the pixels at the new position (use documentSize for 1:1 coordinate mapping)
+        renderer.renderImage(pixels, at: currentRect, to: texture, screenSize: documentSize)
     }
 
     /// Commit the moved selection to finalize the change
