@@ -109,7 +109,13 @@ struct LayerRow: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 8)
-        .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+        .padding(.horizontal, 8)
+        .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
     }
 }
 

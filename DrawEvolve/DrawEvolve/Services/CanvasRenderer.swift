@@ -436,10 +436,6 @@ class CanvasRenderer: NSObject {
         var viewport = viewportSize
         renderEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
 
-        // Pass fixed canvas/document size to shader
-        var canvas = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
-        renderEncoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
-
         // Draw fullscreen quad (6 vertices for 2 triangles)
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
@@ -468,19 +464,16 @@ class CanvasRenderer: NSObject {
         )
 
         // Transform document space points to screen space using canvas transforms
-        // Use DOCUMENT center for document-space, SCREEN center for screen-space
-        let screenCenterX = viewportSize.width / 2
-        let screenCenterY = viewportSize.height / 2
-        let docCenterX = canvasSize.width / 2  // Fixed document size (2048x2048)
-        let docCenterY = canvasSize.height / 2
+        let centerX = viewportSize.width / 2
+        let centerY = viewportSize.height / 2
         let cosAngle = cos(canvasRotation)
         let sinAngle = sin(canvasRotation)
 
         let positions = stroke.points.map { point -> SIMD2<Float> in
             // Document → Screen transformation (match corrected documentToScreen)
-            // Step 1: Translate to document origin
-            var x = point.location.x - docCenterX
-            var y = point.location.y - docCenterY
+            // Step 1: Translate to center (before any scaling/rotation)
+            var x = point.location.x - centerX
+            var y = point.location.y - centerY
 
             // Step 2: Apply zoom
             x *= zoomScale
@@ -490,9 +483,9 @@ class CanvasRenderer: NSObject {
             let rotatedX = x * cosAngle - y * sinAngle
             let rotatedY = x * sinAngle + y * cosAngle
 
-            // Step 4: Translate to screen center and apply pan
-            x = rotatedX + screenCenterX + panOffset.x
-            y = rotatedY + screenCenterY + panOffset.y
+            // Step 4: Translate back from center and apply pan
+            x = rotatedX + centerX + panOffset.x
+            y = rotatedY + centerY + panOffset.y
 
             return SIMD2<Float>(Float(x), Float(y))
         }

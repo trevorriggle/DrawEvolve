@@ -129,6 +129,19 @@ struct DrawingCanvasView: View {
                     .cornerRadius(8)
                     .transition(.opacity)
                 }
+
+                // Layer indicator - always show current layer
+                HStack(spacing: 4) {
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .font(.caption2)
+                    Text(canvasState.layers[safe: canvasState.selectedLayerIndex]?.name ?? "Layer")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.ultraThinMaterial)
+                .cornerRadius(8)
             }
             .padding(.top, 8)
             .padding(.trailing, 8)

@@ -263,17 +263,10 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // ALWAYS check all layers, not just on first run
             // This ensures new layers get textures when added
-            var createdCount = 0
             for i in 0..<layers.count {
                 if layers[i].texture == nil {
                     layers[i].texture = renderer.createLayerTexture()
-                    createdCount += 1
-                    print("Created texture for layer \(i): \(layers[i].name)")
                 }
-            }
-
-            if createdCount > 0 {
-                print("ensureLayerTextures: Created \(createdCount) new textures, total layers: \(layers.count)")
             }
         }
 
@@ -907,8 +900,6 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             print("Committing stroke with \(stroke.points.count) points")
-            print("Selected layer index: \(selectedLayerIndex)")
-            print("Total layers: \(layers.count)")
 
             // Ensure textures are initialized before committing
             ensureLayerTextures()
@@ -922,8 +913,6 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             let layer = layers[selectedLayerIndex]
-            print("Layer \(selectedLayerIndex) name: \(layer.name)")
-            print("Layer has texture: \(layer.texture != nil)")
 
             if let texture = layer.texture, let renderer = renderer {
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
