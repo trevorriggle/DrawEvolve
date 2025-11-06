@@ -126,27 +126,41 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     // Convert back to NDC
     finalPos = (screenPos / viewport) * 2.0 - 1.0;
 
-    // Transform texture coordinates inversely (Inverse: Unpan → Unrotate → Unzoom)
-    float2 texScreenPos = finalTexCoord * viewport;
+    // Transform texture coordinates inversely (stay in normalized 0-1 space)
+    // Get aspect ratio for correction
+    float aspectRatio = viewport.x / viewport.y;
+
+    // Convert pan from pixel space to normalized space
+    float2 normalizedPan = pan / viewport;
 
     // Inverse pan
-    texScreenPos -= pan;
+    finalTexCoord -= normalizedPan;
 
-    // Inverse rotation
+    // Inverse rotation (with aspect ratio correction)
     if (rotation != 0.0) {
-        float2 texRotated = texScreenPos - center;
-        float cosAngle = cos(rotation);
-        float sinAngle = sin(rotation);
-        // Inverse rotation: negate the angle
-        texScreenPos.x = texRotated.x * cosAngle + texRotated.y * sinAngle + center.x;
-        texScreenPos.y = texRotated.y * cosAngle - texRotated.x * sinAngle + center.y;
+        // Translate to center in normalized space
+        finalTexCoord -= float2(0.5, 0.5);
+
+        // Scale Y by aspect ratio before rotation (to make space uniform)
+        finalTexCoord.y *= aspectRatio;
+
+        // Apply inverse rotation (negate angle)
+        float cosAngle = cos(-rotation);
+        float sinAngle = sin(-rotation);
+        float2 rotated;
+        rotated.x = finalTexCoord.x * cosAngle - finalTexCoord.y * sinAngle;
+        rotated.y = finalTexCoord.x * sinAngle + finalTexCoord.y * cosAngle;
+        finalTexCoord = rotated;
+
+        // Scale Y back after rotation
+        finalTexCoord.y /= aspectRatio;
+
+        // Translate back from center
+        finalTexCoord += float2(0.5, 0.5);
     }
 
-    // Inverse zoom
-    texScreenPos = (texScreenPos - center) / zoom + center;
-
-    // Convert back to normalized texture coordinates
-    finalTexCoord = texScreenPos / viewport;
+    // Inverse zoom (in normalized space)
+    finalTexCoord = (finalTexCoord - float2(0.5, 0.5)) / zoom + float2(0.5, 0.5);
 
     out.position = float4(finalPos, 0.0, 1.0);
     out.texCoord = finalTexCoord;

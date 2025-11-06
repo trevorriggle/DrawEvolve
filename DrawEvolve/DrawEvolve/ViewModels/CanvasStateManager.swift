@@ -557,17 +557,17 @@ class CanvasStateManager: ObservableObject {
 
     /// Transform a point from view/screen space to document space (accounting for zoom, pan, and rotation)
     func screenToDocument(_ point: CGPoint) -> CGPoint {
-        // Step 1: Translate to origin (remove pan)
+        // Get viewport center for rotation pivot
+        let centerX = screenSize.width / 2
+        let centerY = screenSize.height / 2
+
+        // Step 1: Remove pan
         var pt = CGPoint(
             x: point.x - panOffset.x,
             y: point.y - panOffset.y
         )
 
-        // Get viewport center for rotation pivot
-        let centerX = screenSize.width / 2
-        let centerY = screenSize.height / 2
-
-        // Step 2: Translate to rotation origin
+        // Step 2: Translate to origin
         pt.x -= centerX
         pt.y -= centerY
 
@@ -578,13 +578,13 @@ class CanvasStateManager: ObservableObject {
         let rotatedX = pt.x * cosAngle - pt.y * sinAngle
         let rotatedY = pt.x * sinAngle + pt.y * cosAngle
 
-        // Step 4: Translate back from rotation origin
-        pt.x = rotatedX + centerX
-        pt.y = rotatedY + centerY
+        // Step 4: Apply inverse zoom
+        pt.x = rotatedX / zoomScale
+        pt.y = rotatedY / zoomScale
 
-        // Step 5: Apply inverse zoom
-        pt.x /= zoomScale
-        pt.y /= zoomScale
+        // Step 5: Translate back from origin
+        pt.x += centerX
+        pt.y += centerY
 
         return pt
     }
@@ -594,26 +594,28 @@ class CanvasStateManager: ObservableObject {
         let centerX = screenSize.width / 2
         let centerY = screenSize.height / 2
 
-        // Step 1: Apply zoom
+        // Step 1: Translate to center (before any scaling/rotation)
         var pt = CGPoint(
-            x: point.x * zoomScale,
-            y: point.y * zoomScale
+            x: point.x - centerX,
+            y: point.y - centerY
         )
 
-        // Step 2: Translate to rotation origin
-        pt.x -= centerX
-        pt.y -= centerY
+        // Step 2: Apply zoom
+        pt.x *= zoomScale
+        pt.y *= zoomScale
 
-        // Step 3: Apply rotation
+        // Step 3: Apply rotation (already relative to center)
         let angle = canvasRotation.radians
         let cosAngle = cos(angle)
         let sinAngle = sin(angle)
         let rotatedX = pt.x * cosAngle - pt.y * sinAngle
         let rotatedY = pt.x * sinAngle + pt.y * cosAngle
 
-        // Step 4: Translate back and apply pan
-        pt.x = rotatedX + centerX + panOffset.x
-        pt.y = rotatedY + centerY + panOffset.y
+        // Step 4: Translate back from center and apply pan
+        pt = CGPoint(
+            x: rotatedX + centerX + panOffset.x,
+            y: rotatedY + centerY + panOffset.y
+        )
 
         return pt
     }

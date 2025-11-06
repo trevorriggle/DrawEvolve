@@ -470,20 +470,20 @@ class CanvasRenderer: NSObject {
         let sinAngle = sin(canvasRotation)
 
         let positions = stroke.points.map { point -> SIMD2<Float> in
-            // Document → Screen transformation
-            // Step 1: Apply zoom
-            var x = point.location.x * zoomScale
-            var y = point.location.y * zoomScale
+            // Document → Screen transformation (match corrected documentToScreen)
+            // Step 1: Translate to center (before any scaling/rotation)
+            var x = point.location.x - centerX
+            var y = point.location.y - centerY
 
-            // Step 2: Translate to rotation origin
-            x -= centerX
-            y -= centerY
+            // Step 2: Apply zoom
+            x *= zoomScale
+            y *= zoomScale
 
-            // Step 3: Apply rotation
+            // Step 3: Apply rotation (already relative to center)
             let rotatedX = x * cosAngle - y * sinAngle
             let rotatedY = x * sinAngle + y * cosAngle
 
-            // Step 4: Translate back and apply pan
+            // Step 4: Translate back from center and apply pan
             x = rotatedX + centerX + panOffset.x
             y = rotatedY + centerY + panOffset.y
 
