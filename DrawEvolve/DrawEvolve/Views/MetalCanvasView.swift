@@ -221,7 +221,8 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Composite all visible layers to screen with zoom/pan/rotation transform
-            for layer in layers where layer.isVisible {
+            var compositedCount = 0
+            for (index, layer) in layers.enumerated() where layer.isVisible {
                 if let texture = layer.texture {
                     renderer?.renderTextureToScreen(
                         texture,
@@ -232,7 +233,11 @@ struct MetalCanvasView: UIViewRepresentable {
                         canvasRotation: Float(rotation),
                         viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
                     )
+                    compositedCount += 1
                 }
+            }
+            if compositedCount > 1 {
+                print("🎨 Composited \(compositedCount) layers to screen")
             }
 
             // IMPORTANT: Render current stroke preview on top
@@ -266,7 +271,26 @@ struct MetalCanvasView: UIViewRepresentable {
             for i in 0..<layers.count {
                 if layers[i].texture == nil {
                     layers[i].texture = renderer.createLayerTexture()
+                    if let tex = layers[i].texture {
+                        print("🆕 Created texture for Layer \(i) '\(layers[i].name)': \(ObjectIdentifier(tex))")
+                    }
                 }
+            }
+
+            // Verify all layers have UNIQUE textures
+            print("📋 Layer texture map:")
+            var textureIDs = Set<ObjectIdentifier>()
+            for (i, layer) in layers.enumerated() {
+                if let tex = layer.texture {
+                    let id = ObjectIdentifier(tex)
+                    textureIDs.insert(id)
+                    print("  Layer \(i) '\(layer.name)': \(id)")
+                } else {
+                    print("  Layer \(i) '\(layer.name)': ❌ NO TEXTURE")
+                }
+            }
+            if textureIDs.count != layers.count {
+                print("⚠️ WARNING: \(layers.count) layers but only \(textureIDs.count) unique textures!")
             }
         }
 
@@ -916,8 +940,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             if let texture = layer.texture, let renderer = renderer {
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
-                print("Rendering stroke to layer \(selectedLayerIndex) texture (width: \(texture.width), height: \(texture.height))")
-                print("Document size: \(documentSize.width)x\(documentSize.height), View size: \(view.bounds.size.width)x\(view.bounds.size.height)")
+                print("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)' - Texture ID: \(ObjectIdentifier(texture))")
 
                 // Capture snapshot BEFORE rendering stroke
                 print("Capturing BEFORE snapshot...")
