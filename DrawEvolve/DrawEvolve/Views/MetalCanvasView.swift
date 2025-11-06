@@ -236,10 +236,21 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // IMPORTANT: Render current stroke preview on top
-            // Use bounds.size (screen space) for preview, matching touch coordinates
+            // Preview stroke points are in document space, so apply transforms for display
             // DON'T show preview for eraser - it looks weird
             if let stroke = currentStroke, !stroke.points.isEmpty, stroke.tool != .eraser {
-                renderer?.renderStrokePreview(stroke, to: renderEncoder, viewportSize: view.bounds.size)
+                let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
+                let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
+                let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
+
+                renderer?.renderStrokePreview(
+                    stroke,
+                    to: renderEncoder,
+                    viewportSize: view.bounds.size,
+                    zoomScale: zoomScale,
+                    panOffset: panOffset,
+                    canvasRotation: rotation
+                )
             }
 
             renderEncoder.endEncoding()

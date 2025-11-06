@@ -17,6 +17,7 @@ struct PromptInputView: View {
             // Dimmed background
             Color.black.opacity(0.4)
                 .ignoresSafeArea()
+                .allowsHitTesting(false)
 
             // Card
             VStack(spacing: 0) {
@@ -28,7 +29,7 @@ struct PromptInputView: View {
 
                     Text("Tell me what you're creating today")
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
                 .padding(.top, 32)
                 .padding(.horizontal, 24)
@@ -42,6 +43,8 @@ struct PromptInputView: View {
                             TextField("e.g., a portrait, landscape, still life", text: $context.subject)
                                 .textFieldStyle(.roundedBorder)
                                 .textInputAutocapitalization(.sentences)
+                                .textContentType(.none)
+                                .autocorrectionDisabled()
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
@@ -50,33 +53,41 @@ struct PromptInputView: View {
                             TextField("e.g., realism, impressionism, anime", text: $context.style)
                                 .textFieldStyle(.roundedBorder)
                                 .textInputAutocapitalization(.sentences)
+                                .textContentType(.none)
+                                .autocorrectionDisabled()
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Inspired by any artists?")
                                 .font(.subheadline)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                             TextField("e.g., Van Gogh, Miyazaki (optional)", text: $context.artists)
                                 .textFieldStyle(.roundedBorder)
                                 .textInputAutocapitalization(.words)
+                                .textContentType(.none)
+                                .autocorrectionDisabled()
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Techniques you'll use?")
                                 .font(.subheadline)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                             TextField("e.g., hatching, blending (optional)", text: $context.techniques)
                                 .textFieldStyle(.roundedBorder)
                                 .textInputAutocapitalization(.sentences)
+                                .textContentType(.none)
+                                .autocorrectionDisabled()
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Area you want feedback on?")
                                 .font(.subheadline)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                             TextField("e.g., proportions, shading (optional)", text: $context.focus)
                                 .textFieldStyle(.roundedBorder)
                                 .textInputAutocapitalization(.sentences)
+                                .textContentType(.none)
+                                .autocorrectionDisabled()
                         }
                     }
                     .padding(24)
@@ -112,7 +123,7 @@ struct PromptInputView: View {
                                 Text("View Gallery")
                             }
                             .font(.subheadline)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.primary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                             .background(Color(uiColor: .secondarySystemBackground))

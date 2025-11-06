@@ -34,7 +34,7 @@ struct BetaTransparencyPopup: View {
 
                     Text("We're being completely honest with you")
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
                 .padding(.horizontal, 32)
                 .padding(.top, 24)
@@ -118,7 +118,7 @@ struct BetaTransparencyPopup: View {
 
                             Text("Your journey matters. We're building this WITH you, not just FOR you.")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                                 .italic()
                                 .padding(.top, 8)
                         }

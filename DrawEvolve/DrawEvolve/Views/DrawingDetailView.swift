@@ -81,10 +81,10 @@ struct DrawingDetailView: View {
                                         HStack {
                                             Image(systemName: "clock")
                                                 .font(.caption)
-                                                .foregroundColor(.secondary)
+                                                .foregroundColor(.primary)
                                             Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
                                                 .font(.caption)
-                                                .foregroundColor(.secondary)
+                                                .foregroundColor(.primary)
                                         }
 
                                         Divider()
@@ -102,15 +102,15 @@ struct DrawingDetailView: View {
                             VStack(spacing: 12) {
                                 Image(systemName: "sparkles.rectangle.stack")
                                     .font(.system(size: 40))
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(.primary)
 
                                 Text("No AI feedback yet")
                                     .font(.headline)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(.primary)
 
                                 Text("Request feedback while working on this drawing to see it here")
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(.primary)
                                     .multilineTextAlignment(.center)
                             }
                             .frame(maxWidth: .infinity)
@@ -196,7 +196,7 @@ struct InfoRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(.primary)
                 .textCase(.uppercase)
 
             Text(value)

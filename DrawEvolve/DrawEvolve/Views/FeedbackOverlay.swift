@@ -24,7 +24,7 @@ struct FeedbackOverlay: View {
                     Button(action: { isPresented = false }) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.title2)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.primary)
                     }
                 }
                 .padding()
@@ -43,7 +43,7 @@ struct FeedbackOverlay: View {
 
                         Text("Sit tight — your analysis is on the way!")
                             .font(.headline)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.primary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal)
 
@@ -97,7 +97,7 @@ struct FeedbackOverlay: View {
                     VStack {
                         Spacer()
                         Text("No feedback available")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.primary)
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

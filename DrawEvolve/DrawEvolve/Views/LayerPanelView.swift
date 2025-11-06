@@ -91,11 +91,11 @@ struct LayerRow: View {
                 HStack(spacing: 8) {
                     Text("Opacity: \(Int(layer.opacity * 100))%")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
 
                     Text(layer.blendMode.rawValue)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
             }
 

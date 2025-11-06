@@ -30,7 +30,7 @@ struct OnboardingPopup: View {
 
                     Text("Your personalized drawing coach")
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
 
                 Divider()
@@ -107,7 +107,7 @@ struct OnboardingStep: View {
 
                 Text(description)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
         }
     }

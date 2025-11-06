@@ -444,7 +444,10 @@ class CanvasRenderer: NSObject {
     func renderStrokePreview(
         _ stroke: BrushStroke,
         to renderEncoder: MTLRenderCommandEncoder,
-        viewportSize: CGSize
+        viewportSize: CGSize,
+        zoomScale: CGFloat = 1.0,
+        panOffset: CGPoint = .zero,
+        canvasRotation: Double = 0.0
     ) {
         // Select pipeline based on tool
         let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
@@ -460,8 +463,33 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // Convert stroke points to positions (already in screen space, no scaling needed)
-        let positions = stroke.points.map { SIMD2<Float>(Float($0.location.x), Float($0.location.y)) }
+        // Transform document space points to screen space using canvas transforms
+        let centerX = viewportSize.width / 2
+        let centerY = viewportSize.height / 2
+        let cosAngle = cos(canvasRotation)
+        let sinAngle = sin(canvasRotation)
+
+        let positions = stroke.points.map { point -> SIMD2<Float> in
+            // Document → Screen transformation
+            // Step 1: Apply zoom
+            var x = point.location.x * zoomScale
+            var y = point.location.y * zoomScale
+
+            // Step 2: Translate to rotation origin
+            x -= centerX
+            y -= centerY
+
+            // Step 3: Apply rotation
+            let rotatedX = x * cosAngle - y * sinAngle
+            let rotatedY = x * sinAngle + y * cosAngle
+
+            // Step 4: Translate back and apply pan
+            x = rotatedX + centerX + panOffset.x
+            y = rotatedY + centerY + panOffset.y
+
+            return SIMD2<Float>(Float(x), Float(y))
+        }
+
         // Use the actual viewport size for the preview
         let viewport = SIMD2<Float>(Float(viewportSize.width), Float(viewportSize.height))
 

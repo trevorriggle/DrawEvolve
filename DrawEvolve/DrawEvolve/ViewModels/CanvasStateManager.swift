@@ -679,4 +679,27 @@ class CanvasStateManager: ObservableObject {
     func resetAllTransforms() {
         resetZoomAndPan()
     }
+
+    /// Transform a rectangle from document space to screen space
+    /// For rotated canvases, returns the bounding box of the transformed corners
+    func documentRectToScreen(_ rect: CGRect) -> CGRect {
+        // Transform all four corners
+        let topLeft = documentToScreen(CGPoint(x: rect.minX, y: rect.minY))
+        let topRight = documentToScreen(CGPoint(x: rect.maxX, y: rect.minY))
+        let bottomLeft = documentToScreen(CGPoint(x: rect.minX, y: rect.maxY))
+        let bottomRight = documentToScreen(CGPoint(x: rect.maxX, y: rect.maxY))
+
+        // Find bounding box of transformed corners
+        let minX = min(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x)
+        let minY = min(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y)
+        let maxX = max(topLeft.x, topRight.x, bottomLeft.x, bottomRight.x)
+        let maxY = max(topLeft.y, topRight.y, bottomLeft.y, bottomRight.y)
+
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Transform a path from document space to screen space
+    func documentPathToScreen(_ path: [CGPoint]) -> [CGPoint] {
+        return path.map { documentToScreen($0) }
+    }
 }

@@ -131,11 +131,11 @@ struct ColorSlider<Background: View>: View {
             HStack {
                 Text(label)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
                 Spacer()
                 Text(String(format: "%.0f%%", value * 100))
                     .font(.caption.monospacedDigit())
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
 
             Slider(value: $value, in: range)

@@ -18,7 +18,7 @@ struct CritiqueHistoryView: View {
                     VStack(spacing: 16) {
                         Image(systemName: "sparkles.rectangle.stack")
                             .font(.system(size: 60))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.primary)
 
                         Text("No Critique History")
                             .font(.title2)
@@ -26,7 +26,7 @@ struct CritiqueHistoryView: View {
 
                         Text("Request feedback to start building your critique history")
                             .font(.subheadline)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.primary)
                             .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: .infinity)
@@ -71,7 +71,7 @@ struct CritiqueHistoryRow: View {
 
                 Text(formattedDate)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
 
                 Spacer()
 
@@ -80,12 +80,12 @@ struct CritiqueHistoryRow: View {
                         if !context.subject.isEmpty {
                             Text(context.subject)
                                 .font(.caption2)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                         }
                         if !context.style.isEmpty {
                             Text(context.style)
                                 .font(.caption2)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                         }
                     }
                 }

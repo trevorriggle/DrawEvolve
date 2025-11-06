@@ -104,11 +104,11 @@ struct FloatingFeedbackPanel: View {
                                             .font(.caption)
                                         Text(formatTimestamp(critiqueHistory[selectedHistoryIndex].timestamp))
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(.primary)
                                         Spacer()
                                         Text("\(selectedHistoryIndex + 1) of \(critiqueHistory.count)")
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(.primary)
                                     }
                                     .padding(.horizontal, 4)
                                 }
@@ -133,7 +133,7 @@ struct FloatingFeedbackPanel: View {
                                     Text("History")
                                         .font(.subheadline)
                                         .fontWeight(.semibold)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(.primary)
                                     Spacer()
                                 }
                                 .padding(.horizontal, 12)
@@ -161,7 +161,7 @@ struct FloatingFeedbackPanel: View {
 
                                                         Text(entry.feedback.prefix(50) + (entry.feedback.count > 50 ? "..." : ""))
                                                             .font(.caption)
-                                                            .foregroundColor(.secondary)
+                                                            .foregroundColor(.primary)
                                                             .lineLimit(2)
                                                     }
                                                     Spacer()

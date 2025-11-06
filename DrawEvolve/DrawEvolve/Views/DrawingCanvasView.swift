@@ -68,16 +68,20 @@ struct DrawingCanvasView: View {
 
             // Blue preview stroke while dragging selection
             if let previewRect = canvasState.previewSelection {
+                // Transform preview from document space to screen space
+                let screenPreviewRect = canvasState.documentRectToScreen(previewRect)
                 Rectangle()
-                    .path(in: previewRect)
+                    .path(in: screenPreviewRect)
                     .stroke(Color.blue, lineWidth: 2)
                     .allowsHitTesting(false)
             }
 
             if let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
+                // Transform preview path from document space to screen space
+                let screenPreviewPath = canvasState.documentPathToScreen(previewPath)
                 Path { p in
-                    p.move(to: previewPath[0])
-                    for point in previewPath.dropFirst() {
+                    p.move(to: screenPreviewPath[0])
+                    for point in screenPreviewPath.dropFirst() {
                         p.addLine(to: point)
                     }
                 }
@@ -87,11 +91,13 @@ struct DrawingCanvasView: View {
 
             // Marching ants selection overlay (after selection is made)
             if let selection = canvasState.activeSelection {
-                MarchingAntsRectangle(rect: selection)
+                // Transform selection from document space to screen space
+                let screenSelection = canvasState.documentRectToScreen(selection)
+                MarchingAntsRectangle(rect: screenSelection)
                     .allowsHitTesting(false)
 
                 // Transform handles for rectangular selection
-                SelectionTransformHandles(rect: selection, canvasState: canvasState)
+                SelectionTransformHandles(rect: screenSelection, canvasState: canvasState)
             }
 
             // Canvas transform indicators (top-right)
@@ -130,12 +136,15 @@ struct DrawingCanvasView: View {
             .allowsHitTesting(false)
 
             if let path = canvasState.selectionPath {
-                MarchingAntsPath(path: path)
+                // Transform path from document space to screen space
+                let screenPath = canvasState.documentPathToScreen(path)
+                MarchingAntsPath(path: screenPath)
                     .allowsHitTesting(false)
 
                 // Transform handles for lasso selection (use bounding rect)
                 let boundingRect = canvasState.calculateBoundingRect(for: path)
-                SelectionTransformHandles(rect: boundingRect, canvasState: canvasState)
+                let screenBoundingRect = canvasState.documentRectToScreen(boundingRect)
+                SelectionTransformHandles(rect: screenBoundingRect, canvasState: canvasState)
             }
 
             // Show selection pixels being moved/transformed
@@ -362,7 +371,7 @@ struct DrawingCanvasView: View {
                         VStack(spacing: 12) {
                             Text("Selection Active")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
 
                             HStack(spacing: 12) {
                                 // Cancel selection button

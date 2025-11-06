@@ -17,7 +17,7 @@ struct BrushSettingsView: View {
                     Text("Size")
                     Spacer()
                     Text(String(format: "%.0f px", settings.size))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
                 Slider(value: $settings.size, in: 1...100)
             }
@@ -27,7 +27,7 @@ struct BrushSettingsView: View {
                     Text("Opacity")
                     Spacer()
                     Text(String(format: "%.0f%%", settings.opacity * 100))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
                 Slider(value: $settings.opacity, in: 0...1)
             }
@@ -37,7 +37,7 @@ struct BrushSettingsView: View {
                     Text("Hardness")
                     Spacer()
                     Text(String(format: "%.0f%%", settings.hardness * 100))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
                 Slider(value: $settings.hardness, in: 0...1)
 
@@ -45,7 +45,7 @@ struct BrushSettingsView: View {
                     Text("Spacing")
                     Spacer()
                     Text(String(format: "%.0f%%", settings.spacing * 100))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.primary)
                 }
                 Slider(value: $settings.spacing, in: 0.01...1)
             }
@@ -59,7 +59,7 @@ struct BrushSettingsView: View {
                             Text("Minimum Size")
                             Spacer()
                             Text(String(format: "%.0f%%", settings.minPressureSize * 100))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                         }
                         Slider(value: $settings.minPressureSize, in: 0...1)
 
@@ -67,7 +67,7 @@ struct BrushSettingsView: View {
                             Text("Maximum Size")
                             Spacer()
                             Text(String(format: "%.0f%%", settings.maxPressureSize * 100))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                         }
                         Slider(value: $settings.maxPressureSize, in: 0...1)
                     }

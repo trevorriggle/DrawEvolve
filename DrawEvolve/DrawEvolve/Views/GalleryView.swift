@@ -131,7 +131,7 @@ struct GalleryView: View {
 
                 Text("Tap the + button to create your first drawing")
                     .font(.body)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
                     .multilineTextAlignment(.center)
             }
 
@@ -208,7 +208,7 @@ struct DrawingCard: View {
                         .overlay(
                             Image(systemName: "photo")
                                 .font(.largeTitle)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(.primary)
                         )
                 }
 
@@ -252,7 +252,7 @@ struct DrawingCard: View {
 
                 Text(drawing.createdAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary)
             }
         }
     }
