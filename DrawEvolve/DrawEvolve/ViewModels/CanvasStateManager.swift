@@ -51,9 +51,9 @@ class CanvasStateManager: ObservableObject {
     var screenSize: CGSize = .zero // Current viewport/screen size
 
     // Document size is the coordinate space for stored drawing data
-    // Currently equals screenSize, but could be fixed (e.g., 2048x2048) for resolution independence
+    // FIXED size for resolution independence - does NOT change with screen rotation!
     var documentSize: CGSize {
-        return screenSize
+        return CGSize(width: 2048, height: 2048)
     }
     var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 
@@ -557,9 +557,11 @@ class CanvasStateManager: ObservableObject {
 
     /// Transform a point from view/screen space to document space (accounting for zoom, pan, and rotation)
     func screenToDocument(_ point: CGPoint) -> CGPoint {
-        // Get viewport center for rotation pivot
-        let centerX = screenSize.width / 2
-        let centerY = screenSize.height / 2
+        // Use SCREEN center for screen-space operations, DOCUMENT center for document-space operations
+        let screenCenterX = screenSize.width / 2
+        let screenCenterY = screenSize.height / 2
+        let docCenterX = documentSize.width / 2
+        let docCenterY = documentSize.height / 2
 
         // Step 1: Remove pan
         var pt = CGPoint(
@@ -567,9 +569,9 @@ class CanvasStateManager: ObservableObject {
             y: point.y - panOffset.y
         )
 
-        // Step 2: Translate to origin
-        pt.x -= centerX
-        pt.y -= centerY
+        // Step 2: Translate to screen origin
+        pt.x -= screenCenterX
+        pt.y -= screenCenterY
 
         // Step 3: Apply inverse rotation
         let angle = -canvasRotation.radians // Negative for inverse
@@ -582,22 +584,25 @@ class CanvasStateManager: ObservableObject {
         pt.x = rotatedX / zoomScale
         pt.y = rotatedY / zoomScale
 
-        // Step 5: Translate back from origin
-        pt.x += centerX
-        pt.y += centerY
+        // Step 5: Translate to document center (map from screen space to document space)
+        pt.x += docCenterX
+        pt.y += docCenterY
 
         return pt
     }
 
     /// Transform a point from document space to view/screen space (applying zoom, pan, and rotation)
     func documentToScreen(_ point: CGPoint) -> CGPoint {
-        let centerX = screenSize.width / 2
-        let centerY = screenSize.height / 2
+        // Use DOCUMENT center for document-space operations, SCREEN center for screen-space operations
+        let screenCenterX = screenSize.width / 2
+        let screenCenterY = screenSize.height / 2
+        let docCenterX = documentSize.width / 2
+        let docCenterY = documentSize.height / 2
 
-        // Step 1: Translate to center (before any scaling/rotation)
+        // Step 1: Translate to document origin
         var pt = CGPoint(
-            x: point.x - centerX,
-            y: point.y - centerY
+            x: point.x - docCenterX,
+            y: point.y - docCenterY
         )
 
         // Step 2: Apply zoom
@@ -611,10 +616,10 @@ class CanvasStateManager: ObservableObject {
         let rotatedX = pt.x * cosAngle - pt.y * sinAngle
         let rotatedY = pt.x * sinAngle + pt.y * cosAngle
 
-        // Step 4: Translate back from center and apply pan
+        // Step 4: Translate to screen center and apply pan
         pt = CGPoint(
-            x: rotatedX + centerX + panOffset.x,
-            y: rotatedY + centerY + panOffset.y
+            x: rotatedX + screenCenterX + panOffset.x,
+            y: rotatedY + screenCenterY + panOffset.y
         )
 
         return pt

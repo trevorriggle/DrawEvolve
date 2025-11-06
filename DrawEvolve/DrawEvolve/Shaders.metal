@@ -80,7 +80,8 @@ vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
 // Vertex shader for full-screen quad with zoom, pan, and rotation support
 vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
                                                 constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, rotation]
-                                                constant float2 *viewportSize [[buffer(1)]]) {
+                                                constant float2 *viewportSize [[buffer(1)]],
+                                                constant float2 *canvasSize [[buffer(2)]]) {   // Fixed canvas/document size
     VertexOut out;
 
     // Generate full-screen quad
@@ -98,26 +99,28 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     float zoom = transform[0][0];
     float2 pan = float2(transform[0][1], transform[0][2]);
     float rotation = transform[0][3];  // Rotation angle in radians
-    float2 viewport = viewportSize[0];
+    float2 viewport = viewportSize[0];      // Screen size (changes with orientation)
+    float2 canvas = canvasSize[0];          // Document size (fixed, e.g. 2048x2048)
 
     float2 finalPos = positions[vertexID];
     float2 finalTexCoord = texCoords[vertexID];
 
+    // VERTEX POSITIONING (screen space)
     // Apply transform: Zoom → Rotate → Pan
     // Convert NDC position to screen space
     float2 screenPos = (finalPos * 0.5 + 0.5) * viewport;  // NDC to screen
 
     // Step 1: Apply zoom (scale around viewport center)
-    float2 center = viewport * 0.5;
-    screenPos = (screenPos - center) * zoom + center;
+    float2 screenCenter = viewport * 0.5;
+    screenPos = (screenPos - screenCenter) * zoom + screenCenter;
 
     // Step 2: Apply rotation (rotate around viewport center)
     if (rotation != 0.0) {
-        float2 rotated = screenPos - center;
+        float2 rotated = screenPos - screenCenter;
         float cosAngle = cos(rotation);
         float sinAngle = sin(rotation);
-        screenPos.x = rotated.x * cosAngle - rotated.y * sinAngle + center.x;
-        screenPos.y = rotated.x * sinAngle + rotated.y * cosAngle + center.y;
+        screenPos.x = rotated.x * cosAngle - rotated.y * sinAngle + screenCenter.x;
+        screenPos.y = rotated.x * sinAngle + rotated.y * cosAngle + screenCenter.y;
     }
 
     // Step 3: Apply pan
@@ -126,21 +129,18 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     // Convert back to NDC
     finalPos = (screenPos / viewport) * 2.0 - 1.0;
 
-    // Transform texture coordinates inversely (stay in normalized 0-1 space)
-    // NO aspect ratio correction needed - texture coords are already aspect-ratio neutral!
+    // TEXTURE COORDINATE TRANSFORMATION (normalized 0-1 space mapping to fixed canvas)
+    // The texture is fixed size (canvas), but screen size varies with orientation
+    // We need to map from screen transforms to texture space correctly
 
-    // Convert pan from pixel space to normalized space
-    float2 normalizedPan = pan / viewport;
-
-    // Inverse pan
+    // Inverse pan: convert from screen pixels to normalized canvas space
+    float2 normalizedPan = pan / canvas;  // Normalize by CANVAS size, not viewport!
     finalTexCoord -= normalizedPan;
 
-    // Inverse rotation (no aspect ratio correction)
+    // Inverse rotation around center (0.5, 0.5) in normalized space
     if (rotation != 0.0) {
-        // Translate to center in normalized space
         finalTexCoord -= float2(0.5, 0.5);
 
-        // Apply inverse rotation (negate angle)
         float cosAngle = cos(-rotation);
         float sinAngle = sin(-rotation);
         float2 rotated;
@@ -148,11 +148,10 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
         rotated.y = finalTexCoord.x * sinAngle + finalTexCoord.y * cosAngle;
         finalTexCoord = rotated;
 
-        // Translate back from center
         finalTexCoord += float2(0.5, 0.5);
     }
 
-    // Inverse zoom (in normalized space)
+    // Inverse zoom in normalized space
     finalTexCoord = (finalTexCoord - float2(0.5, 0.5)) / zoom + float2(0.5, 0.5);
 
     out.position = float4(finalPos, 0.0, 1.0);
