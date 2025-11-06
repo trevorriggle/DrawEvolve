@@ -688,9 +688,11 @@ struct MetalCanvasView: UIViewRepresentable {
                     y: location.y - dragStart.y
                 )
 
-                Task { @MainActor in
+                // IMPORTANT: Update offset and render synchronously for smooth animation
+                // Touch events run on main thread, so assumeIsolated is safe and avoids async latency
+                MainActor.assumeIsolated {
                     canvasState.selectionOffset = offset
-                    // Render selection pixels in real-time for fluent animation
+                    // Render selection pixels in real-time for immediate visual feedback
                     canvasState.renderSelectionInRealTime()
                 }
 

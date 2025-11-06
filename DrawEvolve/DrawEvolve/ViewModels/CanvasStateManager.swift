@@ -493,7 +493,7 @@ class CanvasStateManager: ObservableObject {
     }
 
     /// Commit the moved selection to finalize the change
-    /// With real-time rendering, pixels are already at their final position, so we just record history
+    /// Render the selection pixels to texture at their final position
     func commitSelection() {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
@@ -503,8 +503,12 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        // Pixels are already rendered at final position by real-time rendering
-        // Just capture the current state as "after" for history
+        // IMPORTANT: Render selection pixels to texture at final position one last time
+        // During drag, pixels were rendered in real-time synchronously on every touch event
+        // This final render ensures the texture has the pixels at their final position
+        renderSelectionInRealTime()
+
+        // Capture the current state as "after" for history
         let afterSnapshot = renderer.captureSnapshot(of: texture)
 
         // Record in history (before = original with pixels, after = current with pixels moved)

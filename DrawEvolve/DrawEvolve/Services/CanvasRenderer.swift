@@ -464,6 +464,101 @@ class CanvasRenderer: NSObject {
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
+    /// Render selection pixels as an overlay during drag for smooth animation
+    /// This renders at 60fps without writing to texture until drag is complete
+    func renderSelectionOverlay(
+        _ image: UIImage,
+        at rect: CGRect,
+        to renderEncoder: MTLRenderCommandEncoder,
+        zoomScale: Float,
+        panOffset: SIMD2<Float>,
+        canvasRotation: Float,
+        viewportSize: SIMD2<Float>,
+        canvasSize: SIMD2<Float>
+    ) {
+        // Create a temporary texture from the selection image
+        guard let cgImage = image.cgImage else {
+            print("ERROR: Failed to get CGImage from selection")
+            return
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+
+        // Create texture descriptor
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            print("ERROR: Failed to create texture for selection overlay")
+            return
+        }
+
+        // Convert CGImage to pixel data
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        let bytesPerRow = width * 4
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("ERROR: Failed to create CGContext for selection overlay")
+            return
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        guard let data = context.data else {
+            print("ERROR: Failed to get context data")
+            return
+        }
+
+        // Upload to texture
+        let region = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: width, height: height, depth: 1)
+        )
+        texture.replace(region: region, mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
+
+        // Now render this texture at the specified rect with transforms applied
+        // Use the same transform pipeline as regular texture rendering
+        guard let pipelineState = textureDisplayWithTransformPipelineState else {
+            print("ERROR: Transform pipeline state not available")
+            return
+        }
+
+        renderEncoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setFragmentTexture(texture, index: 0)
+
+        // Pass full opacity
+        var opacity: Float = 1.0
+        renderEncoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
+
+        // Pass transform parameters
+        var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, canvasRotation)
+        renderEncoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+
+        var viewport = viewportSize
+        renderEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+
+        var canvas = canvasSize
+        renderEncoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+
+        // Draw fullscreen quad
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
     /// Render in-progress stroke preview directly to screen (for real-time feedback)
     func renderStrokePreview(
         _ stroke: BrushStroke,
