@@ -7,9 +7,6 @@
 
 ## ⚠️ Known Issues (November 2025)
 
-### Critical
-1. **Canvas Rotation Stretching** - Rotating the canvas causes drawings to stretch and distort. Proportions are not maintained during rotation, causing circles to become ellipses and squares to become rectangles. See `ROTATION_STRETCHING_FIX_PLAN.md` for detailed analysis and fix plan.
-
 ### Deferred Features
 2. **Unimplemented Tools** - 8 tools remain unimplemented (Smudge, Clone Stamp, Move). See `TOOL_IMPLEMENTATION_ROADMAP.md` and `toolaudit.md` for details.
 3. **Blur/Sharpen Brush Mode** - Currently apply globally to entire layer instead of brush-based application.
@@ -34,7 +31,7 @@ DrawEvolve isn't just a drawing app with AI feedback - it's a **creative practic
   - Selection: Rectangle Select, Lasso, Magic Wand
   - Effects: Blur (global), Sharpen (global)
   - Utility: Text
-- ⚠️ **Canvas Transforms:** Zoom (0.1x-10x), Pan working, Rotation has stretching issues (see ROTATION_STRETCHING_FIX_PLAN.md)
+- ✅ **Canvas Transforms:** Zoom (0.1x-10x), Pan, and Rotation all working correctly
 - ⚠️ **Transform Handles:** Scale and rotate integrated into selection tools (Oct 21, 2025)
 - ✅ Undo/redo system with texture snapshots
 - ✅ Export to image

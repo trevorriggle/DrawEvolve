@@ -127,8 +127,7 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     finalPos = (screenPos / viewport) * 2.0 - 1.0;
 
     // Transform texture coordinates inversely (stay in normalized 0-1 space)
-    // Get aspect ratio for correction
-    float aspectRatio = viewport.x / viewport.y;
+    // NO aspect ratio correction needed - texture coords are already aspect-ratio neutral!
 
     // Convert pan from pixel space to normalized space
     float2 normalizedPan = pan / viewport;
@@ -136,13 +135,10 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     // Inverse pan
     finalTexCoord -= normalizedPan;
 
-    // Inverse rotation (with aspect ratio correction)
+    // Inverse rotation (no aspect ratio correction)
     if (rotation != 0.0) {
         // Translate to center in normalized space
         finalTexCoord -= float2(0.5, 0.5);
-
-        // Scale Y by aspect ratio before rotation (to make space uniform)
-        finalTexCoord.y *= aspectRatio;
 
         // Apply inverse rotation (negate angle)
         float cosAngle = cos(-rotation);
@@ -151,9 +147,6 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
         rotated.x = finalTexCoord.x * cosAngle - finalTexCoord.y * sinAngle;
         rotated.y = finalTexCoord.x * sinAngle + finalTexCoord.y * cosAngle;
         finalTexCoord = rotated;
-
-        // Scale Y back after rotation
-        finalTexCoord.y /= aspectRatio;
 
         // Translate back from center
         finalTexCoord += float2(0.5, 0.5);
