@@ -20,7 +20,7 @@ struct FloatingFeedbackPanel: View {
     @State private var screenSize: CGSize = .zero
 
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
-    private let expandedSize: CGSize = CGSize(width: 350, height: 500)
+    private let expandedSize: CGSize = CGSize(width: 525, height: 500)
     private let historyMenuWidth: CGFloat = 200
 
     var body: some View {
@@ -57,7 +57,27 @@ struct FloatingFeedbackPanel: View {
                                 }
                                 .help("Reset panel position")
 
-                                Button(action: { withAnimation(.spring(response: 0.3)) { isExpanded = false } }) {
+                                Button(action: {
+                                    withAnimation(.spring(response: 0.3)) {
+                                        // Adjust position so top-left stays in same place
+                                        let offsetX = (expandedSize.width - collapsedSize.width) / 2
+                                        let offsetY = (expandedSize.height - collapsedSize.height) / 2
+                                        var newX = position.x - offsetX
+                                        var newY = position.y - offsetY
+
+                                        // Apply strict boundaries for collapsed state
+                                        let minX = collapsedSize.width / 2
+                                        let maxX = screenSize.width - collapsedSize.width / 2
+                                        let minY = collapsedSize.height / 2
+                                        let maxY = screenSize.height - collapsedSize.height / 2
+
+                                        newX = min(max(newX, minX), maxX)
+                                        newY = min(max(newY, minY), maxY)
+
+                                        position = CGPoint(x: newX, y: newY)
+                                        isExpanded = false
+                                    }
+                                }) {
                                     Image(systemName: "chevron.down.circle.fill")
                                         .foregroundColor(.secondary)
                                 }
@@ -189,6 +209,22 @@ struct FloatingFeedbackPanel: View {
                     .onTapGesture {
                         // Tap to expand (doesn't interfere with drag)
                         withAnimation(.spring(response: 0.3)) {
+                            // Adjust position so top-left stays in same place
+                            let offsetX = (expandedSize.width - collapsedSize.width) / 2
+                            let offsetY = (expandedSize.height - collapsedSize.height) / 2
+                            var newX = position.x + offsetX
+                            var newY = position.y + offsetY
+
+                            // Apply strict boundaries for expanded state
+                            let minX = expandedSize.width / 2
+                            let maxX = screenSize.width - expandedSize.width / 2
+                            let minY = expandedSize.height / 2
+                            let maxY = screenSize.height - expandedSize.height / 2
+
+                            newX = min(max(newX, minX), maxX)
+                            newY = min(max(newY, minY), maxY)
+
+                            position = CGPoint(x: newX, y: newY)
                             isExpanded = true
                         }
                     }
@@ -201,8 +237,28 @@ struct FloatingFeedbackPanel: View {
             .gesture(
                 DragGesture()
                     .onChanged { value in
-                        // Update drag offset in real-time for immediate response
-                        dragOffset = value.translation
+                        // Constrain drag offset in real-time to prevent going off-screen
+                        let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
+                        let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+
+                        // Calculate what the new position would be with this drag
+                        let potentialX = position.x + value.translation.width
+                        let potentialY = position.y + value.translation.height
+
+                        // Strict boundaries - keep entire panel on screen
+                        let minX = currentWidth / 2
+                        let maxX = geometry.size.width - currentWidth / 2
+                        let minY = currentHeight / 2
+                        let maxY = geometry.size.height - currentHeight / 2
+
+                        // Constrain the drag offset
+                        let constrainedX = min(max(potentialX, minX), maxX)
+                        let constrainedY = min(max(potentialY, minY), maxY)
+
+                        dragOffset = CGSize(
+                            width: constrainedX - position.x,
+                            height: constrainedY - position.y
+                        )
                     }
                     .onEnded { value in
                         // Apply drag to position and reset drag offset
@@ -210,14 +266,14 @@ struct FloatingFeedbackPanel: View {
                         let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
 
                         // Calculate new position
-                        var newX = position.x + value.translation.width
-                        var newY = position.y + value.translation.height
+                        var newX = position.x + dragOffset.width
+                        var newY = position.y + dragOffset.height
 
-                        // Constrain to keep view visible on screen
-                        let minX = currentWidth / 2 + 20
-                        let maxX = geometry.size.width - currentWidth / 2 - 20
-                        let minY = currentHeight / 2 + 80
-                        let maxY = geometry.size.height - currentHeight / 2 - 20
+                        // Strict boundaries - keep entire panel on screen
+                        let minX = currentWidth / 2
+                        let maxX = geometry.size.width - currentWidth / 2
+                        let minY = currentHeight / 2
+                        let maxY = geometry.size.height - currentHeight / 2
 
                         newX = min(max(newX, minX), maxX)
                         newY = min(max(newY, minY), maxY)
@@ -232,17 +288,25 @@ struct FloatingFeedbackPanel: View {
                 // Store screen size for reset function
                 screenSize = geometry.size
 
-                // Position in top-right corner initially, ensuring it stays on screen
+                // Position in top-left corner initially, ensuring it stays on screen
                 let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
                 let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
 
-                // Calculate safe position from screen edges
+                // Calculate safe position from screen edges (top-left)
                 let padding: CGFloat = 20
-                let topPadding: CGFloat = 80
 
-                // Position using absolute coordinates (top-right corner)
-                let x = geometry.size.width - currentWidth / 2 - padding
-                let y = currentHeight / 2 + topPadding
+                // Position using absolute coordinates (top-left corner)
+                var x = currentWidth / 2 + padding
+                var y = currentHeight / 2 + padding
+
+                // Apply strict boundaries
+                let minX = currentWidth / 2
+                let maxX = geometry.size.width - currentWidth / 2
+                let minY = currentHeight / 2
+                let maxY = geometry.size.height - currentHeight / 2
+
+                x = min(max(x, minX), maxX)
+                y = min(max(y, minY), maxY)
 
                 position = CGPoint(x: x, y: y)
                 dragOffset = .zero
@@ -275,15 +339,23 @@ struct FloatingFeedbackPanel: View {
 
     private func resetPosition() {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-            // Reset to default top-right position
+            // Reset to default top-left position
             let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
             let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
 
             let padding: CGFloat = 20
-            let topPadding: CGFloat = 80
 
-            let x = screenSize.width - currentWidth / 2 - padding
-            let y = currentHeight / 2 + topPadding
+            var x = currentWidth / 2 + padding
+            var y = currentHeight / 2 + padding
+
+            // Apply strict boundaries
+            let minX = currentWidth / 2
+            let maxX = screenSize.width - currentWidth / 2
+            let minY = currentHeight / 2
+            let maxY = screenSize.height - currentHeight / 2
+
+            x = min(max(x, minX), maxX)
+            y = min(max(y, minY), maxY)
 
             position = CGPoint(x: x, y: y)
             dragOffset = .zero

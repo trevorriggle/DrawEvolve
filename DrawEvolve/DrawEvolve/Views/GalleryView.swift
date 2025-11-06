@@ -156,13 +156,15 @@ struct GalleryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
-                    DrawingCard(drawing: drawing) {
-                        drawingToDelete = drawing
-                        showDeleteAlert = true
-                    }
-                    .onTapGesture {
+                    Button(action: {
                         selectedDrawing = drawing
+                    }) {
+                        DrawingCard(drawing: drawing) {
+                            drawingToDelete = drawing
+                            showDeleteAlert = true
+                        }
                     }
+                    .buttonStyle(PlainButtonStyle())
                 }
             }
             .padding()
@@ -210,21 +212,35 @@ struct DrawingCard: View {
                         )
                 }
 
-                // Feedback badge - show if there's any feedback or critique history
-                if drawing.feedback != nil || !drawing.critiqueHistory.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 12))
-                        Text("AI")
-                            .font(.system(size: 10, weight: .bold))
+                // Overlay badges and buttons in a VStack at top-right
+                VStack(alignment: .trailing, spacing: 8) {
+                    // Delete button
+                    Button(action: onDelete) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.red)
+                            .clipShape(Circle())
                     }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.accentColor)
-                    .cornerRadius(8)
-                    .padding(8)
+                    .buttonStyle(PlainButtonStyle())
+
+                    // Feedback badge - show if there's any feedback or critique history
+                    if drawing.feedback != nil || !drawing.critiqueHistory.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 12))
+                            Text("AI")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor)
+                        .cornerRadius(8)
+                    }
                 }
+                .padding(8)
             }
 
             // Title and metadata
@@ -232,15 +248,11 @@ struct DrawingCard: View {
                 Text(drawing.title)
                     .font(.headline)
                     .lineLimit(1)
+                    .foregroundColor(.primary)
 
                 Text(drawing.createdAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption)
                     .foregroundColor(.secondary)
-            }
-        }
-        .contextMenu {
-            Button(role: .destructive, action: onDelete) {
-                Label("Delete", systemImage: "trash")
             }
         }
     }
