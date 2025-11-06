@@ -309,14 +309,14 @@ struct MetalCanvasView: UIViewRepresentable {
             let timestamp = touch.timestamp
 
             print("Touch began at screen: \(screenLocation) → document: \(location) with pressure \(pressure), tool: \(currentTool)")
-            print("Selected layer: \(selectedLayerIndex), total layers: \(layers.count)")
+            print("📍 Selected layer INDEX: \(selectedLayerIndex) of \(layers.count) total layers")
             if let layer = layers[safe: selectedLayerIndex] {
-                print("Layer has texture: \(layer.texture != nil)")
+                print("   Will draw to: '\(layer.name)' - has texture: \(layer.texture != nil)")
                 if let texture = layer.texture {
-                    print("  Texture ID: \(ObjectIdentifier(texture))")
+                    print("   Texture ID: \(ObjectIdentifier(texture))")
                 }
             } else {
-                print("ERROR: Invalid layer index!")
+                print("   ❌ ERROR: selectedLayerIndex \(selectedLayerIndex) is OUT OF BOUNDS!")
             }
 
             // Handle text tool - show text input dialog

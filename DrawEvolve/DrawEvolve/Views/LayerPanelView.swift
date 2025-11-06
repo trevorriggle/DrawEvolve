@@ -17,7 +17,9 @@ struct LayerPanelView: View {
         List {
             ForEach(Array(layers.enumerated().reversed()), id: \.element.id) { index, layer in
                 Button(action: {
-                    selectedIndex = layers.count - 1 - index
+                    let newIndex = layers.count - 1 - index
+                    print("🎯 Layer tapped: '\(layer.name)' - Setting selectedIndex to \(newIndex)")
+                    selectedIndex = newIndex
                 }) {
                     LayerRow(
                         layer: layer,

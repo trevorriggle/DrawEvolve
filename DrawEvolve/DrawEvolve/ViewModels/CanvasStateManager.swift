@@ -89,6 +89,7 @@ class CanvasStateManager: ObservableObject {
         let layer = DrawingLayer(name: "Layer \(layers.count + 1)")
         layers.append(layer)
         selectedLayerIndex = layers.count - 1
+        print("➕ Added '\(layer.name)' - selectedLayerIndex now = \(selectedLayerIndex), total layers = \(layers.count)")
         historyManager.record(.layerAdded(layer))
     }
 
