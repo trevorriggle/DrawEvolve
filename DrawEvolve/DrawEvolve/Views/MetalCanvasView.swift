@@ -680,6 +680,8 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 Task { @MainActor in
                     canvasState.selectionOffset = offset
+                    // Render selection pixels in real-time for fluent animation
+                    canvasState.renderSelectionInRealTime()
                 }
 
                 if hypot(offset.x, offset.y) > 5 { // Log only if moved more than 5 points

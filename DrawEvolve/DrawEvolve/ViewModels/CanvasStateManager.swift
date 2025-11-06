@@ -27,6 +27,8 @@ class CanvasStateManager: ObservableObject {
     // Selection pixel data (extracted when selection is made)
     var selectionPixels: UIImage? = nil
     var selectionOriginalRect: CGRect? = nil // Original position before moving
+    var selectionLayerSnapshot: Data? = nil // Snapshot after clearing selection (for real-time rendering)
+    var selectionBeforeSnapshot: Data? = nil // Snapshot before extraction (for history/undo)
 
     // Transform state for selection
     @Published var selectionScale: CGFloat = 1.0 // Scale factor for selection
@@ -51,9 +53,10 @@ class CanvasStateManager: ObservableObject {
     var screenSize: CGSize = .zero // Current viewport/screen size
 
     // Document size is the coordinate space for stored drawing data
-    // Currently equals screenSize, but could be fixed (e.g., 2048x2048) for resolution independence
+    // FIXED SIZE - the canvas is always square, like a piece of paper
+    // The screen size can change (rotation), but the canvas never changes
     var documentSize: CGSize {
-        return screenSize
+        return CGSize(width: 2048, height: 2048)
     }
     var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 
@@ -323,6 +326,8 @@ class CanvasStateManager: ObservableObject {
         selectionPath = nil
         selectionPixels = nil
         selectionOriginalRect = nil
+        selectionLayerSnapshot = nil
+        selectionBeforeSnapshot = nil
         selectionOffset = .zero
         previewSelection = nil
         previewLassoPath = nil
@@ -381,6 +386,7 @@ class CanvasStateManager: ObservableObject {
     }
 
     /// Extract pixels from the selection and store them for moving
+    /// IMPORTANT: This captures snapshots and immediately clears the original pixels for fluent real-time movement
     func extractSelectionPixels() {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
@@ -388,6 +394,9 @@ class CanvasStateManager: ObservableObject {
             print("ERROR: Cannot extract selection - invalid layer or texture")
             return
         }
+
+        // Capture "before" snapshot for history (BEFORE any modifications)
+        selectionBeforeSnapshot = renderer.captureSnapshot(of: texture)
 
         if let rect = activeSelection {
             // Extract pixels from rectangular selection
@@ -400,7 +409,11 @@ class CanvasStateManager: ObservableObject {
                 print("❌ ERROR: Failed to extract rectangular selection")
                 clearSelection() // Clear invalid selection
             } else {
-                print("✂️ Extracted rectangular selection: \(rect)")
+                // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
+                renderer.clearRect(rect, in: texture, screenSize: screenSize)
+                // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
+                selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
+                print("✂️ Extracted rectangular selection: \(rect) and cleared original")
             }
         } else if let path = selectionPath {
             // Validate path has enough points
@@ -429,67 +442,63 @@ class CanvasStateManager: ObservableObject {
                 print("❌ ERROR: Failed to extract lasso selection")
                 clearSelection() // Clear invalid selection
             } else {
-                print("✂️ Extracted lasso selection, bounding rect: \(boundingRect)")
+                // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
+                renderer.clearPath(path, in: texture, screenSize: screenSize)
+                // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
+                selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
+                print("✂️ Extracted lasso selection, bounding rect: \(boundingRect) and cleared original")
             }
         }
     }
 
-    /// Commit the moved selection back to the texture
-    func commitSelection() {
+    /// Render selection pixels in real-time during drag
+    /// This provides fluent animation by rendering directly to the texture as the user drags
+    func renderSelectionInRealTime() {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
               let renderer = renderer,
-              var pixels = selectionPixels,
-              let originalRect = selectionOriginalRect else {
-            print("ERROR: Cannot commit selection - missing data")
+              let pixels = selectionPixels,
+              let originalRect = selectionOriginalRect,
+              let snapshot = selectionLayerSnapshot else {
             return
         }
 
-        // Capture before snapshot
-        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        // Step 1: Restore the base layer (with hole where selection was) from snapshot
+        renderer.restoreSnapshot(snapshot, to: texture)
 
-        // Check if we need to transform the pixels
-        let hasTransform = selectionScale != 1.0 || selectionRotation != .zero || selectionOffset != .zero
-
-        // Clear the original position if moved or transformed
-        if hasTransform {
-            if activeSelection != nil {
-                renderer.clearRect(originalRect, in: texture, screenSize: screenSize)
-            } else if let path = selectionPath {
-                renderer.clearPath(path, in: texture, screenSize: screenSize)
-            }
-        }
-
-        // Apply scale and rotation transforms to the pixels if needed
-        if selectionScale != 1.0 || selectionRotation != .zero {
-            pixels = applyTransforms(to: pixels, scale: selectionScale, rotation: selectionRotation)
-        }
-
-        // Calculate new position and size
-        let scaledSize = CGSize(
+        // Step 2: Calculate the current position with offset and scale applied
+        let currentRect = CGRect(
+            x: originalRect.origin.x + selectionOffset.x,
+            y: originalRect.origin.y + selectionOffset.y,
             width: originalRect.width * selectionScale,
             height: originalRect.height * selectionScale
         )
 
-        let newRect = CGRect(
-            x: originalRect.origin.x + selectionOffset.x - (scaledSize.width - originalRect.width) / 2,
-            y: originalRect.origin.y + selectionOffset.y - (scaledSize.height - originalRect.height) / 2,
-            width: scaledSize.width,
-            height: scaledSize.height
-        )
+        // Step 3: Render the pixels at the new position
+        renderer.renderImage(pixels, at: currentRect, to: texture, screenSize: screenSize)
+    }
 
-        // Render transformed pixels at new position
-        renderer.renderImage(pixels, at: newRect, to: texture, screenSize: screenSize)
+    /// Commit the moved selection to finalize the change
+    /// With real-time rendering, pixels are already at their final position, so we just record history
+    func commitSelection() {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer,
+              let beforeSnapshot = selectionBeforeSnapshot else {
+            print("ERROR: Cannot commit selection - missing data")
+            return
+        }
 
-        // Capture after snapshot
+        // Pixels are already rendered at final position by real-time rendering
+        // Just capture the current state as "after" for history
         let afterSnapshot = renderer.captureSnapshot(of: texture)
 
-        // Record in history
-        if let before = beforeSnapshot, let after = afterSnapshot {
+        // Record in history (before = original with pixels, after = current with pixels moved)
+        if let after = afterSnapshot {
             let layerId = layers[selectedLayerIndex].id
             historyManager.record(.stroke(
                 layerId: layerId,
-                beforeSnapshot: before,
+                beforeSnapshot: beforeSnapshot,
                 afterSnapshot: after
             ))
         }
@@ -558,22 +567,26 @@ class CanvasStateManager: ObservableObject {
 
     /// Transform a point from view/screen space to document space (accounting for zoom, pan, and rotation)
     func screenToDocument(_ point: CGPoint) -> CGPoint {
-        // Get viewport center for rotation pivot
-        let centerX = screenSize.width / 2
-        let centerY = screenSize.height / 2
+        // Screen center (viewport - changes with rotation)
+        let screenCenterX = screenSize.width / 2
+        let screenCenterY = screenSize.height / 2
 
-        // Step 1: Remove pan
+        // Document center (fixed - never changes)
+        let docCenterX = documentSize.width / 2
+        let docCenterY = documentSize.height / 2
+
+        // Step 1: Remove pan (screen space)
         var pt = CGPoint(
             x: point.x - panOffset.x,
             y: point.y - panOffset.y
         )
 
-        // Step 2: Translate to origin
-        pt.x -= centerX
-        pt.y -= centerY
+        // Step 2: Translate to screen origin
+        pt.x -= screenCenterX
+        pt.y -= screenCenterY
 
         // Step 3: Apply inverse rotation
-        let angle = -canvasRotation.radians // Negative for inverse
+        let angle = -canvasRotation.radians
         let cosAngle = cos(angle)
         let sinAngle = sin(angle)
         let rotatedX = pt.x * cosAngle - pt.y * sinAngle
@@ -583,39 +596,44 @@ class CanvasStateManager: ObservableObject {
         pt.x = rotatedX / zoomScale
         pt.y = rotatedY / zoomScale
 
-        // Step 5: Translate back from origin
-        pt.x += centerX
-        pt.y += centerY
+        // Step 5: Translate to document center (map to fixed canvas space)
+        pt.x += docCenterX
+        pt.y += docCenterY
 
         return pt
     }
 
     /// Transform a point from document space to view/screen space (applying zoom, pan, and rotation)
     func documentToScreen(_ point: CGPoint) -> CGPoint {
-        let centerX = screenSize.width / 2
-        let centerY = screenSize.height / 2
+        // Screen center (viewport - changes with rotation)
+        let screenCenterX = screenSize.width / 2
+        let screenCenterY = screenSize.height / 2
 
-        // Step 1: Translate to center (before any scaling/rotation)
+        // Document center (fixed - never changes)
+        let docCenterX = documentSize.width / 2
+        let docCenterY = documentSize.height / 2
+
+        // Step 1: Translate to document origin
         var pt = CGPoint(
-            x: point.x - centerX,
-            y: point.y - centerY
+            x: point.x - docCenterX,
+            y: point.y - docCenterY
         )
 
         // Step 2: Apply zoom
         pt.x *= zoomScale
         pt.y *= zoomScale
 
-        // Step 3: Apply rotation (already relative to center)
+        // Step 3: Apply rotation
         let angle = canvasRotation.radians
         let cosAngle = cos(angle)
         let sinAngle = sin(angle)
         let rotatedX = pt.x * cosAngle - pt.y * sinAngle
         let rotatedY = pt.x * sinAngle + pt.y * cosAngle
 
-        // Step 4: Translate back from center and apply pan
+        // Step 4: Translate to screen center and apply pan
         pt = CGPoint(
-            x: rotatedX + centerX + panOffset.x,
-            y: rotatedY + centerY + panOffset.y
+            x: rotatedX + screenCenterX + panOffset.x,
+            y: rotatedY + screenCenterY + panOffset.y
         )
 
         return pt

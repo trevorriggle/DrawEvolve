@@ -246,7 +246,9 @@ struct FloatingFeedbackPanel: View {
                         let potentialY = position.y + value.translation.height
 
                         // Strict boundaries - keep entire panel on screen
-                        let minX = currentWidth / 2
+                        // If history menu is showing, account for it on the left side
+                        let leftExtension = showHistoryMenu ? (historyMenuWidth + 8) : 0
+                        let minX = currentWidth / 2 + leftExtension
                         let maxX = geometry.size.width - currentWidth / 2
                         let minY = currentHeight / 2
                         let maxY = geometry.size.height - currentHeight / 2
@@ -270,7 +272,9 @@ struct FloatingFeedbackPanel: View {
                         var newY = position.y + dragOffset.height
 
                         // Strict boundaries - keep entire panel on screen
-                        let minX = currentWidth / 2
+                        // If history menu is showing, account for it on the left side
+                        let leftExtension = showHistoryMenu ? (historyMenuWidth + 8) : 0
+                        let minX = currentWidth / 2 + leftExtension
                         let maxX = geometry.size.width - currentWidth / 2
                         let minY = currentHeight / 2
                         let maxY = geometry.size.height - currentHeight / 2

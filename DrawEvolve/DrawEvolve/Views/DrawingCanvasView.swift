@@ -160,30 +160,8 @@ struct DrawingCanvasView: View {
                 SelectionTransformHandles(rect: screenBoundingRect, canvasState: canvasState)
             }
 
-            // Show selection pixels being moved/transformed
-            if let pixels = canvasState.selectionPixels,
-               let originalRect = canvasState.selectionOriginalRect {
-                // Apply transforms to selection pixels
-                let hasOffset = canvasState.selectionOffset != .zero
-                let hasScale = canvasState.selectionScale != 1.0
-                let hasRotation = canvasState.selectionRotation != .zero
-
-                if hasOffset || hasScale || hasRotation {
-                    Image(uiImage: pixels)
-                        .resizable()
-                        .frame(
-                            width: originalRect.width * canvasState.selectionScale,
-                            height: originalRect.height * canvasState.selectionScale
-                        )
-                        .rotationEffect(canvasState.selectionRotation)
-                        .position(
-                            x: originalRect.origin.x + originalRect.width / 2 + canvasState.selectionOffset.x,
-                            y: originalRect.origin.y + originalRect.height / 2 + canvasState.selectionOffset.y
-                        )
-                        .allowsHitTesting(false)
-                        .opacity(0.8) // Slightly transparent to show it's being transformed
-                }
-            }
+            // Selection pixels are now rendered in real-time to the texture for fluent animation
+            // The duplicate SwiftUI Image overlay is no longer needed
 
             // Floating toolbar overlay (top layer, left side)
             VStack(alignment: .leading, spacing: 0) {
@@ -326,8 +304,8 @@ struct DrawingCanvasView: View {
                             // AI Feedback button
                             ToolButton(icon: "sparkles", isSelected: showFeedback) {
                                 if canvasState.feedback != nil {
-                                    // If we have feedback, show the panel
-                                    showFeedback = true
+                                    // Toggle the panel visibility
+                                    showFeedback.toggle()
                                 } else {
                                     // If no feedback yet, request it
                                     requestFeedback()
@@ -652,11 +630,11 @@ struct DrawingCanvasView: View {
         print("  - Title: \(drawing.title)")
         print("  - Image data size: \(drawing.imageData.count) bytes")
 
-        // Load feedback if exists
+        // Load feedback if exists (but keep panel collapsed - user can tap sparkles to view)
         if let feedback = drawing.feedback {
             canvasState.feedback = feedback
-            showFeedback = true // Show feedback panel immediately
-            print("  - Has feedback: YES (showing feedback panel)")
+            // Don't auto-show panel - let user tap sparkles button to view
+            print("  - Has feedback: YES (loaded, panel collapsed)")
         } else {
             print("  - Has feedback: NO")
         }
