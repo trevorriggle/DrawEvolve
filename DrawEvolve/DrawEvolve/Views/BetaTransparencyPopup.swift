@@ -135,12 +135,12 @@ struct BetaTransparencyPopup: View {
                 }) {
                     Text("I Understand - Let's Create!")
                         .font(.headline)
+                        .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(12)
                 }
+                .background(Color.accentColor)
+                .cornerRadius(12)
                 .padding(.horizontal, 32)
                 .padding(.vertical, 20)
             }

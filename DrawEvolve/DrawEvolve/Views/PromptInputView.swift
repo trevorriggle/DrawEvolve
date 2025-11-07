@@ -110,9 +110,9 @@ struct PromptInputView: View {
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 16)
-                                .background(context.isComplete ? Color.accentColor : Color.gray)
-                                .cornerRadius(12)
                         }
+                        .background(context.isComplete ? Color.accentColor : Color.gray)
+                        .cornerRadius(12)
                         .disabled(!context.isComplete)
 
                         Button(action: {
@@ -126,9 +126,9 @@ struct PromptInputView: View {
                             .foregroundColor(.primary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
-                            .background(Color(uiColor: .secondarySystemBackground))
-                            .cornerRadius(10)
                         }
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .cornerRadius(10)
                     }
                     .padding()
                     .background(.ultraThinMaterial)
