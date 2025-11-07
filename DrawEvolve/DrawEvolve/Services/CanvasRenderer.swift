@@ -233,13 +233,21 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // CRITICAL: Scale coordinates from screen space to texture space
-        // Use separate X and Y scales to handle non-square screen/texture dimensions correctly
+        // IMPORTANT: Stroke points are already in document space which matches texture space
+        // Document size should equal texture size (both are square canvases)
+        // Therefore scale should be 1:1
         let scaleX = Float(texture.width) / Float(screenSize.width)
         let scaleY = Float(texture.height) / Float(screenSize.height)
-        print("  Coordinate scale: X=\(scaleX), Y=\(scaleY) (texture: \(texture.width)x\(texture.height), screen: \(screenSize))")
+        print("  Coordinate scale: X=\(scaleX), Y=\(scaleY) (texture: \(texture.width)x\(texture.height), document: \(screenSize))")
 
-        // Convert stroke points to positions and scale to texture space
+        // If document size != texture size, something is wrong
+        if abs(scaleX - 1.0) > 0.01 || abs(scaleY - 1.0) > 0.01 {
+            print("  ⚠️ WARNING: Document size doesn't match texture size! Stroke will be misaligned.")
+            print("  Expected document size: \(texture.width)x\(texture.height)")
+            print("  Actual document size: \(screenSize)")
+        }
+
+        // Convert stroke points to positions (already in correct coordinate space)
         let positions = stroke.points.map { point in
             SIMD2<Float>(
                 Float(point.location.x) * scaleX,
@@ -590,24 +598,53 @@ class CanvasRenderer: NSObject {
         let docCenterX = canvasSize.width / 2
         let docCenterY = canvasSize.height / 2
 
+        // Calculate aspect ratio correction (to match documentToScreen in CanvasStateManager)
+        let viewportAspect = viewportSize.width / viewportSize.height
+        var aspectScaleX: CGFloat = 1.0
+        var aspectScaleY: CGFloat = 1.0
+
+        if viewportAspect > 1.0 {
+            // Landscape: canvas is pillarboxed
+            aspectScaleX = 1.0 / viewportAspect
+        } else {
+            // Portrait: canvas is letterboxed
+            aspectScaleY = viewportAspect
+        }
+
+        // Canvas scale (document space to screen space)
+        let canvasScale: CGFloat
+        if viewportAspect > 1.0 {
+            canvasScale = viewportSize.height / canvasSize.height
+        } else {
+            canvasScale = viewportSize.width / canvasSize.width
+        }
+
         let cosAngle = cos(canvasRotation)
         let sinAngle = sin(canvasRotation)
 
         let positions = stroke.points.map { point -> SIMD2<Float> in
-            // Document → Screen transformation
+            // Document → Screen transformation (matches CanvasStateManager.documentToScreen)
             // Step 1: Translate to document origin
             var x = point.location.x - docCenterX
             var y = point.location.y - docCenterY
 
-            // Step 2: Apply zoom
+            // Step 2: Scale from document space to screen space
+            x *= canvasScale
+            y *= canvasScale
+
+            // Step 3: Apply aspect ratio correction
+            x *= aspectScaleX
+            y *= aspectScaleY
+
+            // Step 4: Apply zoom
             x *= zoomScale
             y *= zoomScale
 
-            // Step 3: Apply rotation
+            // Step 5: Apply rotation
             let rotatedX = x * cosAngle - y * sinAngle
             let rotatedY = x * sinAngle + y * cosAngle
 
-            // Step 4: Translate to screen center and apply pan
+            // Step 6: Translate to screen center and apply pan
             x = rotatedX + screenCenterX + panOffset.x
             y = rotatedY + screenCenterY + panOffset.y
 
