@@ -11,12 +11,14 @@ struct BetaTransparencyPopup: View {
     @Binding var isPresented: Bool
 
     var body: some View {
+        let _ = print("🎨 BetaTransparencyPopup: body rendered, isPresented = \(isPresented)")
         ZStack {
             // Dimmed background
             Color.black.opacity(0.4)
                 .ignoresSafeArea()
                 .onTapGesture {
                     // Prevent dismissal by tapping outside
+                    print("👆 Background tapped (will not dismiss)")
                 }
 
             // Popup card
@@ -131,6 +133,7 @@ struct BetaTransparencyPopup: View {
 
                 // Continue button
                 Button(action: {
+                    print("🔘 Beta Transparency button tapped!")
                     isPresented = false
                 }) {
                     Text("I Understand - Let's Create!")
@@ -139,8 +142,10 @@ struct BetaTransparencyPopup: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
                 }
+                .buttonStyle(.plain)
                 .background(Color.accentColor)
                 .cornerRadius(12)
+                .contentShape(Rectangle())
                 .padding(.horizontal, 32)
                 .padding(.vertical, 20)
             }
