@@ -954,10 +954,11 @@ struct MetalCanvasView: UIViewRepresentable {
 
             if let texture = layer.texture, let renderer = renderer {
                 // Stroke points are in document space which matches texture space
-                // Use texture size directly for 1:1 coordinate mapping
-                let textureSize = CGSize(width: texture.width, height: texture.height)
+                // IMPORTANT: Pass document size (not texture size) to ensure 1:1 coordinate mapping
+                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
                 print("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)' - Texture ID: \(ObjectIdentifier(texture))")
-                print("  Texture size: \(textureSize.width)x\(textureSize.height)")
+                print("  Texture size: \(texture.width)x\(texture.height)")
+                print("  Document size: \(documentSize.width)x\(documentSize.height)")
 
                 // Capture snapshot BEFORE rendering stroke
                 print("Capturing BEFORE snapshot...")
@@ -967,7 +968,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
 
                 // Render the stroke (stroke points are in document/texture space already)
-                renderer.renderStroke(stroke, to: texture, screenSize: textureSize)
+                renderer.renderStroke(stroke, to: texture, screenSize: documentSize)
                 print("Stroke committed successfully - texture should now contain the stroke")
 
                 // Capture snapshot AFTER rendering stroke (GPU is done now)
