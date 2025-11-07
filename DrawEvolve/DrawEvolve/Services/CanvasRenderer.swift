@@ -233,25 +233,23 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // IMPORTANT: Stroke points are already in document space which matches texture space
-        // Document size should equal texture size (both are square canvases)
-        // Therefore scale should be 1:1
-        let scaleX = Float(texture.width) / Float(screenSize.width)
-        let scaleY = Float(texture.height) / Float(screenSize.height)
-        print("  Coordinate scale: X=\(scaleX), Y=\(scaleY) (texture: \(texture.width)x\(texture.height), document: \(screenSize))")
+        // CRITICAL FIX: Stroke points are already in document/texture coordinate space
+        // The screenSize parameter is actually documentSize (which should equal texture size)
+        // Points are already scaled correctly from screenToDocument(), so NO SCALING should be applied
+        print("  Texture size: \(texture.width)x\(texture.height)")
+        print("  Document size passed: \(screenSize.width)x\(screenSize.height)")
 
-        // If document size != texture size, something is wrong
-        if abs(scaleX - 1.0) > 0.01 || abs(scaleY - 1.0) > 0.01 {
-            print("  ⚠️ WARNING: Document size doesn't match texture size! Stroke will be misaligned.")
-            print("  Expected document size: \(texture.width)x\(texture.height)")
-            print("  Actual document size: \(screenSize)")
+        // Document size and texture size should be identical (both are square canvas)
+        if abs(screenSize.width - CGFloat(texture.width)) > 1.0 || abs(screenSize.height - CGFloat(texture.height)) > 1.0 {
+            print("  ⚠️ WARNING: Document size (\(screenSize)) doesn't match texture size (\(texture.width)x\(texture.height))")
+            print("  This will cause stroke misalignment!")
         }
 
-        // Convert stroke points to positions (already in correct coordinate space)
+        // NO SCALING - points are already in texture coordinate space
         let positions = stroke.points.map { point in
             SIMD2<Float>(
-                Float(point.location.x) * scaleX,
-                Float(point.location.y) * scaleY
+                Float(point.location.x),
+                Float(point.location.y)
             )
         }
         let viewportSize = SIMD2<Float>(Float(texture.width), Float(texture.height))
