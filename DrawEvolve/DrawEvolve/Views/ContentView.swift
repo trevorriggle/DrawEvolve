@@ -73,14 +73,11 @@ struct ContentView: View {
         guard !hasCheckedFirstLaunch else { return }
         hasCheckedFirstLaunch = true
 
-        print("🚀 ContentView: performFirstLaunchCheck called")
-
         // Initialize anonymous user ID on first launch
         _ = AnonymousUserManager.shared.userID
 
         // DEBUG: Reset onboarding on every launch during development
         #if DEBUG
-        print("🔧 DEBUG: Resetting onboarding flags")
         UserDefaults.standard.set(false, forKey: "hasSeenBetaTransparency")
         UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
         UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
@@ -91,16 +88,12 @@ struct ContentView: View {
 
         // Show beta transparency first, then onboarding
         if !hasSeenBetaTransparency {
-            print("📱 Showing Beta Transparency popup")
             showBetaTransparency = true
             hasSeenBetaTransparency = true
         } else if !hasSeenOnboarding {
-            print("📱 Showing Onboarding popup")
             showOnboarding = true
             hasSeenOnboarding = true
         }
-
-        print("✅ First launch check complete")
     }
 }
 

@@ -66,12 +66,12 @@ struct OnboardingPopup: View {
                 }) {
                     Text("Let's Get Started")
                         .font(.headline)
-                        .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
+                        .background(Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
                 }
-                .background(Color.accentColor)
-                .cornerRadius(12)
                 .padding(.horizontal)
             }
             .padding(.horizontal, 32)
