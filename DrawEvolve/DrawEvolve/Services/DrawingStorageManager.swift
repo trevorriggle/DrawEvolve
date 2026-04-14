@@ -59,7 +59,7 @@ class DrawingStorageManager: ObservableObject {
 
     // MARK: - Save Drawing
 
-    func saveDrawing(title: String, imageData: Data, feedback: String? = nil, context: DrawingContext? = nil) async throws -> Drawing {
+    func saveDrawing(title: String, imageData: Data, feedback: String? = nil, context: DrawingContext? = nil, critiqueHistory: [CritiqueEntry] = []) async throws -> Drawing {
         isLoading = true
         errorMessage = nil
 
@@ -73,10 +73,11 @@ class DrawingStorageManager: ObservableObject {
             createdAt: Date(),
             updatedAt: Date(),
             feedback: feedback,
-            context: context
+            context: context,
+            critiqueHistory: critiqueHistory
         )
 
-        print("DrawingStorageManager: Saving new drawing '\(title)'")
+        print("DrawingStorageManager: Saving new drawing '\(title)' with \(critiqueHistory.count) critique entries")
 
         // Save to file system
         let fileURL = drawingsDirectory.appendingPathComponent("\(newDrawing.id.uuidString).json")
@@ -93,7 +94,14 @@ class DrawingStorageManager: ObservableObject {
 
     // MARK: - Update Drawing
 
-    func updateDrawing(id: UUID, title: String? = nil, imageData: Data? = nil, feedback: String? = nil, context: DrawingContext? = nil) async throws {
+    /// Update an existing drawing.
+    ///
+    /// `critiqueHistory`, if provided, **replaces** (not appends to) the stored list.
+    /// Previously this function synthesized a brand-new `CritiqueEntry` every time
+    /// it was called with a non-nil `feedback` string, which duplicated the history
+    /// on every save (bug A). The canvas now owns the critique list and passes it in
+    /// whole; callers that don't care about history can pass `nil` to leave it alone.
+    func updateDrawing(id: UUID, title: String? = nil, imageData: Data? = nil, feedback: String? = nil, context: DrawingContext? = nil, critiqueHistory: [CritiqueEntry]? = nil) async throws {
         isLoading = true
         errorMessage = nil
 
@@ -113,15 +121,13 @@ class DrawingStorageManager: ObservableObject {
                 drawings[index].imageData = imageData
             }
             if let feedback = feedback {
-                // Add new critique to history
-                let critiqueEntry = CritiqueEntry(
-                    feedback: feedback,
-                    timestamp: Date(),
-                    context: context ?? drawings[index].context
-                )
-                drawings[index].critiqueHistory.append(critiqueEntry)
+                // `feedback` is the latest-summary field, independent of the list.
                 drawings[index].feedback = feedback
-                print("  - Added feedback to critique history (now \(drawings[index].critiqueHistory.count) entries)")
+                print("  - Updated latest feedback summary")
+            }
+            if let critiqueHistory = critiqueHistory {
+                drawings[index].critiqueHistory = critiqueHistory
+                print("  - Replaced critique history (\(critiqueHistory.count) entries)")
             }
             if let context = context {
                 drawings[index].context = context

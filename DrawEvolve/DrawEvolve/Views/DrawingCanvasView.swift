@@ -692,24 +692,30 @@ struct DrawingCanvasView: View {
 
         do {
             if let drawingID = currentDrawingID {
-                // Update existing drawing
+                // Update existing drawing. Pass the canvas's local critique history
+                // so the storage manager replaces (not appends to) the stored list.
+                // The storage manager used to synthesize a new CritiqueEntry on every
+                // save-with-feedback, which duplicated the list indefinitely.
                 print("  - Updating existing drawing with ID: \(drawingID)")
                 try await storageManager.updateDrawing(
                     id: drawingID,
                     title: drawingTitle,
                     imageData: imageData,
                     feedback: canvasState.feedback,
-                    context: context
+                    context: context,
+                    critiqueHistory: critiqueHistory
                 )
                 print("✅ Drawing updated successfully!")
             } else {
-                // Create new drawing
+                // Create new drawing. Include any critique entries the user already
+                // accumulated in this session before the first save.
                 print("  - Creating new drawing")
                 let savedDrawing = try await storageManager.saveDrawing(
                     title: drawingTitle,
                     imageData: imageData,
                     feedback: canvasState.feedback,
-                    context: context
+                    context: context,
+                    critiqueHistory: critiqueHistory
                 )
                 // IMPORTANT: Set the currentDrawingID so subsequent saves update instead of creating new
                 currentDrawingID = savedDrawing.id

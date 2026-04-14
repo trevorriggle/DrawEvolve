@@ -183,34 +183,38 @@ struct DrawingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Drawing thumbnail
+            // Drawing thumbnail — always square, fills the grid cell width.
+            //
+            // Previous layout used a `GeometryReader` with fixed 200pt height and
+            // `.aspectRatio(.fill)` which silently cropped the image horizontally
+            // whenever the grid cell was wider than 200pt (i.e. always on iPad
+            // landscape). Saved images are square 2048² so a 1:1 aspect with
+            // `.scaledToFill` on a square container produces no cropping at all.
             ZStack(alignment: .topTrailing) {
-                if let uiImage = UIImage(data: drawing.imageData) {
-                    GeometryReader { geometry in
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: geometry.size.width, height: 200)
-                            .clipped()
-                    }
-                    .frame(height: 200)
-                    .background(Color.white) // White background for dark mode
+                Color.white
+                    .aspectRatio(1, contentMode: .fit)
+                    .overlay(
+                        Group {
+                            if let uiImage = UIImage(data: drawing.imageData) {
+                                Image(uiImage: uiImage)
+                                    .resizable()
+                                    .scaledToFill()
+                            } else {
+                                Color.secondary.opacity(0.2)
+                                    .overlay(
+                                        Image(systemName: "photo")
+                                            .font(.largeTitle)
+                                            .foregroundColor(.primary)
+                                    )
+                            }
+                        }
+                    )
+                    .clipped()
                     .cornerRadius(12)
                     .overlay(
                         RoundedRectangle(cornerRadius: 12)
                             .stroke(Color.primary.opacity(0.2), lineWidth: 2)
                     )
-                } else {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.2))
-                        .frame(height: 200)
-                        .cornerRadius(12)
-                        .overlay(
-                            Image(systemName: "photo")
-                                .font(.largeTitle)
-                                .foregroundColor(.primary)
-                        )
-                }
 
                 // Overlay badges and buttons in a VStack at top-right
                 VStack(alignment: .trailing, spacing: 8) {
