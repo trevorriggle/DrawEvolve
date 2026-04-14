@@ -295,7 +295,7 @@ struct DrawingCanvasView: View {
                             }
                             .help("Rotate canvas right 90°")
 
-                            ToolButton(icon: "arrow.counterclockwise", isSelected: false) {
+                            ToolButton(icon: "viewfinder", isSelected: false) {
                                 canvasState.resetAllTransforms()
                             }
                             .help("Reset zoom, pan, and rotation")
