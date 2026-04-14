@@ -599,12 +599,28 @@ class CanvasStateManager: ObservableObject {
 
     // MARK: - Zoom and Pan Management
 
-    /// Transform a point from view/screen space to document space (accounting for zoom, pan, rotation, and aspect ratio)
+    // MARK: - Coordinate transforms
+    //
+    // These must be the exact inverse of the shader's vertex transform in
+    // `quadVertexShaderWithTransform`. The shader does (pseudocode):
+    //
+    //   quadCornerNDC → aspectScaled → screenPos (Y-up pixels)
+    //                 → zoomAroundCenter → rotateAroundCenter → screenPos += (pan.x, -pan.y)
+    //                 → NDC
+    //
+    // With identity texCoords, every screen pixel inside the quad samples the
+    // texture at the fraction of the quad it falls in. The math below is the
+    // UIKit-space (Y-down) inverse of that pipeline. A single-number scale
+    // `fitSize = min(viewport.w, viewport.h)` replaces the previous separate
+    // aspectScale + canvasScale steps that were overshooting by 1/aspect.
+    //
+    // The previous implementation overshot doc coords by a factor of the
+    // viewport aspect ratio on the longer axis — e.g. touching the right edge
+    // of a pillarbox in landscape returned doc.x ≈ 2390 instead of 2048. That
+    // was the "strokes offset consistently" symptom after Phase-1 fixes.
+
+    /// Transform a point from view/screen space (UIKit points) to document space.
     func screenToDocument(_ point: CGPoint) -> CGPoint {
-        // Defensive: reject any non-finite / degenerate state instead of propagating
-        // NaN/Inf through every downstream consumer (strokes, selections, eyedropper).
-        // If this ever trips in practice, the user can recover by tapping the "reset
-        // transforms" toolbar button without restarting the app.
         guard point.x.isFinite, point.y.isFinite,
               screenSize.width > 0, screenSize.height > 0,
               documentSize.width > 0, documentSize.height > 0,
@@ -614,76 +630,41 @@ class CanvasStateManager: ObservableObject {
             return .zero
         }
 
-        // Screen center (viewport - changes with rotation)
-        let screenCenterX = screenSize.width / 2
-        let screenCenterY = screenSize.height / 2
+        let fitSize = min(screenSize.width, screenSize.height)
+        let centerX = screenSize.width / 2
+        let centerY = screenSize.height / 2
 
-        // Document center (fixed - never changes)
-        let docCenterX = documentSize.width / 2
-        let docCenterY = documentSize.height / 2
+        // Inverse pan, then translate so (0,0) is the viewport center.
+        var pt = CGPoint(x: point.x - panOffset.x - centerX,
+                         y: point.y - panOffset.y - centerY)
 
-        // Step 0: Account for aspect ratio correction (pillarboxing/letterboxing)
-        // The canvas is square but the viewport may be rectangular
-        // We need to remove the aspect ratio scaling to get the actual canvas coordinates
-        let viewportAspect = screenSize.width / screenSize.height
-        var aspectScale = CGPoint(x: 1.0, y: 1.0)
+        // Inverse rotation. The shader's rotation matrix R(θ) in UIKit-Y-down
+        // appears as visual CW rotation by θ. The inverse is R(-θ):
+        //   x' =  x·cos(θ) + y·sin(θ)
+        //   y' = -x·sin(θ) + y·cos(θ)
+        let theta = canvasRotation.radians
+        let cosT = cos(theta)
+        let sinT = sin(theta)
+        let rx = pt.x * cosT + pt.y * sinT
+        let ry = -pt.x * sinT + pt.y * cosT
 
-        if viewportAspect > 1.0 {
-            // Landscape: canvas is pillarboxed (black bars on left/right)
-            aspectScale.x = viewportAspect
-        } else {
-            // Portrait: canvas is letterboxed (black bars on top/bottom)
-            aspectScale.y = 1.0 / viewportAspect
-        }
+        // Inverse zoom (around viewport center, which is (0,0) here).
+        let zx = rx / zoomScale
+        let zy = ry / zoomScale
 
-        // Step 1: Remove pan (screen space)
-        var pt = CGPoint(
-            x: point.x - panOffset.x,
-            y: point.y - panOffset.y
-        )
+        // At this point (zx, zy) is the quad-local coordinate centered at origin,
+        // ranging over [-fitSize/2, +fitSize/2] when the touch is inside the
+        // aspect-corrected canvas region. Convert to normalized [0,1] fraction
+        // and scale by document size.
+        let fracX = (zx + fitSize / 2) / fitSize
+        let fracY = (zy + fitSize / 2) / fitSize
 
-        // Step 2: Translate to screen origin
-        pt.x -= screenCenterX
-        pt.y -= screenCenterY
-
-        // Step 3: Apply inverse rotation
-        let angle = -canvasRotation.radians
-        let cosAngle = cos(angle)
-        let sinAngle = sin(angle)
-        let rotatedX = pt.x * cosAngle - pt.y * sinAngle
-        let rotatedY = pt.x * sinAngle + pt.y * cosAngle
-
-        // Step 4: Apply inverse zoom
-        pt.x = rotatedX / zoomScale
-        pt.y = rotatedY / zoomScale
-
-        // Step 5: Apply inverse aspect ratio correction
-        pt.x *= aspectScale.x
-        pt.y *= aspectScale.y
-
-        // Step 6: Scale from screen space to document space
-        // The canvas is rendered to fit the smaller dimension of the viewport
-        let canvasScale: CGFloat
-        if viewportAspect > 1.0 {
-            // Landscape: canvas height matches viewport height
-            canvasScale = documentSize.height / screenSize.height
-        } else {
-            // Portrait: canvas width matches viewport width
-            canvasScale = documentSize.width / screenSize.width
-        }
-        pt.x *= canvasScale
-        pt.y *= canvasScale
-
-        // Step 7: Translate to document center (map to fixed canvas space)
-        pt.x += docCenterX
-        pt.y += docCenterY
-
-        return pt
+        return CGPoint(x: fracX * documentSize.width,
+                       y: fracY * documentSize.height)
     }
 
-    /// Transform a point from document space to view/screen space (applying zoom, pan, rotation, and aspect ratio)
+    /// Transform a point from document space to view/screen space (UIKit points).
     func documentToScreen(_ point: CGPoint) -> CGPoint {
-        // Mirror the defensive guards in `screenToDocument`.
         guard point.x.isFinite, point.y.isFinite,
               screenSize.width > 0, screenSize.height > 0,
               documentSize.width > 0, documentSize.height > 0,
@@ -693,66 +674,30 @@ class CanvasStateManager: ObservableObject {
             return .zero
         }
 
-        // Screen center (viewport - changes with rotation)
-        let screenCenterX = screenSize.width / 2
-        let screenCenterY = screenSize.height / 2
+        let fitSize = min(screenSize.width, screenSize.height)
+        let centerX = screenSize.width / 2
+        let centerY = screenSize.height / 2
 
-        // Document center (fixed - never changes)
-        let docCenterX = documentSize.width / 2
-        let docCenterY = documentSize.height / 2
+        // doc → normalized fraction → quad-local (centered) pixels.
+        let fracX = point.x / documentSize.width
+        let fracY = point.y / documentSize.height
+        var pt = CGPoint(x: fracX * fitSize - fitSize / 2,
+                         y: fracY * fitSize - fitSize / 2)
 
-        // Calculate aspect ratio correction
-        let viewportAspect = screenSize.width / screenSize.height
-        var aspectScale = CGPoint(x: 1.0, y: 1.0)
-
-        if viewportAspect > 1.0 {
-            // Landscape: canvas is pillarboxed (black bars on left/right)
-            aspectScale.x = 1.0 / viewportAspect
-        } else {
-            // Portrait: canvas is letterboxed (black bars on top/bottom)
-            aspectScale.y = viewportAspect
-        }
-
-        // Step 1: Translate to document origin
-        var pt = CGPoint(
-            x: point.x - docCenterX,
-            y: point.y - docCenterY
-        )
-
-        // Step 2: Scale from document space to screen space
-        let canvasScale: CGFloat
-        if viewportAspect > 1.0 {
-            // Landscape: canvas height matches viewport height
-            canvasScale = screenSize.height / documentSize.height
-        } else {
-            // Portrait: canvas width matches viewport width
-            canvasScale = screenSize.width / documentSize.width
-        }
-        pt.x *= canvasScale
-        pt.y *= canvasScale
-
-        // Step 3: Apply aspect ratio correction
-        pt.x *= aspectScale.x
-        pt.y *= aspectScale.y
-
-        // Step 4: Apply zoom
+        // Zoom around origin (viewport center).
         pt.x *= zoomScale
         pt.y *= zoomScale
 
-        // Step 5: Apply rotation
-        let angle = canvasRotation.radians
-        let cosAngle = cos(angle)
-        let sinAngle = sin(angle)
-        let rotatedX = pt.x * cosAngle - pt.y * sinAngle
-        let rotatedY = pt.x * sinAngle + pt.y * cosAngle
+        // Rotate around origin. R(θ) in UIKit-Y-down = visual CW by θ.
+        let theta = canvasRotation.radians
+        let cosT = cos(theta)
+        let sinT = sin(theta)
+        let rx = pt.x * cosT - pt.y * sinT
+        let ry = pt.x * sinT + pt.y * cosT
 
-        // Step 6: Translate to screen center and apply pan
-        pt = CGPoint(
-            x: rotatedX + screenCenterX + panOffset.x,
-            y: rotatedY + screenCenterY + panOffset.y
-        )
-
-        return pt
+        // Translate to viewport center, then apply pan.
+        return CGPoint(x: rx + centerX + panOffset.x,
+                       y: ry + centerY + panOffset.y)
     }
 
     /// Apply zoom. `centerPoint` is the pinch location in screen space; currently only

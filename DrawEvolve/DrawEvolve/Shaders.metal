@@ -77,11 +77,26 @@ vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
     return out;
 }
 
-// Vertex shader for full-screen quad with zoom, pan, and rotation support
+// Vertex shader for full-screen quad with zoom, pan, and rotation support.
+//
+// ARCHITECTURE: position transforms ONLY. Texture coordinates are the identity
+// [0,1] per-corner mapping; the GPU's linear interpolation across the (possibly
+// transformed) quad is what produces the correct sample lookup.
+//
+// The previous implementation also applied the *inverse* of zoom/pan/rotation to
+// the texture coordinates, which was both redundant (double-transform) and
+// numerically incorrect (pan was normalised by canvas size in the texCoord path
+// but by viewport size in the position path — the two were never inverses of
+// each other). That was the source of the persistent stroke offset users saw
+// after the Phase-1 coordinate fixes: screen pixels mapped back to doc coords
+// via `screenToDocument` didn't agree with how the shader actually painted those
+// coords to the screen. With identity texCoords, the inverse is unambiguous:
+// whatever the shader does to positions, `CanvasStateManager.screenToDocument`
+// inverts, and they match exactly.
 vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
                                                 constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, rotation]
                                                 constant float2 *viewportSize [[buffer(1)]],
-                                                constant float2 *canvasSize [[buffer(2)]]) {  // Fixed canvas/document size
+                                                constant float2 *canvasSize [[buffer(2)]]) {  // Unused now; kept for ABI stability
     VertexOut out;
 
     // Generate full-screen quad
@@ -90,6 +105,8 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
         float2(-1.0, 1.0), float2(1.0, -1.0), float2(1.0, 1.0)
     };
 
+    // Texture coords: identity mapping per corner. UIKit-Y-down convention —
+    // NDC top (+1) maps to texCoord.v=0 (top row of texture).
     float2 texCoords[6] = {
         float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0),
         float2(0.0, 0.0), float2(1.0, 1.0), float2(1.0, 0.0)
@@ -99,89 +116,44 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     float zoom = transform[0][0];
     float2 pan = float2(transform[0][1], transform[0][2]);
     float rotation = transform[0][3];  // Rotation angle in radians
-    float2 viewport = viewportSize[0];     // Screen size (changes with orientation)
-    float2 canvas = canvasSize[0];         // Document size (fixed 2048x2048)
+    float2 viewport = viewportSize[0]; // Screen size (changes with orientation)
 
     float2 finalPos = positions[vertexID];
-    float2 finalTexCoord = texCoords[vertexID];
+    float2 finalTexCoord = texCoords[vertexID];  // IDENTITY — no transforms.
 
-    // VERTEX POSITIONING (screen/viewport space)
-    // Apply transform: Zoom → Rotate → Pan
-
-    // IMPORTANT: Aspect ratio correction
-    // Canvas is square, but viewport may be rectangular
-    // Scale canvas to fit within viewport while maintaining 1:1 aspect ratio
+    // Aspect-ratio correction: canvas is square, viewport usually isn't. Shrink
+    // the quad so the square canvas fits the shorter viewport dimension.
     float viewportAspect = viewport.x / viewport.y;
     float2 scale = float2(1.0, 1.0);
-
     if (viewportAspect > 1.0) {
-        // Landscape: viewport is wider than tall, pillarbox the canvas
-        scale.x = 1.0 / viewportAspect;
+        scale.x = 1.0 / viewportAspect;  // landscape: pillarbox
     } else {
-        // Portrait: viewport is taller than wide, letterbox the canvas
-        scale.y = viewportAspect;
+        scale.y = viewportAspect;        // portrait: letterbox
     }
-
-    // Apply aspect ratio correction to vertex position
     float2 correctedPos = finalPos * scale;
 
-    // Convert NDC position to screen space
-    float2 screenPos = (correctedPos * 0.5 + 0.5) * viewport;  // NDC to screen
+    // NDC → Y-up pixel space
+    float2 screenPos = (correctedPos * 0.5 + 0.5) * viewport;
 
-    // Step 1: Apply zoom (scale around viewport center)
+    // Zoom around viewport center
     float2 screenCenter = viewport * 0.5;
     screenPos = (screenPos - screenCenter) * zoom + screenCenter;
 
-    // Step 2: Apply rotation (rotate around viewport center)
+    // Rotate around viewport center
     if (rotation != 0.0) {
-        float2 rotated = screenPos - screenCenter;
-        float cosAngle = cos(rotation);
-        float sinAngle = sin(rotation);
-        screenPos.x = rotated.x * cosAngle - rotated.y * sinAngle + screenCenter.x;
-        screenPos.y = rotated.x * sinAngle + rotated.y * cosAngle + screenCenter.y;
+        float2 rel = screenPos - screenCenter;
+        float c = cos(rotation);
+        float s = sin(rotation);
+        screenPos = float2(rel.x * c - rel.y * s, rel.x * s + rel.y * c) + screenCenter;
     }
 
-    // Step 3: Apply pan
-    // `pan` is supplied in UIKit coordinates (Y-down: positive pan.y means finger
-    // moved down). Our internal `screenPos` is Y-up (Y=0 at bottom, Y=viewport.y at
-    // top, because `finalPos.y = (screenPos.y/viewport.y)*2 - 1` makes Y=viewport.y
-    // map to NDC +1 = screen top). Adding pan directly therefore moved the canvas
-    // opposite of the finger vertically. Flip Y here to match UIKit semantics and
-    // the behavior of `CanvasStateManager.documentToScreen`. (Bug 2c)
+    // Pan. `pan` is in UIKit Y-down points; `screenPos` here is Y-up pixels
+    // (Y = viewport.y maps to NDC +1 = screen top). Flip pan.y so the canvas
+    // follows the finger vertically. (Bug 2c.)
     screenPos += float2(pan.x, -pan.y);
 
-    // Convert back to NDC
+    // Back to NDC
     finalPos = (screenPos / viewport) * 2.0 - 1.0;
-
-    // TEXTURE COORDINATE TRANSFORMATION (normalized 0-1 space)
-    // The texture is fixed size (canvas), but screen size varies with orientation
-    // We need to map from screen transforms to the fixed canvas texture correctly
-
-    // Convert pan from screen pixels to normalized canvas space
-    float2 normalizedPan = pan / canvas;  // Normalize by CANVAS size, not viewport!
-
-    // Inverse pan
-    finalTexCoord -= normalizedPan;
-
-    // Inverse rotation (around center 0.5, 0.5 in normalized space)
-    if (rotation != 0.0) {
-        // Translate to center in normalized space
-        finalTexCoord -= float2(0.5, 0.5);
-
-        // Apply inverse rotation (negate angle)
-        float cosAngle = cos(-rotation);
-        float sinAngle = sin(-rotation);
-        float2 rotated;
-        rotated.x = finalTexCoord.x * cosAngle - finalTexCoord.y * sinAngle;
-        rotated.y = finalTexCoord.x * sinAngle + finalTexCoord.y * cosAngle;
-        finalTexCoord = rotated;
-
-        // Translate back from center
-        finalTexCoord += float2(0.5, 0.5);
-    }
-
-    // Inverse zoom (in normalized space)
-    finalTexCoord = (finalTexCoord - float2(0.5, 0.5)) / zoom + float2(0.5, 0.5);
 
     out.position = float4(finalPos, 0.0, 1.0);
     out.texCoord = finalTexCoord;

@@ -588,63 +588,38 @@ class CanvasRenderer: NSObject {
             hardness: Float(stroke.settings.hardness)
         )
 
-        // Transform document space points to screen space using canvas transforms
-        // Screen center (viewport - changes with rotation)
-        let screenCenterX = viewportSize.width / 2
-        let screenCenterY = viewportSize.height / 2
-        // Document center (fixed canvas - 2048x2048)
-        let docCenterX = canvasSize.width / 2
-        let docCenterY = canvasSize.height / 2
-
-        // Calculate aspect ratio correction (to match documentToScreen in CanvasStateManager)
-        let viewportAspect = viewportSize.width / viewportSize.height
-        var aspectScaleX: CGFloat = 1.0
-        var aspectScaleY: CGFloat = 1.0
-
-        if viewportAspect > 1.0 {
-            // Landscape: canvas is pillarboxed
-            aspectScaleX = 1.0 / viewportAspect
-        } else {
-            // Portrait: canvas is letterboxed
-            aspectScaleY = viewportAspect
-        }
-
-        // Canvas scale (document space to screen space)
-        let canvasScale: CGFloat
-        if viewportAspect > 1.0 {
-            canvasScale = viewportSize.height / canvasSize.height
-        } else {
-            canvasScale = viewportSize.width / canvasSize.width
-        }
-
+        // Transform document-space points to UIKit-screen-space points, matching
+        // `CanvasStateManager.documentToScreen`. Must stay in sync with the shader's
+        // position transform in `quadVertexShaderWithTransform`; both describe the
+        // exact same mapping — see the comment block in CanvasStateManager for the
+        // derivation. (Bug: the previous code here used aspectScale + canvasScale
+        // multiplied together, which overshot doc→screen by a factor of the
+        // viewport aspect ratio on the longer axis and caused in-progress stroke
+        // previews to draw consistently offset from the finger.)
+        let fitSize = min(viewportSize.width, viewportSize.height)
+        let centerX = viewportSize.width / 2
+        let centerY = viewportSize.height / 2
         let cosAngle = cos(canvasRotation)
         let sinAngle = sin(canvasRotation)
 
         let positions = stroke.points.map { point -> SIMD2<Float> in
-            // Document → Screen transformation (matches CanvasStateManager.documentToScreen)
-            // Step 1: Translate to document origin
-            var x = point.location.x - docCenterX
-            var y = point.location.y - docCenterY
+            // doc → normalized fraction → quad-local centered pixels
+            let fracX = point.location.x / canvasSize.width
+            let fracY = point.location.y / canvasSize.height
+            var x = fracX * fitSize - fitSize / 2
+            var y = fracY * fitSize - fitSize / 2
 
-            // Step 2: Scale from document space to screen space
-            x *= canvasScale
-            y *= canvasScale
-
-            // Step 3: Apply aspect ratio correction
-            x *= aspectScaleX
-            y *= aspectScaleY
-
-            // Step 4: Apply zoom
+            // Zoom around origin (viewport center)
             x *= zoomScale
             y *= zoomScale
 
-            // Step 5: Apply rotation
+            // Rotate around origin
             let rotatedX = x * cosAngle - y * sinAngle
             let rotatedY = x * sinAngle + y * cosAngle
 
-            // Step 6: Translate to screen center and apply pan
-            x = rotatedX + screenCenterX + panOffset.x
-            y = rotatedY + screenCenterY + panOffset.y
+            // Translate to viewport center, apply pan
+            x = rotatedX + centerX + panOffset.x
+            y = rotatedY + centerY + panOffset.y
 
             return SIMD2<Float>(Float(x), Float(y))
         }
