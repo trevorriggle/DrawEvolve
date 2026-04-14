@@ -77,13 +77,10 @@ struct MetalCanvasView: UIViewRepresentable {
         metalView.enableSetNeedsDisplay = false  // Use continuous drawing mode
         metalView.isPaused = false  // Continuous updates at preferredFramesPerSecond
         metalView.framebufferOnly = false  // Allow texture readback
-        // Off-canvas workbench color. The MTKView clears to this any time the
-        // transformed canvas quad doesn't cover a pixel — e.g. when you pan away
-        // from identity. Previously this was near-white (0.95), which made the
-        // revealed area look like a foreign rectangle hiding strokes. A medium-
-        // dark gray reads as "outside the canvas" instead.
-        metalView.clearColor = MTLClearColor(red: 0.18, green: 0.18, blue: 0.20, alpha: 1)
-        metalView.backgroundColor = UIColor(white: 0.18, alpha: 1)
+        // Canvas + workbench are both pure white — user wants a seamless white
+        // drawing surface with no visible canvas boundary.
+        metalView.clearColor = MTLClearColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1)
+        metalView.backgroundColor = .white
         metalView.preferredFramesPerSecond = 60  // Smooth drawing at 60fps
 
         // Enable multi-touch and pencil input

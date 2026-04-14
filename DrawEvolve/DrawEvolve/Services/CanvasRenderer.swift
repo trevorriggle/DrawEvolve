@@ -580,22 +580,25 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
-        // Prepare brush uniforms
+        // Prepare brush uniforms. IMPORTANT: scale size by zoom for the preview.
+        //
+        // Committed strokes render into the canvas-sized texture at texture-pixel
+        // units, then the compositor displays that texture at (fitSize * zoom) points
+        // on screen. The preview, by contrast, renders directly to the drawable, so
+        // its `pointSize` is in drawable pixels independent of zoom. Without a zoom
+        // factor the preview dot stays the same physical size while the committed
+        // dot grows / shrinks — they appear wildly different at zoom ≠ 1.
+        // `size * zoom` makes the preview match the committed size visually.
         var uniforms = BrushUniforms(
             color: stroke.settings.color,
-            size: Float(stroke.settings.size),
+            size: Float(stroke.settings.size * zoomScale),
             opacity: Float(stroke.settings.opacity),
             hardness: Float(stroke.settings.hardness)
         )
 
         // Transform document-space points to UIKit-screen-space points, matching
         // `CanvasStateManager.documentToScreen`. Must stay in sync with the shader's
-        // position transform in `quadVertexShaderWithTransform`; both describe the
-        // exact same mapping — see the comment block in CanvasStateManager for the
-        // derivation. (Bug: the previous code here used aspectScale + canvasScale
-        // multiplied together, which overshot doc→screen by a factor of the
-        // viewport aspect ratio on the longer axis and caused in-progress stroke
-        // previews to draw consistently offset from the finger.)
+        // position transform in `quadVertexShaderWithTransform`.
         let fitSize = min(viewportSize.width, viewportSize.height)
         let centerX = viewportSize.width / 2
         let centerY = viewportSize.height / 2
@@ -613,9 +616,10 @@ class CanvasRenderer: NSObject {
             x *= zoomScale
             y *= zoomScale
 
-            // Rotate around origin
-            let rotatedX = x * cosAngle - y * sinAngle
-            let rotatedY = x * sinAngle + y * cosAngle
+            // Rotate around origin. Matches documentToScreen: visual CCW by
+            // `canvasRotation` in UIKit Y-down = R(-θ) applied directly.
+            let rotatedX = x * cosAngle + y * sinAngle
+            let rotatedY = -x * sinAngle + y * cosAngle
 
             // Translate to viewport center, apply pan
             x = rotatedX + centerX + panOffset.x

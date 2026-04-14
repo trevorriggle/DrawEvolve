@@ -638,15 +638,20 @@ class CanvasStateManager: ObservableObject {
         var pt = CGPoint(x: point.x - panOffset.x - centerX,
                          y: point.y - panOffset.y - centerY)
 
-        // Inverse rotation. The shader's rotation matrix R(θ) in UIKit-Y-down
-        // appears as visual CW rotation by θ. The inverse is R(-θ):
-        //   x' =  x·cos(θ) + y·sin(θ)
-        //   y' = -x·sin(θ) + y·cos(θ)
+        // Inverse rotation. The shader applies R(θ) in Y-up pixel space, which
+        // reads as a visual CCW rotation by θ on screen. In UIKit Y-down math,
+        // the forward matrix that produces visual CCW is R(-θ); the inverse is
+        // therefore R(+θ) applied directly to Y-down coords:
+        //   x' = x·cos(θ) - y·sin(θ)
+        //   y' = x·sin(θ) + y·cos(θ)
+        // The previous version had the signs of sinT swapped, which was the
+        // cause of strokes "jumping" once any rotation was applied — my
+        // screenToDocument was winding the point the wrong way.
         let theta = canvasRotation.radians
         let cosT = cos(theta)
         let sinT = sin(theta)
-        let rx = pt.x * cosT + pt.y * sinT
-        let ry = -pt.x * sinT + pt.y * cosT
+        let rx = pt.x * cosT - pt.y * sinT
+        let ry = pt.x * sinT + pt.y * cosT
 
         // Inverse zoom (around viewport center, which is (0,0) here).
         let zx = rx / zoomScale
@@ -688,12 +693,16 @@ class CanvasStateManager: ObservableObject {
         pt.x *= zoomScale
         pt.y *= zoomScale
 
-        // Rotate around origin. R(θ) in UIKit-Y-down = visual CW by θ.
+        // Rotate around origin. The shader rotates the quad visually CCW by θ
+        // (it applies R(θ) in Y-up pixel space). To reproduce visual CCW in
+        // UIKit Y-down, apply R(-θ):
+        //   x' =  x·cos(θ) + y·sin(θ)
+        //   y' = -x·sin(θ) + y·cos(θ)
         let theta = canvasRotation.radians
         let cosT = cos(theta)
         let sinT = sin(theta)
-        let rx = pt.x * cosT - pt.y * sinT
-        let ry = pt.x * sinT + pt.y * cosT
+        let rx = pt.x * cosT + pt.y * sinT
+        let ry = -pt.x * sinT + pt.y * cosT
 
         // Translate to viewport center, then apply pan.
         return CGPoint(x: rx + centerX + panOffset.x,
