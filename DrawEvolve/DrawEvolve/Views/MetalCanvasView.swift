@@ -18,7 +18,7 @@ class TouchEnabledMTKView: MTKView {
         super.touchesBegan(touches, with: event)
         if let delegate = touchDelegate {
             print("TouchEnabledMTKView: Forwarding to delegate")
-            delegate.touchesBegan(touches, in: self)
+            delegate.touchesBegan(touches, in: self, with: event)
         } else {
             print("TouchEnabledMTKView: WARNING - No touch delegate!")
         }
@@ -26,27 +26,27 @@ class TouchEnabledMTKView: MTKView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
-        touchDelegate?.touchesMoved(touches, in: self)
+        touchDelegate?.touchesMoved(touches, in: self, with: event)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         print("TouchEnabledMTKView: touchesEnded received")
         super.touchesEnded(touches, with: event)
-        touchDelegate?.touchesEnded(touches, in: self)
+        touchDelegate?.touchesEnded(touches, in: self, with: event)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         print("TouchEnabledMTKView: touchesCancelled received")
         super.touchesCancelled(touches, with: event)
-        touchDelegate?.touchesCancelled(touches, in: self)
+        touchDelegate?.touchesCancelled(touches, in: self, with: event)
     }
 }
 
 protocol TouchHandling: AnyObject {
-    func touchesBegan(_ touches: Set<UITouch>, in view: MTKView)
-    func touchesMoved(_ touches: Set<UITouch>, in view: MTKView)
-    func touchesEnded(_ touches: Set<UITouch>, in view: MTKView)
-    func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView)
+    func touchesBegan(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?)
+    func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?)
+    func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?)
+    func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?)
 }
 
 struct MetalCanvasView: UIViewRepresentable {
@@ -146,6 +146,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var onTextRequest: ((CGPoint) -> Void)?
         private var isDraggingSelection = false // Track if we're dragging a selection
         private var selectionDragStart: CGPoint? // Where the drag started
+        private var coordDiagLogsRemaining = 3 // One-time on-device coordinate-pipeline diagnostic logs
 
         init(
             layers: Binding<[DrawingLayer]>,
@@ -171,8 +172,11 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Update screen size in canvas state (use bounds, not drawable size)
             // Touch coordinates are in bounds space (logical points), not pixels
+            // IMPORTANT: MTKView delegate callbacks are on the main thread; update
+            // synchronously so the next touch/draw sees the new size. The previous
+            // `Task { @MainActor }` raced with touches that landed before the Task flushed.
             if let canvasState = canvasState, let renderer = renderer {
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     canvasState.screenSize = view.bounds.size
                     // Update canvas size to match new screen dimensions (via diagonal calculation)
                     renderer.updateCanvasSize(for: view.bounds.size)
@@ -298,8 +302,37 @@ struct MetalCanvasView: UIViewRepresentable {
             }
         }
 
+        // MARK: - Pressure
+        //
+        // `size * pressure` is applied in the brush vertex shader, so the value we put
+        // into `StrokePoint.pressure` directly scales the brush dot. Previously the
+        // code used `touch.force / maximumPossibleForce` for Pencil and a constant 1.0
+        // for fingers, which made Pencil strokes systematically thinner than finger
+        // strokes and ignored `BrushSettings.pressureSensitivity` entirely. (Bugs 1.3, 3.1)
+        //
+        // New behavior:
+        //   - Pencil + pressureSensitivity on  → remap raw force through
+        //     [minPressureSize, maxPressureSize].
+        //   - Pencil + pressureSensitivity off → 1.0 (no variation).
+        //   - Finger (or any non-pencil type)   → fixed 0.75 so finger and Pencil widths
+        //     feel comparable at the same brush size.
+        private func computePressure(for touch: UITouch) -> CGFloat {
+            let settings = brushSettings
+            if touch.type == .pencil {
+                guard settings.pressureSensitivity else { return 1.0 }
+                guard touch.maximumPossibleForce > 0 else { return 1.0 }
+                let raw = max(0, min(1, touch.force / touch.maximumPossibleForce))
+                let lo = settings.minPressureSize
+                let hi = settings.maxPressureSize
+                return lo + raw * (hi - lo)
+            } else {
+                // Fingers have no reliable pressure on iPad. Use a fixed mid-range value.
+                return 0.75
+            }
+        }
+
         // Touch handling for drawing
-        func touchesBegan(_ touches: Set<UITouch>, in view: MTKView) {
+        func touchesBegan(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("👆 === TOUCH BEGAN ===")
             guard let touch = touches.first else {
                 print("ERROR: No touch in set")
@@ -313,8 +346,26 @@ struct MetalCanvasView: UIViewRepresentable {
             let screenLocation = touch.location(in: view)
             let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
 
-            let pressure = touch.type == .pencil ? (touch.force > 0 ? touch.force / touch.maximumPossibleForce : 1.0) : 1.0
+            let pressure = computePressure(for: touch)
             let timestamp = touch.timestamp
+
+            // One-time coordinate-pipeline diagnostic for bug 1.1 (stroke offset).
+            // Logs the first few touches so we can confirm on-device whether screenSize
+            // and documentSize are what we expect at the moment of input.
+            if coordDiagLogsRemaining > 0, let cs = canvasState {
+                coordDiagLogsRemaining -= 1
+                let bounds = view.bounds.size
+                let drawable = view.drawableSize
+                print("🧭 COORD DIAG [\(3 - coordDiagLogsRemaining)/3]")
+                print("  screenLocation (UIKit pts): \(screenLocation)")
+                print("  document (after screenToDocument): \(location)")
+                print("  view.bounds.size (pts): \(bounds)")
+                print("  view.drawableSize (px): \(drawable)")
+                print("  canvasState.screenSize: \(cs.screenSize)")
+                print("  canvasState.documentSize: \(cs.documentSize)")
+                print("  zoomScale: \(cs.zoomScale)  panOffset: \(cs.panOffset)  rotation: \(cs.canvasRotation.degrees)°")
+                print("  touch.type: \(touch.type.rawValue)  force: \(touch.force)/\(touch.maximumPossibleForce)")
+            }
 
             print("Touch began at screen: \(screenLocation) → document: \(location) with pressure \(pressure), tool: \(currentTool)")
             print("📍 Selected layer INDEX: \(selectedLayerIndex) of \(layers.count) total layers")
@@ -670,22 +721,23 @@ struct MetalCanvasView: UIViewRepresentable {
             print("Created stroke with 1 point")
         }
 
-        func touchesMoved(_ touches: Set<UITouch>, in view: MTKView) {
+        func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             guard let touch = touches.first else {
                 print("touchesMoved: No touch in set")
                 return
             }
 
-            // Get touch location and transform from screen space to document space
-            let screenLocation = touch.location(in: view)
-            let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
+            // Latest single-point location — used by selection/preview paths that only
+            // care about the most recent finger/pencil position, not every sub-sample.
+            let latestScreenLocation = touch.location(in: view)
+            let latestLocation = canvasState?.screenToDocument(latestScreenLocation) ?? latestScreenLocation
 
             // Handle dragging an existing selection
             if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
                 // Calculate offset in document space
                 let offset = CGPoint(
-                    x: location.x - dragStart.x,
-                    y: location.y - dragStart.y
+                    x: latestLocation.x - dragStart.x,
+                    y: latestLocation.y - dragStart.y
                 )
 
                 // IMPORTANT: Update offset and render synchronously for smooth animation
@@ -705,10 +757,10 @@ struct MetalCanvasView: UIViewRepresentable {
             // Handle selection tools
             if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
                 // For rectangle select, show preview while dragging
-                let minX = min(startPoint.x, location.x)
-                let minY = min(startPoint.y, location.y)
-                let maxX = max(startPoint.x, location.x)
-                let maxY = max(startPoint.y, location.y)
+                let minX = min(startPoint.x, latestLocation.x)
+                let minY = min(startPoint.y, latestLocation.y)
+                let maxX = max(startPoint.x, latestLocation.x)
+                let maxY = max(startPoint.y, latestLocation.y)
 
                 let previewRect = CGRect(
                     x: minX,
@@ -723,15 +775,21 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
 
-                if hypot(location.x - startPoint.x, location.y - startPoint.y) > 10 {
+                if hypot(latestLocation.x - startPoint.x, latestLocation.y - startPoint.y) > 10 {
                     print("Rectangle select: dragging preview \(previewRect)")
                 }
                 return
             }
 
             if currentTool == .lasso {
-                // For lasso, build up the path as we drag and show preview
-                lassoPath.append(location)
+                // For lasso, append every coalesced sample so the path captures fine detail
+                // on Apple Pencil (~240 Hz) instead of the ~60 Hz top-level events.
+                let samples = event?.coalescedTouches(for: touch) ?? [touch]
+                for sample in samples {
+                    let sampleScreen = sample.location(in: view)
+                    let sampleDoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
+                    lassoPath.append(sampleDoc)
+                }
 
                 if let canvasState = canvasState {
                     Task { @MainActor in
@@ -751,64 +809,75 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            let pressure = touch.type == .pencil ? touch.force / touch.maximumPossibleForce : 1.0
-            let timestamp = touch.timestamp
-
             // Check if this is a shape tool
             let isShapeTool = [.line, .rectangle, .circle].contains(currentTool)
 
             if isShapeTool, let startPoint = shapeStartPoint {
-                // For shape tools, regenerate the shape from start to current point
+                // Shape tools only care about start/end; use the latest coalesced sample.
+                let endPressure = computePressure(for: touch)
                 stroke.points = generateShapePoints(
                     from: startPoint,
-                    to: location,
+                    to: latestLocation,
                     tool: currentTool,
-                    pressure: pressure,
-                    timestamp: timestamp
+                    pressure: endPressure,
+                    timestamp: touch.timestamp
                 )
                 currentStroke = stroke
             } else {
-                // Regular brush/eraser: Add point to stroke with interpolation for smooth curves
-                if let last = lastPoint {
-                    let distance = hypot(location.x - last.x, location.y - last.y)
-                    let spacing = brushSettings.size * brushSettings.spacing
+                // Regular brush/eraser: iterate every coalesced sample so Apple Pencil
+                // input at 240 Hz isn't undersampled. For each sample, keep the original
+                // distance/spacing interpolation from the previous committed point, which
+                // is what produces smooth curves at low sample rates.
+                let samples = event?.coalescedTouches(for: touch) ?? [touch]
 
-                    if distance > spacing {
-                        // Interpolate points for smoother strokes
-                        let steps = Int(ceil(distance / spacing))
-                        for i in 1...steps {
-                            let t = CGFloat(i) / CGFloat(steps)
-                            let interpLocation = CGPoint(
-                                x: last.x + (location.x - last.x) * t,
-                                y: last.y + (location.y - last.y) * t
-                            )
-                            let interpPressure = (lastTimestamp > 0) ?
-                                (1 - t) * (stroke.points.last?.pressure ?? 1.0) + t * pressure : pressure
+                for sample in samples {
+                    let sampleScreen = sample.location(in: view)
+                    let sampleLoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
+                    let samplePressure = computePressure(for: sample)
+                    let sampleTimestamp = sample.timestamp
 
-                            let point = BrushStroke.StrokePoint(
-                                location: interpLocation,
-                                pressure: interpPressure,
-                                timestamp: timestamp
-                            )
-                            stroke.points.append(point)
+                    if let last = lastPoint {
+                        let distance = hypot(sampleLoc.x - last.x, sampleLoc.y - last.y)
+                        let spacing = brushSettings.size * brushSettings.spacing
+
+                        if distance > spacing {
+                            let steps = Int(ceil(distance / spacing))
+                            for i in 1...steps {
+                                let t = CGFloat(i) / CGFloat(steps)
+                                let interpLocation = CGPoint(
+                                    x: last.x + (sampleLoc.x - last.x) * t,
+                                    y: last.y + (sampleLoc.y - last.y) * t
+                                )
+                                let previousPressure = stroke.points.last?.pressure ?? samplePressure
+                                let interpPressure = (lastTimestamp > 0)
+                                    ? (1 - t) * previousPressure + t * samplePressure
+                                    : samplePressure
+
+                                stroke.points.append(BrushStroke.StrokePoint(
+                                    location: interpLocation,
+                                    pressure: interpPressure,
+                                    timestamp: sampleTimestamp
+                                ))
+                            }
                         }
                     }
+
+                    lastPoint = sampleLoc
+                    lastTimestamp = sampleTimestamp
                 }
 
                 currentStroke = stroke
-                lastPoint = location
-                lastTimestamp = timestamp
 
                 // Print every 10th point to avoid spam
                 if stroke.points.count % 10 == 0 {
-                    print("touchesMoved: stroke has \(stroke.points.count) points")
+                    print("touchesMoved: stroke has \(stroke.points.count) points (coalesced samples: \(samples.count))")
                 }
             }
 
             // No need to call setNeedsDisplay - continuous drawing is enabled
         }
 
-        func touchesEnded(_ touches: Set<UITouch>, in view: MTKView) {
+        func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("=== TOUCH ENDED ===")
 
             // Handle ending a selection drag
@@ -1016,7 +1085,7 @@ struct MetalCanvasView: UIViewRepresentable {
             print("Stroke cleared from preview, should now be visible in layer texture")
         }
 
-        func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView) {
+        func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil
@@ -1122,11 +1191,21 @@ struct MetalCanvasView: UIViewRepresentable {
             let radiusX = abs(end.x - start.x) / 2
             let radiusY = abs(end.y - start.y) / 2
 
+            // Bug 1.4: previously when start == end both radii were 0, so the Ramanujan
+            // ellipse-perimeter formula below did 0/0 → NaN → `Int(perimeter/spacing)`
+            // trapped and crashed the app. Guard against a degenerate circle (any point
+            // drag < 1 pixel) and against non-positive spacing.
+            let spacing = brushSettings.size * brushSettings.spacing
+            guard radiusX > 0.5 || radiusY > 0.5 else {
+                // Too small to be a meaningful shape; emit nothing.
+                return []
+            }
+            guard spacing > 0 else { return [] }
+
             // Calculate number of points based on perimeter approximation
             // Ramanujan's approximation for ellipse perimeter
             let h = pow((radiusX - radiusY), 2) / pow((radiusX + radiusY), 2)
             let perimeter = .pi * (radiusX + radiusY) * (1 + (3 * h) / (10 + sqrt(4 - 3 * h)))
-            let spacing = brushSettings.size * brushSettings.spacing
             let steps = max(Int(perimeter / spacing), 16)
 
             var points: [BrushStroke.StrokePoint] = []
@@ -1530,19 +1609,35 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // MARK: - UIGestureRecognizerDelegate
 
-        /// Allow pinch, pan, and rotation gestures to work simultaneously
+        /// Allow pinch, pan, and rotation to recognize simultaneously with each other,
+        /// but NOT with any non-transform recognizer that might get attached (e.g. system
+        /// edge gestures). Previously this returned `true` unconditionally, which let the
+        /// MTKView's internal touch path race with our transform gestures and effectively
+        /// prevented pan/pinch from ever winning on device (bug 1.2).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            // Allow all transform gestures to work together (pinch + pan + rotation)
-            return true
+            return Coordinator.isTransformGesture(gestureRecognizer)
+                && Coordinator.isTransformGesture(otherGestureRecognizer)
         }
 
-        /// Block transform gestures while actively drawing
+        /// Allow transform gestures to begin even mid-stroke. When UIKit then claims the
+        /// touches for the gesture, it will call `touchesCancelled` on the MTKView, which
+        /// clears `currentStroke` via `touchesCancelled(_:in:)` above. Previously this
+        /// returned `false` whenever a stroke was in progress, which meant any 2-finger
+        /// pan/pinch/rotation was rejected because `touchesBegan` had already started a
+        /// stroke on the first finger (bug 1.2).
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            // Disable transform gestures while actively drawing
-            if currentStroke != nil {
-                return false
+            if Coordinator.isTransformGesture(gestureRecognizer) {
+                return true
             }
-            return true
+            // Non-transform gestures (should be none on our MTKView) fall back to the
+            // previous conservative behavior.
+            return currentStroke == nil
+        }
+
+        private static func isTransformGesture(_ gr: UIGestureRecognizer) -> Bool {
+            return gr is UIPinchGestureRecognizer
+                || gr is UIPanGestureRecognizer
+                || gr is UIRotationGestureRecognizer
         }
     }
 }

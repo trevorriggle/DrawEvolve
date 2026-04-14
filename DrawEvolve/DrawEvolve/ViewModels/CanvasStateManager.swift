@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Combine
 
 @MainActor
 class CanvasStateManager: ObservableObject {
@@ -49,6 +50,13 @@ class CanvasStateManager: ObservableObject {
     var enableRotationSnapping: Bool = true
 
     let historyManager = HistoryManager()
+    // Bridge the nested HistoryManager's ObservableObject changes up to this object so
+    // SwiftUI views that read `canvasState.historyManager.canUndo / canRedo` actually
+    // re-render when those flags flip. Without this bridge the redo button stayed
+    // .disabled(true) even after an undo pushed an action onto the redo stack — the
+    // visible symptom of bug 2.1. Retain as a property so the subscription lives as
+    // long as the state manager.
+    private var historyCancellable: AnyCancellable?
     var renderer: CanvasRenderer?
     private var _screenSize: CGSize = .zero
     var screenSize: CGSize {
@@ -68,7 +76,7 @@ class CanvasStateManager: ObservableObject {
     var documentSize: CGSize {
         return renderer?.canvasSize ?? CGSize(width: 2048, height: 2048)
     }
-    var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
+    @Published var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 
     var isEmpty: Bool {
         // Canvas is empty if:
@@ -94,6 +102,14 @@ class CanvasStateManager: ObservableObject {
     }
 
     init() {
+        // Forward nested HistoryManager change notifications. `objectWillChange.send()`
+        // must fire on the main actor; we're already @MainActor-isolated, so that's
+        // guaranteed for callers that mutate historyManager from the main actor (which
+        // all our mutation sites do).
+        historyCancellable = historyManager.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+
         // Start with one layer
         addLayer()
     }

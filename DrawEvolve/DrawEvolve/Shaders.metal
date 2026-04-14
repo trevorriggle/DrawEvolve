@@ -142,7 +142,13 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     }
 
     // Step 3: Apply pan
-    screenPos += pan;
+    // `pan` is supplied in UIKit coordinates (Y-down: positive pan.y means finger
+    // moved down). Our internal `screenPos` is Y-up (Y=0 at bottom, Y=viewport.y at
+    // top, because `finalPos.y = (screenPos.y/viewport.y)*2 - 1` makes Y=viewport.y
+    // map to NDC +1 = screen top). Adding pan directly therefore moved the canvas
+    // opposite of the finger vertically. Flip Y here to match UIKit semantics and
+    // the behavior of `CanvasStateManager.documentToScreen`. (Bug 2c)
+    screenPos += float2(pan.x, -pan.y);
 
     // Convert back to NDC
     finalPos = (screenPos / viewport) * 2.0 - 1.0;
