@@ -601,6 +601,19 @@ class CanvasStateManager: ObservableObject {
 
     /// Transform a point from view/screen space to document space (accounting for zoom, pan, rotation, and aspect ratio)
     func screenToDocument(_ point: CGPoint) -> CGPoint {
+        // Defensive: reject any non-finite / degenerate state instead of propagating
+        // NaN/Inf through every downstream consumer (strokes, selections, eyedropper).
+        // If this ever trips in practice, the user can recover by tapping the "reset
+        // transforms" toolbar button without restarting the app.
+        guard point.x.isFinite, point.y.isFinite,
+              screenSize.width > 0, screenSize.height > 0,
+              documentSize.width > 0, documentSize.height > 0,
+              zoomScale.isFinite, zoomScale > 0,
+              panOffset.x.isFinite, panOffset.y.isFinite,
+              canvasRotation.radians.isFinite else {
+            return .zero
+        }
+
         // Screen center (viewport - changes with rotation)
         let screenCenterX = screenSize.width / 2
         let screenCenterY = screenSize.height / 2
@@ -670,6 +683,16 @@ class CanvasStateManager: ObservableObject {
 
     /// Transform a point from document space to view/screen space (applying zoom, pan, rotation, and aspect ratio)
     func documentToScreen(_ point: CGPoint) -> CGPoint {
+        // Mirror the defensive guards in `screenToDocument`.
+        guard point.x.isFinite, point.y.isFinite,
+              screenSize.width > 0, screenSize.height > 0,
+              documentSize.width > 0, documentSize.height > 0,
+              zoomScale.isFinite, zoomScale > 0,
+              panOffset.x.isFinite, panOffset.y.isFinite,
+              canvasRotation.radians.isFinite else {
+            return .zero
+        }
+
         // Screen center (viewport - changes with rotation)
         let screenCenterX = screenSize.width / 2
         let screenCenterY = screenSize.height / 2
@@ -732,31 +755,51 @@ class CanvasStateManager: ObservableObject {
         return pt
     }
 
-    /// Apply zoom centered at a specific point in screen space
+    /// Apply zoom. `centerPoint` is the pinch location in screen space; currently only
+    /// used for future zoom-around-point restoration.
+    ///
+    /// The previous implementation tried to adjust `panOffset` so the document point
+    /// under `centerPoint` stayed fixed, but its math mixed document coordinates with
+    /// screen coordinates:
+    ///
+    ///     panOffset += centerPoint − docPoint * zoomScale
+    ///
+    /// `docPoint` lives in a 0…2048 document-space range while `centerPoint` lives in a
+    /// ~0…1366 screen-space range, so `centerPoint − docPoint*zoomScale` produced
+    /// arbitrary values that, reapplied every frame at 60 Hz, grew `panOffset`
+    /// roughly geometrically. This was the cause of the 10^48 → 10^121 coordinate
+    /// explosion after any pinch on device.
+    ///
+    /// For now zoom happens around the screen center (no pan compensation). Zoom-to-
+    /// pinch-point can be restored later with correct aspect/rotation-aware math.
     func zoom(scale: CGFloat, centerPoint: CGPoint) {
-        // Clamp the new scale to min/max bounds
+        guard scale.isFinite, scale > 0 else { return }
+        guard centerPoint.x.isFinite, centerPoint.y.isFinite else { return }
+
         let newScale = min(max(scale, minZoom), maxZoom)
+        guard newScale.isFinite, newScale > 0 else { return }
 
-        // Calculate the document-space point that should remain fixed
-        let docPoint = screenToDocument(centerPoint)
-
-        // Update the zoom scale
         zoomScale = newScale
-
-        // Adjust pan offset so the document point stays at the same screen position
-        let newScreenPoint = CGPoint(x: docPoint.x * zoomScale, y: docPoint.y * zoomScale)
-        panOffset.x += centerPoint.x - newScreenPoint.x
-        panOffset.y += centerPoint.y - newScreenPoint.y
     }
 
-    /// Pan the canvas by a delta in screen space
+    /// Pan the canvas by a delta in screen space.
     func pan(delta: CGPoint) {
+        guard delta.x.isFinite, delta.y.isFinite else { return }
+
         panOffset.x += delta.x
         panOffset.y += delta.y
+
+        // Hard clamp so a corrupted frame can't push panOffset to infinity. With a
+        // 2048-pt canvas and max 10× zoom, legitimate pan stays well inside ±2×
+        // document size; anything past that is runaway state.
+        let maxPan = 2 * max(documentSize.width, documentSize.height)
+        panOffset.x = min(max(panOffset.x, -maxPan), maxPan)
+        panOffset.y = min(max(panOffset.y, -maxPan), maxPan)
     }
 
-    /// Rotate the canvas by an angle increment
+    /// Rotate the canvas by an angle increment.
     func rotate(by angle: Angle, snapToGrid: Bool = true) {
+        guard angle.radians.isFinite else { return }
         // Prevent rotation if change is negligible
         guard abs(angle.degrees) > 0.1 else { return }
 
@@ -768,7 +811,9 @@ class CanvasStateManager: ObservableObject {
             newRotation = .degrees(newRotation.degrees + 360)
         }
 
-        // Snap to grid if enabled
+        // Snap to grid if enabled (typically only on gesture .ended; passing true here
+        // during continuous rotation causes per-frame 15° ratcheting — see the gesture
+        // handler comment for the bug this avoids).
         if snapToGrid && enableRotationSnapping {
             let snappedDegrees = round(newRotation.degrees / rotationSnappingInterval.degrees) * rotationSnappingInterval.degrees
             newRotation = .degrees(snappedDegrees)

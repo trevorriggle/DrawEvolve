@@ -1528,14 +1528,21 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Pinch began at \(location), scale: \(gesture.scale)")
 
             case .changed:
-                // Apply zoom centered at pinch location
-                Task { @MainActor in
-                    let currentScale = canvasState.zoomScale
-                    let newScale = currentScale * gesture.scale
+                // CRITICAL: capture `gesture.scale` synchronously BEFORE resetting and
+                // BEFORE dispatching state mutation. Previously the read lived inside
+                // `Task { @MainActor in … }`, which ran after `gesture.scale = 1.0`
+                // executed later on the same runloop turn, so the effective scale delta
+                // was always 1.0 and zoom never changed (device bug report).
+                let scaleDelta = gesture.scale
+                gesture.scale = 1.0
+
+                guard scaleDelta.isFinite, scaleDelta > 0 else { return }
+
+                // Gesture callbacks are main-actor; run the mutation synchronously.
+                MainActor.assumeIsolated {
+                    let newScale = canvasState.zoomScale * scaleDelta
                     canvasState.zoom(scale: newScale, centerPoint: location)
                 }
-                // Reset gesture scale so we get incremental changes
-                gesture.scale = 1.0
 
             case .ended, .cancelled:
                 print("Pinch ended, final zoom: \(canvasState.zoomScale)")
@@ -1554,12 +1561,13 @@ struct MetalCanvasView: UIViewRepresentable {
 
             case .changed:
                 let translation = gesture.translation(in: view)
-                // Apply pan delta
-                Task { @MainActor in
+                gesture.setTranslation(.zero, in: view)
+
+                guard translation.x.isFinite, translation.y.isFinite else { return }
+
+                MainActor.assumeIsolated {
                     canvasState.pan(delta: translation)
                 }
-                // Reset translation so we get incremental changes
-                gesture.setTranslation(.zero, in: view)
 
             case .ended, .cancelled:
                 print("Two-finger pan ended")
@@ -1577,26 +1585,28 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Rotation began")
 
             case .changed:
+                // Capture delta BEFORE resetting. Do NOT snap during `.changed`: the
+                // previous code passed `snapToGrid: true` on every incremental event,
+                // which at 60 Hz rounded each small delta to the nearest 15° and
+                // produced "rotation jumps by 130°+ per gesture" (device bug report).
+                // We accumulate the raw delta here and snap only on `.ended`.
                 let rotationAngle = Angle(radians: gesture.rotation)
-
-                Task { @MainActor in
-                    // Disable snapping if user holds down option key (on iPad with keyboard)
-                    let snapToGrid = !gesture.modifierFlags.contains(.alternate)
-                    canvasState.rotate(by: rotationAngle, snapToGrid: snapToGrid)
-                }
-
-                // Reset rotation so we get incremental changes
                 gesture.rotation = 0
+
+                guard rotationAngle.radians.isFinite else { return }
+
+                MainActor.assumeIsolated {
+                    canvasState.rotate(by: rotationAngle, snapToGrid: false)
+                }
 
             case .ended:
                 print("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
 
-                // Optionally snap to nearest 90° on release if very close
-                let currentDegrees = canvasState.canvasRotation.degrees
-                let nearest90 = round(currentDegrees / 90) * 90
-
-                if abs(currentDegrees - nearest90) < 5 {  // Within 5° of 90° increment
-                    Task { @MainActor in
+                // Optionally snap to nearest 90° on release if very close.
+                MainActor.assumeIsolated {
+                    let currentDegrees = canvasState.canvasRotation.degrees
+                    let nearest90 = round(currentDegrees / 90) * 90
+                    if abs(currentDegrees - nearest90) < 5 {
                         canvasState.canvasRotation = .degrees(nearest90)
                         print("Snapped to nearest 90°: \(nearest90)°")
                     }
