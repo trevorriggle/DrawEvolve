@@ -77,10 +77,10 @@ struct MetalCanvasView: UIViewRepresentable {
         metalView.enableSetNeedsDisplay = false  // Use continuous drawing mode
         metalView.isPaused = false  // Continuous updates at preferredFramesPerSecond
         metalView.framebufferOnly = false  // Allow texture readback
-        // Canvas + workbench are both pure white — user wants a seamless white
-        // drawing surface with no visible canvas boundary.
-        metalView.clearColor = MTLClearColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1)
-        metalView.backgroundColor = .white
+        // Off-canvas workbench is light gray so the canvas boundary is visible
+        // when zoomed/panned out. At default zoom the canvas fills the viewport.
+        metalView.clearColor = MTLClearColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1)
+        metalView.backgroundColor = UIColor(white: 0.9, alpha: 1.0)
         metalView.preferredFramesPerSecond = 60  // Smooth drawing at 60fps
 
         // Enable multi-touch and pencil input

@@ -121,14 +121,16 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     float2 finalPos = positions[vertexID];
     float2 finalTexCoord = texCoords[vertexID];  // IDENTITY — no transforms.
 
-    // Aspect-ratio correction: canvas is square, viewport usually isn't. Shrink
-    // the quad so the square canvas fits the shorter viewport dimension.
+    // Aspect-ratio correction: canvas is square, viewport usually isn't. Scale
+    // the quad so the square canvas *fills* (covers) the longer viewport
+    // dimension — at zoom=1 the entire screen is inside the canvas. The shorter
+    // axis gets scaled up past ±1 NDC, clipping outside the viewport.
     float viewportAspect = viewport.x / viewport.y;
     float2 scale = float2(1.0, 1.0);
     if (viewportAspect > 1.0) {
-        scale.x = 1.0 / viewportAspect;  // landscape: pillarbox
+        scale.y = viewportAspect;        // landscape: extend quad top/bottom
     } else {
-        scale.y = viewportAspect;        // portrait: letterbox
+        scale.x = 1.0 / viewportAspect;  // portrait: extend quad left/right
     }
     float2 correctedPos = finalPos * scale;
 

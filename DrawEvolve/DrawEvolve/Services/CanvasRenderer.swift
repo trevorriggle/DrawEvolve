@@ -599,7 +599,7 @@ class CanvasRenderer: NSObject {
         // Transform document-space points to UIKit-screen-space points, matching
         // `CanvasStateManager.documentToScreen`. Must stay in sync with the shader's
         // position transform in `quadVertexShaderWithTransform`.
-        let fitSize = min(viewportSize.width, viewportSize.height)
+        let fitSize = max(viewportSize.width, viewportSize.height)
         let centerX = viewportSize.width / 2
         let centerY = viewportSize.height / 2
         let cosAngle = cos(canvasRotation)

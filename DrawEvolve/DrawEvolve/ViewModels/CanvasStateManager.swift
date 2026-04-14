@@ -630,7 +630,7 @@ class CanvasStateManager: ObservableObject {
             return .zero
         }
 
-        let fitSize = min(screenSize.width, screenSize.height)
+        let fitSize = max(screenSize.width, screenSize.height)
         let centerX = screenSize.width / 2
         let centerY = screenSize.height / 2
 
@@ -679,7 +679,7 @@ class CanvasStateManager: ObservableObject {
             return .zero
         }
 
-        let fitSize = min(screenSize.width, screenSize.height)
+        let fitSize = max(screenSize.width, screenSize.height)
         let centerX = screenSize.width / 2
         let centerY = screenSize.height / 2
 
