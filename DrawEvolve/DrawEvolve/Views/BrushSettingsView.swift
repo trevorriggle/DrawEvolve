@@ -19,7 +19,7 @@ struct BrushSettingsView: View {
                     Text(String(format: "%.0f px", settings.size))
                         .foregroundColor(.primary)
                 }
-                Slider(value: $settings.size, in: 1...100)
+                Slider(value: $settings.size, in: 1...200)
             }
 
             Section("Opacity") {

@@ -193,7 +193,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 MainActor.assumeIsolated {
                     canvasState.screenSize = view.bounds.size
                     // Update canvas size to match new screen dimensions (via diagonal calculation)
-                    renderer.updateCanvasSize(for: view.bounds.size)
+                    // Use drawable pixel size (not bounds.size in points) so
+                    // the canvas texture matches the display's native
+                    // resolution. Otherwise the 2048² texture is upscaled
+                    // ~1.33× to a ~2732px-wide drawable on iPad Pro, producing
+                    // blocky/low-res stroke edges. Doc coord system scales
+                    // with texture size; brush defaults compensated below.
+                    renderer.updateCanvasSize(for: view.drawableSize)
                     print("  - Updated canvasState.screenSize to \(view.bounds.size) (bounds, not drawable size)")
                     print("  - Canvas size updated to \(renderer.canvasSize)")
                 }
@@ -219,7 +225,13 @@ struct MetalCanvasView: UIViewRepresentable {
                     canvasState.screenSize = view.bounds.size
                     canvasState.renderer = renderer
                     // Ensure canvas size is immediately updated based on screen size
-                    renderer.updateCanvasSize(for: view.bounds.size)
+                    // Use drawable pixel size (not bounds.size in points) so
+                    // the canvas texture matches the display's native
+                    // resolution. Otherwise the 2048² texture is upscaled
+                    // ~1.33× to a ~2732px-wide drawable on iPad Pro, producing
+                    // blocky/low-res stroke edges. Doc coord system scales
+                    // with texture size; brush defaults compensated below.
+                    renderer.updateCanvasSize(for: view.drawableSize)
                     print("MetalCanvasView.draw: Shared renderer with canvas state")
                     print("  - Screen size: \(view.bounds.size)")
                     print("  - Canvas size: \(renderer.canvasSize)")

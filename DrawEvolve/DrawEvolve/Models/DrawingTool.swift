@@ -89,7 +89,11 @@ enum DrawingTool {
 
 /// Brush settings
 struct BrushSettings {
-    var size: CGFloat = 5.0
+    // Doubled from 5 to preserve the previous on-screen stamp size after
+    // the canvas texture bump (2048→4096 on iPad Pro). size is in doc pixels;
+    // doubling the doc resolution halves the on-screen thickness at the same
+    // numeric size, so we compensate the default.
+    var size: CGFloat = 10.0
     var opacity: CGFloat = 1.0
     var hardness: CGFloat = 0.8
     var spacing: CGFloat = 0.1

@@ -7,7 +7,7 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 ## Tool-by-tool findings
 
 ### Shape tools
-- **Circle and Square/Rectangle** — these *shouldn't* account for canvas rotation. Currently they do, which means a rectangle drawn on a rotated canvas ends up rotated relative to the drag. They should draw axis-aligned to the user's on-screen drag regardless of canvas rotation.
+- ✅ **Circle and Square/Rectangle rotation** — FIXED. Shape generation now happens in screen space with each stamp mapped back through `screenToDocument`; rectangle + circle are screen-axis-aligned regardless of canvas rotation/zoom/pan. Line unchanged (rotation-invariant). Confirmed on device.
 
 ### Paint bucket
 - Fill takes a long time to complete.
@@ -22,24 +22,30 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 
 ### Magic selection (magic wand)
 - Doesn't work.
-- Questionable whether it needs to be in v1 at all.
+- **Decision: cut from UI** for v1 (Trevor confirmed).
 
 ### Smudge (finger smudge tool)
 - Doesn't work.
-- Questionable whether it needs to be in v1.
+- **Decision: cut from UI** for v1 (Trevor confirmed).
 
 ### "Black triangle" tool
-- Does *something* but unclear what. Needs identification — likely a stale/unused tool that should either be documented or removed.
+- Does *something* but unclear what.
+- **Decision: cut from UI** for v1 (Trevor confirmed).
 
 ### Brush dots / stamp preview
-- "Brush dot things" don't seem to work (likely the brush size/hardness/opacity preview dots next to the size slider).
+- "Brush dot things" don't seem to work.
+- **Decision: cut from UI** for v1 if still broken after brush tuning pass.
 
 ### Rectangular select
 - Selection and move work after today's polygon rewrite.
 - Still exhibits the ~10px Y-jump when Delete is tapped (see April 15 revival journal).
 
 ### Clipboard button
-- Redundant / unclear purpose. Probably cut candidate.
+- Redundant / unclear purpose.
+- **Decision: cut from UI** for v1 (Trevor confirmed).
+
+### Stroke resolution (canvas-wide)
+- ✅ **Low-res / blocky stroke edges** — FIXED. Canvas texture now sizes from `view.drawableSize` (pixels) instead of `view.bounds.size` (points), pushing it from 2048² to 4096² on iPad Pro so strokes render at the display's native resolution. Default `BrushSettings.size` doubled (5 → 10) and slider max doubled (100 → 200) to compensate for the doubled doc-pixel coord system. Memory cost: ~48 MB per layer (320 MB at 5 layers) — fine on iPad Pro, monitor on base iPad.
 
 ---
 
@@ -53,6 +59,7 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 
 - **Tool selected indicator** — when a tool is selected, briefly show the tool's name mid-screen (fade in, hold briefly, fade out). Quick affordance so the user knows what they just tapped.
 - **Brush settings** — full pass needed on true hardware (sizes, hardness curves, pressure curves, spacing defaults). Today's prompt-side fixes don't cover on-iPad feel.
+- **Hand-drawn tool icons** — Trevor considering replacing SF Symbols with custom icons for personality. Target size: 44×44 pt button with ~22pt glyph; design as vector (PDF/SVG) or raster at 132×132px (@3×).
 
 ---
 
@@ -66,10 +73,11 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 ## Triage for TestFlight
 
 **Must fix before ship:**
+- ~~Circle/Rectangle rotation behavior.~~ ✅
+- ~~Low-res stroke rendering.~~ ✅
 - Paint bucket outline + performance.
 - Text breakpoint.
 - Color picker / eyedropper.
-- Circle/Rectangle rotation behavior.
 - AI feedback history panel layout + default-most-recent.
 - Image import tool.
 - Selection delete ~10px jump.
@@ -77,10 +85,11 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 **Should fix before ship (polish):**
 - Tool-selected mid-screen indicator.
 - Brush settings on-hardware tuning pass.
-- Identify and fix/remove the "black triangle" tool.
-- Brush stamp preview dots.
+- Hand-drawn tool icons (if Trevor has the time).
 
-**Cut candidates (defer to v1.1 or remove):**
+**Cut from UI for v1 (decided):**
 - Magic selection.
 - Smudge tool.
-- Clipboard button (verify purpose first).
+- Clipboard button.
+- "Black triangle" tool.
+- Brush stamp preview dots (if still broken after brush tuning pass).
