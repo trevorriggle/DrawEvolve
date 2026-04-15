@@ -1130,27 +1130,39 @@ class CanvasRenderer: NSObject {
     // MARK: - Selection Operations
 
     /// Clear pixels in a rectangular selection
+    /// Convert a doc-space rect to an integer texture-pixel rect (x, y, w, h).
+    /// Uses floor on the near edge and ceil on the far edge so any pixel the
+    /// rect touches is included, then clamps to the texture. Returns nil when
+    /// the clamped rect is empty.
+    private func texturePixelRect(for rect: CGRect, in texture: MTLTexture, screenSize: CGSize) -> (Int, Int, Int, Int)? {
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+
+        let minFX = rect.origin.x * scaleX
+        let minFY = rect.origin.y * scaleY
+        let maxFX = (rect.origin.x + rect.width) * scaleX
+        let maxFY = (rect.origin.y + rect.height) * scaleY
+
+        let x0 = max(0, Int(floor(minFX)))
+        let y0 = max(0, Int(floor(minFY)))
+        let x1 = min(texture.width, Int(ceil(maxFX)))
+        let y1 = min(texture.height, Int(ceil(maxFY)))
+
+        let w = x1 - x0
+        let h = y1 - y0
+        guard w > 0, h > 0 else { return nil }
+        return (x0, y0, w, h)
+    }
+
     func clearRect(_ rect: CGRect, in texture: MTLTexture, screenSize: CGSize) {
         print("CanvasRenderer: Clearing rect \(rect)")
 
-        // Scale rect from screen space to texture space
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
-        let scaledRect = CGRect(
-            x: rect.origin.x * scaleX,
-            y: rect.origin.y * scaleY,
-            width: rect.width * scaleX,
-            height: rect.height * scaleY
-        )
-
-        let x = Int(scaledRect.origin.x)
-        let y = Int(scaledRect.origin.y)
-        let w = Int(scaledRect.width)
-        let h = Int(scaledRect.height)
-
-        // Bounds check
-        guard x >= 0, y >= 0, x + w <= texture.width, y + h <= texture.height else {
-            print("ERROR: Rect outside texture bounds")
+        // Convert doc-space rect to integer pixel rect. Use floor/ceil so every
+        // pixel the rect touches is included, then clamp to texture bounds.
+        // clearRect and extractPixels MUST use identical integer rects or
+        // extracted/cleared regions drift and leave ghost pixels on move.
+        guard let (x, y, w, h) = texturePixelRect(for: rect, in: texture, screenSize: screenSize) else {
+            print("ERROR: Rect outside texture bounds or empty")
             return
         }
 
@@ -1254,17 +1266,19 @@ class CanvasRenderer: NSObject {
             return inside
         }
 
-        // Find bounding box of path
-        let minX = max(0, Int(scaledPath.map { $0.x }.min() ?? 0))
-        let maxX = min(width - 1, Int(scaledPath.map { $0.x }.max() ?? CGFloat(width)))
-        let minY = max(0, Int(scaledPath.map { $0.y }.min() ?? 0))
-        let maxY = min(height - 1, Int(scaledPath.map { $0.y }.max() ?? CGFloat(height)))
+        // Find bounding box of path. floor/ceil so edge pixels aren't shaved.
+        let minX = max(0, Int(floor(scaledPath.map { $0.x }.min() ?? 0)))
+        let maxX = min(width - 1, Int(ceil(scaledPath.map { $0.x }.max() ?? CGFloat(width))))
+        let minY = max(0, Int(floor(scaledPath.map { $0.y }.min() ?? 0)))
+        let maxY = min(height - 1, Int(ceil(scaledPath.map { $0.y }.max() ?? CGFloat(height))))
 
-        // Clear pixels inside the path
+        // Clear pixels inside the path. Test at pixel CENTER (px+0.5, py+0.5)
+        // so edge pixels that are mostly-inside get included — testing at the
+        // corner drops thin edge slivers.
         var clearedCount = 0
         for py in minY...maxY {
             for px in minX...maxX {
-                let point = CGPoint(x: CGFloat(px), y: CGFloat(py))
+                let point = CGPoint(x: CGFloat(px) + 0.5, y: CGFloat(py) + 0.5)
                 if isPointInPolygon(point, polygon: scaledPath) {
                     let idx = (py * width + px) * 4
                     guard idx + 3 < pixelData.count else { continue }
@@ -1308,24 +1322,9 @@ class CanvasRenderer: NSObject {
     func extractPixels(from rect: CGRect, in texture: MTLTexture, screenSize: CGSize) -> UIImage? {
         print("CanvasRenderer: Extracting pixels from rect \(rect)")
 
-        // Scale rect from screen space to texture space
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
-        let scaledRect = CGRect(
-            x: rect.origin.x * scaleX,
-            y: rect.origin.y * scaleY,
-            width: rect.width * scaleX,
-            height: rect.height * scaleY
-        )
-
-        let x = Int(scaledRect.origin.x)
-        let y = Int(scaledRect.origin.y)
-        let w = Int(scaledRect.width)
-        let h = Int(scaledRect.height)
-
-        // Bounds check
-        guard x >= 0, y >= 0, x + w <= texture.width, y + h <= texture.height, w > 0, h > 0 else {
-            print("ERROR: Rect outside texture bounds or invalid dimensions")
+        // Must use identical integer rect as clearRect — see note there.
+        guard let (x, y, w, h) = texturePixelRect(for: rect, in: texture, screenSize: screenSize) else {
+            print("ERROR: Rect outside texture bounds or empty")
             return nil
         }
 
@@ -1413,11 +1412,11 @@ class CanvasRenderer: NSObject {
         let scaleY = CGFloat(texture.height) / screenSize.height
         let scaledPath = path.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
 
-        // Find bounding box
-        let minX = max(0, Int(scaledPath.map { $0.x }.min() ?? 0))
-        let maxX = min(texture.width - 1, Int(scaledPath.map { $0.x }.max() ?? CGFloat(texture.width)))
-        let minY = max(0, Int(scaledPath.map { $0.y }.min() ?? 0))
-        let maxY = min(texture.height - 1, Int(scaledPath.map { $0.y }.max() ?? CGFloat(texture.height)))
+        // Find bounding box. floor/ceil so edge pixels aren't shaved.
+        let minX = max(0, Int(floor(scaledPath.map { $0.x }.min() ?? 0)))
+        let maxX = min(texture.width - 1, Int(ceil(scaledPath.map { $0.x }.max() ?? CGFloat(texture.width))))
+        let minY = max(0, Int(floor(scaledPath.map { $0.y }.min() ?? 0)))
+        let maxY = min(texture.height - 1, Int(ceil(scaledPath.map { $0.y }.max() ?? CGFloat(texture.height))))
 
         let w = maxX - minX + 1
         let h = maxY - minY + 1
@@ -1477,7 +1476,9 @@ class CanvasRenderer: NSObject {
                     for col in 0..<w {
                         let texX = minX + col
                         let texY = minY + row
-                        let point = CGPoint(x: CGFloat(texX), y: CGFloat(texY))
+                        // Test pixel CENTER so edge pixels mostly inside the
+                        // polygon are included (matches clearPath).
+                        let point = CGPoint(x: CGFloat(texX) + 0.5, y: CGFloat(texY) + 0.5)
 
                         let srcOffset = (texY * width + texX) * 4
                         let dstOffset = (row * w + col) * 4
