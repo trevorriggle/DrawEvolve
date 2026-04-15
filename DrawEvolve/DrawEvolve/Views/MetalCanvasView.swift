@@ -268,6 +268,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     stroke,
                     to: renderEncoder,
                     viewportSize: view.bounds.size,
+                    drawableSize: view.drawableSize,
                     zoomScale: zoomScale,
                     panOffset: panOffset,
                     canvasRotation: rotation

@@ -570,6 +570,7 @@ class CanvasRenderer: NSObject {
         _ stroke: BrushStroke,
         to renderEncoder: MTLRenderCommandEncoder,
         viewportSize: CGSize,
+        drawableSize: CGSize,
         zoomScale: CGFloat = 1.0,
         panOffset: CGPoint = .zero,
         canvasRotation: Double = 0.0
@@ -583,13 +584,32 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
+        // Match the committed-on-screen stamp size.
+        //
+        // The committed stroke renders at `settings.size` TEXTURE pixels into a
+        // `canvasSize`-sized texture. The compositor then maps that texture to
+        // `fitSize × fitSize` of the DRAWABLE (pixels), further multiplied by
+        // zoomScale. The preview, meanwhile, uses Metal `[[point_size]]` which
+        // is always in RENDER-TARGET pixels (the drawable), regardless of the
+        // point-space viewport we pass the vertex shader.
+        //
+        // On-screen equivalent size of the committed stroke in drawable pixels:
+        //     settings.size * (drawableFit / canvasSize.width) * zoomScale
+        //
+        // The old preview used `settings.size * zoomScale`, which was off by
+        // the texture→screen ratio `drawableFit / canvasSize.width`. On iPad
+        // that's ≈2732/2048 ≈ 1.33×, so committed was visibly larger and the
+        // absolute gap scaled linearly with brush size.
+        let drawableFit = max(drawableSize.width, drawableSize.height)
+        let textureToScreen = canvasSize.width > 0 ? drawableFit / canvasSize.width : 1.0
+
         let previewColor: UIColor = isEraser
             ? UIColor(white: 0.55, alpha: 0.45)
             : stroke.settings.color
         let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
         var uniforms = BrushUniforms(
             color: previewColor,
-            size: Float(stroke.settings.size * zoomScale),
+            size: Float(stroke.settings.size * textureToScreen * zoomScale),
             opacity: Float(previewOpacity),
             hardness: Float(stroke.settings.hardness)
         )
