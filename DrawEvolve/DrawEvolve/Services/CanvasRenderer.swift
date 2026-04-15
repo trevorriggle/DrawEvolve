@@ -592,8 +592,8 @@ class CanvasRenderer: NSObject {
         // factor the preview dot stays the same physical size while the committed
         // dot grows / shrinks — they appear wildly different at zoom ≠ 1.
         // `size * zoom` makes the preview match the committed size visually.
-        let previewColor: SIMD4<Float> = isEraser
-            ? SIMD4<Float>(0.55, 0.55, 0.55, 0.45)
+        let previewColor: UIColor = isEraser
+            ? UIColor(white: 0.55, alpha: 0.45)
             : stroke.settings.color
         let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
         var uniforms = BrushUniforms(
