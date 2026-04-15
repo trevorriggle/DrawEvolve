@@ -475,10 +475,34 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Handle move tool — grab every pixel on the selected layer as a
+            // single floating selection so the user can drag the whole layer.
+            // Reuses the existing rect-selection extract/drag pipeline: build a
+            // full-document rect, extract pixels (which clears the layer), then
+            // fall through to the in-selection drag check below.
+            if currentTool == .move, let canvasState = canvasState {
+                let alreadyHasSelection = MainActor.assumeIsolated {
+                    canvasState.selectionPixels != nil
+                }
+                if !alreadyHasSelection {
+                    MainActor.assumeIsolated {
+                        let fullRect = CGRect(origin: .zero, size: canvasState.documentSize)
+                        canvasState.activeSelection = fullRect
+                        canvasState.selectionPath = nil
+                        canvasState.extractSelectionPixels()
+                        canvasState.renderSelectionInRealTime()
+                    }
+                    print("Move tool: extracted full layer as selection")
+                }
+            }
+
             // Check if we're touching inside an existing selection (for any tool)
             if let canvasState = canvasState {
                 let shouldStartDragging = MainActor.assumeIsolated {
                     guard canvasState.selectionPixels != nil else { return false }
+                    // Move tool always drags from any tap — the selection
+                    // covers the whole layer so isPointInSelection is moot.
+                    if currentTool == .move { return true }
                     return isPointInSelection(location)
                 }
 
