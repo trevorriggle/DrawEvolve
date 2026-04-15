@@ -141,7 +141,11 @@ struct MetalCanvasView: UIViewRepresentable {
         private var currentStroke: BrushStroke?
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
-        private var shapeStartPoint: CGPoint? // For shape tools
+        private var shapeStartPoint: CGPoint? // For shape tools (doc space)
+        // Screen-space start for shape tools that should ignore canvas rotation
+        // (rectangle, circle). Line is rotation-invariant so it can use the
+        // doc-space start directly.
+        private var shapeStartScreen: CGPoint?
         private var lassoPath: [CGPoint] = [] // For lasso selection
         private var polygonPoints: [CGPoint] = [] // For polygon tool
         private var canvasState: CanvasStateManager?
@@ -712,7 +716,8 @@ struct MetalCanvasView: UIViewRepresentable {
             if isShapeTool {
                 // For shape tools, just store the start point
                 shapeStartPoint = location
-                print("Shape tool: stored start point \(location)")
+                shapeStartScreen = screenLocation
+                print("Shape tool: stored start point \(location) (screen: \(screenLocation))")
             }
 
             // Start new stroke
@@ -824,13 +829,43 @@ struct MetalCanvasView: UIViewRepresentable {
             if isShapeTool, let startPoint = shapeStartPoint {
                 // Shape tools only care about start/end; use the latest coalesced sample.
                 let endPressure = computePressure(for: touch)
-                stroke.points = generateShapePoints(
-                    from: startPoint,
-                    to: latestLocation,
-                    tool: currentTool,
-                    pressure: endPressure,
-                    timestamp: touch.timestamp
-                )
+                // Rectangle and circle should be SCREEN-axis-aligned regardless
+                // of canvas rotation/zoom/pan. We generate their path in
+                // screen space and map each point back through screenToDocument
+                // — which undoes the active canvas transform — so that when
+                // the committed stamps are displayed via the compositor
+                // (which re-applies the transform) they end up screen-aligned.
+                // Line is rotation-invariant so it stays in doc space.
+                if let canvasState = canvasState,
+                   let startScreen = shapeStartScreen,
+                   (currentTool == .rectangle || currentTool == .circle) {
+                    // Generate the shape in SCREEN space with the same
+                    // generator (it's coordinate-agnostic), then map each
+                    // point back through screenToDocument.
+                    let endScreen = latestScreenLocation
+                    let screenPoints = generateShapePoints(
+                        from: startScreen,
+                        to: endScreen,
+                        tool: currentTool,
+                        pressure: endPressure,
+                        timestamp: touch.timestamp
+                    )
+                    stroke.points = screenPoints.map { sp in
+                        BrushStroke.StrokePoint(
+                            location: canvasState.screenToDocument(sp.location),
+                            pressure: sp.pressure,
+                            timestamp: sp.timestamp
+                        )
+                    }
+                } else {
+                    stroke.points = generateShapePoints(
+                        from: startPoint,
+                        to: latestLocation,
+                        tool: currentTool,
+                        pressure: endPressure,
+                        timestamp: touch.timestamp
+                    )
+                }
                 currentStroke = stroke
             } else {
                 // Regular brush/eraser: iterate every coalesced sample so Apple Pencil
@@ -941,6 +976,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
 
                 shapeStartPoint = nil
+                shapeStartScreen = nil
                 return
             }
 
@@ -954,6 +990,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     // Clear lasso path and preview
                     lassoPath = []
                     shapeStartPoint = nil
+                shapeStartScreen = nil
                     if let canvasState = canvasState {
                         Task { @MainActor in
                             canvasState.previewLassoPath = nil
@@ -976,6 +1013,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     // Clear lasso path and preview
                     lassoPath = []
                     shapeStartPoint = nil
+                shapeStartScreen = nil
                     if let canvasState = canvasState {
                         Task { @MainActor in
                             canvasState.previewLassoPath = nil
@@ -1004,6 +1042,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Clear lasso path
                 lassoPath = []
                 shapeStartPoint = nil
+                shapeStartScreen = nil
                 return
             }
 
@@ -1088,6 +1127,7 @@ struct MetalCanvasView: UIViewRepresentable {
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil
+            shapeStartScreen = nil
             marqueeStartScreen = nil
             print("Stroke cleared from preview, should now be visible in layer texture")
         }
@@ -1096,6 +1136,7 @@ struct MetalCanvasView: UIViewRepresentable {
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil
+            shapeStartScreen = nil
             marqueeStartScreen = nil
             lassoPath = []
             polygonPoints = []

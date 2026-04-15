@@ -130,22 +130,29 @@ struct DrawingCanvasView: View {
                     .transition(.opacity)
                 }
 
-                // Layer indicator - always show current layer
-                HStack(spacing: 4) {
-                    Image(systemName: "square.stack.3d.up.fill")
-                        .font(.caption2)
-                    Text(canvasState.layers[safe: canvasState.selectedLayerIndex]?.name ?? "Layer")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.ultraThinMaterial)
-                .cornerRadius(8)
             }
             .padding(.top, 8)
             .padding(.trailing, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .allowsHitTesting(false)
+
+            // Layer indicator — pinned to the bottom center of the screen so
+            // it's always visible regardless of which gallery/panels are open.
+            // SwiftUI alignment + safe-area padding handles iPad orientation
+            // changes automatically (portrait ↔ landscape reflow).
+            HStack(spacing: 4) {
+                Image(systemName: "square.stack.3d.up.fill")
+                    .font(.caption2)
+                Text(canvasState.layers[safe: canvasState.selectedLayerIndex]?.name ?? "Layer")
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.ultraThinMaterial)
+            .cornerRadius(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 12)
             .allowsHitTesting(false)
 
             if let path = canvasState.selectionPath {
