@@ -55,6 +55,7 @@ actor OpenAIManager {
         let requestBody: [String: Any] = [
             "image": base64Image,
             "context": [
+                "skillLevel": context.skillLevel,
                 "subject": context.subject,
                 "style": context.style,
                 "artists": context.artists,

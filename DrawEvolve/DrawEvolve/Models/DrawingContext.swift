@@ -9,6 +9,7 @@ import Foundation
 
 /// Holds the user's pre-drawing questionnaire responses
 struct DrawingContext: Codable {
+    var skillLevel: String = "Beginner"
     var subject: String = ""
     var style: String = ""
     var artists: String = ""
