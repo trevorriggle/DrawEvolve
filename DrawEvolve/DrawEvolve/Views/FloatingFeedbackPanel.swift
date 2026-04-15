@@ -20,7 +20,7 @@ struct FloatingFeedbackPanel: View {
     @State private var screenSize: CGSize = .zero
 
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
-    private let expandedSize: CGSize = CGSize(width: 525, height: 500)
+    private let expandedSize: CGSize = CGSize(width: 656, height: 625)
     private let historyMenuWidth: CGFloat = 200
 
     var body: some View {
