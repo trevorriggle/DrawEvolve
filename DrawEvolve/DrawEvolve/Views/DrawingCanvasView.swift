@@ -221,10 +221,6 @@ struct DrawingCanvasView: View {
                                 canvasState.currentTool = .circle
                             }
 
-                            ToolButton(icon: DrawingTool.polygon.icon, isSelected: canvasState.currentTool == .polygon) {
-                                canvasState.currentTool = .polygon
-                            }
-
                             // Fill and color tools
                             ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
                                 canvasState.currentTool = .paintBucket
@@ -241,27 +237,6 @@ struct DrawingCanvasView: View {
 
                             ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
                                 canvasState.currentTool = .lasso
-                            }
-
-                            ToolButton(icon: DrawingTool.magicWand.icon, isSelected: canvasState.currentTool == .magicWand) {
-                                canvasState.currentTool = .magicWand
-                            }
-
-                            ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
-                                canvasState.currentTool = .smudge
-                            }
-
-                            // Effect tools
-                            ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
-                                canvasState.currentTool = .blur
-                            }
-
-                            ToolButton(icon: DrawingTool.sharpen.icon, isSelected: canvasState.currentTool == .sharpen) {
-                                canvasState.currentTool = .sharpen
-                            }
-
-                            ToolButton(icon: DrawingTool.cloneStamp.icon, isSelected: canvasState.currentTool == .cloneStamp) {
-                                canvasState.currentTool = .cloneStamp
                             }
 
                             ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {

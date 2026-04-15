@@ -18,8 +18,6 @@ class CanvasRenderer: NSObject {
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
-    private var blurComputeState: MTLComputePipelineState?
-    private var sharpenComputeState: MTLComputePipelineState?
 
     // Canvas dimensions - dynamically calculated to be a square larger than screen diagonal
     // This ensures no clipping/distortion when rotating the canvas
@@ -70,9 +68,7 @@ class CanvasRenderer: NSObject {
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
               let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
               let compositeFragment = library.makeFunction(name: "compositeFragmentShader"),
-              let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader"),
-              let blurKernel = library.makeFunction(name: "blurKernel"),
-              let sharpenKernel = library.makeFunction(name: "sharpenKernel") else {
+              let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -153,8 +149,6 @@ class CanvasRenderer: NSObject {
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
-            blurComputeState = try device.makeComputePipelineState(function: blurKernel)
-            sharpenComputeState = try device.makeComputePipelineState(function: sharpenKernel)
         } catch {
             print("Failed to create pipeline states: \(error)")
         }
@@ -1088,68 +1082,6 @@ class CanvasRenderer: NSObject {
             }
         }
         print()
-    }
-
-    // MARK: - Blur/Sharpen Effects
-
-    /// Apply blur effect to texture at brush position
-    func applyBlur(at point: CGPoint, radius: Float, to texture: MTLTexture, screenSize: CGSize) {
-        guard let computeState = blurComputeState else {
-            print("ERROR: Blur compute state not available")
-            return
-        }
-
-        applyEffect(computeState: computeState, at: point, radius: radius, to: texture, screenSize: screenSize, effectName: "Blur")
-    }
-
-    /// Apply sharpen effect to texture at brush position
-    func applySharpen(at point: CGPoint, radius: Float, to texture: MTLTexture, screenSize: CGSize) {
-        guard let computeState = sharpenComputeState else {
-            print("ERROR: Sharpen compute state not available")
-            return
-        }
-
-        applyEffect(computeState: computeState, at: point, radius: radius, to: texture, screenSize: screenSize, effectName: "Sharpen")
-    }
-
-    /// Generic effect application (blur/sharpen)
-    private func applyEffect(
-        computeState: MTLComputePipelineState,
-        at point: CGPoint,
-        radius: Float,
-        to texture: MTLTexture,
-        screenSize: CGSize,
-        effectName: String
-    ) {
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
-            print("ERROR: Failed to create command buffer/encoder for \(effectName)")
-            return
-        }
-
-        computeEncoder.setComputePipelineState(computeState)
-        computeEncoder.setTexture(texture, index: 0)
-        computeEncoder.setTexture(texture, index: 1) // Output texture (same as input for in-place operation)
-
-        // Set effect parameters
-        var effectRadius = radius
-        computeEncoder.setBytes(&effectRadius, length: MemoryLayout<Float>.stride, index: 0)
-
-        // Dispatch compute shader on full texture
-        // (For brush-like application, we'd need a custom approach - for now this applies to whole image)
-        let threadgroupSize = MTLSize(width: 8, height: 8, depth: 1)
-        let threadgroups = MTLSize(
-            width: (texture.width + threadgroupSize.width - 1) / threadgroupSize.width,
-            height: (texture.height + threadgroupSize.height - 1) / threadgroupSize.height,
-            depth: 1
-        )
-
-        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
-        computeEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        print("\(effectName) effect applied successfully")
     }
 
     // MARK: - Selection Operations

@@ -310,66 +310,6 @@ fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
 
 // MARK: - Effect Shaders
 
-// Compute shader for blur effect
-kernel void blurKernel(texture2d<float, access::read> inputTexture [[texture(0)]],
-                       texture2d<float, access::write> outputTexture [[texture(1)]],
-                       constant float &blurRadius [[buffer(0)]],
-                       uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
-        return;
-    }
-
-    // Simple box blur
-    float4 sum = float4(0.0);
-    int radius = int(blurRadius);
-    int count = 0;
-
-    for (int dy = -radius; dy <= radius; dy++) {
-        for (int dx = -radius; dx <= radius; dx++) {
-            int2 coord = int2(gid) + int2(dx, dy);
-            if (coord.x >= 0 && coord.x < int(inputTexture.get_width()) &&
-                coord.y >= 0 && coord.y < int(inputTexture.get_height())) {
-                sum += inputTexture.read(uint2(coord));
-                count++;
-            }
-        }
-    }
-
-    outputTexture.write(sum / float(count), gid);
-}
-
-// Compute shader for sharpen effect
-kernel void sharpenKernel(texture2d<float, access::read> inputTexture [[texture(0)]],
-                          texture2d<float, access::write> outputTexture [[texture(1)]],
-                          constant float &amount [[buffer(0)]],
-                          uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
-        return;
-    }
-
-    // Sharpen kernel
-    float4 center = inputTexture.read(gid);
-    float4 sum = float4(0.0);
-
-    // 3x3 sharpen kernel
-    int2 offsets[8] = {
-        int2(-1, -1), int2(0, -1), int2(1, -1),
-        int2(-1,  0),              int2(1,  0),
-        int2(-1,  1), int2(0,  1), int2(1,  1)
-    };
-
-    for (int i = 0; i < 8; i++) {
-        int2 coord = int2(gid) + offsets[i];
-        if (coord.x >= 0 && coord.x < int(inputTexture.get_width()) &&
-            coord.y >= 0 && coord.y < int(inputTexture.get_height())) {
-            sum += inputTexture.read(uint2(coord));
-        }
-    }
-
-    float4 result = center * (1.0 + 8.0 * amount) - sum * amount;
-    outputTexture.write(clamp(result, 0.0, 1.0), gid);
-}
-
 // Compute shader for paint bucket flood fill
 kernel void floodFillKernel(texture2d<float, access::read> inputTexture [[texture(0)]],
                             texture2d<float, access::write> outputTexture [[texture(1)]],
