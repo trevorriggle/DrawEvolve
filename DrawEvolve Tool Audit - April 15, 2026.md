@@ -12,46 +12,42 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 ### Paint bucket
 - Fill takes a long time to complete.
 - Leaves a thin white outline around filled regions — not a true paint-bucket fill (likely antialiased boundary pixels getting skipped by the flood fill's color-match tolerance).
-
+VERDICT -> KEEP AND FIX
 ### Text
 - Adding text causes a breakpoint/crash.
 - Font handling isn't figured out — no sensible font picker, sizing, or styling story yet.
-
+VERDICT -> KEEP AND FIX
 ### Color picker / eyedropper
 - Doesn't work. Tapping the canvas with the eyedropper doesn't update the brush color.
-
+VERDICT -> KEEP AND FIX
 ### Magic selection (magic wand)
 - Doesn't work.
 - **Decision: cut from UI** for v1 (Trevor confirmed).
-
+VERDICT -> CUT (FOR NOW)
 ### Smudge (finger smudge tool)
 - Doesn't work.
-- **Decision: cut from UI** for v1 (Trevor confirmed).
-
+VERDICT -> CUT (FOR NOW)
 ### "Black triangle" tool
 - Does *something* but unclear what.
-- **Decision: cut from UI** for v1 (Trevor confirmed).
-
+VERDICT -> CUT 
 ### Brush dots / stamp preview
 - "Brush dot things" don't seem to work.
-- **Decision: cut from UI** for v1 if still broken after brush tuning pass.
-
+VERDICT -> CUT (FOR NOW)
 ### Rectangular select
 - Selection and move work after today's polygon rewrite.
 - Still exhibits the ~10px Y-jump when Delete is tapped (see April 15 revival journal).
-
+VERDICT -> KEEP AND FIX (SO CLOSE)
 ### Clipboard button
 - Redundant / unclear purpose.
-- **Decision: cut from UI** for v1 (Trevor confirmed).
-
+VERDICT -> CUT
 ### Stroke resolution (canvas-wide)
 - ✅ **Low-res / blocky stroke edges** — FIXED. Canvas texture now sizes from `view.drawableSize` (pixels) instead of `view.bounds.size` (points), pushing it from 2048² to 4096² on iPad Pro so strokes render at the display's native resolution. Default `BrushSettings.size` doubled (5 → 10) and slider max doubled (100 → 200) to compensate for the doubled doc-pixel coord system. Memory cost: ~48 MB per layer (320 MB at 5 layers) — fine on iPad Pro, monitor on base iPad.
 
----
-
+VERDICT -> FIXED
 ## Missing features
 
 - **Image import** — no way to bring an existing image into the canvas. Needed button/tool.
+VERDICT -> ADD (WITH SCALE ANCHORS IN CORNERS – IN OWN LAYER
 
 ---
 
@@ -68,6 +64,7 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 - History panel goes off screen — needs a layout that fits the expanded panel and scrolls correctly on iPad.
 - Should default to loading the **most recent** feedback when opened, not an empty state.
 
+URGENT NEED POINTER TOOL -> SELECT THIS TOOL AND MOVE ALL PIXELS IN SELECTED LAYER
 ---
 
 ## Triage for TestFlight
@@ -93,3 +90,4 @@ Trevor's on-device audit of every tool and related UI behavior. Captures what's 
 - Clipboard button.
 - "Black triangle" tool.
 - Brush stamp preview dots (if still broken after brush tuning pass).
+
