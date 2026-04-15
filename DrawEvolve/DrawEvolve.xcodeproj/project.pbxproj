@@ -11,7 +11,6 @@
 		DE000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100002 /* ContentView.swift */; };
 		DE000003 /* PromptInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100003 /* PromptInputView.swift */; };
 		DE000004 /* DrawingCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100004 /* DrawingCanvasView.swift */; };
-		DE000005 /* FeedbackOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100005 /* FeedbackOverlay.swift */; };
 		DE000006 /* DrawingContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100006 /* DrawingContext.swift */; };
 		DE000007 /* OpenAIManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100007 /* OpenAIManager.swift */; };
 		DE000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200001 /* Assets.xcassets */; };
@@ -34,7 +33,6 @@
 		DE000030 /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100030 /* FloatingFeedbackPanel.swift */; };
 		DE000031 /* DrawingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100031 /* DrawingDetailView.swift */; };
 		DE000032 /* CritiqueHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100032 /* CritiqueHistory.swift */; };
-		DE000033 /* CritiqueHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100033 /* CritiqueHistoryView.swift */; };
 		DE000034 /* FormattedMarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100034 /* FormattedMarkdownView.swift */; };
 		DE000036 /* CrashReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100036 /* CrashReporter.swift */; };
 		DE000037 /* CanvasStateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100037 /* CanvasStateManager.swift */; };
@@ -52,7 +50,6 @@
 		DE100002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DE100003 /* PromptInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptInputView.swift; sourceTree = "<group>"; };
 		DE100004 /* DrawingCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingCanvasView.swift; sourceTree = "<group>"; };
-		DE100005 /* FeedbackOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackOverlay.swift; sourceTree = "<group>"; };
 		DE100006 /* DrawingContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingContext.swift; sourceTree = "<group>"; };
 		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
 		DE100012 /* OnboardingPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPopup.swift; sourceTree = "<group>"; };
@@ -77,7 +74,6 @@
 		DE100030 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
 		DE100031 /* DrawingDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingDetailView.swift; sourceTree = "<group>"; };
 		DE100032 /* CritiqueHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistory.swift; sourceTree = "<group>"; };
-		DE100033 /* CritiqueHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistoryView.swift; sourceTree = "<group>"; };
 		DE100034 /* FormattedMarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattedMarkdownView.swift; sourceTree = "<group>"; };
 		DE100036 /* CrashReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashReporter.swift; sourceTree = "<group>"; };
 		DE100037 /* CanvasStateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasStateManager.swift; sourceTree = "<group>"; };
@@ -142,7 +138,6 @@
 				DE100003 /* PromptInputView.swift */,
 				DE100004 /* DrawingCanvasView.swift */,
 				DE100017 /* MetalCanvasView.swift */,
-				DE100005 /* FeedbackOverlay.swift */,
 				DE100018 /* ColorPicker.swift */,
 				DE100019 /* LayerPanelView.swift */,
 				DE100020 /* BrushSettingsView.swift */,
@@ -150,7 +145,6 @@
 				DE100030 /* FloatingFeedbackPanel.swift */,
 				DE100034 /* FormattedMarkdownView.swift */,
 				DE100031 /* DrawingDetailView.swift */,
-				DE100033 /* CritiqueHistoryView.swift */,
 				DE100038 /* SelectionOverlays.swift */,
 				DE000316 /* Components */,
 			);
@@ -300,7 +294,6 @@
 				DE000003 /* PromptInputView.swift in Sources */,
 				DE000004 /* DrawingCanvasView.swift in Sources */,
 				DE000017 /* MetalCanvasView.swift in Sources */,
-				DE000005 /* FeedbackOverlay.swift in Sources */,
 				DE000018 /* ColorPicker.swift in Sources */,
 				DE000019 /* LayerPanelView.swift in Sources */,
 				DE000020 /* BrushSettingsView.swift in Sources */,
@@ -319,7 +312,6 @@
 				DE000034 /* FormattedMarkdownView.swift in Sources */,
 				DE000031 /* DrawingDetailView.swift in Sources */,
 				DE000032 /* CritiqueHistory.swift in Sources */,
-				DE000033 /* CritiqueHistoryView.swift in Sources */,
 				DE000036 /* CrashReporter.swift in Sources */,
 				DE000037 /* CanvasStateManager.swift in Sources */,
 				DE000038 /* SelectionOverlays.swift in Sources */,

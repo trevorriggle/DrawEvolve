@@ -14,7 +14,6 @@ struct FloatingFeedbackPanel: View {
     @State private var isExpanded = true
     @State private var position: CGPoint = .zero
     @State private var dragOffset: CGSize = .zero
-    @State private var showHistory = false
     @State private var showHistoryMenu = false
     @State private var selectedHistoryIndex = 0
     @State private var screenSize: CGSize = .zero
@@ -315,9 +314,6 @@ struct FloatingFeedbackPanel: View {
                 position = CGPoint(x: x, y: y)
                 dragOffset = .zero
             }
-        }
-        .sheet(isPresented: $showHistory) {
-            CritiqueHistoryView(critiqueHistory: critiqueHistory)
         }
     }
 

@@ -104,36 +104,4 @@ actor OpenAIManager {
 
         return feedback
     }
-
-    /// Builds the feedback prompt from the user's context
-    private func buildPrompt(from context: DrawingContext) -> String {
-        var prompt = "You are the DrawEvolve AI coach, a friendly drawing mentor.\n"
-        prompt += "Today, the user is drawing \(context.subject). "
-        prompt += "They're attempting the \(context.style) style. "
-
-        if !context.artists.isEmpty {
-            prompt += "They are inspired by \(context.artists). "
-        }
-
-        if !context.techniques.isEmpty {
-            prompt += "They will be using \(context.techniques). "
-        }
-
-        if !context.focus.isEmpty {
-            prompt += "They want feedback on \(context.focus). "
-        }
-
-        if !context.additionalContext.isEmpty {
-            prompt += "The user also wants you to understand: \(context.additionalContext). "
-        }
-
-        prompt += """
-        \n
-        Provide detailed feedback that helps them improve their artistic skills.
-        Be encouraging, precise, and specific. Never condescending.
-        Slip in one small, friendly joke, never at the user's expense.
-        """
-
-        return prompt
-    }
 }
