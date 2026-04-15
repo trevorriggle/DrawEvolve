@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import PhotosUI
 @preconcurrency import Metal
 
 struct DrawingCanvasView: View {
@@ -41,6 +42,9 @@ struct DrawingCanvasView: View {
 
     // Clear confirmation
     @State private var showClearConfirmation = false
+
+    // Image import (Photos picker)
+    @State private var photoPickerItem: PhotosPickerItem?
 
     // Critique history
     @State private var critiqueHistory: [CritiqueEntry] = []
@@ -245,6 +249,13 @@ struct DrawingCanvasView: View {
 
                             ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
                                 canvasState.currentTool = .text
+                            }
+
+                            // Image import (Photos picker)
+                            PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.system(size: 22))
+                                    .frame(width: 44, height: 44)
                             }
 
                             // Clear button
@@ -596,6 +607,18 @@ struct DrawingCanvasView: View {
             // When tool changes, commit any active selection
             if canvasState.selectionPixels != nil {
                 canvasState.commitSelection()
+            }
+        }
+        .onChange(of: photoPickerItem) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self),
+                   let uiImage = UIImage(data: data) {
+                    await MainActor.run {
+                        canvasState.importImage(uiImage)
+                    }
+                }
+                await MainActor.run { photoPickerItem = nil }
             }
         }
         .onAppear {

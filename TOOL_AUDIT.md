@@ -40,8 +40,22 @@ Trevor's on-device audit of every tool and related UI behavior that's still in t
 
 ## Missing features
 
-- **Image import** — no way to bring an existing image into the canvas. Needed button/tool.
-  - VERDICT → **ADD** (with scale anchors in corners — drop into its own layer)
+- ✅ **Image import — basic** (April 15). New `photo.badge.plus` button in the toolbar opens the system PhotosPicker. On selection, the image is dropped onto a brand-new layer, aspect-fit and centered at ~80% of the document. After import the user can use the Move tool to reposition. Implemented via `CanvasStateManager.importImage(_:)`. Needs on-device confirmation.
+
+## High-priority deferred work
+
+> These are NOT done yet. They are the obvious next steps and should be picked up before TestFlight.
+
+- **Corner scale/rotate handles for selections (HIGH PRIORITY)** — in-flight transform via draggable anchors at the four corners of any active selection. This was the original UX intent for the imported image (and was specced in the prior audit as "with scale anchors in corners"), but the handles don't exist anywhere in `Views/SelectionOverlays.swift` yet — only marching-ants borders are drawn. Once built, the handles must work for **all selection sources**:
+  - Rectangular Select
+  - Lasso (quick selection)
+  - Imported images (currently rely on Move tool only)
+
+  State plumbing already exists on `CanvasStateManager` (`selectionScale`, `selectionRotation`, `selectionOffset`) and `renderSelectionInRealTime()` already applies scale/offset, so the missing piece is the SwiftUI overlay + drag gesture math. A rotate handle (above the bounding box, like Photoshop) would be a natural addition while in there.
+
+- **Rectangular Select Y-jump on Delete (~10px)** — known existing bug in the rect-select path. Lives in the same code area as the work above; fix while implementing the corner handles since both touch the rect-selection rendering math.
+
+- **Procreate-style multitouch shape constraint (HIGH PRIORITY)** — when the user is mid-drag on the Rectangle or Circle tool, a second finger touching the screen should snap the in-progress shape to a perfect square / perfect circle (i.e. force width = height around the drag origin). Release of the second finger un-snaps. This is the Procreate "QuickShape"-style affordance Trevor wants. Implementation lives in `Views/MetalCanvasView.swift` `touchesMoved`/`touchesEnded` for `.rectangle` and `.circle`; the `UIEvent` already exposes the touch count via `touches(for: view)?.count`. Watch out for the screen-space → doc-space mapping introduced by the April 15 rotation fix — the constraint needs to apply in screen space and then map through, the same way the shape itself does.
 
 ---
 
@@ -67,9 +81,10 @@ Trevor's on-device audit of every tool and related UI behavior that's still in t
 - Text breakpoint.
 - Color picker / eyedropper.
 - AI feedback history panel layout + default-most-recent.
-- Image import tool.
 - Selection delete ~10px jump.
-- Verify Move tool on device.
+- Corner scale/rotate handles for selections (Rect Select, Lasso, imported images) — see High-priority deferred work above.
+- Procreate-style multitouch constraint for perfect circles/squares — see High-priority deferred work above.
+- Verify Move tool + image import on device.
 
 **Should fix before ship (polish):**
 - Tool-selected mid-screen indicator.
@@ -80,4 +95,5 @@ Trevor's on-device audit of every tool and related UI behavior that's still in t
 - ✅ Circle/Rectangle rotation behavior.
 - ✅ Low-res stroke rendering.
 - ✅ Move tool / pointer (full-layer drag).
+- ✅ Image import — basic (drops into a new layer; reposition via Move tool until corner handles land).
 - ✅ Six broken/half-built tools cut from the toolbar (see `CUT_TOOLS_TO_REINSTATE.md`).

@@ -323,6 +323,60 @@ class CanvasStateManager: ObservableObject {
         }
     }
 
+    /// Import a photo onto a brand-new layer, sized aspect-fit and centered
+    /// on the document. The user can reposition with the Move tool.
+    /// (Corner scale/rotate handles are deferred — see audit doc.)
+    func importImage(_ image: UIImage) {
+        guard let renderer = renderer else {
+            print("ERROR: Cannot import image - renderer not ready")
+            return
+        }
+
+        addLayer()
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture else {
+            print("ERROR: Cannot import image - new layer has no texture")
+            return
+        }
+
+        // Aspect-fit the image into ~80% of the document
+        let docW = documentSize.width
+        let docH = documentSize.height
+        let imgW = image.size.width
+        let imgH = image.size.height
+        guard imgW > 0, imgH > 0 else { return }
+
+        let maxW = docW * 0.8
+        let maxH = docH * 0.8
+        let scale = min(maxW / imgW, maxH / imgH)
+        let drawW = imgW * scale
+        let drawH = imgH * scale
+        let rect = CGRect(
+            x: (docW - drawW) / 2,
+            y: (docH - drawH) / 2,
+            width: drawW,
+            height: drawH
+        )
+
+        renderer.renderImage(image, at: rect, to: texture, screenSize: documentSize)
+        hasLoadedExistingImage = true
+
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        let layerId = layers[selectedLayerIndex].id
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == layerId }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+
+        print("📷 Imported image into new layer at \(rect)")
+    }
+
     func requestFeedback(for context: DrawingContext) async {
         guard let image = exportImage() else {
             showError(message: "Failed to export drawing")
