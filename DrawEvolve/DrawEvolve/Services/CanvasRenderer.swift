@@ -583,22 +583,31 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
-        // Prepare brush uniforms. IMPORTANT: scale size by zoom for the preview.
+        // Prepare brush uniforms. Preview size must match what the committed
+        // stroke will look like after it's composited back to the screen.
         //
-        // Committed strokes render into the canvas-sized texture at texture-pixel
-        // units, then the compositor displays that texture at (fitSize * zoom) points
-        // on screen. The preview, by contrast, renders directly to the drawable, so
-        // its `pointSize` is in drawable pixels independent of zoom. Without a zoom
-        // factor the preview dot stays the same physical size while the committed
-        // dot grows / shrinks — they appear wildly different at zoom ≠ 1.
-        // `size * zoom` makes the preview match the committed size visually.
+        // Committed strokes render into the canvas-sized texture at TEXTURE
+        // pixel units (brush size = N texture pixels). The compositor then
+        // displays that texture scaled to `fitSize × fitSize` drawable pixels,
+        // then further multiplied by zoomScale. On-screen stamp size is:
+        //     settings.size * (fitSize / canvasSize.width) * zoomScale
+        //
+        // The preview renders DIRECTLY to the drawable in drawable pixels, so
+        // we must pre-apply the same texture-to-screen ratio that the
+        // compositor applies. The old code only multiplied by zoomScale, so
+        // preview was smaller than committed by a factor of fitSize/canvasSize
+        // (≈1.33× on iPad) — the gap scaled linearly with brush size, which is
+        // why huge brushes showed huge discrepancies.
+        let fitSizeForScale = max(viewportSize.width, viewportSize.height)
+        let textureToScreen = canvasSize.width > 0 ? fitSizeForScale / canvasSize.width : 1.0
+
         let previewColor: UIColor = isEraser
             ? UIColor(white: 0.55, alpha: 0.45)
             : stroke.settings.color
         let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
         var uniforms = BrushUniforms(
             color: previewColor,
-            size: Float(stroke.settings.size * zoomScale),
+            size: Float(stroke.settings.size * textureToScreen * zoomScale),
             opacity: Float(previewOpacity),
             hardness: Float(stroke.settings.hardness)
         )
@@ -1528,42 +1537,44 @@ class CanvasRenderer: NSObject {
         return UIImage(cgImage: cgImage)
     }
 
-    /// Render an image (extracted selection pixels) at a specific position
+    /// Render an image (extracted selection pixels) at a specific position.
+    ///
+    /// Uses the CGImage's intrinsic pixel dimensions and only computes an
+    /// integer pixel OFFSET from `rect.origin`. This guarantees a 1:1 blit
+    /// without CoreGraphics resampling — resampling was the source of the
+    /// half-alpha edge pixels that showed up as white halos on moved selections.
+    ///
+    /// Blending math treats both source and destination as PREMULTIPLIED BGRA
+    /// (which is how the Metal texture stores pixels with the brush pipeline's
+    /// sourceAlpha/oneMinusSourceAlpha blend factors). The previous version
+    /// applied a straight-alpha Porter-Duff formula to premultiplied inputs,
+    /// double-multiplying by srcA and shifting edge colors.
     func renderImage(_ image: UIImage, at rect: CGRect, to texture: MTLTexture, screenSize: CGSize) {
-        print("CanvasRenderer: Rendering image at \(rect)")
-
         guard let cgImage = image.cgImage else {
             print("ERROR: Failed to get CGImage")
             return
         }
 
-        // Scale rect from screen space to texture space
+        // Image pixel dimensions — use as-is, no resampling.
+        let w = cgImage.width
+        let h = cgImage.height
+        guard w > 0, h > 0 else { return }
+
+        // Integer pixel offset in texture space. We truncate here; the CGImage
+        // was extracted at integer pixel bounds, so the render target must also
+        // be integer-aligned. Sub-pixel drag jitter is acceptable.
         let scaleX = CGFloat(texture.width) / screenSize.width
         let scaleY = CGFloat(texture.height) / screenSize.height
-        let scaledRect = CGRect(
-            x: rect.origin.x * scaleX,
-            y: rect.origin.y * scaleY,
-            width: rect.width * scaleX,
-            height: rect.height * scaleY
-        )
+        let x = Int(floor(rect.origin.x * scaleX))
+        let y = Int(floor(rect.origin.y * scaleY))
 
-        let x = Int(scaledRect.origin.x)
-        let y = Int(scaledRect.origin.y)
-        let w = Int(scaledRect.width)
-        let h = Int(scaledRect.height)
-
-        // Bounds check
-        guard w > 0, h > 0 else {
-            print("ERROR: Invalid dimensions")
-            return
-        }
-
-        // Create a context to render the image at the desired size
+        // Pull image bytes into a premultipliedFirst BGRA buffer at native size.
+        // No `context.draw(_, in:)` scaling — we give the context the image's
+        // exact dimensions so drawing is a straight copy.
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
         let bytesPerRow = w * 4
-
-        guard let context = CGContext(
+        guard let srcContext = CGContext(
             data: nil,
             width: w,
             height: h,
@@ -1575,21 +1586,14 @@ class CanvasRenderer: NSObject {
             print("ERROR: Failed to create CGContext")
             return
         }
+        srcContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let srcData = srcContext.data else { return }
 
-        // Draw the image
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-
-        guard let data = context.data else {
-            print("ERROR: Failed to get context data")
-            return
-        }
-
-        // Read current texture data
+        // Read texture, composite, write back.
         let texWidth = texture.width
         let texHeight = texture.height
         let texBytesPerRow = texWidth * 4
-        let texDataSize = texBytesPerRow * texHeight
-        var texPixelData = Data(count: texDataSize)
+        var texPixelData = Data(count: texBytesPerRow * texHeight)
 
         texPixelData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
@@ -1604,51 +1608,53 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // Composite image onto texture with alpha blending
         texPixelData.withUnsafeMutableBytes { texPtr in
             guard let texBase = texPtr.baseAddress else { return }
-
-            data.withMemoryRebound(to: UInt8.self, capacity: w * h * 4) { imgPtr in
+            srcData.withMemoryRebound(to: UInt8.self, capacity: w * h * 4) { imgPtr in
                 for row in 0..<h {
+                    let texY = y + row
+                    guard texY >= 0, texY < texHeight else { continue }
                     for col in 0..<w {
                         let texX = x + col
-                        let texY = y + row
-
-                        // Bounds check for texture
-                        guard texX >= 0, texY >= 0, texX < texWidth, texY < texHeight else { continue }
+                        guard texX >= 0, texX < texWidth else { continue }
 
                         let imgOffset = (row * w + col) * 4
                         let texOffset = (texY * texWidth + texX) * 4
 
-                        // Read source pixel (BGRA)
-                        let srcB = CGFloat(imgPtr[imgOffset]) / 255.0
-                        let srcG = CGFloat(imgPtr[imgOffset + 1]) / 255.0
-                        let srcR = CGFloat(imgPtr[imgOffset + 2]) / 255.0
-                        let srcA = CGFloat(imgPtr[imgOffset + 3]) / 255.0
+                        // Both src and dst are PREMULTIPLIED BGRA8. Use premul
+                        // Porter-Duff: out = src + dst * (1 - srcA). No extra
+                        // multiply by srcA, no divide by outA.
+                        let srcB = Int(imgPtr[imgOffset])
+                        let srcG = Int(imgPtr[imgOffset + 1])
+                        let srcR = Int(imgPtr[imgOffset + 2])
+                        let srcA = Int(imgPtr[imgOffset + 3])
 
-                        // Read dest pixel (BGRA)
-                        let dstB = CGFloat((texBase + texOffset).load(as: UInt8.self)) / 255.0
-                        let dstG = CGFloat((texBase + texOffset + 1).load(as: UInt8.self)) / 255.0
-                        let dstR = CGFloat((texBase + texOffset + 2).load(as: UInt8.self)) / 255.0
-                        let dstA = CGFloat((texBase + texOffset + 3).load(as: UInt8.self)) / 255.0
+                        // Fully transparent source contributes nothing; skip to
+                        // preserve the destination exactly (important for lasso
+                        // masks outside the polygon).
+                        if srcA == 0 { continue }
 
-                        // Alpha compositing (Porter-Duff over)
-                        let outA = srcA + dstA * (1 - srcA)
-                        let outR = (srcR * srcA + dstR * dstA * (1 - srcA)) / (outA + 0.0001)
-                        let outG = (srcG * srcA + dstG * dstA * (1 - srcA)) / (outA + 0.0001)
-                        let outB = (srcB * srcA + dstB * dstA * (1 - srcA)) / (outA + 0.0001)
+                        let dstB = Int((texBase + texOffset).load(as: UInt8.self))
+                        let dstG = Int((texBase + texOffset + 1).load(as: UInt8.self))
+                        let dstR = Int((texBase + texOffset + 2).load(as: UInt8.self))
+                        let dstA = Int((texBase + texOffset + 3).load(as: UInt8.self))
 
-                        // Write back (BGRA)
-                        (texBase + texOffset).storeBytes(of: UInt8(outB * 255), as: UInt8.self)
-                        (texBase + texOffset + 1).storeBytes(of: UInt8(outG * 255), as: UInt8.self)
-                        (texBase + texOffset + 2).storeBytes(of: UInt8(outR * 255), as: UInt8.self)
-                        (texBase + texOffset + 3).storeBytes(of: UInt8(outA * 255), as: UInt8.self)
+                        let invSrcA = 255 - srcA
+                        // (dst * invSrcA + 127) / 255  → rounded integer divide
+                        let outB = srcB + (dstB * invSrcA + 127) / 255
+                        let outG = srcG + (dstG * invSrcA + 127) / 255
+                        let outR = srcR + (dstR * invSrcA + 127) / 255
+                        let outA = srcA + (dstA * invSrcA + 127) / 255
+
+                        (texBase + texOffset).storeBytes(of: UInt8(min(255, outB)), as: UInt8.self)
+                        (texBase + texOffset + 1).storeBytes(of: UInt8(min(255, outG)), as: UInt8.self)
+                        (texBase + texOffset + 2).storeBytes(of: UInt8(min(255, outR)), as: UInt8.self)
+                        (texBase + texOffset + 3).storeBytes(of: UInt8(min(255, outA)), as: UInt8.self)
                     }
                 }
             }
         }
 
-        // Write modified texture data back
         texPixelData.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.replace(
@@ -1661,7 +1667,5 @@ class CanvasRenderer: NSObject {
                 bytesPerRow: texBytesPerRow
             )
         }
-
-        print("✅ Image rendered successfully at position (\(x), \(y))")
     }
 }

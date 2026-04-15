@@ -84,6 +84,9 @@ struct DrawingCanvasView: View {
                     for point in screenPreviewPath.dropFirst() {
                         p.addLine(to: point)
                     }
+                    // Close the path so the marquee preview draws all 4 edges
+                    // of the quad. Lasso traces its own closing edge naturally.
+                    p.closeSubpath()
                 }
                 .stroke(Color.blue, lineWidth: 2)
                 .allowsHitTesting(false)

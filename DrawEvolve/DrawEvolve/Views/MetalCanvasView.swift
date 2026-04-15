@@ -147,7 +147,15 @@ struct MetalCanvasView: UIViewRepresentable {
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
         private var isDraggingSelection = false // Track if we're dragging a selection
-        private var selectionDragStart: CGPoint? // Where the drag started
+        private var selectionDragStart: CGPoint? // Where the drag started (doc space)
+        // Screen-space start of a rectangle-marquee drag. We store the SCREEN
+        // point (not just doc point) so that under canvas rotation we can build
+        // a screen-axis-aligned rectangle from the user's drag and then map its
+        // 4 corners to doc space — yielding a rotated quad that faithfully
+        // matches what the user actually dragged. Storing only the doc-space
+        // start and using min/max gives a doc-axis-aligned rect which is wrong
+        // when the canvas is rotated.
+        private var marqueeStartScreen: CGPoint?
         private var coordDiagLogsRemaining = 3 // One-time on-device coordinate-pipeline diagnostic logs
 
         init(
@@ -675,7 +683,10 @@ struct MetalCanvasView: UIViewRepresentable {
             if isSelectionTool {
                 // For selection tools, store start point and clear any existing selection
                 shapeStartPoint = location
-                print("Selection tool: stored start point \(location)")
+                // Store screen-space start too — the marquee needs this to build a
+                // screen-axis-aligned quad that survives canvas rotation.
+                marqueeStartScreen = screenLocation
+                print("Selection tool: stored start point \(location) (screen: \(screenLocation))")
 
                 // For lasso, start building the path
                 if currentTool == .lasso {
@@ -756,28 +767,24 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Handle selection tools
-            if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
-                // For rectangle select, show preview while dragging
-                let minX = min(startPoint.x, latestLocation.x)
-                let minY = min(startPoint.y, latestLocation.y)
-                let maxX = max(startPoint.x, latestLocation.x)
-                let maxY = max(startPoint.y, latestLocation.y)
-
-                let previewRect = CGRect(
-                    x: minX,
-                    y: minY,
-                    width: maxX - minX,
-                    height: maxY - minY
-                )
+            if currentTool == .rectangleSelect, let startScreen = marqueeStartScreen {
+                // Build the 4 screen-axis-aligned corners of the user's drag,
+                // then transform each to doc space. This gives a rotated quad
+                // in doc space under canvas rotation — matching what the user
+                // sees. Using doc-space min/max would make the selection
+                // axis-aligned in DOC space, which visually diverges from the
+                // user's drag whenever rotation is non-zero.
+                let endScreen = latestScreenLocation
+                let corners = marqueeCorners(screenStart: startScreen, screenEnd: endScreen)
+                let docCorners: [CGPoint] = corners.map {
+                    canvasState?.screenToDocument($0) ?? $0
+                }
 
                 if let canvasState = canvasState {
                     Task { @MainActor in
-                        canvasState.previewSelection = previewRect
+                        canvasState.previewSelection = nil
+                        canvasState.previewLassoPath = docCorners
                     }
-                }
-
-                if hypot(latestLocation.x - startPoint.x, latestLocation.y - startPoint.y) > 10 {
-                    print("Rectangle select: dragging preview \(previewRect)")
                 }
                 return
             }
@@ -906,31 +913,28 @@ struct MetalCanvasView: UIViewRepresentable {
             let screenEndLocation = touch.location(in: view)
             let endLocation = canvasState?.screenToDocument(screenEndLocation) ?? screenEndLocation
 
-            if currentTool == .rectangleSelect, let startPoint = shapeStartPoint {
-                print("Rectangle select: creating selection from \(startPoint) to \(endLocation)")
+            if currentTool == .rectangleSelect, let startScreen = marqueeStartScreen {
+                // Build the 4 screen-axis-aligned corners, map each to doc space.
+                // Under rotation this produces a rotated quad in doc space that
+                // exactly matches what the user dragged on screen.
+                let endScreen = screenEndLocation
+                let corners = marqueeCorners(screenStart: startScreen, screenEnd: endScreen)
+                let docCorners: [CGPoint] = corners.map {
+                    canvasState?.screenToDocument($0) ?? $0
+                }
+                print("Rectangle select: creating polygon selection with corners \(docCorners)")
 
-                // Create selection rectangle
-                let minX = min(startPoint.x, endLocation.x)
-                let minY = min(startPoint.y, endLocation.y)
-                let maxX = max(startPoint.x, endLocation.x)
-                let maxY = max(startPoint.y, endLocation.y)
-
-                let selectionRect = CGRect(
-                    x: minX,
-                    y: minY,
-                    width: maxX - minX,
-                    height: maxY - minY
-                )
-
-                // Store selection in canvas state and extract pixels
+                // Store selection in canvas state as a 4-point polygon and
+                // extract pixels via the lasso code path. activeSelection stays
+                // nil — selectionPath is the ground truth under rotation.
                 if let canvasState = canvasState {
                     Task { @MainActor in
-                        canvasState.previewSelection = nil // Clear preview
-                        canvasState.activeSelection = selectionRect
-                        print("Rectangle selection created: \(selectionRect)")
-                        // Extract pixels for moving
+                        canvasState.previewSelection = nil
+                        canvasState.previewLassoPath = nil
+                        canvasState.activeSelection = nil
+                        canvasState.selectionPath = docCorners
+                        print("Rectangle selection created as polygon: \(docCorners)")
                         canvasState.extractSelectionPixels()
-                        // Render them back immediately at original position so they don't disappear
                         canvasState.renderSelectionInRealTime()
                     }
                 }
@@ -1083,6 +1087,7 @@ struct MetalCanvasView: UIViewRepresentable {
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil
+            marqueeStartScreen = nil
             print("Stroke cleared from preview, should now be visible in layer texture")
         }
 
@@ -1090,6 +1095,7 @@ struct MetalCanvasView: UIViewRepresentable {
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil
+            marqueeStartScreen = nil
             lassoPath = []
             polygonPoints = []
             isDraggingSelection = false
@@ -1283,6 +1289,22 @@ struct MetalCanvasView: UIViewRepresentable {
 
         /// Check if a point is inside the current selection
         @MainActor
+        /// Build the 4 corners of the screen-axis-aligned rectangle defined by
+        /// the user's drag endpoints. Order: TL, TR, BR, BL — a closed quad
+        /// suitable for point-in-polygon testing after mapping to doc space.
+        private func marqueeCorners(screenStart: CGPoint, screenEnd: CGPoint) -> [CGPoint] {
+            let minX = min(screenStart.x, screenEnd.x)
+            let minY = min(screenStart.y, screenEnd.y)
+            let maxX = max(screenStart.x, screenEnd.x)
+            let maxY = max(screenStart.y, screenEnd.y)
+            return [
+                CGPoint(x: minX, y: minY),
+                CGPoint(x: maxX, y: minY),
+                CGPoint(x: maxX, y: maxY),
+                CGPoint(x: minX, y: maxY)
+            ]
+        }
+
         private func isPointInSelection(_ point: CGPoint) -> Bool {
             guard let canvasState = canvasState else { return false }
 
