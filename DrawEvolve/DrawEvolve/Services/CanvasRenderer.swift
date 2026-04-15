@@ -574,9 +574,12 @@ class CanvasRenderer: NSObject {
         panOffset: CGPoint = .zero,
         canvasRotation: Double = 0.0
     ) {
-        // Select pipeline based on tool
-        let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
-        guard let pipelineState = pipeline else { return }
+        // The eraser pipeline zeroes out destination alpha, which on the drawable
+        // would erase the composited image itself. Instead, render the eraser
+        // preview as a ghost trail via the brush pipeline: semi-transparent gray
+        // so the user sees the path being erased without destroying the preview.
+        let isEraser = stroke.tool == .eraser
+        guard let pipelineState = brushPipelineState else { return }
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
@@ -589,10 +592,14 @@ class CanvasRenderer: NSObject {
         // factor the preview dot stays the same physical size while the committed
         // dot grows / shrinks — they appear wildly different at zoom ≠ 1.
         // `size * zoom` makes the preview match the committed size visually.
+        let previewColor: SIMD4<Float> = isEraser
+            ? SIMD4<Float>(0.55, 0.55, 0.55, 0.45)
+            : stroke.settings.color
+        let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
         var uniforms = BrushUniforms(
-            color: stroke.settings.color,
+            color: previewColor,
             size: Float(stroke.settings.size * zoomScale),
-            opacity: Float(stroke.settings.opacity),
+            opacity: Float(previewOpacity),
             hardness: Float(stroke.settings.hardness)
         )
 

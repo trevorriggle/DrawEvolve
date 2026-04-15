@@ -95,9 +95,6 @@ struct DrawingCanvasView: View {
                 let screenSelection = canvasState.documentRectToScreen(selection)
                 MarchingAntsRectangle(rect: screenSelection)
                     .allowsHitTesting(false)
-
-                // Transform handles for rectangular selection
-                SelectionTransformHandles(rect: screenSelection, canvasState: canvasState)
             }
 
             // Canvas transform indicators (top-right)
@@ -153,11 +150,35 @@ struct DrawingCanvasView: View {
                 let screenPath = canvasState.documentPathToScreen(path)
                 MarchingAntsPath(path: screenPath)
                     .allowsHitTesting(false)
+            }
 
-                // Transform handles for lasso selection (use bounding rect)
-                let boundingRect = canvasState.calculateBoundingRect(for: path)
-                let screenBoundingRect = canvasState.documentRectToScreen(boundingRect)
-                SelectionTransformHandles(rect: screenBoundingRect, canvasState: canvasState)
+            // Delete button for active selection (rect or lasso)
+            if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button(action: {
+                            canvasState.deleteSelectedPixels()
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "trash")
+                                Text("Delete")
+                            }
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.red)
+                            .cornerRadius(10)
+                            .shadow(radius: 3)
+                        }
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(.top, 12)
+                .allowsHitTesting(true)
             }
 
             // Selection pixels are now rendered in real-time to the texture for fluent animation

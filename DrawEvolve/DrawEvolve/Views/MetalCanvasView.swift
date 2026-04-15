@@ -251,8 +251,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // IMPORTANT: Render current stroke preview on top
             // Preview stroke points are in document space, so apply transforms for display
-            // DON'T show preview for eraser - it looks weird
-            if let stroke = currentStroke, !stroke.points.isEmpty, stroke.tool != .eraser {
+            if let stroke = currentStroke, !stroke.points.isEmpty {
                 let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
                 let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
                 let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
