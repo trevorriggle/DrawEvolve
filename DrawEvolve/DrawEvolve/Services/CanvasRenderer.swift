@@ -583,31 +583,13 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
-        // Prepare brush uniforms. Preview size must match what the committed
-        // stroke will look like after it's composited back to the screen.
-        //
-        // Committed strokes render into the canvas-sized texture at TEXTURE
-        // pixel units (brush size = N texture pixels). The compositor then
-        // displays that texture scaled to `fitSize × fitSize` drawable pixels,
-        // then further multiplied by zoomScale. On-screen stamp size is:
-        //     settings.size * (fitSize / canvasSize.width) * zoomScale
-        //
-        // The preview renders DIRECTLY to the drawable in drawable pixels, so
-        // we must pre-apply the same texture-to-screen ratio that the
-        // compositor applies. The old code only multiplied by zoomScale, so
-        // preview was smaller than committed by a factor of fitSize/canvasSize
-        // (≈1.33× on iPad) — the gap scaled linearly with brush size, which is
-        // why huge brushes showed huge discrepancies.
-        let fitSizeForScale = max(viewportSize.width, viewportSize.height)
-        let textureToScreen = canvasSize.width > 0 ? fitSizeForScale / canvasSize.width : 1.0
-
         let previewColor: UIColor = isEraser
             ? UIColor(white: 0.55, alpha: 0.45)
             : stroke.settings.color
         let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
         var uniforms = BrushUniforms(
             color: previewColor,
-            size: Float(stroke.settings.size * textureToScreen * zoomScale),
+            size: Float(stroke.settings.size * zoomScale),
             opacity: Float(previewOpacity),
             hardness: Float(stroke.settings.hardness)
         )
