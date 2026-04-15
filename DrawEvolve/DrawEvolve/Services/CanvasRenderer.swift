@@ -113,25 +113,39 @@ class CanvasRenderer: NSObject {
         compositeDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         compositeDescriptor.colorAttachments[0].rgbBlendOperation = .add
 
-        // Texture display pipeline (for showing layers on screen)
+        // Texture display pipeline (for showing layers on screen).
+        //
+        // The canvas texture stores PREMULTIPLIED rgba (the brush pipeline's
+        // `.sourceAlpha/.oneMinusSourceAlpha` blend into an initially-transparent
+        // texture premultiplies the output). Displaying it back with sourceAlpha
+        // would multiply by alpha a second time, producing dark/desaturated
+        // halos along soft edges — that's the gray outline around strokes. Use
+        // `.one` for the source RGB since it's already premultiplied.
         let textureDisplayDescriptor = MTLRenderPipelineDescriptor()
         textureDisplayDescriptor.vertexFunction = quadVertex
         textureDisplayDescriptor.fragmentFunction = textureDisplayFragment
         textureDisplayDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         textureDisplayDescriptor.colorAttachments[0].isBlendingEnabled = true
-        textureDisplayDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        textureDisplayDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
         textureDisplayDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         textureDisplayDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        textureDisplayDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        textureDisplayDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        textureDisplayDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
-        // Texture display pipeline with zoom/pan transform support
+        // Texture display pipeline with zoom/pan transform support — same
+        // premultiplied-source blend as above.
         let textureDisplayWithTransformDescriptor = MTLRenderPipelineDescriptor()
         textureDisplayWithTransformDescriptor.vertexFunction = quadVertexWithTransform
         textureDisplayWithTransformDescriptor.fragmentFunction = textureDisplayFragment
         textureDisplayWithTransformDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         textureDisplayWithTransformDescriptor.colorAttachments[0].isBlendingEnabled = true
-        textureDisplayWithTransformDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        textureDisplayWithTransformDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
         textureDisplayWithTransformDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         textureDisplayWithTransformDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        textureDisplayWithTransformDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        textureDisplayWithTransformDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        textureDisplayWithTransformDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
