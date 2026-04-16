@@ -1,0 +1,192 @@
+CopyDrawEvolve Dev Plan
+Last updated: April 15, 2026 — post hardware audit
+Target: TestFlight before June 1, 2026
+
+Status Tracker
+
+ 1.1 Brush stroke offset/distortion
+ 1.2 Canvas zoom and pan
+ 1.3 Apple Pencil input
+ 1.4 Circle tool crash
+ 2.1 Redo
+ 2.2 Gallery preview — verify on device
+ 2.3 Navigation state
+[~] 2.4 Selection tools — marquee + lasso + delete work; pixel offset ~20px unresolved; scale/rotate handles not yet built
+ 2.5 AI feedback display
+ 3.1 Pencil vs finger width
+ 3.2 Launch time
+ 3.3 Landing screen
+ 3.4 Brush thickens on release
+ Canvas fill/clipping fix (Option B — rectangular quad)
+ Reset transform button
+ TESTFLIGHT SUBMISSION
+
+
+Hardware Audit — April 15, 2026
+Fresh findings from on-device testing. All items below are new or updated.
+Crashes
+
+Text tool crashes immediately — adds a white rectangle then crashes. Do not ship. Fix or cut.
+Stroke vanishes mid-stroke under heavy Apple Pencil pressure — affects brush, eraser, all shape tools. Likely a pressure value overflow or NaN entering the render pipeline. HIGH PRIORITY.
+
+Brush & Stroke
+
+Brush size breaks rendering — at large brush sizes, strokes behave incorrectly across all tools. Root cause unknown. Needs investigation before the pressure issue can be fully isolated.
+Pressure sensitivity on eraser — may not be necessary. Consider removing pressure from the eraser path entirely and using fixed pressure = 1.0. Simplifies the failure surface.
+Shape tool stroke thinning on release — brush, circle, box, and line tools all show a thinner stroke on release than during the drag. Last segment is rendering at a lower pressure. Known issue, needs tail-taper fix or pressure clamp on final segment.
+Paint tool white halo around strokes — premultiplied alpha issue on the brush composite pipeline. Already partially addressed in compositor blend factors (April 15) but still visible on device.
+
+Selection Tools
+
+Rectangle select pixel offset ~20px upward — when moving or deleting a selection, the affected content is ~20px above the actual selection box. Likely a coordinate mismatch in the extract/clear/render pipeline under the new polygon-based marquee. Must fix before ship.
+Lasso select is slow — functional but takes noticeably long. The CPU-side point-in-polygon loop over potentially millions of pixels is the bottleneck. Consider bounding box pre-filter or GPU acceleration.
+Copy/paste selection to new layer — MISSING. When rect select or lasso is active, add a "Copy to New Layer" action alongside the existing Delete button. Extracts selected pixels into a brand new layer without clearing the original. High value, low risk.
+
+Tools That Don't Work
+
+Eyedropper — tapping canvas does not update brush color. Should be straightforward — read pixel at tap location from the composite texture and set as current color.
+Image import — opens photo gallery but imported image does not appear on canvas. Must place on its own new layer on import. Fix or cut.
+Text tool — crashes. Fix or cut for TestFlight.
+
+Move Tool (Pointer / 4-Arrow)
+
+Overcomplicated UX — currently adds a full rectangular select over the entire layer which feels wrong. Intent is simpler: select the move tool, drag to reposition all pixels on the current layer. No marquee needed. Simplify to layer-drag only.
+
+UI / Layout
+
+Onboarding keyboard pushes fields off screen — "Let's Set Up Your Canvas" form gets squashed when the software keyboard appears. Needs ScrollView + keyboard-aware layout or .ignoresSafeArea(.keyboard) adjustment.
+Canvas size percentage indicator hidden behind gallery icon — move the zoom percentage readout into the toolbar. It should always be visible.
+AI feedback history panel goes off screen — needs scroll + correct sizing in the expanded panel. Should default to most recent feedback on open, not empty state.
+
+Tools to Cut (Redundant)
+
+Rotate Left / Rotate Right toolbar buttons — redundant now that pinch-rotate works well on device. Remove both. Recenter button stays.
+
+
+Bug Priority for TestFlight
+Must Fix (blocking)
+
+Stroke vanishes under heavy pressure (affects all tools)
+Brush size breaks rendering at large sizes
+Rectangle select pixel offset ~20px
+Eyedropper does nothing
+Image import broken (fix or cut)
+Text tool crashes (fix or cut)
+Onboarding keyboard layout
+Canvas zoom % hidden behind gallery icon
+AI feedback history panel layout + default to latest
+Paint bucket white outline + slow performance
+Move tool UX simplification (layer drag, no marquee)
+
+Should Fix (polish)
+
+Shape tool stroke thinning on release
+Lasso select performance
+Layers panel switching speed
+White halo on brush strokes (compositor blend)
+Tool selected mid-screen indicator (name fade in/out on tap)
+
+Deferred to v1.1
+
+Corner scale/rotate handles for selections and imported images
+Procreate-style two-finger snap to perfect square/circle
+Pressure sensitivity tuning pass on hardware
+Hand-drawn tool icons
+Magic wand, smudge, blur, sharpen, clone stamp, polygon (see CUT_TOOLS_TO_REINSTATE.md)
+
+
+Current Tool Inventory
+As of April 15 hardware audit
+ToolStatusNotesBrushWorkingPressure vanish bug, size bugEraserWorkingConsider removing pressure sensitivityRectangle / SquareWorkingStroke thins on releaseCircleWorkingStroke thins on releaseLineWorkingStroke thins on releasePaint Bucket / FillBrokenWhite outline, slowEyedropperBrokenDoesn't update colorRectangle SelectPartially working~20px pixel offset on move/deleteLasso SelectPartially workingSlow, functionalMove ToolOvercomplicatedSimplify to layer-drag, remove auto-marqueeTextBroken / crashesFix or cutImage ImportBrokenOpens gallery, doesn't place imageTrash / ClearWorking—Color SelectionWorking—Brush SettingsWorkingTied to pressure/size bugsLayersWorkingSwitching slightly slowNight ModeWorking—UndoWorking—RedoWorking—Recenter CanvasWorking—AI Feedback ToggleWorking—Rotate Left/RightCUTRedundant with pinch
+
+Recommended Missing Core Tools
+These are standard drawing app tools that are absent from the current build. Ranked by value-to-effort for the TestFlight window.
+High Value / Low Effort
+
+Opacity slider — per-layer opacity control in the layers panel. Essential for layered workflows. Slider 0–100% that feeds into the compositor.
+Straight line with snap — a dedicated line tool that snaps to 45° increments when a second finger touches the screen (same Procreate-style multitouch pattern as the square/circle snap). Different from the current line tool which doesn't snap.
+
+High Value / Medium Effort
+
+Layer blend modes — Normal, Multiply, Screen, Overlay at minimum. Applied per-layer in the compositor. Massive boost to what users can create without adding new tools.
+Crop tool — define a region and crop the canvas to it. Useful for export. No new render pipeline needed, just adjust the export region.
+
+Medium Value / Low Effort
+
+Flip horizontal / Flip vertical — canvas-level transforms. Common action, trivial to implement via a texture flip in the renderer.
+Symmetry / mirror mode — mirror strokes across a vertical or horizontal axis in real time. Popular for portrait and mandala drawing. Medium complexity but high delight factor for the target user.
+
+Deferred (v1.1+)
+
+Gradient tool
+Custom brush creator
+Ruler / guides
+Selection feather/expand/contract
+Adjustment layers (brightness, contrast, hue)
+
+
+Features Missing from Current Build
+Export
+
+Export to Photos — MISSING. Essential for TestFlight. A single button that composites all visible layers and saves to the camera roll via UIImageWriteToSavedPhotosAlbum. No App Store approval needed for basic Photos access. Add to toolbar or gallery detail view.
+
+Selection
+
+Copy selection to new layer — when rect or lasso select is active, add "Copy to Layer" alongside Delete. Extracts pixels to a new layer without clearing the source.
+
+
+AI Feedback System
+Stable as of April 15. No changes needed before TestFlight.
+
+Worker: https://drawevolve-backend.trevorriggle.workers.dev
+Model: gpt-4o, max_tokens: 1000
+Prompt: structured (Quick Take / What's Working / Focus Area / Try This / 💬), skill-calibrated (Beginner/Intermediate/Advanced), sent as role: system
+Cost: ~$0.015/critique
+Skill level: flows end-to-end from UI picker → model → JSON → worker → prompt template
+
+
+Architecture Notes
+Critical — do not touch without reading
+Coordinate Pipeline (load-bearing)
+screenToDocument / documentToScreen / quadVertexShaderWithTransform must stay in sync at all times. Any change to one requires retest of all three on physical iPad. This was the source of Phase 1's major bugs and must not regress.
+
+Canvas texture: 4096×4096 (sized from view.drawableSize, not view.bounds.size)
+fitSize model: uses max(viewport.w, viewport.h) — fill, not fit
+Rotation convention: shader Y-up (visual CCW), Swift R(-theta) for Y-down equivalent
+Marquee selection: stored as 4-point screen-space polygon mapped to doc space via screenToDocument. Routes through lasso pipeline. activeSelection is nil for all marquee selections — selectionPath is ground truth.
+
+Memory
+
+4096×4096 × 4 bytes = 64MB per layer
+5 layers = 320MB — monitor on base iPad, fine on iPad Pro
+History manager caps at 50 snapshots — each snapshot is 64MB; limit is effectively the memory ceiling, not the count
+
+Worker Auth
+
+No auth, no rate limiting, CORS wide open — acceptable for TestFlight, must address before public launch
+API key lives in Cloudflare Worker environment variable OPENAI_API_KEY
+Deploy via wrangler deploy from cloudflare-worker/ with CLOUDFLARE_API_TOKEN set
+
+
+Dev Workflow
+
+Open Claude Code in DrawEvolve codespace (GitHub: trevorriggle/DrawEvolve)
+Point at specific bug with context from this file
+Push to GitHub from codespace
+Pull to Mac Mini in Xcode via AnyDesk from work PC
+Build to iPad Pro (device name: "Paige iPad") — physical device only, simulator not trusted for touch/Pencil bugs
+Test on device, report results
+Next bug
+
+
+Ground Rules
+
+No scope creep past v1.0 minimum. If it's not on this list, it waits.
+Every coordinate-pipeline change tested on physical iPad before marking done.
+Dead code cleanup (stage 2: Metal shaders) is optional polish, not critical path.
+Selection tools: scale/rotate handles are deferred to v1.1. Ship marquee + lasso + delete + copy-to-layer.
+If text tool can't be fixed quickly, cut it. Don't ship a crash.
+
+
+Files That Matter
+FileRoleViews/DrawingCanvasView.swiftMain canvas host, ZStack orchestrator, toolbarViews/MetalCanvasView.swiftTouch handling, gesture recognizers, shape generatorsViewModels/CanvasStateManager.swiftState, coordinate transforms, selection, historyServices/CanvasRenderer.swiftMetal renderer, all pixel operationsDrawEvolve/Shaders.metalGPU shadersServices/OpenAIManager.swiftAI feedback API callcloudflare-worker/index.jsPrompt, OpenAI call, skill-level calibrationModels/DrawingContext.swiftPre-draw questionnaire model incl. skillLevelViews/PromptInputView.swiftPre-draw form incl. skill level pickerViews/FloatingFeedbackPanel.swiftFeedback display panelViews/GalleryView.swift + DrawingDetailView.swiftGallery and drawing history
