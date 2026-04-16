@@ -257,6 +257,16 @@ struct MetalCanvasView: UIViewRepresentable {
                 canvasState?.canvasRotation.radians ?? 0.0
             }
 
+            // Draw opaque white canvas background so the gray workbench
+            // doesn't show through transparent layer regions
+            renderer?.renderCanvasBackground(
+                to: renderEncoder,
+                zoomScale: Float(zoomScale),
+                panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                canvasRotation: Float(rotation),
+                viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+            )
+
             // Composite all visible layers to screen with zoom/pan/rotation transform
             for layer in layers where layer.isVisible {
                 if let texture = layer.texture {

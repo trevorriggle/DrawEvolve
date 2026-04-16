@@ -19,6 +19,9 @@ class CanvasRenderer: NSObject {
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
 
+    // 1x1 white texture used to draw an opaque canvas background quad
+    private var whiteTexture: MTLTexture?
+
     // Canvas dimensions - dynamically calculated to be a square larger than screen diagonal
     // This ensures no clipping/distortion when rotating the canvas
     private var _canvasSize: CGSize = CGSize(width: 2048, height: 2048)
@@ -152,6 +155,15 @@ class CanvasRenderer: NSObject {
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
         } catch {
             print("Failed to create pipeline states: \(error)")
+        }
+
+        // Create a 1x1 opaque white texture for the canvas background quad
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 1, height: 1, mipmapped: false)
+        desc.usage = [.shaderRead]
+        if let tex = device.makeTexture(descriptor: desc) {
+            var pixel: [UInt8] = [255, 255, 255, 255] // BGRA white
+            tex.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &pixel, bytesPerRow: 4)
+            whiteTexture = tex
         }
     }
 
@@ -441,6 +453,21 @@ class CanvasRenderer: NSObject {
     }
 
     /// Render a texture as a fullscreen quad with optional zoom and pan
+    /// Draw an opaque white quad at the canvas position so the gray workbench
+    /// doesn't bleed through transparent layer regions.
+    func renderCanvasBackground(
+        to renderEncoder: MTLRenderCommandEncoder,
+        zoomScale: Float = 1.0,
+        panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
+        canvasRotation: Float = 0.0,
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
+    ) {
+        guard let tex = whiteTexture else { return }
+        renderTextureToScreen(tex, to: renderEncoder, opacity: 1.0,
+                              zoomScale: zoomScale, panOffset: panOffset,
+                              canvasRotation: canvasRotation, viewportSize: viewportSize)
+    }
+
     func renderTextureToScreen(
         _ texture: MTLTexture,
         to renderEncoder: MTLRenderCommandEncoder,
