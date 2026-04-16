@@ -1,5 +1,5 @@
 CopyDrawEvolve Dev Plan
-Last updated: April 15, 2026 — post hardware audit
+Last updated: April 16, 2026 — fixes-in-progress session
 Target: TestFlight before June 1, 2026
 
 Status Tracker
@@ -21,12 +21,120 @@ Status Tracker
  Reset transform button
  TESTFLIGHT SUBMISSION
 
+Fixes Landed — April 16 Session
+Each entry tagged "sim-verified" (checked in simulator only) or "iPad retest needed" (touch/Pencil-dependent, must confirm on Paige iPad).
+
+[~] Text tool crash + white rectangle — sim-verifiable; iPad retest needed for placement accuracy at non-default zoom
+    Root cause: two bugs in one path.
+      (1) CanvasStateManager.renderText passed `screenSize` (UIKit pts ~1194) to
+          CanvasRenderer.renderText while `location` was already in document
+          space (~2048). The renderer multiplied location by texture/screenSize
+          ≈1.72×, walking destinationOrigin off the texture; blitEncoder.copy
+          Metal-asserted → crash.
+      (2) blitEncoder.copy is a raw byte copy with no alpha blending. The
+          rasterized text image's transparent margins overwrote anything beneath
+          the text rect, leaving a transparent hole that revealed the white
+          canvas background — the visible "white rectangle".
+    Fix:
+      • CanvasStateManager.renderText now passes `documentSize` (1:1 with
+        texture in current architecture).
+      • CanvasRenderer.renderText rewritten to rasterize text to a
+        scale=1.0 UIImage, then route through the existing renderImage path
+        which uses the proven premultiplied Porter-Duff blend (same path
+        moved selections use). No new blending math, no destructive blit.
+      • Added before/after snapshots so text placement is now undoable.
+      • Thumbnail refresh after text commits.
+    Files: CanvasStateManager.swift, CanvasRenderer.swift
+
+[~] Image import broken — sim-verifiable
+    Root cause: importImage() called addLayer() then immediately tried to render
+    into layers[selectedLayerIndex].texture — but addLayer only appends the
+    DrawingLayer to the array. Texture creation is lazy inside
+    MetalCanvasView.Coordinator.ensureLayerTextures(), which only runs during a
+    Metal draw cycle. So at the moment of the import call the texture was nil,
+    the guard returned early, and the image never landed on the layer. The
+    PhotosPicker showed and dismissed normally, masking the silent failure.
+    Fix:
+      • importImage now eagerly calls renderer.createLayerTexture() right after
+        addLayer, before the render call. Coordinator.ensureLayerTextures will
+        skip the layer next draw because it already has a texture.
+      • Undo still works via the existing .layerAdded history record (undo
+        removes the layer + image together; redo re-inserts the same DrawingLayer
+        whose texture is retained).
+    Files: CanvasStateManager.swift
+
+[x] Cut Rotate Left / Rotate Right toolbar buttons — sim-verified (visual only)
+    Reason: redundant with two-finger pinch-rotate which works on device.
+    Fix: removed both ToolButton entries from DrawingCanvasView's toolbar grid.
+    The viewfinder/recenter button stays — it resets all transforms.
+    Files: DrawingCanvasView.swift
+
+[x] Canvas zoom % moved out from behind gallery icon — sim-verified
+    Root cause: zoom indicator was a top-trailing VStack overlay that stacked
+    in the same screen region as the gallery button (50×50 pinned top-trailing
+    with .padding 12pt). At any zoom ≠ 100% the readout rendered behind the
+    larger gallery icon and was invisible.
+    Fix:
+      • Removed the zoom block from the top-right indicator VStack (rotation
+        indicator stays — it doesn't conflict with the gallery icon).
+      • Added a persistent zoom % readout at the top of the floating toolbar,
+        always visible. Tapping it resets zoom/pan/rotation (same action as
+        the existing recenter button).
+    Files: DrawingCanvasView.swift
+
+[~] Onboarding keyboard squashing form layout — sim-verifiable
+    Root cause: PromptInputView centered the card with two Spacers and a
+    .frame(maxHeight: 700). When the iOS software keyboard appeared, the safe
+    area shrank, the available height for the centering VStack shrank, and the
+    card compressed proportionally — squashing the form fields off-screen with
+    no auto-scroll to the focused field.
+    Fix:
+      • Added .ignoresSafeArea(.keyboard, edges: .bottom) on the outer ZStack
+        so the layout no longer compresses when the keyboard appears.
+      • Added @FocusState tracking which TextField has focus (subject, style,
+        artists, techniques, focus).
+      • Wrapped the form ScrollView in a ScrollViewReader and tagged each
+        field VStack with .id(Field.x). On focus change, scrolls the focused
+        field to anchor: .top with a 0.05s delay so layout settles first.
+        Anchor .top (vs .center) because with the keyboard safe area ignored
+        the ScrollView gets no automatic bottom inset — pinning to .top
+        guarantees the field sits well above the keyboard regardless of card
+        height.
+      • Sticky bottom buttons remain sticky and may be visually overlapped by
+        the keyboard; user can swipe-dismiss (scrollDismissesKeyboard already
+        wired up) to access them.
+    Files: PromptInputView.swift
+
+[~] AI feedback panel sizing + default to most recent — sim-verifiable
+    Root cause: three problems in one panel.
+      (1) Fixed expandedSize (656×625) didn't respect screen geometry. On
+          smaller screens or split-screen the panel could exceed bounds.
+      (2) The history menu slid out 200pt to the LEFT of the panel. When the
+          panel sat at its default top-left position (~20pt from screen left),
+          opening the history slid the menu to x = -188 — fully off-screen.
+      (3) selectedHistoryIndex defaulted to 0, which pointed at the OLDEST
+          critique (the menu reverses the array for display, so the newest is
+          on top, but the index stayed pinned to the array's first element).
+          Opening the panel showed stale feedback every time.
+    Fix:
+      • Added computed `actualExpandedSize` clamped to
+        max(320, screenSize - padding - menuRoom). The fixed expandedSize
+        (656×625) becomes the upper bound, not the literal size. All .frame,
+        boundary, and offset calculations switched to actualExpandedSize.
+      • When the user taps the history menu button, if the panel is too close
+        to the screen's left edge, we slide the panel right just enough that
+        the 200pt menu has room to appear without clipping.
+      • selectedHistoryIndex is set to max(0, critiqueHistory.count - 1) on
+        the panel's .onAppear AND on .onChange(of: critiqueHistory.count), so
+        the panel always opens on (and stays on) the latest critique.
+    Files: FloatingFeedbackPanel.swift
+
 
 Hardware Audit — April 15, 2026
 Fresh findings from on-device testing. All items below are new or updated.
 Crashes
 
-Text tool crashes immediately — adds a white rectangle then crashes. Do not ship. Fix or cut.
+Text tool crashes immediately — adds a white rectangle then crashes. Do not ship. Fix or cut. [FIXED Apr 16 — see "Fixes Landed" above; sim-verified, iPad retest needed]
 Stroke vanishes mid-stroke under heavy Apple Pencil pressure — affects brush, eraser, all shape tools. Likely a pressure value overflow or NaN entering the render pipeline. HIGH PRIORITY.
 
 Brush & Stroke
@@ -45,8 +153,8 @@ Copy/paste selection to new layer — MISSING. When rect select or lasso is acti
 Tools That Don't Work
 
 Eyedropper — tapping canvas does not update brush color. Should be straightforward — read pixel at tap location from the composite texture and set as current color.
-Image import — opens photo gallery but imported image does not appear on canvas. Must place on its own new layer on import. Fix or cut.
-Text tool — crashes. Fix or cut for TestFlight.
+Image import — opens photo gallery but imported image does not appear on canvas. Must place on its own new layer on import. Fix or cut. [FIXED Apr 16 — sim-verified, iPad retest needed]
+Text tool — crashes. Fix or cut for TestFlight. [FIXED Apr 16 — sim-verified, iPad retest needed]
 
 Move Tool (Pointer / 4-Arrow)
 
@@ -54,13 +162,13 @@ Overcomplicated UX — currently adds a full rectangular select over the entire 
 
 UI / Layout
 
-Onboarding keyboard pushes fields off screen — "Let's Set Up Your Canvas" form gets squashed when the software keyboard appears. Needs ScrollView + keyboard-aware layout or .ignoresSafeArea(.keyboard) adjustment.
-Canvas size percentage indicator hidden behind gallery icon — move the zoom percentage readout into the toolbar. It should always be visible.
-AI feedback history panel goes off screen — needs scroll + correct sizing in the expanded panel. Should default to most recent feedback on open, not empty state.
+Onboarding keyboard pushes fields off screen — "Let's Set Up Your Canvas" form gets squashed when the software keyboard appears. Needs ScrollView + keyboard-aware layout or .ignoresSafeArea(.keyboard) adjustment. [FIXED Apr 16 — sim-verified]
+Canvas size percentage indicator hidden behind gallery icon — move the zoom percentage readout into the toolbar. It should always be visible. [FIXED Apr 16 — sim-verified]
+AI feedback history panel goes off screen — needs scroll + correct sizing in the expanded panel. Should default to most recent feedback on open, not empty state. [FIXED Apr 16 — sim-verified]
 
 Tools to Cut (Redundant)
 
-Rotate Left / Rotate Right toolbar buttons — redundant now that pinch-rotate works well on device. Remove both. Recenter button stays.
+Rotate Left / Rotate Right toolbar buttons — redundant now that pinch-rotate works well on device. Remove both. Recenter button stays. [DONE Apr 16]
 
 
 Bug Priority for TestFlight
@@ -70,11 +178,11 @@ Stroke vanishes under heavy pressure (affects all tools)
 Brush size breaks rendering at large sizes
 Rectangle select pixel offset ~20px
 Eyedropper does nothing
-Image import broken (fix or cut)
-Text tool crashes (fix or cut)
-Onboarding keyboard layout
-Canvas zoom % hidden behind gallery icon
-AI feedback history panel layout + default to latest
+Image import broken (fix or cut) [FIXED Apr 16 — sim-verified, iPad retest needed]
+Text tool crashes (fix or cut) [FIXED Apr 16 — sim-verified, iPad retest needed]
+Onboarding keyboard layout [FIXED Apr 16 — sim-verified]
+Canvas zoom % hidden behind gallery icon [FIXED Apr 16 — sim-verified]
+AI feedback history panel layout + default to latest [FIXED Apr 16 — sim-verified]
 Paint bucket white outline + slow performance
 Move tool UX simplification (layer drag, no marquee)
 
@@ -97,7 +205,7 @@ Magic wand, smudge, blur, sharpen, clone stamp, polygon (see CUT_TOOLS_TO_REINST
 
 Current Tool Inventory
 As of April 15 hardware audit
-ToolStatusNotesBrushWorkingPressure vanish bug, size bugEraserWorkingConsider removing pressure sensitivityRectangle / SquareWorkingStroke thins on releaseCircleWorkingStroke thins on releaseLineWorkingStroke thins on releasePaint Bucket / FillBrokenWhite outline, slowEyedropperBrokenDoesn't update colorRectangle SelectPartially working~20px pixel offset on move/deleteLasso SelectPartially workingSlow, functionalMove ToolOvercomplicatedSimplify to layer-drag, remove auto-marqueeTextBroken / crashesFix or cutImage ImportBrokenOpens gallery, doesn't place imageTrash / ClearWorking—Color SelectionWorking—Brush SettingsWorkingTied to pressure/size bugsLayersWorkingSwitching slightly slowNight ModeWorking—UndoWorking—RedoWorking—Recenter CanvasWorking—AI Feedback ToggleWorking—Rotate Left/RightCUTRedundant with pinch
+ToolStatusNotesBrushWorkingPressure vanish bug, size bugEraserWorkingConsider removing pressure sensitivityRectangle / SquareWorkingStroke thins on releaseCircleWorkingStroke thins on releaseLineWorkingStroke thins on releasePaint Bucket / FillBrokenWhite outline, slowEyedropperBrokenDoesn't update colorRectangle SelectPartially working~20px pixel offset on move/deleteLasso SelectPartially workingSlow, functionalMove ToolOvercomplicatedSimplify to layer-drag, remove auto-marqueeTextFixed (Apr 16, sim-verified)Routes through renderImage; iPad retest neededImage ImportFixed (Apr 16, sim-verified)Eager texture creation; iPad retest neededTrash / ClearWorking—Color SelectionWorking—Brush SettingsWorkingTied to pressure/size bugsLayersWorkingSwitching slightly slowNight ModeWorking—UndoWorking—RedoWorking—Recenter CanvasWorking—AI Feedback ToggleWorking—Rotate Left/RightCUTRedundant with pinch
 
 Recommended Missing Core Tools
 These are standard drawing app tools that are absent from the current build. Ranked by value-to-effort for the TestFlight window.

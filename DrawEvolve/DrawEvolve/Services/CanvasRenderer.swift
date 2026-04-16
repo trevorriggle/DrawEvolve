@@ -914,7 +914,26 @@ class CanvasRenderer: NSObject {
         }
     }
 
-    /// Render text to a texture at the specified location
+    /// Render text to a texture at the specified location.
+    ///
+    /// Caller passes `location` in DOC space and `screenSize` = documentSize
+    /// (so the internal doc→texture scale is 1:1 in the current architecture).
+    ///
+    /// Two bugs the previous implementation had:
+    ///   1. Crash — it double-scaled `location` (callers were passing UIKit
+    ///      points as `screenSize` while `location` was already doc-space),
+    ///      so `destinationOrigin + sourceSize` walked off the texture and
+    ///      `blitEncoder.copy` Metal-asserted.
+    ///   2. White rectangle — the blit was a raw byte copy, so the entire
+    ///      rasterized text rect (transparent margins included) overwrote
+    ///      whatever was underneath. On an empty layer the rectangular hole
+    ///      revealed the white canvas background, hence the visible "white box".
+    ///
+    /// New approach: rasterize the text to a UIImage at scale=1.0 (so its
+    /// pixel dims match texture pixels), then route through `renderImage`,
+    /// which uses the same proven premultiplied-alpha Porter-Duff blend that
+    /// moved selections rely on. Same blend, same coordinate handling, no
+    /// new edge cases to debug.
     func renderText(
         _ text: String,
         at location: CGPoint,
@@ -925,123 +944,52 @@ class CanvasRenderer: NSObject {
     ) {
         print("CanvasRenderer: Rendering text '\(text)' at \(location)")
 
-        // Create text attributes
-        let font = UIFont.systemFont(ofSize: fontSize, weight: .regular)
+        // Doc→texture scale. With current architecture both equal canvasSize
+        // and this is 1.0. Computed anyway so the math holds if they ever
+        // diverge.
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let textureScale = max(scaleX, scaleY)
+
+        // Render text at the texture-pixel font size so the rasterized image
+        // is sharp at native canvas resolution. (Equivalent to `fontSize` in
+        // doc units when scale is 1:1.)
+        let renderFontSize = fontSize * textureScale
+        let font = UIFont.systemFont(ofSize: renderFontSize, weight: .regular)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: color
         ]
 
-        // Calculate text size
-        let textSize = (text as NSString).size(withAttributes: attributes)
-        print("  Text size: \(textSize)")
-
-        // Scale coordinates from screen space to texture space
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
-        let scaledLocation = CGPoint(x: location.x * scaleX, y: location.y * scaleY)
-        let scaledFontSize = fontSize * max(scaleX, scaleY)
-        let scaledFont = UIFont.systemFont(ofSize: scaledFontSize, weight: .regular)
-        let scaledAttributes: [NSAttributedString.Key: Any] = [
-            .font: scaledFont,
-            .foregroundColor: color
-        ]
-        let scaledTextSize = (text as NSString).size(withAttributes: scaledAttributes)
-
-        print("  Scaled location: \(scaledLocation), scaled size: \(scaledTextSize)")
-
-        // Create a temporary texture to render text into
-        let textWidth = Int(ceil(scaledTextSize.width))
-        let textHeight = Int(ceil(scaledTextSize.height))
-
-        guard textWidth > 0, textHeight > 0 else {
+        let textSizePx = (text as NSString).size(withAttributes: attributes)
+        guard textSizePx.width > 0, textSizePx.height > 0 else {
             print("  ERROR: Invalid text dimensions")
             return
         }
 
-        // Render text to a CGContext
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
-        let bytesPerRow = textWidth * 4
-
-        guard let context = CGContext(
-            data: nil,
-            width: textWidth,
-            height: textHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo
-        ) else {
-            print("  ERROR: Failed to create CGContext")
-            return
+        // Rasterize to a transparent-background UIImage at scale=1.0 so the
+        // backing CGImage's pixel dimensions equal `textSizePx`. Without
+        // forcing scale=1.0, UIGraphicsImageRenderer uses the device's main
+        // screen scale (2× or 3×), which would blow the image up and break
+        // the 1:1 doc→texture mapping renderImage relies on.
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = false
+        let imageRenderer = UIGraphicsImageRenderer(size: textSizePx, format: format)
+        let textImage = imageRenderer.image { _ in
+            (text as NSString).draw(at: .zero, withAttributes: attributes)
         }
 
-        // Flip coordinate system for correct text orientation
-        context.translateBy(x: 0, y: CGFloat(textHeight))
-        context.scaleBy(x: 1.0, y: -1.0)
+        // Convert the texture-pixel size back to doc units for renderImage,
+        // which re-applies texture/screenSize scaling internally. The two
+        // scale factors cancel and the image lands at pixel-perfect 1:1.
+        let docW = textSizePx.width / textureScale
+        let docH = textSizePx.height / textureScale
+        let destRect = CGRect(x: location.x, y: location.y, width: docW, height: docH)
 
-        // Draw text
-        (text as NSString).draw(at: .zero, withAttributes: scaledAttributes)
+        renderImage(textImage, at: destRect, to: texture, screenSize: screenSize)
 
-        // Get the pixel data
-        guard let data = context.data else {
-            print("  ERROR: Failed to get context data")
-            return
-        }
-
-        // Create a temporary Metal texture from the CGContext data
-        let textTextureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: textWidth,
-            height: textHeight,
-            mipmapped: false
-        )
-        textTextureDescriptor.usage = [.shaderRead]
-
-        guard let textTexture = device.makeTexture(descriptor: textTextureDescriptor) else {
-            print("  ERROR: Failed to create text texture")
-            return
-        }
-
-        let region = MTLRegion(
-            origin: MTLOrigin(x: 0, y: 0, z: 0),
-            size: MTLSize(width: textWidth, height: textHeight, depth: 1)
-        )
-        textTexture.replace(region: region, mipmapLevel: 0, withBytes: data, bytesPerRow: bytesPerRow)
-
-        // Now blit the text texture onto the layer texture at the specified location
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
-            print("  ERROR: Failed to create command buffer/blit encoder")
-            return
-        }
-
-        let sourceOrigin = MTLOrigin(x: 0, y: 0, z: 0)
-        let sourceSize = MTLSize(width: textWidth, height: textHeight, depth: 1)
-        let destinationOrigin = MTLOrigin(
-            x: Int(scaledLocation.x),
-            y: Int(scaledLocation.y),
-            z: 0
-        )
-
-        blitEncoder.copy(
-            from: textTexture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: sourceOrigin,
-            sourceSize: sourceSize,
-            to: texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: destinationOrigin
-        )
-
-        blitEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        print("  Text rendered successfully")
+        print("  Text rendered via renderImage at doc rect \(destRect)")
     }
 
     // MARK: - Load Image

@@ -104,21 +104,10 @@ struct DrawingCanvasView: View {
                     .allowsHitTesting(false)
             }
 
-            // Canvas transform indicators (top-right)
+            // Canvas transform indicators (top-right) — zoom % moved into the
+            // floating toolbar (Apr 16) so it's no longer hidden behind the
+            // gallery button. Rotation indicator stays here.
             VStack(alignment: .trailing, spacing: 4) {
-                // Zoom indicator
-                if canvasState.zoomScale != 1.0 {
-                    Text("\(Int(canvasState.zoomScale * 100))%")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
-                        .transition(.opacity)
-                }
-
-                // Rotation indicator
                 if canvasState.canvasRotation.degrees != 0 {
                     HStack(spacing: 4) {
                         Image(systemName: "rotate.right")
@@ -133,7 +122,6 @@ struct DrawingCanvasView: View {
                     .cornerRadius(8)
                     .transition(.opacity)
                 }
-
             }
             .padding(.top, 8)
             .padding(.trailing, 8)
@@ -202,6 +190,22 @@ struct DrawingCanvasView: View {
             VStack(alignment: .leading, spacing: 0) {
                 if !isToolbarCollapsed {
                     ScrollView {
+                        // Zoom % readout at the top of the toolbar (Apr 16).
+                        // Always visible so the user can see the current zoom
+                        // level without the gallery icon covering it. Tap to
+                        // reset zoom/pan/rotation (matches the recenter button).
+                        Button(action: { canvasState.resetAllTransforms() }) {
+                            Text("\(Int(canvasState.zoomScale * 100))%")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                                .background(Color(uiColor: .secondarySystemBackground))
+                                .cornerRadius(6)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.top, 8)
+
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
                             // Drawing tools
                             ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
@@ -302,16 +306,9 @@ struct DrawingCanvasView: View {
                             .disabled(!canvasState.historyManager.canRedo)
 
                             // Canvas Transform Controls
-                            ToolButton(icon: "rotate.left", isSelected: false) {
-                                canvasState.rotate(by: .degrees(-90), snapToGrid: true)
-                            }
-                            .help("Rotate canvas left 90°")
-
-                            ToolButton(icon: "rotate.right", isSelected: false) {
-                                canvasState.rotate(by: .degrees(90), snapToGrid: true)
-                            }
-                            .help("Rotate canvas right 90°")
-
+                            // Rotate L/R buttons removed Apr 16 — pinch-rotate
+                            // covers the same case on device and these were
+                            // toolbar clutter. Recenter button stays.
                             ToolButton(icon: "viewfinder", isSelected: false) {
                                 canvasState.resetAllTransforms()
                             }

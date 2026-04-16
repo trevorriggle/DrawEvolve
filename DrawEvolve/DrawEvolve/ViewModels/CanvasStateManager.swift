@@ -284,14 +284,45 @@ class CanvasStateManager: ObservableObject {
 
         let fontSize: CGFloat = 32
 
+        // `location` arrives in DOCUMENT space (the touch handler ran it
+        // through screenToDocument). The renderer scales by texture/screenSize
+        // internally — passing UIKit-points `screenSize` was the source of the
+        // ~1.7× double-scale that walked the blit destination off the texture
+        // and crashed the app. Pass documentSize so the internal scale is 1:1.
+        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
         renderer.renderText(
             text,
             at: location,
             fontSize: fontSize,
             color: brushSettings.color,
             to: texture,
-            screenSize: screenSize
+            screenSize: documentSize
         )
+
+        let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+        if let before = beforeSnapshot, let after = afterSnapshot {
+            let layerId = layers[selectedLayerIndex].id
+            historyManager.record(.stroke(
+                layerId: layerId,
+                beforeSnapshot: before,
+                afterSnapshot: after
+            ))
+        }
+
+        let currentLayerIndex = selectedLayerIndex
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
     }
 
     func loadImage(_ image: UIImage) {
@@ -333,9 +364,22 @@ class CanvasStateManager: ObservableObject {
         }
 
         addLayer()
-        guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture else {
-            print("ERROR: Cannot import image - new layer has no texture")
+        guard selectedLayerIndex < layers.count else {
+            print("ERROR: Cannot import image - selectedLayerIndex out of range")
+            return
+        }
+
+        // `addLayer` only appends the DrawingLayer; texture creation is lazy
+        // inside MetalCanvasView.Coordinator.ensureLayerTextures(), which
+        // only runs during a Metal draw cycle. We're synchronously about to
+        // render into this layer, so the texture must exist NOW — otherwise
+        // the guard below fails silently and the imported image vanishes.
+        // (That was the "image import broken" symptom.)
+        if layers[selectedLayerIndex].texture == nil {
+            layers[selectedLayerIndex].texture = renderer.createLayerTexture()
+        }
+        guard let texture = layers[selectedLayerIndex].texture else {
+            print("ERROR: Cannot import image - failed to create texture")
             return
         }
 

@@ -22,6 +22,25 @@ struct FloatingFeedbackPanel: View {
     private let expandedSize: CGSize = CGSize(width: 656, height: 625)
     private let historyMenuWidth: CGFloat = 200
 
+    /// The actual expanded panel size for the current screen. The fixed
+    /// `expandedSize` (656×625) is the *upper bound* — on smaller screens or
+    /// in split-screen / iPhone fallback we shrink it so the panel stays
+    /// fully on-screen with room reserved on the left for the history menu
+    /// when the user opens it.
+    private var actualExpandedSize: CGSize {
+        guard screenSize.width > 0, screenSize.height > 0 else {
+            return expandedSize
+        }
+        let outerPadding: CGFloat = 40
+        let menuRoom = historyMenuWidth + 8  // reserve so history menu fits to the left
+        let widthCap = max(320, screenSize.width - outerPadding - menuRoom)
+        let heightCap = max(320, screenSize.height - outerPadding)
+        return CGSize(
+            width: min(expandedSize.width, widthCap),
+            height: min(expandedSize.height, heightCap)
+        )
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ZStack {
@@ -32,7 +51,25 @@ struct FloatingFeedbackPanel: View {
                         HStack {
                             Button(action: {
                                 withAnimation(.spring(response: 0.25)) {
-                                    showHistoryMenu.toggle()
+                                    let willShow = !showHistoryMenu
+                                    showHistoryMenu = willShow
+                                    if willShow {
+                                        // Make sure the history menu has room
+                                        // to the left of the panel. Without this,
+                                        // opening the menu while the panel sits
+                                        // near the screen's left edge slid the
+                                        // menu off-screen.
+                                        let panelLeftEdge = position.x - actualExpandedSize.width / 2
+                                        let needed = historyMenuWidth + 8
+                                        if panelLeftEdge < needed {
+                                            let newX = needed + actualExpandedSize.width / 2
+                                            let maxX = screenSize.width - actualExpandedSize.width / 2
+                                            position = CGPoint(
+                                                x: min(newX, maxX),
+                                                y: position.y
+                                            )
+                                        }
+                                    }
                                 }
                             }) {
                                 Image(systemName: "line.3.horizontal")
@@ -59,8 +96,8 @@ struct FloatingFeedbackPanel: View {
                                 Button(action: {
                                     withAnimation(.spring(response: 0.3)) {
                                         // Adjust position so top-left stays in same place
-                                        let offsetX = (expandedSize.width - collapsedSize.width) / 2
-                                        let offsetY = (expandedSize.height - collapsedSize.height) / 2
+                                        let offsetX = (actualExpandedSize.width - collapsedSize.width) / 2
+                                        let offsetY = (actualExpandedSize.height - collapsedSize.height) / 2
                                         var newX = position.x - offsetX
                                         var newY = position.y - offsetY
 
@@ -119,7 +156,7 @@ struct FloatingFeedbackPanel: View {
                         }
                         .background(Color(uiColor: .systemBackground))
                     }
-                    .frame(width: expandedSize.width, height: expandedSize.height)
+                    .frame(width: actualExpandedSize.width, height: actualExpandedSize.height)
                     .background(Color(uiColor: .systemBackground))
                     .cornerRadius(16)
                     .shadow(radius: 10)
@@ -185,7 +222,7 @@ struct FloatingFeedbackPanel: View {
                                     }
                                 }
                             }
-                            .frame(width: historyMenuWidth, height: expandedSize.height)
+                            .frame(width: historyMenuWidth, height: actualExpandedSize.height)
                             .background(Color(uiColor: .systemBackground))
                             .cornerRadius(12)
                             .shadow(radius: 8)
@@ -209,16 +246,16 @@ struct FloatingFeedbackPanel: View {
                         // Tap to expand (doesn't interfere with drag)
                         withAnimation(.spring(response: 0.3)) {
                             // Adjust position so top-left stays in same place
-                            let offsetX = (expandedSize.width - collapsedSize.width) / 2
-                            let offsetY = (expandedSize.height - collapsedSize.height) / 2
+                            let offsetX = (actualExpandedSize.width - collapsedSize.width) / 2
+                            let offsetY = (actualExpandedSize.height - collapsedSize.height) / 2
                             var newX = position.x + offsetX
                             var newY = position.y + offsetY
 
                             // Apply strict boundaries for expanded state
-                            let minX = expandedSize.width / 2
-                            let maxX = screenSize.width - expandedSize.width / 2
-                            let minY = expandedSize.height / 2
-                            let maxY = screenSize.height - expandedSize.height / 2
+                            let minX = actualExpandedSize.width / 2
+                            let maxX = screenSize.width - actualExpandedSize.width / 2
+                            let minY = actualExpandedSize.height / 2
+                            let maxY = screenSize.height - actualExpandedSize.height / 2
 
                             newX = min(max(newX, minX), maxX)
                             newY = min(max(newY, minY), maxY)
@@ -237,8 +274,8 @@ struct FloatingFeedbackPanel: View {
                 DragGesture()
                     .onChanged { value in
                         // Constrain drag offset in real-time to prevent going off-screen
-                        let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
-                        let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+                        let currentWidth = isExpanded ? actualExpandedSize.width : collapsedSize.width
+                        let currentHeight = isExpanded ? actualExpandedSize.height : collapsedSize.height
 
                         // Calculate what the new position would be with this drag
                         let potentialX = position.x + value.translation.width
@@ -263,8 +300,8 @@ struct FloatingFeedbackPanel: View {
                     }
                     .onEnded { value in
                         // Apply drag to position and reset drag offset
-                        let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
-                        let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+                        let currentWidth = isExpanded ? actualExpandedSize.width : collapsedSize.width
+                        let currentHeight = isExpanded ? actualExpandedSize.height : collapsedSize.height
 
                         // Calculate new position
                         var newX = position.x + dragOffset.width
@@ -291,9 +328,15 @@ struct FloatingFeedbackPanel: View {
                 // Store screen size for reset function
                 screenSize = geometry.size
 
+                // Default to the MOST RECENT entry rather than the oldest
+                // (selectedHistoryIndex = 0 was the previous default, which
+                // mapped to critiqueHistory[0] — the first/oldest critique
+                // — making the panel open on stale feedback every time).
+                selectedHistoryIndex = max(0, critiqueHistory.count - 1)
+
                 // Position in top-left corner initially, ensuring it stays on screen
-                let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
-                let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+                let currentWidth = isExpanded ? actualExpandedSize.width : collapsedSize.width
+                let currentHeight = isExpanded ? actualExpandedSize.height : collapsedSize.height
 
                 // Calculate safe position from screen edges (top-left)
                 let padding: CGFloat = 20
@@ -313,6 +356,13 @@ struct FloatingFeedbackPanel: View {
 
                 position = CGPoint(x: x, y: y)
                 dragOffset = .zero
+            }
+            .onChange(of: critiqueHistory.count) { _, newCount in
+                // When new feedback arrives while the panel is already open,
+                // jump to it. Otherwise the user keeps seeing whichever
+                // historical entry was selected and has to manually pick the
+                // new one — easy to miss.
+                selectedHistoryIndex = max(0, newCount - 1)
             }
         }
     }
@@ -340,8 +390,8 @@ struct FloatingFeedbackPanel: View {
     private func resetPosition() {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
             // Reset to default top-left position
-            let currentWidth = isExpanded ? expandedSize.width : collapsedSize.width
-            let currentHeight = isExpanded ? expandedSize.height : collapsedSize.height
+            let currentWidth = isExpanded ? actualExpandedSize.width : collapsedSize.width
+            let currentHeight = isExpanded ? actualExpandedSize.height : collapsedSize.height
 
             let padding: CGFloat = 20
 
