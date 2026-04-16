@@ -279,8 +279,16 @@ class CanvasRenderer: NSObject {
         var viewportSizeCopy = viewportSize
 
         for (index, point) in stroke.points.enumerated() {
-            // Update pressure for this point
-            uniforms.pressure = Float(point.pressure)
+            // Sanitize pressure at the GPU boundary. Defense in depth —
+            // touchesMoved already NaN-guards the interpolation, but a
+            // history-restored stroke or future code path could feed us a
+            // non-finite value and that would silently kill rendering for
+            // the whole stroke (NaN → NaN pointSize → no draw).
+            let safePressure: CGFloat = {
+                guard point.pressure.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressure))
+            }()
+            uniforms.pressure = Float(safePressure)
 
             // Copy position to avoid overlapping access
             var position = positions[index]
@@ -643,9 +651,27 @@ class CanvasRenderer: NSObject {
             ? UIColor(white: 0.55, alpha: 0.45)
             : stroke.settings.color
         let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
+
+        // Clamp the preview's base size to Apple GPU's point sprite cap
+        // (~511 px on A-series). Past this, Metal silently fails to render
+        // points — this is one of the two causes the user reported as
+        // "stroke vanishes mid-stroke" (the other was NaN propagation,
+        // fixed in computePressure / touchesMoved). Without the clamp, at
+        // brush size 200 + zoom 2 + iPad textureToScreen ≈ 1.33 the raw
+        // value would be 532 — past the cap. Visual result of the clamp:
+        // very-large brushes at high zoom show truncated preview thickness
+        // instead of disappearing. The committed stroke uses
+        // settings.size directly into texture pixels (no zoom/aspect
+        // multipliers) so it's already safe; the shader-side clamp below
+        // belt-and-suspenders that path too.
+        let rawPreviewSize = stroke.settings.size * textureToScreen * zoomScale
+        let safePreviewSize: CGFloat = rawPreviewSize.isFinite
+            ? min(max(rawPreviewSize, 0), 511)
+            : 0
+
         var uniforms = BrushUniforms(
             color: previewColor,
-            size: Float(stroke.settings.size * textureToScreen * zoomScale),
+            size: Float(safePreviewSize),
             opacity: Float(previewOpacity),
             hardness: Float(stroke.settings.hardness)
         )
@@ -689,8 +715,14 @@ class CanvasRenderer: NSObject {
         var viewportCopy = viewport
 
         for (index, point) in stroke.points.enumerated() {
-            // Update pressure for this point
-            uniforms.pressure = Float(point.pressure)
+            // Sanitize pressure — NaN here would taint pointSize and the
+            // preview point would silently fail to render. See the matching
+            // sanitization in renderStroke above.
+            let safePressure: CGFloat = {
+                guard point.pressure.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressure))
+            }()
+            uniforms.pressure = Float(safePressure)
 
             // Copy position to avoid overlapping access
             var position = positions[index]

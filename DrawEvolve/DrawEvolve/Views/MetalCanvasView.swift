@@ -355,11 +355,26 @@ struct MetalCanvasView: UIViewRepresentable {
             let settings = brushSettings
             if touch.type == .pencil {
                 guard settings.pressureSensitivity else { return 1.0 }
-                guard touch.maximumPossibleForce > 0 else { return 1.0 }
+                // Apple Pencil firmware has been observed to occasionally
+                // return NaN for `touch.force` under heavy pressure or palm
+                // rejection. Swift's `max(0, NaN)` returns NaN (NaN
+                // comparisons never satisfy `>`, so the fallback path
+                // returns NaN rather than 0). NaN pressure → NaN pointSize
+                // in the brush vertex shader → silent fail to render →
+                // "stroke vanishes mid-stroke" symptom from the Apr 15
+                // hardware audit. Bail to neutral pressure 1.0 if any
+                // input is non-finite or out of range.
+                guard touch.maximumPossibleForce.isFinite,
+                      touch.maximumPossibleForce > 0,
+                      touch.force.isFinite else {
+                    return 1.0
+                }
                 let raw = max(0, min(1, touch.force / touch.maximumPossibleForce))
+                guard raw.isFinite else { return 1.0 }
                 let lo = settings.minPressureSize
                 let hi = settings.maxPressureSize
-                return lo + raw * (hi - lo)
+                let result = lo + raw * (hi - lo)
+                return result.isFinite ? result : 1.0
             } else {
                 // Fingers have no reliable pressure on iPad. Use a fixed mid-range value.
                 return 0.75
@@ -736,21 +751,50 @@ struct MetalCanvasView: UIViewRepresentable {
                                     y: last.y + (sampleLoc.y - last.y) * t
                                 )
                                 let previousPressure = stroke.points.last?.pressure ?? samplePressure
+                                // NaN-guard the interpolation. If either
+                                // operand isn't finite, fall back to a safe
+                                // value. Without these guards a single bad
+                                // Pencil sample (NaN force) propagates NaN
+                                // through every subsequent point in the
+                                // stroke via previousPressure, and the
+                                // entire rest of the stroke fails to render.
+                                let safePrev = previousPressure.isFinite ? previousPressure : samplePressure
+                                let safeSample = samplePressure.isFinite ? samplePressure : 1.0
                                 let interpPressure = (lastTimestamp > 0)
-                                    ? (1 - t) * previousPressure + t * samplePressure
-                                    : samplePressure
+                                    ? (1 - t) * safePrev + t * safeSample
+                                    : safeSample
 
                                 stroke.points.append(BrushStroke.StrokePoint(
                                     location: interpLocation,
-                                    pressure: interpPressure,
+                                    pressure: interpPressure.isFinite ? interpPressure : 1.0,
                                     timestamp: sampleTimestamp
                                 ))
                             }
+                            // Only advance lastPoint AFTER stamps are
+                            // committed. Updating it on every sample
+                            // unconditionally caused the "large brush
+                            // doesn't draw" bug: at brush size 200 with
+                            // default spacing 0.1 the threshold is 20 doc
+                            // pixels, but Pencil samples land ~2 doc px
+                            // apart at typical drawing speed. With the
+                            // unconditional update, distance "reset" every
+                            // sample and never accumulated past 20 → no
+                            // stamps ever fired → user lifted with a
+                            // single-stamp stroke. Now distance accumulates
+                            // from the last stamped point until it earns
+                            // a stamp.
+                            lastPoint = sampleLoc
+                            lastTimestamp = sampleTimestamp
                         }
+                        // else: distance < spacing — keep lastPoint where
+                        // it was so subsequent samples can accumulate.
+                    } else {
+                        // Defensive: if lastPoint is somehow nil mid-stroke
+                        // (shouldn't happen — touchesBegan seeds it), seed
+                        // here so the next sample has an anchor.
+                        lastPoint = sampleLoc
+                        lastTimestamp = sampleTimestamp
                     }
-
-                    lastPoint = sampleLoc
-                    lastTimestamp = sampleTimestamp
                 }
 
                 currentStroke = stroke

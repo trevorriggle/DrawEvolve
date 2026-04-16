@@ -50,7 +50,15 @@ vertex VertexOut brushVertexShader(uint vertexID [[vertex_id]],
 
     out.position = float4(ndc, 0.0, 1.0);
     out.texCoord = float2(0.0, 0.0); // Point sprite will generate tex coords
-    out.pointSize = uniforms.size * uniforms.pressure;
+    // Apple GPU point sprite size cap is ~511 px on A-series (possibly
+    // higher on M-series). Past the cap, Metal silently fails to render the
+    // point — manifests as "stroke vanishes mid-stroke" / "large brush
+    // doesn't draw" from the Apr 15 hardware audit. Clamp here as the
+    // last line of defense; Swift-side code also pre-clamps but this
+    // guarantees we never lose a stamp regardless of upstream code paths
+    // (history restore, future tools, etc). The visible failure mode at
+    // extreme inputs is a stamp capped at 511 px instead of invisible.
+    out.pointSize = clamp(uniforms.size * uniforms.pressure, 0.0, 511.0);
 
     return out;
 }
