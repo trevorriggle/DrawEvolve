@@ -30,9 +30,10 @@ class CanvasRenderer: NSObject {
     /// Update canvas size based on screen dimensions
     /// Canvas should be a square with side length = ceil(screen diagonal) to avoid clipping when rotated
     func updateCanvasSize(for screenSize: CGSize) {
+        let maxTextureDimension: CGFloat = 2048
         let diagonal = ceil(sqrt(screenSize.width * screenSize.width + screenSize.height * screenSize.height))
-        // Round up to nearest power of 2 for better GPU performance
-        let size = pow(2, ceil(log2(diagonal)))
+        // Round up to nearest power of 2 for better GPU performance, but cap at 2048 to avoid memory pressure on device
+        let size = min(pow(2, ceil(log2(diagonal))), maxTextureDimension)
         let newSize = CGSize(width: size, height: size)
 
         // Only update if size actually changed
