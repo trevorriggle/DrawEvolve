@@ -82,29 +82,6 @@ Each entry tagged "sim-verified" (checked in simulator only) or "iPad retest nee
         the existing recenter button).
     Files: DrawingCanvasView.swift
 
-[~] Onboarding keyboard squashing form layout — sim-verifiable
-    Root cause: PromptInputView centered the card with two Spacers and a
-    .frame(maxHeight: 700). When the iOS software keyboard appeared, the safe
-    area shrank, the available height for the centering VStack shrank, and the
-    card compressed proportionally — squashing the form fields off-screen with
-    no auto-scroll to the focused field.
-    Fix:
-      • Added .ignoresSafeArea(.keyboard, edges: .bottom) on the outer ZStack
-        so the layout no longer compresses when the keyboard appears.
-      • Added @FocusState tracking which TextField has focus (subject, style,
-        artists, techniques, focus).
-      • Wrapped the form ScrollView in a ScrollViewReader and tagged each
-        field VStack with .id(Field.x). On focus change, scrolls the focused
-        field to anchor: .top with a 0.05s delay so layout settles first.
-        Anchor .top (vs .center) because with the keyboard safe area ignored
-        the ScrollView gets no automatic bottom inset — pinning to .top
-        guarantees the field sits well above the keyboard regardless of card
-        height.
-      • Sticky bottom buttons remain sticky and may be visually overlapped by
-        the keyboard; user can swipe-dismiss (scrollDismissesKeyboard already
-        wired up) to access them.
-    Files: PromptInputView.swift
-
 [~] AI feedback panel sizing + default to most recent — sim-verifiable
     Root cause: three problems in one panel.
       (1) Fixed expandedSize (656×625) didn't respect screen geometry. On
@@ -162,7 +139,7 @@ Overcomplicated UX — currently adds a full rectangular select over the entire 
 
 UI / Layout
 
-Onboarding keyboard pushes fields off screen — "Let's Set Up Your Canvas" form gets squashed when the software keyboard appears. Needs ScrollView + keyboard-aware layout or .ignoresSafeArea(.keyboard) adjustment. [FIXED Apr 16 — sim-verified]
+Onboarding keyboard pushes fields off screen — "Let's Set Up Your Canvas" form gets squashed when the software keyboard appears. Needs ScrollView + keyboard-aware layout or .ignoresSafeArea(.keyboard) adjustment.
 Canvas size percentage indicator hidden behind gallery icon — move the zoom percentage readout into the toolbar. It should always be visible. [FIXED Apr 16 — sim-verified]
 AI feedback history panel goes off screen — needs scroll + correct sizing in the expanded panel. Should default to most recent feedback on open, not empty state. [FIXED Apr 16 — sim-verified]
 
@@ -180,7 +157,7 @@ Rectangle select pixel offset ~20px
 Eyedropper does nothing
 Image import broken (fix or cut) [FIXED Apr 16 — sim-verified, iPad retest needed]
 Text tool crashes (fix or cut) [FIXED Apr 16 — sim-verified, iPad retest needed]
-Onboarding keyboard layout [FIXED Apr 16 — sim-verified]
+Onboarding keyboard layout
 Canvas zoom % hidden behind gallery icon [FIXED Apr 16 — sim-verified]
 AI feedback history panel layout + default to latest [FIXED Apr 16 — sim-verified]
 Paint bucket white outline + slow performance
