@@ -1316,7 +1316,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 // which at 60 Hz rounded each small delta to the nearest 15° and
                 // produced "rotation jumps by 130°+ per gesture" (device bug report).
                 // We accumulate the raw delta here and snap only on `.ended`.
-                let rotationAngle = Angle(radians: gesture.rotation)
+                // UIRotationGestureRecognizer reports clockwise as positive
+                // (UIKit Y-down), but the shader rotates in Y-up space, so
+                // negate to match the user's finger direction.
+                let rotationAngle = Angle(radians: -gesture.rotation)
                 gesture.rotation = 0
 
                 guard rotationAngle.radians.isFinite else { return }

@@ -19,10 +19,14 @@ struct PromptInputView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-            // Card
-            VStack(spacing: 0) {
-                // Header
-                VStack(spacing: 12) {
+            // Card — sits in a VStack with a top Spacer so the keyboard
+            // pushes it upward instead of hiding the active field
+            VStack {
+                Spacer(minLength: 0)
+
+                VStack(spacing: 0) {
+                    // Header
+                    VStack(spacing: 12) {
                     Text("Let's Set Up Your Canvas")
                         .font(.title)
                         .fontWeight(.bold)
@@ -144,11 +148,14 @@ struct PromptInputView: View {
                     .padding()
                     .background(.ultraThinMaterial)
                 }
+                }
+                .frame(maxWidth: 600, maxHeight: 700)
+                .background(Color(uiColor: .systemBackground))
+                .cornerRadius(20)
+                .shadow(radius: 20)
+
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: 600, maxHeight: 700)
-            .background(Color(uiColor: .systemBackground))
-            .cornerRadius(20)
-            .shadow(radius: 20)
             .padding(40)
         }
         .fullScreenCover(isPresented: $showGallery) {
