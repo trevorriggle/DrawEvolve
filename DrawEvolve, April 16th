@@ -32,6 +32,24 @@ Bugs Remaining for TestFlight
 
 Must Fix (blocking)
 
+  Opacity slider band-aid in place — REAL FIX NEEDED before public
+    launch. The brush opacity slider previously failed to cap per-stroke
+    alpha (each stamp blended at slider opacity → overlapping stamps
+    accumulated → a 10% slider produced near-100% alpha within a single
+    stroke). Apr 27 workaround: when stroke.settings.opacity < 1.0 the
+    commit path stamps into a scratch texture at opacity = 1.0 (per-pixel
+    alpha caps at 1.0 by alpha blending into an empty buffer), then
+    composites scratch onto the layer at slider opacity in one pass.
+    BAND-AID: the in-progress preview (renderStrokePreview) still
+    accumulates each frame, so the user sees a more-opaque preview
+    during drag that snaps to the capped result on touchesEnded. Real
+    fix: route the preview through a parallel scratch path so what you
+    see is what you commit (wet-ink preview). Eraser was deliberately
+    left on the direct path; eraser's own accumulation bug needs a
+    different composite (subtract scratch alpha × slider from layer
+    alpha) and is deferred. Memory cost: +64 MB scratch texture
+    allocated lazily on first sub-100% stroke.
+
   Paint bucket white outline + slow flood — premultiplied-alpha halo
     around the fill plus an unbounded CPU-side BFS flood fill. Halo
     was partially fixed Apr 15 (compositor now uses .one for source
@@ -139,6 +157,17 @@ simulator.
    them. Repeat with the lasso tool around a tighter shape. Test in
    both portrait and landscape — the safe-area inset differs and was
    the root cause.
+
+10. Brush opacity cap — set the brush opacity slider to 10%. Draw a
+    long, looping stroke that crosses itself many times. The stroke
+    must NOT exceed ~10% alpha at any pixel (overlapping passes within
+    the SAME stroke do not darken). Lift, draw a second stroke on top
+    at 10%: it should darken the first stroke (cross-stroke darkening
+    is allowed). Confirm shape tools (line/rect/circle) at 10% also
+    cap. Confirm the eraser at < 100% still erases through (eraser
+    deliberately routes through the unchanged direct path). Note: the
+    in-progress preview during drag will look more opaque than the
+    committed result — this is the documented band-aid.
 
 
 Tool Inventory
@@ -277,7 +306,29 @@ Color picker "couldn't pick muted colors" — single cause (Apr 27):
   pulled hue out of the incoming color and forced saturation,
   brightness, and alpha to 1.0. Tapping black/white/gray gave you red;
   reopening the picker after picking anything muted snapped back.
-  Fix: pass all four HSBA components through as-is.
+  Fix: pass all four HSBA components through as-is. Apr 27 follow-up:
+  Trevor wanted the SLIDERS to default to full saturation/brightness
+  on open (so any hue change starts vivid) while preset taps still pick
+  the actual preset color. updateFromColor now keeps the brush's hue +
+  alpha but forces sat/bright to 1.0 and writes back; preset taps stay
+  unchanged (pick exact preset color).
+
+Opacity slider "10% looks like 100% within a single stroke" — single
+cause (Apr 27): each brush stamp blended at slider opacity using
+standard alpha blending, so overlapping stamps within one stroke
+accumulated as 1 - (1-O)^n which approaches 1.0 fast. Default spacing
+of 0.1 means ~10 stamps per brush diameter, so a single stroke easily
+hits near-100% alpha at slider 10%. Workaround (band-aid): when
+stroke.settings.opacity < 1.0 and tool != eraser, the commit path
+stamps into a scratch texture at opacity = 1.0 (alpha caps at 1.0
+naturally), then composites scratch onto the layer at slider opacity
+in one pass via textureDisplayPipelineState. Per-pixel alpha now caps
+at slider opacity per stroke. Cross-stroke darkening still works.
+Caveat: in-progress preview (renderStrokePreview) still accumulates
+each frame, so what you see during drag is more opaque than what
+commits. Real fix = wet-ink preview that mirrors the commit path. Also
+required: textureDisplayShader was multiplying ONLY alpha by opacity;
+fixed to multiply all four channels (premultiplied-correct).
 
 Selection marching ants "selection above the ants" — single cause
 (Apr 27): the four selection overlays in DrawingCanvasView's ZStack

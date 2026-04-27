@@ -111,6 +111,11 @@ struct AdvancedColorPicker: View {
     }
 
     private func updateFromColor() {
+        // Opening the picker: keep the hue (and alpha) from the current
+        // brush color, but reset saturation and brightness to full so the
+        // user starts from a vivid baseline. Preset taps still pick the
+        // tapped color exactly (see the .onTapGesture in the preset grid),
+        // so muted swatches like Black/White/Gray remain selectable.
         var h: CGFloat = 0
         var s: CGFloat = 0
         var b: CGFloat = 0
@@ -119,9 +124,10 @@ struct AdvancedColorPicker: View {
         selectedColor.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
 
         hue = h
-        saturation = s
-        brightness = b
+        saturation = 1.0
+        brightness = 1.0
         alpha = a
+        updateColor()
     }
 }
 
