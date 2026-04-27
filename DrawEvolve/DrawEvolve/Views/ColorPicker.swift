@@ -80,16 +80,13 @@ struct AdvancedColorPicker: View {
                                 .stroke(selectedColor == color ? Color.accentColor : Color.clear, lineWidth: 2)
                         )
                         .onTapGesture {
-                            // Pick only the hue from the preset and force the
-                            // other sliders to max. Tapping a muted preset
-                            // should still land a vivid color + max sliders.
                             var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
                             color.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
                             hue = h
-                            saturation = 1.0
-                            brightness = 1.0
-                            alpha = 1.0
-                            selectedColor = UIColor(hue: h, saturation: 1.0, brightness: 1.0, alpha: 1.0)
+                            saturation = s
+                            brightness = b
+                            alpha = a
+                            selectedColor = color
                         }
                 }
             }
@@ -114,11 +111,6 @@ struct AdvancedColorPicker: View {
     }
 
     private func updateFromColor() {
-        // Take hue from the current color but default saturation, brightness,
-        // and opacity to maximum. Users open the picker to pick vivid colors;
-        // starting mid-saturation/brightness from whatever was previously
-        // selected makes every hue shift feel muted until they re-max those
-        // sliders. Force them to 1.0 and sync the color accordingly.
         var h: CGFloat = 0
         var s: CGFloat = 0
         var b: CGFloat = 0
@@ -127,10 +119,9 @@ struct AdvancedColorPicker: View {
         selectedColor.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
 
         hue = h
-        saturation = 1.0
-        brightness = 1.0
-        alpha = 1.0
-        updateColor()
+        saturation = s
+        brightness = b
+        alpha = a
     }
 }
 

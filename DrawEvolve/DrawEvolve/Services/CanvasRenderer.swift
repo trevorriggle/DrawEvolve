@@ -330,12 +330,21 @@ class CanvasRenderer: NSObject {
 
     /// Composite all layers into a single image
     func compositeLayersToImage(layers: [DrawingLayer]) -> UIImage? {
-        // Create final texture
+        guard let finalTexture = compositeLayersToTexture(layers: layers) else {
+            return nil
+        }
+        return textureToUIImage(finalTexture)
+    }
+
+    /// Composite all visible layers onto a fresh white-backed texture and
+    /// return it. Used by export and the eyedropper. Output pixels have
+    /// alpha = 1.0 and straight (not premultiplied) RGB equal to what the
+    /// user sees on screen, since the white background is fully opaque.
+    func compositeLayersToTexture(layers: [DrawingLayer]) -> MTLTexture? {
         guard let finalTexture = createLayerTexture() else {
             return nil
         }
 
-        // Composite each visible layer
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             return nil
         }
@@ -350,7 +359,6 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        // Blend each layer
         guard let pipeline = textureDisplayPipelineState else {
             print("ERROR: textureDisplayPipelineState not available")
             return nil
@@ -373,8 +381,7 @@ class CanvasRenderer: NSObject {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        // Convert Metal texture to UIImage
-        return textureToUIImage(finalTexture)
+        return finalTexture
     }
 
     private func textureToUIImage(_ texture: MTLTexture) -> UIImage? {

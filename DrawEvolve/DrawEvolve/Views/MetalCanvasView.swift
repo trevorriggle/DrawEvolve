@@ -480,19 +480,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Handle eyedropper tool - pick color from canvas
+            // Handle eyedropper tool - pick color from canvas. Sample the
+            // composite of visible layers (not just the active layer) so the
+            // user picks the color they actually see.
             if currentTool == .eyeDropper {
                 print("Eyedropper: picking color at \(location)")
-                guard selectedLayerIndex < layers.count,
-                      let texture = layers[selectedLayerIndex].texture else {
-                    print("ERROR: Cannot pick color - invalid layer or texture")
+                guard let renderer = renderer,
+                      let composite = renderer.compositeLayersToTexture(layers: layers) else {
+                    print("ERROR: Cannot pick color - composite unavailable")
                     return
                 }
 
-                // Read pixel color at location (using document size for coordinate scaling)
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
-                if let pickedColor = getColorAt(location, in: texture, screenSize: documentSize) {
-                    // Update brush color
+                if let pickedColor = getColorAt(location, in: composite, screenSize: documentSize) {
                     brushSettings.color = pickedColor
                     print("Picked color: \(pickedColor)")
                 }
@@ -1276,12 +1276,25 @@ struct MetalCanvasView: UIViewRepresentable {
                 texture.getBytes(baseAddress, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
             }
 
-            // Extract BGRA color components (Metal uses BGRA format)
+            // Extract BGRA color components (Metal uses BGRA format).
+            // Stored values are premultiplied by alpha (per the brush fragment
+            // shader), so divide RGB by alpha to recover the visible color.
             let pixelIndex = x * 4
-            let b = CGFloat(pixelData[pixelIndex]) / 255.0
-            let g = CGFloat(pixelData[pixelIndex + 1]) / 255.0
-            let r = CGFloat(pixelData[pixelIndex + 2]) / 255.0
-            let a = CGFloat(pixelData[pixelIndex + 3]) / 255.0
+            let bp = CGFloat(pixelData[pixelIndex])     / 255.0
+            let gp = CGFloat(pixelData[pixelIndex + 1]) / 255.0
+            let rp = CGFloat(pixelData[pixelIndex + 2]) / 255.0
+            let a  = CGFloat(pixelData[pixelIndex + 3]) / 255.0
+
+            // Bail on transparent pixels — picking "nothing" should be a no-op,
+            // not silently set the brush to fully transparent black.
+            guard a > 0.01 else {
+                print("Eyedropper: pixel at \(point) is transparent, ignoring")
+                return nil
+            }
+
+            let r = min(rp / a, 1.0)
+            let g = min(gp / a, 1.0)
+            let b = min(bp / a, 1.0)
 
             return UIColor(red: r, green: g, blue: b, alpha: a)
         }

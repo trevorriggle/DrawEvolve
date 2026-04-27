@@ -1,132 +1,107 @@
-DrawEvolve Dev Plan
-Last updated: April 16, 2026 — end of fixes session
+DrawEvolve Dev Plan — Current Standings
+Last updated: April 27, 2026
 Target: TestFlight before June 1, 2026
 
 
 Snapshot
 
-Today's session knocked out almost the entire Apr 15 hardware-audit
-"Must Fix (blocking)" list. Of 11 blocking items, 7 are fixed (3
-sim-verified, 4 needing iPad retest), 1 was attempted-then-reverted (the
-onboarding keyboard fix made the UX worse), and 3 remain untouched
-(rectangle select 20px offset, eyedropper, paint bucket halo).
+Drawing engine, AI feedback, persistence, and gallery are working. The
+remaining work to ship is a short list of bugs in the selection / fill
+path, a couple of UX simplifications, and one missing feature (Export
+to Photos). Touch- and Pencil-driven changes from the last two sessions
+need iPad verification before the cut.
 
-Remaining hard blockers for TestFlight: rectangle select 20px offset,
-eyedropper broken, paint bucket halo, move tool UX simplification,
-Export to Photos (still missing), and onboarding keyboard layout.
-Everything else can ship as-is or slip to v1.0.1.
+Hard blockers for TestFlight (5):
+  • Rectangle select ~20px upward offset on move/delete
+  • Paint bucket white halo (premultiplied-alpha tail) + slow flood
+  • Move tool UX: hide the marquee, accept any tap as drag start
+  • Export to Photos — feature missing entirely (single button)
+  • Onboarding keyboard layout — open after the Apr 16 attempt was
+    reverted (UX worse than the bug)
 
-Closest realistic TestFlight cut: get the rectangle-select offset and
-eyedropper fixed (both plausibly 1 session each), wire up Export to
-Photos (a single button), then iPad-verify the four interpreted Pencil
-fixes from today. If the Pencil clamp behaves on hardware, ship.
+Pending iPad verification (no code changes needed if these pass):
+  Pencil heavy pressure across all tools, large brush slow draw, text
+  tool, image import, color picker (HSB sheet), eyedropper.
 
-
-Apr 16 Session — Fixes That Landed
-
-Tagged sim-verified (checked in simulator) or iPad-retest (touch/Pencil
-dependent — Trevor verifies on Paige iPad before TestFlight cut).
-
-(1) Text tool crash + white rectangle           [iPad-retest]
-    CanvasStateManager passed UIKit-points screenSize where doc-space
-    was expected; the renderer double-scaled the location ~1.72× and
-    walked the blit destination off the texture → Metal-assert crash.
-    Even when it didn't crash, blitEncoder.copy is a destructive byte
-    copy with no alpha blend, so the rasterized text rect punched a
-    hole through anything underneath → revealed the white canvas
-    background as a "white rectangle".
-    Fix: pass documentSize; rewrite renderText to rasterize text to a
-    scale=1.0 UIImage, then route through the existing renderImage
-    path which uses the proven premultiplied Porter-Duff blend.
-    Text is now also undoable (before/after snapshots) and refreshes
-    the layer thumbnail.
-    Files: CanvasStateManager.swift, CanvasRenderer.swift
-
-(2) Image import broken                         [iPad-retest]
-    importImage called addLayer then immediately tried to render into
-    layers[selectedLayerIndex].texture — but addLayer only appends the
-    DrawingLayer; texture creation is lazy inside
-    Coordinator.ensureLayerTextures, which only fires during a Metal
-    draw cycle. Texture was nil at the moment of the import call → the
-    guard returned early → image never landed.
-    Fix: importImage now eagerly calls renderer.createLayerTexture()
-    right after addLayer.
-    Files: CanvasStateManager.swift
-
-(3) Cut Rotate Left/Right toolbar buttons       [sim-verified]
-    Redundant with two-finger pinch-rotate. Removed both ToolButton
-    entries; viewfinder/recenter button stays.
-    Files: DrawingCanvasView.swift
-
-(4) Canvas zoom % moved out from behind gallery icon  [sim-verified]
-    Old indicator was a top-trailing overlay that stacked behind the
-    gallery button (50×50 pinned top-trailing). Moved to a persistent
-    readout at the top of the floating toolbar; tap to reset all
-    transforms. Rotation indicator stays at top-trailing — it's
-    smaller and doesn't conflict.
-    Files: DrawingCanvasView.swift
-
-(5) AI feedback panel sizing + default to most recent  [sim-verified]
-    Three problems in one panel:
-      • Fixed expandedSize (656×625) didn't respect screen geometry.
-      • History menu slid out 200pt LEFT of panel; at the default
-        top-left position this took it fully off-screen.
-      • selectedHistoryIndex defaulted to 0 (oldest critique) instead
-        of the most recent.
-    Fix: computed actualExpandedSize clamped to screen geometry; on
-    history-menu tap, slide the panel right if it's too close to the
-    left edge; selectedHistoryIndex pinned to (count - 1) on .onAppear
-    AND on .onChange of critiqueHistory.count.
-    Files: FloatingFeedbackPanel.swift
-
-(6) Pencil "stroke vanishes" + large-brush "breaks rendering"  [iPad-retest]
-    All three causes from the investigation (same session) implemented
-    in one batch. They ship together; iPad is the only way to truly
-    verify.
-      • computePressure: explicit isFinite() guards on touch.force AND
-        touch.maximumPossibleForce; bail to neutral 1.0 if non-finite.
-        Prevents NaN from Pencil firmware glitches entering the
-        pressure path.
-      • touchesMoved: NaN-guard interpolation (one bad sample no
-        longer taints the rest of the stroke). lastPoint /
-        lastTimestamp updates moved INSIDE the spacing-check block so
-        distance accumulates from the last stamped point — was the
-        smoking gun for "large brush draws nothing" (at brush 200 +
-        spacing 0.1 the threshold is 20 doc px, but Pencil samples
-        land ~2 doc px apart, so distance reset every sample and
-        never reached 20).
-      • renderStroke + renderStrokePreview: clamp pressure to [0, 1]
-        with NaN→1.0 fallback before passing to GPU. Preview also
-        clamps base pointSize to ≤511 before passing to shader.
-      • Shaders.metal brushVertexShader: final clamp on out.pointSize
-        to [0, 511] — guarantees no upstream code path can lose a
-        stamp to Apple's GPU point-sprite cap. Visible failure at
-        extreme inputs is now "stamp capped at 511 px" instead of
-        invisible.
-    Files: MetalCanvasView.swift, CanvasRenderer.swift, Shaders.metal
-    Risk: touches the load-bearing pressure → render path. Verify on
-    iPad with brush at multiple sizes + heavy Pencil pressure. The
-    511 cap is conservative — can be raised on M-series iPad if needed
-    after device check.
-
-(R) Onboarding keyboard layout — REVERTED
-    Attempted @FocusState + ScrollViewReader + .ignoresSafeArea(.keyboard).
-    Trevor tested and the combo made the UX worse than the existing
-    bug. Reverted to the pre-session state. Bug remains open; future
-    attempts should make ONE minimal change at a time and ask before
-    stacking modifiers. Trust iOS defaults + scrollDismissesKeyboard
-    that's already wired up.
+Closest realistic cut: fix the rectangle-select offset, wire up
+Export to Photos, run the iPad test plan below. If everything verifies,
+ship. Paint bucket halo and onboarding keyboard can slip to v1.0.1 if
+needed.
 
 
-Apr 16 iPad Test Plan
+Bugs Remaining for TestFlight
+
+Must Fix (blocking)
+
+  Rectangle select ~20px upward offset — when moving or deleting a
+    selection, the affected content sits ~20px above the visible
+    selection box. Likely a coordinate mismatch in the
+    extract/clear/render pipeline under the polygon-based marquee.
+    Marquees route through the lasso pipeline (activeSelection is nil;
+    selectionPath is ground truth). Start in
+    CanvasStateManager.extractSelection and CanvasRenderer.clearSelection.
+
+  Paint bucket white outline + slow flood — premultiplied-alpha halo
+    around the fill plus an unbounded CPU-side BFS flood fill. Halo
+    was partially fixed Apr 15 (compositor now uses .one for source
+    RGB since textures store premultiplied), still visible on device.
+    A bounded BFS or a GPU compute kernel pass would help.
+
+  Move tool UX — currently extracts a full-document rect on
+    touchesBegan and shows a marquee around the whole layer. Intent:
+    pick the tool, drag anywhere to reposition all pixels, no marquee.
+    Code is half there; needs the marquee visual hidden and the
+    "tap inside selection?" check bypassed for this tool.
+
+  Export to Photos — MISSING. Single toolbar/gallery button: composite
+    visible layers (use CanvasRenderer.compositeLayersToImage, already
+    extracted via compositeLayersToTexture as of Apr 27) and call
+    UIImageWriteToSavedPhotosAlbum. No App Store approval beyond the
+    standard Photos permission. Hard ship blocker — this is the only
+    feature gap that blocks shipping.
+
+  Onboarding keyboard layout — reverted Apr 16 after the @FocusState +
+    ScrollViewReader + .ignoresSafeArea(.keyboard) stack made the UX
+    worse than the bug. Future attempts: ONE minimal change at a time;
+    trust iOS defaults + scrollDismissesKeyboard already wired up; ask
+    before stacking modifiers.
+
+Should Fix (polish, can slip to v1.0.1)
+
+  Shape tool stroke thinning on release — last segment renders at
+    lower pressure on lift. Tail-taper fix or final-segment pressure
+    clamp.
+  Lasso select performance — CPU point-in-polygon over millions of
+    pixels. Bounding box pre-filter is in place; GPU compute kernel
+    would be faster.
+  Layers panel switching speed — slight lag on layer select.
+  White halo on brush strokes — partially addressed Apr 15. Still
+    visible at extremes per Apr 15 device report.
+  Tool-selected mid-screen indicator — tool name fade-in/out on tap.
+
+Deferred to v1.1
+
+  Corner scale/rotate handles for selections and imported images.
+  Procreate-style two-finger snap to perfect square/circle.
+  Pressure sensitivity tuning pass on hardware.
+  Hand-drawn tool icons.
+  Magic wand, smudge, blur, sharpen, clone stamp, polygon
+    (see CUT_TOOLS_TO_REINSTATE.md if reintroducing).
+  Copy selection to new layer — when rect/lasso select is active, add
+    "Copy to Layer" alongside Delete. High value, low risk.
+
+
+Pending iPad Test Plan
 
 When back on Paige iPad, verify in this order. If any step fails, fix
-before TestFlight cut.
+before the TestFlight cut. All steps cover changes that have already
+landed but are touch- or Pencil-driven and can't be trusted from the
+simulator.
 
 1. Pencil heavy pressure across all tools — draw with Pencil pressing
    hard. Stroke must NOT vanish mid-stroke. Try brush, eraser, line,
-   rectangle, circle. If anything still vanishes the 511 px clamp may
-   need raising for M-series.
+   rectangle, circle. If anything still vanishes the 511 px shader
+   clamp may need raising for M-series.
 
 2. Large brush slow draw — set brush to size 200, draw slowly with
    Pencil. Should produce a continuous stroke (not a single starting
@@ -150,144 +125,48 @@ before TestFlight cut.
    hamburger → history menu must NOT clip off the left edge (panel
    should slide right if needed).
 
+7. Color picker (HSB sheet) — tap the toolbar swatch. Tap each preset
+   (Black, White, Gray, Red, …) and confirm the color preview at the
+   top matches the preset, not a vivid hue substitute. Move the
+   saturation/brightness sliders down and confirm the preview actually
+   goes muted. Close and re-open the picker — sliders should reflect
+   whatever you last picked, not snap back to 100%.
 
-Bugs Remaining for TestFlight
-
-Must Fix (blocking)
-
-  Rectangle select pixel offset ~20px upward — when moving or deleting
-    a selection the affected content is ~20px above the actual
-    selection box. Likely a coordinate mismatch in the
-    extract/clear/render pipeline under the new polygon-based marquee.
-    Selection routes through lasso pipeline (activeSelection is nil
-    for marquees; selectionPath is ground truth).
-
-  Eyedropper does nothing — tapping canvas does not update brush
-    color. Should be straightforward: read pixel at tap location from
-    the composite texture, set brushSettings.color.
-
-  Image import broken — FIXED Apr 16 (sim-verified, iPad retest).
-
-  Text tool crashes — FIXED Apr 16 (sim-verified, iPad retest).
-
-  Onboarding keyboard layout — REVERTED Apr 16, still open. Future
-    attempts must be minimal/incremental.
-
-  Canvas zoom % hidden behind gallery icon — FIXED Apr 16
-    (sim-verified).
-
-  AI feedback history panel layout + default to latest — FIXED Apr 16
-    (sim-verified).
-
-  Paint bucket white outline + slow performance — premultiplied alpha
-    issue + CPU-side stack flood fill. The compositor blend factors
-    were partially fixed Apr 15; halo still visible on device.
-    Performance issue is the unbounded BFS — bounded BFS or quick GPU
-    kernel pass would help.
-
-  Move tool UX simplification — currently adds a full rectangular
-    select over the entire layer. Intent is simpler: pick the move
-    tool, drag to reposition all pixels on the current layer; no
-    marquee. Note: the existing code already extracts the full doc
-    rect as a selection on touchesBegan; need to hide the marquee
-    visual and accept any tap (not just inside the marquee) as the
-    drag start. Half-implemented already.
-
-  Stroke vanishes under heavy pressure — FIXED Apr 16 (interpreted,
-    iPad retest).
-
-  Brush size breaks rendering at large sizes — FIXED Apr 16
-    (interpreted, iPad retest).
-
-Should Fix (polish)
-
-  Shape tool stroke thinning on release — last segment renders at
-    lower pressure on lift. Tail-taper fix or pressure clamp on the
-    final segment.
-
-  Lasso select performance — CPU point-in-polygon over millions of
-    pixels. Bounding box pre-filter is in place; GPU compute kernel
-    would be faster.
-
-  Layers panel switching speed — slight lag on layer select.
-
-  White halo on brush strokes — partially addressed Apr 15
-    (compositor blend factors corrected to .one for source RGB since
-    texture stores premultiplied). Still visible on device per Apr 15
-    report.
-
-  Tool selected mid-screen indicator — tool name fade-in/out on tap.
-
-Deferred to v1.1
-
-  Corner scale/rotate handles for selections and imported images.
-  Procreate-style two-finger snap to perfect square/circle.
-  Pressure sensitivity tuning pass on hardware.
-  Hand-drawn tool icons.
-  Magic wand, smudge, blur, sharpen, clone stamp, polygon
-    (see CUT_TOOLS_TO_REINSTATE.md if reintroducing).
+8. Eyedropper — paint a swatch on layer 1, add layer 2 and paint a
+   different color on top. Switch to layer 1. Pick the eyedropper. Tap
+   the layer-2 color: brush should change to that color (composite
+   sampling). Tap empty white space: brush should change to white. Tap
+   fully transparent canvas at the very edge of a stroke: brush should
+   NOT silently change to transparent black.
 
 
-Features Missing — Required for TestFlight
-
-  Export to Photos — MISSING. Single button that composites visible
-    layers and saves to camera roll via UIImageWriteToSavedPhotosAlbum.
-    No App Store approval needed for basic Photos access. Add to
-    toolbar or gallery detail view. This is the only "feature" gap
-    that's a hard ship blocker.
-
-  Copy selection to new layer — when rect/lasso select is active, add
-    a "Copy to Layer" action alongside Delete. Extracts pixels to a
-    new layer without clearing the source. High value, low risk.
-
-
-Recommended Missing Core Tools (post-TestFlight nice-to-have)
-
-  High Value / Low Effort
-    Opacity slider — per-layer opacity control in the layers panel.
-    Straight line with snap — line tool that snaps to 45° increments
-      with a second finger (Procreate-style multitouch).
-
-  High Value / Medium Effort
-    Layer blend modes — Normal, Multiply, Screen, Overlay at minimum.
-    Crop tool — define a region and crop the canvas to it.
-
-  Medium Value / Low Effort
-    Flip horizontal / Flip vertical — canvas-level transforms.
-    Symmetry / mirror mode — mirror strokes across an axis in real time.
-
-  Deferred (v1.1+)
-    Gradient tool, custom brush creator, ruler/guides, selection
-    feather/expand/contract, adjustment layers.
-
-
-Tool Inventory (post-Apr 16 session)
+Tool Inventory
 
   Tool                Status                          Notes
   ----                ------                          -----
-  Brush               Fixed Apr 16 (iPad retest)      NaN guards + lastPoint-on-stamp + 511px clamp
+  Brush               Working (iPad retest)           NaN guards + lastPoint-on-stamp + 511 px clamp (Apr 16)
   Eraser              Working                         Consider removing pressure sensitivity
   Line                Working                         Stroke thins on release
   Rectangle/Square    Working                         Stroke thins on release
   Circle              Working                         Stroke thins on release
-  Paint Bucket        Broken                          White outline, slow flood fill
-  Eyedropper          Broken                          Doesn't update color
-  Rectangle Select    Partially working               ~20px offset on move/delete
+  Paint Bucket        Broken                          White halo + slow flood — blocking
+  Eyedropper          Working (iPad retest)           Composite sample + un-premultiply + alpha-0 bail (Apr 27)
+  Rectangle Select    Partially working               ~20px offset on move/delete — blocking
   Lasso Select        Partially working               Slow but functional
-  Move Tool           Overcomplicated                 Half-implemented; hide marquee, accept any tap
-  Text                Fixed Apr 16 (iPad retest)      Routes through renderImage; undoable
-  Image Import        Fixed Apr 16 (iPad retest)      Eager texture creation
+  Move Tool           Overcomplicated                 Hide marquee, accept any tap — blocking
+  Text                Working (iPad retest)           Routes through renderImage; undoable (Apr 16)
+  Image Import        Working (iPad retest)           Eager texture creation (Apr 16)
   Trash / Clear       Working
-  Color Picker        Working
-  Brush Settings      Working                         Tied to pressure/size paths (fixed Apr 16)
+  Color Picker        Working (sim-verified)          HSB sheet respects sat/bright/alpha (Apr 27)
+  Brush Settings      Working
   Layers              Working                         Slight switching lag
   Night Mode          Working
   Undo                Working
   Redo                Working
   Recenter Canvas     Working
   AI Feedback         Working
-  Rotate Left/Right   CUT (Apr 16)                    Redundant with pinch
-  Zoom % readout      Added (Apr 16)                  Always visible at top of toolbar
+  Zoom % readout      Working                         Always visible at top of toolbar (Apr 16)
+  Rotate Left/Right   CUT (Apr 16)                    Redundant with two-finger pinch-rotate
 
 
 AI Feedback System
@@ -322,14 +201,22 @@ Coordinate Pipeline
     activeSelection is nil for all marquee selections — selectionPath
     is ground truth.
 
-Pressure → Render Pipeline (NEW Apr 16 — also load-bearing)
+Pressure → Render Pipeline
   Apple Pencil firmware can return NaN force samples; the pressure
-  path is now NaN-guarded at four points (computePressure,
-  touchesMoved interpolation, renderStroke per-point, shader clamp).
-  Apple GPU point sprites cap at ~511 px; the brush vertex shader
-  clamps out.pointSize to [0, 511] as the universal guarantee. Don't
-  remove these guards without re-doing the analysis in the
-  Investigations section below.
+  path is NaN-guarded at four points (computePressure, touchesMoved
+  interpolation, renderStroke per-point, shader clamp). Apple GPU
+  point sprites cap at ~511 px; the brush vertex shader clamps
+  out.pointSize to [0, 511] as the universal guarantee. Don't remove
+  these guards without redoing the analysis in the Investigations
+  Reference below.
+
+Composite Sampling
+  CanvasRenderer.compositeLayersToTexture(layers:) renders all visible
+  layers over an opaque white background and returns the resulting
+  MTL texture. Output has alpha = 1.0 and straight RGB equal to what's
+  on screen. Used by Export to Photos (via compositeLayersToImage)
+  and the eyedropper. One full 4096×4096 pass per call; only fired on
+  user action, not per frame.
 
 Memory
   4096×4096 × 4 bytes = 64 MB per layer.
@@ -345,13 +232,10 @@ Worker Auth
   CLOUDFLARE_API_TOKEN set.
 
 
-Investigations Reference (Apr 16)
+Investigations Reference
 
-Full analysis of the Pencil-vanish + large-brush bugs. The fixes
-landed in the same session, but keep these notes as reference in case
-the symptom recurs or the 511 px clamp needs revisiting on M-series.
-
-Pencil "stroke vanishes mid-stroke under heavy pressure" — two causes:
+Pencil "stroke vanishes mid-stroke under heavy pressure" — two causes
+(both addressed Apr 16):
   (1) NaN propagation. Swift's max(0, NaN) returns NaN, not 0. A
       single NaN force sample taints the stroke via interpolation
       (previousPressure ?? samplePressure) → all subsequent stamps
@@ -364,7 +248,7 @@ Pencil "stroke vanishes mid-stroke under heavy pressure" — two causes:
   first. Affects all tools because brush/eraser/line/rect/circle all
   route through the same pressure → point sprite path.
 
-"Large brush size breaks the whole thing" — three causes:
+"Large brush size breaks the whole thing" — three causes (Apr 16):
   (1) BIG ONE: lastPoint updated every coalesced sample regardless of
       whether a stamp committed. At brush 200 + spacing 0.1, the
       threshold is 20 doc px, but Pencil samples land ~2 doc px apart
@@ -374,6 +258,25 @@ Pencil "stroke vanishes mid-stroke under heavy pressure" — two causes:
   (3) Fragment shader cost is O(size²); 200 px stamp = 40,000
       fragments per stamp at 240 Hz. Less critical than (1) but can
       contribute to GPU stalls at extremes.
+
+Eyedropper "picked wrong color" — three causes (Apr 27):
+  (1) Sampled the active layer's texture only. Color the user saw on
+      another layer would come back transparent (or wrong).
+  (2) Layer textures store premultiplied RGBA (per the brush fragment
+      shader); reading raw bytes into UIColor produced muddy
+      half-bright colors at any non-opaque pixel.
+  (3) Tap on alpha-0 canvas silently set the brush to transparent
+      black; subsequent strokes appeared to vanish.
+  Fix: composite visible layers over white, sample that, un-premultiply
+  by alpha (no-op on the composite since alpha = 1.0), bail if alpha
+  < 0.01.
+
+Color picker "couldn't pick muted colors" — single cause (Apr 27):
+  AdvancedColorPicker.updateFromColor and the preset-tap handler both
+  pulled hue out of the incoming color and forced saturation,
+  brightness, and alpha to 1.0. Tapping black/white/gray gave you red;
+  reopening the picker after picking anything muted snapped back.
+  Fix: pass all four HSBA components through as-is.
 
 
 Dev Workflow
@@ -395,17 +298,14 @@ Ground Rules
     waits.
   Every coordinate-pipeline change tested on physical iPad before
     marking done.
-  Pressure → render path also tested on iPad before marking done
-    (added Apr 16).
-  Dead code cleanup (stage 2: Metal shaders) is optional polish, not
-    critical path.
+  Pressure → render path also tested on iPad before marking done.
   Selection tools: scale/rotate handles are deferred to v1.1. Ship
     marquee + lasso + delete + copy-to-layer.
-  If text tool can't be fixed quickly, cut it. Don't ship a crash.
-    (As of Apr 16: fixed, no longer at risk of being cut.)
-  When fixing UX surfaces, propose ONE minimal change at a time. Don't
-    stack modifiers (added Apr 16 after the keyboard fix had to be
-    reverted).
+  When fixing UX surfaces, propose ONE minimal change at a time.
+    Don't stack modifiers (added Apr 16 after the keyboard fix had to
+    be reverted).
+  Document every fix here with root cause and sim-verified vs.
+    iPad-retest annotation.
 
 
 Files That Matter
@@ -414,8 +314,9 @@ Files That Matter
   ----                                   ----
   Views/DrawingCanvasView.swift          Main canvas host, ZStack orchestrator, toolbar
   Views/MetalCanvasView.swift            Touch handling, gesture recognizers, shape generators, pressure
+  Views/ColorPicker.swift                AdvancedColorPicker HSB sheet
   ViewModels/CanvasStateManager.swift    State, coordinate transforms, selection, history
-  Services/CanvasRenderer.swift          Metal renderer, all pixel operations, blending
+  Services/CanvasRenderer.swift          Metal renderer, all pixel operations, blending, composite
   DrawEvolve/Shaders.metal               GPU shaders (pressure clamp lives here)
   Services/OpenAIManager.swift           AI feedback API call (Cloudflare proxy)
   cloudflare-worker/index.js             Prompt, OpenAI call, skill-level calibration
