@@ -31,6 +31,17 @@ class CanvasStateManager: ObservableObject {
     var selectionLayerSnapshot: Data? = nil // Snapshot after clearing selection (for real-time rendering)
     var selectionBeforeSnapshot: Data? = nil // Snapshot before extraction (for history/undo)
 
+    // GPU-side mirror of selectionPixels. Built once when extraction completes
+    // (or when the move tool grabs the whole layer); the renderer composites
+    // it at offset every frame instead of CPU-blending UIImage data per drag
+    // sample. nil when no drag preview is active.
+    var floatingSelectionTexture: MTLTexture? = nil
+    // True when the move tool is dragging the whole active layer with no
+    // prior rect/lasso selection. In that mode we skip extraction entirely:
+    // the layer texture itself is what gets translated in the shader during
+    // drag, and an in-place blit moves the bits on commit.
+    var isTranslatingActiveLayer: Bool = false
+
     // Transform state for selection
     @Published var selectionScale: CGFloat = 1.0 // Scale factor for selection
     @Published var selectionRotation: Angle = .zero // Rotation angle for selection
@@ -452,6 +463,8 @@ class CanvasStateManager: ObservableObject {
         selectionOriginalRect = nil
         selectionLayerSnapshot = nil
         selectionBeforeSnapshot = nil
+        floatingSelectionTexture = nil
+        isTranslatingActiveLayer = false
         selectionOffset = .zero
         previewSelection = nil
         previewLassoPath = nil
@@ -530,16 +543,21 @@ class CanvasStateManager: ObservableObject {
             selectionOffset = .zero
 
             // Verify extraction succeeded
-            if selectionPixels == nil {
-                print("❌ ERROR: Failed to extract rectangular selection")
-                print("  Rect: \(rect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
-                clearSelection() // Clear invalid selection
-            } else {
+            if let pixels = selectionPixels {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
                 renderer.clearRect(rect, in: texture, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
                 selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
+                // Upload the extracted pixels to a Metal texture once. The
+                // draw loop composites this on top of the layer (which now
+                // has a hole) at originalRect + offset every frame — no CPU
+                // work during drag.
+                floatingSelectionTexture = renderer.makeTexture(from: pixels)
                 print("✂️ Extracted rectangular selection: \(rect) and cleared original")
+            } else {
+                print("❌ ERROR: Failed to extract rectangular selection")
+                print("  Rect: \(rect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
+                clearSelection() // Clear invalid selection
             }
         } else if let path = selectionPath {
             // Validate path has enough points
@@ -565,16 +583,19 @@ class CanvasStateManager: ObservableObject {
             selectionOffset = .zero
 
             // Verify extraction succeeded
-            if selectionPixels == nil {
-                print("❌ ERROR: Failed to extract lasso selection")
-                print("  Bounding rect: \(boundingRect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
-                clearSelection() // Clear invalid selection
-            } else {
+            if let pixels = selectionPixels {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
                 renderer.clearPath(path, in: texture, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
                 selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
+                // GPU-side mirror for the live drag preview. See note in the
+                // rect-selection branch above.
+                floatingSelectionTexture = renderer.makeTexture(from: pixels)
                 print("✂️ Extracted lasso selection, bounding rect: \(boundingRect) and cleared original")
+            } else {
+                print("❌ ERROR: Failed to extract lasso selection")
+                print("  Bounding rect: \(boundingRect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
+                clearSelection() // Clear invalid selection
             }
         }
     }
@@ -606,8 +627,12 @@ class CanvasStateManager: ObservableObject {
         renderer.renderImage(pixels, at: currentRect, to: texture, screenSize: documentSize)
     }
 
-    /// Commit the moved selection to finalize the change
-    /// Render the selection pixels to texture at their final position
+    /// Commit the moved selection to finalize the change.
+    ///
+    /// During drag we never write to the layer texture — `floatingSelectionTexture`
+    /// is composited on top each frame at `originalRect + offset`. Here we
+    /// bake it back into the layer in a single GPU pass and then drop the
+    /// floating texture.
     func commitSelection() {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
@@ -617,10 +642,25 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        // IMPORTANT: Render selection pixels to texture at final position one last time
-        // During drag, pixels were rendered in real-time synchronously on every touch event
-        // This final render ensures the texture has the pixels at their final position
-        renderSelectionInRealTime()
+        if let floating = floatingSelectionTexture, let originalRect = selectionOriginalRect {
+            // Compute the final destination rect in doc space (offset + scale).
+            // Layer currently has the source region cleared (extractSelectionPixels
+            // did this), so source-over compositing into it produces exactly
+            // "the moved selection placed where the user released."
+            let finalRect = CGRect(
+                x: originalRect.origin.x + selectionOffset.x,
+                y: originalRect.origin.y + selectionOffset.y,
+                width: originalRect.width * selectionScale,
+                height: originalRect.height * selectionScale
+            )
+            renderer.compositeFloatingTextureIntoLayer(floating, into: texture, atDocRect: finalRect)
+        } else {
+            // Fallback: floating texture wasn't built (e.g. extraction failed
+            // to upload). Use the legacy CPU path so we still commit *something*
+            // rather than losing the user's drag entirely.
+            print("⚠️ Selection commit falling back to CPU composite (no floating texture)")
+            renderSelectionInRealTime()
+        }
 
         // Capture the current state as "after" for history
         let afterSnapshot = renderer.captureSnapshot(of: texture)
@@ -649,9 +689,69 @@ class CanvasStateManager: ObservableObject {
             }
         }
 
-        // Clear all selection data (pixels, rects, previews, etc.)
+        // Clear all selection data (pixels, rects, floating texture, etc.)
         clearSelection()
         print("✅ Selection committed to texture")
+    }
+
+    /// Begin a move-tool whole-layer drag. Used when the user taps with the
+    /// move tool and there's no prior rect/lasso selection: we want to drag
+    /// the entire active layer. Unlike rect/lasso this skips extraction —
+    /// the layer texture itself is what the shader translates during drag,
+    /// and a single Metal blit moves the pixels on commit.
+    func beginActiveLayerTranslation() {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer else {
+            print("ERROR: Cannot begin layer translation - invalid layer or texture")
+            return
+        }
+
+        // Snapshot for undo/redo. No texture writes — the layer renders at
+        // offset via the shader during drag.
+        selectionBeforeSnapshot = renderer.captureSnapshot(of: texture)
+        selectionOffset = .zero
+        isTranslatingActiveLayer = true
+    }
+
+    /// Finalize a move-tool whole-layer drag. One GPU blit moves the bits;
+    /// no per-pixel CPU work.
+    func commitActiveLayerTranslation() {
+        guard selectedLayerIndex < layers.count,
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer,
+              let beforeSnapshot = selectionBeforeSnapshot else {
+            print("ERROR: Cannot commit layer translation - missing data")
+            return
+        }
+
+        renderer.translateLayerTextureInPlace(texture, byDocOffset: selectionOffset, screenSize: documentSize)
+
+        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        if let after = afterSnapshot {
+            let layerId = layers[selectedLayerIndex].id
+            historyManager.record(.stroke(
+                layerId: layerId,
+                beforeSnapshot: beforeSnapshot,
+                afterSnapshot: after
+            ))
+        }
+
+        let currentLayerIndex = selectedLayerIndex
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+
+        clearSelection()  // resets selectionOffset, isTranslatingActiveLayer, snapshots
+        print("✅ Layer translation committed")
     }
 
     /// Apply scale and rotation transforms to a UIImage

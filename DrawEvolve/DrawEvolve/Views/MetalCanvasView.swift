@@ -267,9 +267,56 @@ struct MetalCanvasView: UIViewRepresentable {
                 viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
             )
 
-            // Composite all visible layers to screen with zoom/pan/rotation transform
-            for layer in layers where layer.isVisible {
-                if let texture = layer.texture {
+            // Selection-drag preview state (read once so the layer loop and the
+            // floating overlay below see a consistent snapshot).
+            let (
+                isTranslatingActiveLayer,
+                activeLayerIndex,
+                floatingTexture,
+                selectionOriginalRect,
+                selectionOffsetDoc,
+                selectionScale,
+                documentSize
+            ): (Bool, Int, MTLTexture?, CGRect?, CGPoint, CGFloat, CGSize) = MainActor.assumeIsolated {
+                guard let canvasState = canvasState else {
+                    return (false, -1, MTLTexture?.none, CGRect?.none, CGPoint.zero, CGFloat(1.0), CGSize.zero)
+                }
+                return (
+                    canvasState.isTranslatingActiveLayer,
+                    canvasState.selectedLayerIndex,
+                    canvasState.floatingSelectionTexture,
+                    canvasState.selectionOriginalRect,
+                    canvasState.selectionOffset,
+                    canvasState.selectionScale,
+                    canvasState.documentSize
+                )
+            }
+
+            // Composite all visible layers to screen with zoom/pan/rotation transform.
+            // When the move tool is mid-drag with no rect/lasso selection, the
+            // active layer is rendered at an offset doc rect so the user sees
+            // a real-time preview without any per-frame texture writes.
+            for (index, layer) in layers.enumerated() where layer.isVisible {
+                guard let texture = layer.texture else { continue }
+
+                if isTranslatingActiveLayer && index == activeLayerIndex && documentSize.width > 0 {
+                    let docRect = CGRect(
+                        x: selectionOffsetDoc.x,
+                        y: selectionOffsetDoc.y,
+                        width: documentSize.width,
+                        height: documentSize.height
+                    )
+                    renderer?.renderFloatingTexture(
+                        texture,
+                        atDocRect: docRect,
+                        to: renderEncoder,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                    )
+                } else {
                     renderer?.renderTextureToScreen(
                         texture,
                         to: renderEncoder,
@@ -280,6 +327,29 @@ struct MetalCanvasView: UIViewRepresentable {
                         viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
                     )
                 }
+            }
+
+            // Floating selection (rect/lasso, or move on top of an existing
+            // selection). The active layer has a hole where the selection
+            // came from; the floating texture is composited on top at
+            // originalRect + offset every frame.
+            if let floating = floatingTexture, let original = selectionOriginalRect {
+                let docRect = CGRect(
+                    x: original.origin.x + selectionOffsetDoc.x,
+                    y: original.origin.y + selectionOffsetDoc.y,
+                    width: original.width * selectionScale,
+                    height: original.height * selectionScale
+                )
+                renderer?.renderFloatingTexture(
+                    floating,
+                    atDocRect: docRect,
+                    to: renderEncoder,
+                    opacity: 1.0,
+                    zoomScale: Float(zoomScale),
+                    panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                    canvasRotation: Float(rotation),
+                    viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                )
             }
 
             // IMPORTANT: Render current stroke preview on top
@@ -500,31 +570,31 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Handle move tool — grab every pixel on the selected layer as a
-            // single floating selection so the user can drag the whole layer.
-            // Reuses the existing rect-selection extract/drag pipeline: build a
-            // full-document rect, extract pixels (which clears the layer), then
-            // fall through to the in-selection drag check below.
+            // Handle move tool — drag the entire active layer when there's no
+            // prior rect/lasso selection. We skip pixel extraction entirely;
+            // the shader translates the layer texture each frame and a single
+            // Metal blit moves the bits on commit. (If a rect/lasso selection
+            // already exists, fall through to the standard floating-selection
+            // drag below.)
             if currentTool == .move, let canvasState = canvasState {
                 let alreadyHasSelection = MainActor.assumeIsolated {
-                    canvasState.selectionPixels != nil
+                    canvasState.floatingSelectionTexture != nil || canvasState.selectionPixels != nil
                 }
                 if !alreadyHasSelection {
                     MainActor.assumeIsolated {
-                        let fullRect = CGRect(origin: .zero, size: canvasState.documentSize)
-                        canvasState.activeSelection = fullRect
-                        canvasState.selectionPath = nil
-                        canvasState.extractSelectionPixels()
-                        canvasState.renderSelectionInRealTime()
+                        canvasState.beginActiveLayerTranslation()
                     }
-                    print("Move tool: extracted full layer as selection")
+                    isDraggingSelection = true
+                    selectionDragStart = location
+                    print("Move tool: began whole-layer translation drag")
+                    return
                 }
             }
 
             // Check if we're touching inside an existing selection (for any tool)
             if let canvasState = canvasState {
                 let shouldStartDragging = MainActor.assumeIsolated {
-                    guard canvasState.selectionPixels != nil else { return false }
+                    guard canvasState.floatingSelectionTexture != nil else { return false }
                     // Move tool always drags from any tap — the selection
                     // covers the whole layer so isPointInSelection is moot.
                     if currentTool == .move { return true }
@@ -608,23 +678,22 @@ struct MetalCanvasView: UIViewRepresentable {
             let latestScreenLocation = touch.location(in: view)
             let latestLocation = canvasState?.screenToDocument(latestScreenLocation) ?? latestScreenLocation
 
-            // Handle dragging an existing selection
+            // Handle dragging an existing selection. We *only* update the
+            // doc-space offset here — the draw loop renders the floating
+            // texture (or the active layer, for whole-layer move) at offset
+            // each frame on the GPU. No CPU pixel work per touch event.
             if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
-                // Calculate offset in document space
                 let offset = CGPoint(
                     x: latestLocation.x - dragStart.x,
                     y: latestLocation.y - dragStart.y
                 )
 
-                // IMPORTANT: Update offset and render synchronously for smooth animation
-                // Touch events run on main thread, so assumeIsolated is safe and avoids async latency
                 MainActor.assumeIsolated {
                     canvasState.selectionOffset = offset
-                    // Render selection pixels in real-time for immediate visual feedback
-                    canvasState.renderSelectionInRealTime()
                 }
+                view.setNeedsDisplay()
 
-                if hypot(offset.x, offset.y) > 5 { // Log only if moved more than 5 points
+                if hypot(offset.x, offset.y) > 5 {
                     print("Dragging selection with offset: \(offset)")
                 }
                 return
@@ -817,10 +886,17 @@ struct MetalCanvasView: UIViewRepresentable {
                 isDraggingSelection = false
                 selectionDragStart = nil
 
-                // Commit the selection to the layer
+                // Move-tool whole-layer drag goes through the in-place blit
+                // path (single GPU pass, no UIImage ever built). Floating-
+                // texture drags (rect/lasso, or move on top of an existing
+                // selection) go through the GPU composite path.
                 if let canvasState = canvasState {
                     Task { @MainActor in
-                        canvasState.commitSelection()
+                        if canvasState.isTranslatingActiveLayer {
+                            canvasState.commitActiveLayerTranslation()
+                        } else {
+                            canvasState.commitSelection()
+                        }
                     }
                 }
                 return
@@ -858,7 +934,10 @@ struct MetalCanvasView: UIViewRepresentable {
                         canvasState.selectionPath = docCorners
                         print("Rectangle selection created as polygon: \(docCorners)")
                         canvasState.extractSelectionPixels()
-                        canvasState.renderSelectionInRealTime()
+                        // Floating texture is now composited on top of the
+                        // active layer (which has the hole) by the draw loop —
+                        // no need to render anything back into the layer.
+                        view.setNeedsDisplay()
                     }
                 }
 
@@ -919,10 +998,12 @@ struct MetalCanvasView: UIViewRepresentable {
                         canvasState.previewLassoPath = nil // Clear preview
                         canvasState.selectionPath = pathCopy
                         print("Lasso selection created with \(pathCopy.count) points")
-                        // Extract pixels for moving
+                        // Extract pixels for moving. Floating texture is now
+                        // composited on top of the active layer by the draw
+                        // loop, so we don't need to render the pixels back into
+                        // the layer at original position.
                         canvasState.extractSelectionPixels()
-                        // Render them back immediately at original position so they don't disappear
-                        canvasState.renderSelectionInRealTime()
+                        view.setNeedsDisplay()
                     }
                 }
 

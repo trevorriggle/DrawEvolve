@@ -172,6 +172,74 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     return out;
 }
 
+// Vertex shader that renders a texture covering an arbitrary doc-space rect,
+// with the same zoom/pan/rotation transforms as the layer compositor. Used
+// for the live drag preview of a floating selection (move/rectangle/lasso):
+// each drag frame we just update the doc-space rect uniform and redraw — no
+// pixels are read or written until the user releases the gesture.
+//
+// Inputs:
+//   transform:   [zoom, panX, panY, rotation]   (same convention as the layer shader)
+//   viewportSize: viewport in points
+//   canvasSize:   doc-space extents in points (matches CanvasStateManager.documentSize)
+//   docRect:     [originX, originY, width, height] in doc space (UIKit Y-down)
+vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
+                                          constant float4 *transform [[buffer(0)]],
+                                          constant float2 *viewportSize [[buffer(1)]],
+                                          constant float2 *canvasSize [[buffer(2)]],
+                                          constant float4 *docRect [[buffer(3)]]) {
+    VertexOut out;
+
+    // Unit quad in [0,1]² — texCoord follows the same parameterization so
+    // texCoord.v=0 lands on the rect's TOP edge in doc space. Matches the
+    // texture row-0 = top-of-canvas convention used by the layer shader.
+    float2 unitPos[6] = {
+        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
+        float2(0.0, 1.0), float2(1.0, 0.0), float2(1.0, 1.0)
+    };
+    float2 unit = unitPos[vertexID];
+
+    float2 rectOrigin = float2(docRect[0].x, docRect[0].y);
+    float2 rectSize   = float2(docRect[0].z, docRect[0].w);
+    float2 docPos = rectOrigin + unit * rectSize;
+
+    float2 viewport = viewportSize[0];
+    float fitSize = max(viewport.x, viewport.y);
+    float2 docDim = canvasSize[0];
+
+    // Doc → quad-local pixels (centered at origin, Y-down to start). Match
+    // documentToScreen: pt = (frac * fitSize) - fitSize/2.
+    float2 quadLocalYDown = (docPos / docDim) * fitSize - fitSize * 0.5;
+    // Flip Y to match the layer shader's Y-up screen-pixel space.
+    float2 quadLocal = float2(quadLocalYDown.x, -quadLocalYDown.y);
+
+    float2 screenCenter = viewport * 0.5;
+    float2 screenPos = quadLocal + screenCenter;
+
+    // Zoom, rotate, pan — order matches the layer shader exactly so a rect
+    // that spans the whole canvas would render identically to a layer.
+    float zoom = transform[0][0];
+    screenPos = (screenPos - screenCenter) * zoom + screenCenter;
+
+    float rotation = transform[0][3];
+    if (rotation != 0.0) {
+        float2 rel = screenPos - screenCenter;
+        float c = cos(rotation);
+        float s = sin(rotation);
+        screenPos = float2(rel.x * c - rel.y * s, rel.x * s + rel.y * c) + screenCenter;
+    }
+
+    float2 pan = float2(transform[0][1], transform[0][2]);
+    screenPos += float2(pan.x, -pan.y);
+
+    float2 finalPos = (screenPos / viewport) * 2.0 - 1.0;
+
+    out.position = float4(finalPos, 0.0, 1.0);
+    out.texCoord = unit;
+    out.pointSize = 1.0;
+    return out;
+}
+
 // MARK: - Fragment Shaders
 
 // Fragment shader for brush strokes with soft edges

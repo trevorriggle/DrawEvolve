@@ -11,12 +11,12 @@ path, a couple of UX simplifications, and one missing feature (Export
 to Photos). Touch- and Pencil-driven changes from the last two sessions
 need iPad verification before the cut.
 
-Hard blockers for TestFlight (4):
+Hard blockers for TestFlight (3):
   • Paint bucket white halo (premultiplied-alpha tail) + slow flood
-  • Move tool UX: hide the marquee, accept any tap as drag start
   • Export to Photos — feature missing entirely (single button)
   • Onboarding keyboard layout — open after the Apr 16 attempt was
     reverted (UX worse than the bug)
+(Move tool UX + drag perf landed Apr 27, needs iPad retest.)
 
 Pending iPad verification (no code changes needed if these pass):
   Pencil heavy pressure across all tools, large brush slow draw, text
@@ -54,11 +54,10 @@ Must Fix (blocking)
     RGB since textures store premultiplied), still visible on device.
     A bounded BFS or a GPU compute kernel pass would help.
 
-  Move tool UX — currently extracts a full-document rect on
-    touchesBegan and shows a marquee around the whole layer. Intent:
-    pick the tool, drag anywhere to reposition all pixels, no marquee.
-    Code is half there; needs the marquee visual hidden and the
-    "tap inside selection?" check bypassed for this tool.
+  ~~Move tool UX~~ — addressed Apr 27 alongside the perf rewrite (see
+    "Move/rect/lasso drag was unusably slow" in Investigations
+    Reference). No more full-doc extract on touchesBegan, no marquee,
+    drag from any tap. Needs iPad retest.
 
   Export to Photos — MISSING. Single toolbar/gallery button: composite
     visible layers (use CanvasRenderer.compositeLayersToImage, already
@@ -172,7 +171,7 @@ Tool Inventory
   Eyedropper          Working (iPad retest)           Composite sample + un-premultiply + alpha-0 bail (Apr 27)
   Rectangle Select    Working (iPad retest)           Safe-area overlay misalignment fixed Apr 27
   Lasso Select        Working (iPad retest)           Safe-area overlay misalignment fixed Apr 27; CPU mask is slow but functional
-  Move Tool           Overcomplicated                 Hide marquee, accept any tap — blocking
+  Move Tool           Working (iPad retest)           GPU drag preview + blit commit; no marquee (Apr 27)
   Text                Working (iPad retest)           Routes through renderImage; undoable (Apr 16)
   Image Import        Working (iPad retest)           Eager texture creation (Apr 16)
   Trash / Clear       Working
@@ -336,6 +335,68 @@ produce identical premultiplied output (BOTH RGB and alpha scaled by
 slider opacity), AND allow cross-stroke darkening. Architecture is
 understood; the reason it didn't ship is GPU-state caution near the
 TestFlight deadline.
+
+Move/rect/lasso drag was unusably slow (Apr 27, GPU rewrite, needs
+iPad retest):
+  Root cause: every touchesMoved sample called
+  CanvasStateManager.renderSelectionInRealTime, which on each frame
+  (1) restored the layer-with-hole snapshot via texture.replace
+  (full canvas-sized writeback), then (2) ran the renderImage
+  per-pixel premultiplied Porter-Duff loop in CanvasRenderer over the
+  selection's bounding box, writing the full canvas back again. For
+  the move tool, the "selection" is the entire layer, so every drag
+  sample read+wrote the full 4096×4096 texture and ran 16M premul
+  blends on the main thread. Pencil samples at ~240 Hz multiply that
+  cost — hence "miserably slow."
+
+  Fix: keep the selection as a Metal texture and composite at offset
+  on the GPU during drag; never touch CPU pixels until the user lets
+  go.
+    • New shader quadVertexShaderForRect (Shaders.metal) renders any
+      texture covering an arbitrary doc-space rect, applying the same
+      zoom/pan/rotation as the layer compositor (and Y-flips offset
+      consistent with the existing pan convention so screenToDocument
+      stays the inverse of what the user sees).
+    • New CanvasRenderer methods: renderFloatingTexture (on-screen
+      preview), compositeFloatingTextureIntoLayer (GPU bake on commit
+      with the same premultiplied source-over blend as display), and
+      translateLayerTextureInPlace (Metal blit triplet for whole-
+      layer move commit), plus makeTexture(from: UIImage) to upload
+      the extracted selectionPixels once.
+    • CanvasStateManager: floatingSelectionTexture is built when
+      extractSelectionPixels runs; commitSelection now uses the GPU
+      compositor instead of the CPU loop. New
+      beginActiveLayerTranslation / commitActiveLayerTranslation pair
+      handles move-tool whole-layer drag without extracting at all —
+      isTranslatingActiveLayer flags the path so the draw loop
+      renders the active layer at offset.
+    • MetalCanvasView: touchesMoved during a selection drag now
+      ONLY updates selectionOffset (no per-frame compositing). The
+      MTKView is in continuous mode at 60 Hz so the next vsync picks
+      up the offset and renders. touchesEnded dispatches between
+      commitSelection (rect/lasso/move-on-existing-selection) and
+      commitActiveLayerTranslation (move-with-no-prior-selection).
+
+  Side benefit: the move tool no longer creates a full-document
+  selectionPath/activeSelection on touchesBegan, which is what was
+  drawing the unwanted whole-layer marquee. The Hard blockers list
+  shrinks from 4 to 3.
+
+  Coordinate-transform note: quadVertexShaderForRect derives its
+  doc→screen mapping from the same fitSize=max(viewport.x, viewport.y)
+  reasoning as documentToScreen — must stay in sync if the canvas
+  sizing ever changes. Y-flip on the offset matches the existing pan
+  flip; if a future rework normalises pan to Y-up, this needs to
+  follow.
+
+  iPad retest checklist: (a) move tool drag whole layer at zoom 1× /
+  3× / 0.5× and at canvas rotations 0° / 45° / 90° — pixels must land
+  exactly under the finger on release. (b) Rect select → drag inside
+  → release: same. (c) Lasso → drag inside → release: same. (d)
+  History: undo restores pre-drag layer. (e) After a rect/lasso
+  selection, picking move tool drags only the selection (not the whole
+  layer — should NOT call beginActiveLayerTranslation because
+  floatingSelectionTexture is non-nil).
 
 Selection marching ants "selection above the ants" — single cause
 (Apr 27): the four selection overlays in DrawingCanvasView's ZStack

@@ -18,6 +18,7 @@ class CanvasRenderer: NSObject {
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
+    private var floatingTexturePipelineState: MTLRenderPipelineState? // For floating selection drag preview
 
     // 1x1 white texture used to draw an opaque canvas background quad
     private var whiteTexture: MTLTexture?
@@ -71,6 +72,7 @@ class CanvasRenderer: NSObject {
               let eraserFragment = library.makeFunction(name: "eraserFragmentShader"),
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
               let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
+              let quadVertexForRect = library.makeFunction(name: "quadVertexShaderForRect"),
               let compositeFragment = library.makeFunction(name: "compositeFragmentShader"),
               let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader") else {
             print("Failed to load shader functions")
@@ -147,12 +149,29 @@ class CanvasRenderer: NSObject {
         textureDisplayWithTransformDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         textureDisplayWithTransformDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Floating-texture pipeline — same premultiplied source-over blend as
+        // the layer compositor, but uses the rect-based vertex shader so the
+        // caller can place the texture anywhere in doc space (selection drag
+        // preview, commit-to-layer blit).
+        let floatingTextureDescriptor = MTLRenderPipelineDescriptor()
+        floatingTextureDescriptor.vertexFunction = quadVertexForRect
+        floatingTextureDescriptor.fragmentFunction = textureDisplayFragment
+        floatingTextureDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        floatingTextureDescriptor.colorAttachments[0].isBlendingEnabled = true
+        floatingTextureDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        floatingTextureDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        floatingTextureDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        floatingTextureDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        floatingTextureDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        floatingTextureDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
+            floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
         } catch {
             print("Failed to create pipeline states: \(error)")
         }
@@ -519,6 +538,253 @@ class CanvasRenderer: NSObject {
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
+    // MARK: - Floating Selection Preview (move/rect/lasso drag)
+
+    /// Render a floating-selection texture as a quad covering `docRect`.
+    /// Uses the same zoom/pan/rotation transforms as the layer compositor, so
+    /// the floating preview tracks the canvas exactly as it sits among the
+    /// layers underneath. Caller is responsible for the layer ordering — call
+    /// this AFTER the active layer (which has the selection's hole) so the
+    /// floating pixels paint on top.
+    ///
+    /// `docRect` is in DOC space (UIKit Y-down). Move-tool whole-layer drag
+    /// uses `(offset.x, offset.y, docW, docH)`; rect/lasso drags use
+    /// `(originalRect.origin + offset, originalRect.size * scale)`.
+    func renderFloatingTexture(
+        _ texture: MTLTexture,
+        atDocRect docRect: CGRect,
+        to renderEncoder: MTLRenderCommandEncoder,
+        opacity: Float = 1.0,
+        zoomScale: Float = 1.0,
+        panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
+        canvasRotation: Float = 0.0,
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
+    ) {
+        guard let pipelineState = floatingTexturePipelineState else {
+            print("ERROR: Floating texture pipeline state not available")
+            return
+        }
+
+        renderEncoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setFragmentTexture(texture, index: 0)
+
+        var op = opacity
+        renderEncoder.setFragmentBytes(&op, length: MemoryLayout<Float>.stride, index: 0)
+
+        var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, canvasRotation)
+        renderEncoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+
+        var viewport = viewportSize
+        renderEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+
+        var canvas = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
+        renderEncoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+
+        var rect = SIMD4<Float>(Float(docRect.origin.x), Float(docRect.origin.y),
+                                Float(docRect.width), Float(docRect.height))
+        renderEncoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
+
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
+    /// Composite a floating selection texture INTO a layer texture at `docRect`,
+    /// using the same premultiplied source-over blend as on-screen display.
+    /// Use this on commit (release) to bake the moved selection into the layer
+    /// in a single GPU pass — replaces the per-frame CPU Porter-Duff loop.
+    ///
+    /// `docRect` is in doc space; the layer's texture is treated as 1:1 with
+    /// docSize (matching the rest of the codebase). zoom/pan/rotation are
+    /// identity for the bake — we're writing into canvas-space, not screen.
+    func compositeFloatingTextureIntoLayer(
+        _ floating: MTLTexture,
+        into layer: MTLTexture,
+        atDocRect docRect: CGRect
+    ) {
+        guard let pipelineState = floatingTexturePipelineState,
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            print("ERROR: Cannot composite floating texture")
+            return
+        }
+
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = layer
+        descriptor.colorAttachments[0].loadAction = .load   // preserve existing layer pixels
+        descriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            return
+        }
+
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentTexture(floating, index: 0)
+
+        var opacity: Float = 1.0
+        encoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
+
+        // Identity transform — we render in canvas/doc space, viewport == layer size.
+        var transform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
+        encoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+
+        var viewport = SIMD2<Float>(Float(layer.width), Float(layer.height))
+        encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+
+        // canvasSize uniform must match the texture-pixel coordinate space we're
+        // writing into. Layer pixel dims serve as both viewport and canvas here
+        // because the doc-space rect maps 1:1 onto layer pixels.
+        var canvas = SIMD2<Float>(Float(layer.width), Float(layer.height))
+        encoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+
+        // Convert doc rect into layer-pixel-space rect for the shader. Rest of
+        // the codebase treats docSize == layer size 1:1, but we scale through
+        // canvasSize.width to be explicit so this stays correct if that ever
+        // changes.
+        let scale = CGFloat(layer.width) / canvasSize.width
+        var rect = SIMD4<Float>(
+            Float(docRect.origin.x * scale),
+            Float(docRect.origin.y * scale),
+            Float(docRect.width * scale),
+            Float(docRect.height * scale)
+        )
+        encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    /// Translate a layer texture's pixels by an integer doc-space offset, in
+    /// place. Pixels that fall outside the texture are dropped; vacated regions
+    /// become transparent. Used by the move tool's whole-layer drag commit:
+    /// during the drag we only update an offset uniform (no pixel writes),
+    /// then this single GPU pass actually moves the bits when the user lets go.
+    func translateLayerTextureInPlace(
+        _ texture: MTLTexture,
+        byDocOffset offset: CGPoint,
+        screenSize: CGSize
+    ) {
+        let scaleX = CGFloat(texture.width) / screenSize.width
+        let scaleY = CGFloat(texture.height) / screenSize.height
+        let dx = Int((offset.x * scaleX).rounded())
+        let dy = Int((offset.y * scaleY).rounded())
+
+        if dx == 0 && dy == 0 { return }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: texture.pixelFormat,
+            width: texture.width,
+            height: texture.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+
+        guard let temp = device.makeTexture(descriptor: descriptor),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            print("ERROR: translate-in-place failed to allocate temp/command buffer")
+            return
+        }
+
+        // 1. Copy current layer to temp.
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(
+                from: texture,
+                sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                to: temp,
+                destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.endEncoding()
+        }
+
+        // 2. Clear layer to transparent.
+        let clearDescriptor = MTLRenderPassDescriptor()
+        clearDescriptor.colorAttachments[0].texture = texture
+        clearDescriptor.colorAttachments[0].loadAction = .clear
+        clearDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        clearDescriptor.colorAttachments[0].storeAction = .store
+        if let clearEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: clearDescriptor) {
+            clearEncoder.endEncoding()
+        }
+
+        // 3. Blit temp → layer at integer pixel offset, clipping the source
+        //    region to the part that lands inside the destination.
+        let srcX = max(0, -dx)
+        let srcY = max(0, -dy)
+        let dstX = max(0, dx)
+        let dstY = max(0, dy)
+        let copyW = max(0, min(texture.width  - srcX, texture.width  - dstX))
+        let copyH = max(0, min(texture.height - srcY, texture.height - dstY))
+
+        if copyW > 0, copyH > 0, let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(
+                from: temp,
+                sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                to: texture,
+                destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+            )
+            blit.endEncoding()
+        }
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    /// Upload a UIImage into a fresh Metal texture. Used to build the floating
+    /// selection texture once (when extraction completes) so subsequent drag
+    /// frames can render it on the GPU without touching the CPU pixels.
+    func makeTexture(from image: UIImage) -> MTLTexture? {
+        guard let cgImage = image.cgImage else { return nil }
+        let w = cgImage.width
+        let h = cgImage.height
+        guard w > 0, h > 0 else { return nil }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: w,
+            height: h,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+
+        // Match layer-texture format (premultipliedFirst BGRA8).
+        let bytesPerRow = w * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let context = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return nil
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let data = context.data else { return nil }
+
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, w, h),
+            mipmapLevel: 0,
+            withBytes: data,
+            bytesPerRow: bytesPerRow
+        )
+        return texture
     }
 
     /// Render selection pixels as an overlay during drag for smooth animation
