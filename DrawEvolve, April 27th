@@ -37,7 +37,7 @@ Must Fix (blocking)
   Brush opacity slider REMOVED for v1.0 — root cause is architectural,
     not a one-line fix. Brush strokes are stamp-based (default spacing
     0.1 of brush size = ~10 stamps per brush diameter), and any per-
-    stamp alpha multiplier accumulates across overlapping stamps, so
+    stamp alpha multiplier accumulates acrosHis overlapping stamps, so
     the slider behaves like flow not opacity. Two attempts on Apr 27
     failed to ship: a scratch-buffer commit path softlocked features
     on iPad (likely the +64 MB allocation + sequential
