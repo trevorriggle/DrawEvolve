@@ -14,6 +14,11 @@ class CanvasRenderer: NSObject {
     let device: MTLDevice // Public for GPU sync
     private let commandQueue: MTLCommandQueue
     private var brushPipelineState: MTLRenderPipelineState?
+    // Same as brushPipelineState but with alphaBlendOperation = .max so
+    // per-pixel alpha caps at the highest stamp's alpha (= slider opacity)
+    // within a single stroke, instead of accumulating across overlapping
+    // stamps. Used when stroke.settings.opacity < 1.0 — see renderStroke.
+    private var brushMaxAlphaPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
@@ -21,14 +26,6 @@ class CanvasRenderer: NSObject {
 
     // 1x1 white texture used to draw an opaque canvas background quad
     private var whiteTexture: MTLTexture?
-
-    // Scratch texture for the opacity-capped commit path (BAND-AID).
-    // When a brush/shape stroke commits at opacity < 1.0 we stamp into
-    // this texture at full per-stamp opacity so per-pixel alpha caps at
-    // 1.0 within the stroke, then composite onto the destination layer
-    // at the slider opacity. Lazy-allocated and reused across strokes;
-    // resized when the canvas size changes. See renderStroke.
-    private var strokeScratchTexture: MTLTexture?
 
     // Canvas dimensions - dynamically calculated to be a square larger than screen diagonal
     // This ensures no clipping/distortion when rotating the canvas
@@ -98,6 +95,25 @@ class CanvasRenderer: NSObject {
         brushDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         brushDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Brush pipeline with MAX alpha blending — used when
+        // stroke.settings.opacity < 1.0 to cap per-pixel alpha at the
+        // highest stamp's alpha (= slider opacity * pressure * coverage)
+        // within a single stroke. RGB still uses standard alpha blending
+        // so the visible color converges to the brush color at slider
+        // opacity for the common single-color case. BAND-AID trade-offs
+        // are documented in renderStroke.
+        let brushMaxAlphaDescriptor = MTLRenderPipelineDescriptor()
+        brushMaxAlphaDescriptor.vertexFunction = brushVertex
+        brushMaxAlphaDescriptor.fragmentFunction = brushFragment
+        brushMaxAlphaDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        brushMaxAlphaDescriptor.colorAttachments[0].isBlendingEnabled = true
+        brushMaxAlphaDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        brushMaxAlphaDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        brushMaxAlphaDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        brushMaxAlphaDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        brushMaxAlphaDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .one
+        brushMaxAlphaDescriptor.colorAttachments[0].alphaBlendOperation = .max
+
         // Eraser pipeline (uses zero blend to erase)
         let eraserDescriptor = MTLRenderPipelineDescriptor()
         eraserDescriptor.vertexFunction = brushVertex
@@ -157,6 +173,7 @@ class CanvasRenderer: NSObject {
 
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
+            brushMaxAlphaPipelineState = try device.makeRenderPipelineState(descriptor: brushMaxAlphaDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
@@ -220,45 +237,6 @@ class CanvasRenderer: NSObject {
     /// Render a brush stroke to a texture
     /// Stroke coordinates are in screen space, need to be scaled to texture space
     func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture, screenSize: CGSize) {
-        // BAND-AID for the opacity-accumulation bug:
-        //
-        // Default brush spacing (0.1 of brush size) puts ~10 stamps per
-        // brush diameter along a stroke. With normal alpha blending,
-        // overlapping stamps at slider opacity O accumulate as
-        // 1 - (1-O)^n, which approaches 1.0 fast — so a single 10%-opacity
-        // stroke easily reaches near-100% alpha at any pixel hit by many
-        // stamps. Users (correctly) expect the slider to cap per-stroke
-        // opacity, not per-stamp flow.
-        //
-        // Workaround: when opacity < 1.0 (brush + shape tools, NOT
-        // eraser), stamp into a scratch texture at opacity = 1.0 first.
-        // Per-pixel alpha caps at 1.0 in scratch because that's how alpha
-        // blending into an empty buffer naturally behaves. Then composite
-        // scratch onto the layer at slider opacity in a single pass — the
-        // committed result caps at slider opacity per pixel.
-        //
-        // Known caveat: the in-progress preview (renderStrokePreview)
-        // still accumulates against the drawable each frame, so the
-        // preview during drag will look more opaque than what lands on
-        // touchesEnded. This is an acceptable visual band-aid; the real
-        // fix is a wet-ink preview path that mirrors the commit. See dev
-        // plan ("Opacity slider cap" entry).
-        let useScratch = stroke.tool != .eraser && stroke.settings.opacity < 0.999
-        if useScratch, let scratch = ensureScratchTexture(matching: texture) {
-            stampStroke(stroke, into: scratch, screenSize: screenSize, loadAction: .clear, opacityOverride: 1.0)
-            compositeTexture(scratch, onto: texture, opacity: Float(stroke.settings.opacity))
-            return
-        }
-
-        stampStroke(stroke, into: texture, screenSize: screenSize, loadAction: .load, opacityOverride: nil)
-    }
-
-    /// Stamp a stroke's points as point sprites into a target texture.
-    /// Used for both the direct commit path (loadAction: .load on the
-    /// destination layer) and the scratch commit path (loadAction: .clear
-    /// on the scratch texture). `opacityOverride` lets the scratch path
-    /// stamp at full per-stamp opacity without mutating the stroke value.
-    private func stampStroke(_ stroke: BrushStroke, into texture: MTLTexture, screenSize: CGSize, loadAction: MTLLoadAction, opacityOverride: CGFloat?) {
         print("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
         print("  Texture ID: \(ObjectIdentifier(texture))")
         print("  Screen size: \(screenSize.width)x\(screenSize.height)")
@@ -266,7 +244,6 @@ class CanvasRenderer: NSObject {
         print("  Tool: \(stroke.tool)")
         print("  Brush color: \(stroke.settings.color)")
         print("  Brush size: \(stroke.settings.size)")
-        print("  Load action: \(loadAction == .clear ? "clear" : "load")")
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             print("CanvasRenderer: Failed to create command buffer")
@@ -275,19 +252,50 @@ class CanvasRenderer: NSObject {
 
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = texture
-        renderPassDescriptor.colorAttachments[0].loadAction = loadAction
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
-        if loadAction == .clear {
-            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        }
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             print("CanvasRenderer: Failed to create render encoder")
             return
         }
 
-        // Select pipeline based on tool
-        let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
+        // Select pipeline based on tool and opacity.
+        //
+        // BAND-AID for the opacity-accumulation bug: with the default
+        // brush pipeline, each stamp blends at slider opacity O and
+        // overlapping stamps within a single stroke accumulate as
+        // 1 - (1-O)^n, so a 10%-opacity stroke quickly hits ~100% alpha
+        // wherever many stamps overlap. The user wants the slider to
+        // CAP per-stroke alpha, not act as flow.
+        //
+        // Workaround: when opacity < 1.0 (brush + shape tools, NOT
+        // eraser), use brushMaxAlphaPipelineState which has
+        // alphaBlendOperation = .max. Per-pixel alpha then becomes
+        // max(stamp_alpha, current_alpha) instead of accumulating, so the
+        // ceiling within one stroke is the highest stamp's alpha — which
+        // is `coverage * pressure * slider_opacity * color.a`.
+        //
+        // Trade-offs (documented in dev plan):
+        //   • No cross-stroke darkening at slider < 100% — a second 50%
+        //     stroke on top of a first 50% stroke stays at 50% (max sees
+        //     equals). Workaround for users: raise the slider.
+        //   • RGB still uses standard alpha blend, so for the common
+        //     single-color stroke the visible color converges to the
+        //     brush color at slider opacity (correct). Multi-color
+        //     within-stroke mixing is non-standard but a rare edge case.
+        //   • Pressure still multiplies into alpha in the fragment
+        //     shader, so light-pressure stamps cap below slider opacity.
+        //     Pressure-as-flow within the slider ceiling.
+        //   • Eraser stays on its own pipeline (different blend
+        //     semantics).
+        // Real fix planned for v1.x: wet-ink preview + scratch-buffer
+        // commit that allows cross-stroke darkening.
+        let pipeline: MTLRenderPipelineState? = {
+            if stroke.tool == .eraser { return eraserPipelineState }
+            if stroke.settings.opacity < 1.0 { return brushMaxAlphaPipelineState }
+            return brushPipelineState
+        }()
         guard let pipelineState = pipeline else {
             print("CanvasRenderer: No pipeline state available")
             renderEncoder.endEncoding()
@@ -297,14 +305,11 @@ class CanvasRenderer: NSObject {
         renderEncoder.setRenderPipelineState(pipelineState)
         print("CanvasRenderer: Pipeline set, rendering points...")
 
-        // Prepare brush uniforms. opacityOverride is set by the scratch
-        // commit path so per-stamp opacity is forced to 1.0; the slider
-        // opacity is applied later in the composite step.
-        let effectiveOpacity = opacityOverride ?? stroke.settings.opacity
+        // Prepare brush uniforms
         var uniforms = BrushUniforms(
             color: stroke.settings.color,
             size: Float(stroke.settings.size),
-            opacity: Float(effectiveOpacity),
+            opacity: Float(stroke.settings.opacity),
             hardness: Float(stroke.settings.hardness)
         )
 
@@ -361,60 +366,6 @@ class CanvasRenderer: NSObject {
         // Wait for completion so texture is readable for snapshots
         commandBuffer.waitUntilCompleted()
         print("CanvasRenderer: Stroke completed on GPU")
-    }
-
-    /// Lazy-allocate (and resize on demand) the scratch texture used by
-    /// the opacity-capped commit path. Returns nil if allocation fails.
-    private func ensureScratchTexture(matching texture: MTLTexture) -> MTLTexture? {
-        if let scratch = strokeScratchTexture,
-           scratch.width == texture.width,
-           scratch.height == texture.height,
-           scratch.pixelFormat == texture.pixelFormat {
-            return scratch
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: texture.pixelFormat,
-            width: texture.width,
-            height: texture.height,
-            mipmapped: false
-        )
-        descriptor.usage = [.renderTarget, .shaderRead]
-        descriptor.storageMode = .shared
-        strokeScratchTexture = device.makeTexture(descriptor: descriptor)
-        return strokeScratchTexture
-    }
-
-    /// Composite a source texture onto a destination texture at the given
-    /// opacity using textureDisplayPipelineState. Both textures must store
-    /// premultiplied RGBA. The pipeline's source-RGB factor is .one and
-    /// the textureDisplayShader scales premultiplied RGBA by `opacity`,
-    /// so the result is a correct over-blend at the requested opacity.
-    private func compositeTexture(_ source: MTLTexture, onto dest: MTLTexture, opacity: Float) {
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let pipeline = textureDisplayPipelineState else {
-            print("CanvasRenderer: compositeTexture - missing pipeline or command buffer")
-            return
-        }
-
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = dest
-        pass.colorAttachments[0].loadAction = .load
-        pass.colorAttachments[0].storeAction = .store
-
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
-            print("CanvasRenderer: compositeTexture - failed to create encoder")
-            return
-        }
-
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setFragmentTexture(source, index: 0)
-        var op = opacity
-        encoder.setFragmentBytes(&op, length: MemoryLayout<Float>.stride, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-        encoder.endEncoding()
-
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
     }
 
     // Metal structure matching shader

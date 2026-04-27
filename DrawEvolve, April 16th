@@ -32,23 +32,37 @@ Bugs Remaining for TestFlight
 
 Must Fix (blocking)
 
-  Opacity slider band-aid in place — REAL FIX NEEDED before public
-    launch. The brush opacity slider previously failed to cap per-stroke
-    alpha (each stamp blended at slider opacity → overlapping stamps
-    accumulated → a 10% slider produced near-100% alpha within a single
-    stroke). Apr 27 workaround: when stroke.settings.opacity < 1.0 the
-    commit path stamps into a scratch texture at opacity = 1.0 (per-pixel
-    alpha caps at 1.0 by alpha blending into an empty buffer), then
-    composites scratch onto the layer at slider opacity in one pass.
-    BAND-AID: the in-progress preview (renderStrokePreview) still
-    accumulates each frame, so the user sees a more-opaque preview
-    during drag that snaps to the capped result on touchesEnded. Real
-    fix: route the preview through a parallel scratch path so what you
-    see is what you commit (wet-ink preview). Eraser was deliberately
-    left on the direct path; eraser's own accumulation bug needs a
-    different composite (subtract scratch alpha × slider from layer
-    alpha) and is deferred. Memory cost: +64 MB scratch texture
-    allocated lazily on first sub-100% stroke.
+  Brush opacity slider band-aid in place — REAL FIX NEEDED in v1.x.
+    Originally each brush stamp blended at slider opacity O with
+    standard alpha blending, so overlapping stamps within one stroke
+    accumulated as 1 - (1-O)^n and a 10%-opacity stroke quickly hit
+    ~100% alpha. Apr 27 workaround: added brushMaxAlphaPipelineState
+    (clone of brushPipelineState with alphaBlendOperation = .max,
+    sourceAlphaBlendFactor = .one, destinationAlphaBlendFactor = .one).
+    renderStroke picks this pipeline when stroke.settings.opacity < 1.0
+    (brush + shape tools; eraser stays on its own pipeline). Per-pixel
+    alpha now caps at the highest stamp's alpha — which equals slider
+    opacity at the stroke's center where coverage and pressure max out.
+    No new textures, no extra command buffers, no main-thread waits;
+    same number of GPU commands per stroke.
+
+    BAND-AID trade-offs (must fix in v1.x):
+      • No cross-stroke darkening at slider < 100% — a second 50%
+        stroke on top of a first 50% stroke stays at 50% because max()
+        sees equals. Users wanting darker areas must raise the slider.
+      • RGB still uses standard alpha blend within the stroke, so
+        single-color strokes converge to the brush color at slider
+        opacity (correct). Multi-color mixing within the same stroke is
+        non-standard but rare.
+      • Pressure still multiplies into alpha in the fragment shader, so
+        light-pressure pixels cap below slider opacity (pressure-as-flow
+        within the slider ceiling).
+      • Eraser deliberately stays on its own pipeline — its accumulation
+        bug needs a different composite (subtract scratch alpha × slider
+        from layer alpha) and is deferred.
+    Real fix: wet-ink preview path that mirrors a scratch-buffer commit
+    so what you see during drag matches the committed result, AND
+    cross-stroke darkening works as expected.
 
   Paint bucket white outline + slow flood — premultiplied-alpha halo
     around the fill plus an unbounded CPU-side BFS flood fill. Halo
@@ -158,16 +172,17 @@ simulator.
    both portrait and landscape — the safe-area inset differs and was
    the root cause.
 
-10. Brush opacity cap — set the brush opacity slider to 10%. Draw a
-    long, looping stroke that crosses itself many times. The stroke
-    must NOT exceed ~10% alpha at any pixel (overlapping passes within
-    the SAME stroke do not darken). Lift, draw a second stroke on top
-    at 10%: it should darken the first stroke (cross-stroke darkening
-    is allowed). Confirm shape tools (line/rect/circle) at 10% also
-    cap. Confirm the eraser at < 100% still erases through (eraser
-    deliberately routes through the unchanged direct path). Note: the
-    in-progress preview during drag will look more opaque than the
-    committed result — this is the documented band-aid.
+10. Brush opacity cap (band-aid) — set the brush opacity slider to
+    10%. Draw a long, looping stroke that crosses itself many times.
+    The visible alpha at any pixel must stay at ~10% (no darkening
+    from overlapping stamps within the same stroke). Lift, draw a
+    SECOND 10% stroke on top of the first — they should LOOK the
+    same opacity (no cross-stroke darkening; this is the documented
+    band-aid limitation). Slider 100% must behave exactly like
+    before (the unchanged direct path). Confirm shape tools (line,
+    rect, circle) at < 100% also cap. Confirm the eraser still
+    erases through (eraser deliberately uses its own pipeline).
+
 
 
 Tool Inventory
@@ -313,22 +328,22 @@ Color picker "couldn't pick muted colors" — single cause (Apr 27):
   alpha but forces sat/bright to 1.0 and writes back; preset taps stay
   unchanged (pick exact preset color).
 
-Opacity slider "10% looks like 100% within a single stroke" — single
-cause (Apr 27): each brush stamp blended at slider opacity using
-standard alpha blending, so overlapping stamps within one stroke
-accumulated as 1 - (1-O)^n which approaches 1.0 fast. Default spacing
-of 0.1 means ~10 stamps per brush diameter, so a single stroke easily
-hits near-100% alpha at slider 10%. Workaround (band-aid): when
-stroke.settings.opacity < 1.0 and tool != eraser, the commit path
-stamps into a scratch texture at opacity = 1.0 (alpha caps at 1.0
-naturally), then composites scratch onto the layer at slider opacity
-in one pass via textureDisplayPipelineState. Per-pixel alpha now caps
-at slider opacity per stroke. Cross-stroke darkening still works.
-Caveat: in-progress preview (renderStrokePreview) still accumulates
-each frame, so what you see during drag is more opaque than what
-commits. Real fix = wet-ink preview that mirrors the commit path. Also
-required: textureDisplayShader was multiplying ONLY alpha by opacity;
-fixed to multiply all four channels (premultiplied-correct).
+Brush opacity slider "10% looks like 100% within a single stroke"
+(Apr 27, band-aid in place): each stamp blended at slider opacity O
+with sourceAlpha/oneMinusSourceAlpha and overlapping stamps within
+one stroke accumulated as 1 - (1-O)^n which approaches 1.0 fast.
+Default spacing 0.1 puts ~10 stamps per brush diameter, so a 10%
+stroke easily hits ~100% alpha. Earlier scratch-buffer attempt was
+reverted (over-engineered, softlocked features — likely the +64 MB
+allocation + two sequential waitUntilCompleted calls per stroke).
+Replaced with a one-pipeline-swap band-aid: a clone of the brush
+pipeline with alphaBlendOperation = .max (source/dest alpha factors
+both .one) is used when stroke.settings.opacity < 1.0. Per-pixel
+alpha caps at the highest stamp's contribution. Two conditions in
+renderStroke, one extra pipeline state, no new memory, no main-
+thread waits. Trade-off: no cross-stroke darkening at slider <100%.
+Real fix in v1.x = wet-ink preview path + scratch-buffer commit
+that allows cross-stroke darkening, plus matches preview to commit.
 
 Selection marching ants "selection above the ants" — single cause
 (Apr 27): the four selection overlays in DrawingCanvasView's ZStack

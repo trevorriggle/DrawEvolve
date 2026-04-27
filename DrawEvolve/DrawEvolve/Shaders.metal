@@ -305,17 +305,14 @@ fragment float4 shapeFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, uniforms.opacity * uniforms.color.a);
 }
 
-// Fragment shader for displaying a texture with opacity and blend mode support.
-// Texture stores PREMULTIPLIED RGBA, so applying opacity must scale BOTH the
-// premultiplied RGB and the alpha. Scaling alpha alone leaves RGB at full
-// strength while alpha drops, which produces over-bright halos in the
-// .one / .oneMinusSourceAlpha blend used by textureDisplayPipelineState.
+// Fragment shader for displaying a texture with opacity and blend mode support
 fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
                                       texture2d<float> tex [[texture(0)]],
                                       constant float &opacity [[buffer(0)]]) {
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     float4 color = tex.sample(textureSampler, in.texCoord);
-    color *= opacity;
+    // Apply layer opacity to alpha channel
+    color.a *= opacity;
     return color;
 }
 
