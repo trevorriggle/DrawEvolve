@@ -70,6 +70,15 @@ struct DrawingCanvasView: View {
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
 
+            // Selection overlays use the MTKView's full-screen coordinate
+            // space (the MTKView ignores safe area at line 70). Without
+            // .ignoresSafeArea() on each overlay, SwiftUI lays them out
+            // inside the safe-area-reduced ZStack frame, shifting them down
+            // by safeAreaInsets.top (~20pt iPad portrait). The marching
+            // ants then visually misalign with the actual selected pixels
+            // by that offset. Any new overlay aligned to canvas pixels
+            // needs the same modifier.
+
             // Blue preview stroke while dragging selection
             if let previewRect = canvasState.previewSelection {
                 // Transform preview from document space to screen space
@@ -78,6 +87,7 @@ struct DrawingCanvasView: View {
                     .path(in: screenPreviewRect)
                     .stroke(Color.blue, lineWidth: 2)
                     .allowsHitTesting(false)
+                    .ignoresSafeArea()
             }
 
             if let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
@@ -94,6 +104,7 @@ struct DrawingCanvasView: View {
                 }
                 .stroke(Color.blue, lineWidth: 2)
                 .allowsHitTesting(false)
+                .ignoresSafeArea()
             }
 
             // Marching ants selection overlay (after selection is made)
@@ -102,6 +113,7 @@ struct DrawingCanvasView: View {
                 let screenSelection = canvasState.documentRectToScreen(selection)
                 MarchingAntsRectangle(rect: screenSelection)
                     .allowsHitTesting(false)
+                    .ignoresSafeArea()
             }
 
             // Canvas transform indicators (top-right) — zoom % moved into the
@@ -152,6 +164,7 @@ struct DrawingCanvasView: View {
                 let screenPath = canvasState.documentPathToScreen(path)
                 MarchingAntsPath(path: screenPath)
                     .allowsHitTesting(false)
+                    .ignoresSafeArea()
             }
 
             // Delete button for active selection (rect or lasso)

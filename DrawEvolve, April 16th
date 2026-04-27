@@ -11,8 +11,7 @@ path, a couple of UX simplifications, and one missing feature (Export
 to Photos). Touch- and Pencil-driven changes from the last two sessions
 need iPad verification before the cut.
 
-Hard blockers for TestFlight (5):
-  • Rectangle select ~20px upward offset on move/delete
+Hard blockers for TestFlight (4):
   • Paint bucket white halo (premultiplied-alpha tail) + slow flood
   • Move tool UX: hide the marquee, accept any tap as drag start
   • Export to Photos — feature missing entirely (single button)
@@ -21,25 +20,17 @@ Hard blockers for TestFlight (5):
 
 Pending iPad verification (no code changes needed if these pass):
   Pencil heavy pressure across all tools, large brush slow draw, text
-  tool, image import, color picker (HSB sheet), eyedropper.
+  tool, image import, color picker (HSB sheet), eyedropper, selection
+  marquee/lasso alignment.
 
-Closest realistic cut: fix the rectangle-select offset, wire up
-Export to Photos, run the iPad test plan below. If everything verifies,
-ship. Paint bucket halo and onboarding keyboard can slip to v1.0.1 if
-needed.
+Closest realistic cut: wire up Export to Photos, run the iPad test
+plan below. If everything verifies, ship. Paint bucket halo and
+onboarding keyboard can slip to v1.0.1 if needed.
 
 
 Bugs Remaining for TestFlight
 
 Must Fix (blocking)
-
-  Rectangle select ~20px upward offset — when moving or deleting a
-    selection, the affected content sits ~20px above the visible
-    selection box. Likely a coordinate mismatch in the
-    extract/clear/render pipeline under the polygon-based marquee.
-    Marquees route through the lasso pipeline (activeSelection is nil;
-    selectionPath is ground truth). Start in
-    CanvasStateManager.extractSelection and CanvasRenderer.clearSelection.
 
   Paint bucket white outline + slow flood — premultiplied-alpha halo
     around the fill plus an unbounded CPU-side BFS flood fill. Halo
@@ -139,6 +130,16 @@ simulator.
    fully transparent canvas at the very edge of a stroke: brush should
    NOT silently change to transparent black.
 
+9. Selection marquee/lasso alignment — drag a rectangle selection
+   across an obvious feature (a stroke or filled shape). The marching
+   ants must visually wrap that feature with no vertical offset (no
+   "ants below the actual selection" gap). Tap inside the visible
+   ants: drag should start (move tool / drag-to-reposition). Press
+   Delete: the hole should appear exactly inside the ants, not above
+   them. Repeat with the lasso tool around a tighter shape. Test in
+   both portrait and landscape — the safe-area inset differs and was
+   the root cause.
+
 
 Tool Inventory
 
@@ -151,8 +152,8 @@ Tool Inventory
   Circle              Working                         Stroke thins on release
   Paint Bucket        Broken                          White halo + slow flood — blocking
   Eyedropper          Working (iPad retest)           Composite sample + un-premultiply + alpha-0 bail (Apr 27)
-  Rectangle Select    Partially working               ~20px offset on move/delete — blocking
-  Lasso Select        Partially working               Slow but functional
+  Rectangle Select    Working (iPad retest)           Safe-area overlay misalignment fixed Apr 27
+  Lasso Select        Working (iPad retest)           Safe-area overlay misalignment fixed Apr 27; CPU mask is slow but functional
   Move Tool           Overcomplicated                 Hide marquee, accept any tap — blocking
   Text                Working (iPad retest)           Routes through renderImage; undoable (Apr 16)
   Image Import        Working (iPad retest)           Eager texture creation (Apr 16)
@@ -277,6 +278,23 @@ Color picker "couldn't pick muted colors" — single cause (Apr 27):
   brightness, and alpha to 1.0. Tapping black/white/gray gave you red;
   reopening the picker after picking anything muted snapped back.
   Fix: pass all four HSBA components through as-is.
+
+Selection marching ants "selection above the ants" — single cause
+(Apr 27): the four selection overlays in DrawingCanvasView's ZStack
+(previewSelection rect, previewLassoPath, MarchingAntsRectangle,
+MarchingAntsPath) were not opting out of safe area, while the MTKView
+under them did (.ignoresSafeArea() at line 70). SwiftUI laid the
+overlays out inside the safe-area-reduced ZStack frame, so a Path
+drawn at "screen y = N" landed at "screen y = N + safeAreaInsets.top"
+(~20pt iPad portrait, varies by device/orientation). The pixel
+extract/clear/render pipeline used the MTKView's full-screen coord
+space (correct), so the actual selected pixels sat above the
+visually-displayed marching ants. Side effect: tapping inside the
+visible ants to start a drag failed isPointInSelection (touch was
+correctly converted to doc space, but landed below the real
+selection). Fix: add .ignoresSafeArea() to each of the four overlays.
+No coordinate math change. Robust across devices and orientations
+because the modifier follows whatever insets the system reports.
 
 
 Dev Workflow
