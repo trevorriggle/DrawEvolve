@@ -14,11 +14,6 @@ class CanvasRenderer: NSObject {
     let device: MTLDevice // Public for GPU sync
     private let commandQueue: MTLCommandQueue
     private var brushPipelineState: MTLRenderPipelineState?
-    // Same as brushPipelineState but with alphaBlendOperation = .max so
-    // per-pixel alpha caps at the highest stamp's alpha (= slider opacity)
-    // within a single stroke, instead of accumulating across overlapping
-    // stamps. Used when stroke.settings.opacity < 1.0 — see renderStroke.
-    private var brushMaxAlphaPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
@@ -95,25 +90,6 @@ class CanvasRenderer: NSObject {
         brushDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         brushDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
-        // Brush pipeline with MAX alpha blending — used when
-        // stroke.settings.opacity < 1.0 to cap per-pixel alpha at the
-        // highest stamp's alpha (= slider opacity * pressure * coverage)
-        // within a single stroke. RGB still uses standard alpha blending
-        // so the visible color converges to the brush color at slider
-        // opacity for the common single-color case. BAND-AID trade-offs
-        // are documented in renderStroke.
-        let brushMaxAlphaDescriptor = MTLRenderPipelineDescriptor()
-        brushMaxAlphaDescriptor.vertexFunction = brushVertex
-        brushMaxAlphaDescriptor.fragmentFunction = brushFragment
-        brushMaxAlphaDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        brushMaxAlphaDescriptor.colorAttachments[0].isBlendingEnabled = true
-        brushMaxAlphaDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-        brushMaxAlphaDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        brushMaxAlphaDescriptor.colorAttachments[0].rgbBlendOperation = .add
-        brushMaxAlphaDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-        brushMaxAlphaDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .one
-        brushMaxAlphaDescriptor.colorAttachments[0].alphaBlendOperation = .max
-
         // Eraser pipeline (uses zero blend to erase)
         let eraserDescriptor = MTLRenderPipelineDescriptor()
         eraserDescriptor.vertexFunction = brushVertex
@@ -173,7 +149,6 @@ class CanvasRenderer: NSObject {
 
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
-            brushMaxAlphaPipelineState = try device.makeRenderPipelineState(descriptor: brushMaxAlphaDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
@@ -260,42 +235,8 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // Select pipeline based on tool and opacity.
-        //
-        // BAND-AID for the opacity-accumulation bug: with the default
-        // brush pipeline, each stamp blends at slider opacity O and
-        // overlapping stamps within a single stroke accumulate as
-        // 1 - (1-O)^n, so a 10%-opacity stroke quickly hits ~100% alpha
-        // wherever many stamps overlap. The user wants the slider to
-        // CAP per-stroke alpha, not act as flow.
-        //
-        // Workaround: when opacity < 1.0 (brush + shape tools, NOT
-        // eraser), use brushMaxAlphaPipelineState which has
-        // alphaBlendOperation = .max. Per-pixel alpha then becomes
-        // max(stamp_alpha, current_alpha) instead of accumulating, so the
-        // ceiling within one stroke is the highest stamp's alpha — which
-        // is `coverage * pressure * slider_opacity * color.a`.
-        //
-        // Trade-offs (documented in dev plan):
-        //   • No cross-stroke darkening at slider < 100% — a second 50%
-        //     stroke on top of a first 50% stroke stays at 50% (max sees
-        //     equals). Workaround for users: raise the slider.
-        //   • RGB still uses standard alpha blend, so for the common
-        //     single-color stroke the visible color converges to the
-        //     brush color at slider opacity (correct). Multi-color
-        //     within-stroke mixing is non-standard but a rare edge case.
-        //   • Pressure still multiplies into alpha in the fragment
-        //     shader, so light-pressure stamps cap below slider opacity.
-        //     Pressure-as-flow within the slider ceiling.
-        //   • Eraser stays on its own pipeline (different blend
-        //     semantics).
-        // Real fix planned for v1.x: wet-ink preview + scratch-buffer
-        // commit that allows cross-stroke darkening.
-        let pipeline: MTLRenderPipelineState? = {
-            if stroke.tool == .eraser { return eraserPipelineState }
-            if stroke.settings.opacity < 1.0 { return brushMaxAlphaPipelineState }
-            return brushPipelineState
-        }()
+        // Select pipeline based on tool
+        let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
         guard let pipelineState = pipeline else {
             print("CanvasRenderer: No pipeline state available")
             renderEncoder.endEncoding()

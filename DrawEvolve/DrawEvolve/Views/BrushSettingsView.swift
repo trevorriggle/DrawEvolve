@@ -22,15 +22,12 @@ struct BrushSettingsView: View {
                 Slider(value: $settings.size, in: 1...200)
             }
 
-            Section("Opacity") {
-                HStack {
-                    Text("Opacity")
-                    Spacer()
-                    Text(String(format: "%.0f%%", settings.opacity * 100))
-                        .foregroundColor(.primary)
-                }
-                Slider(value: $settings.opacity, in: 0...1)
-            }
+            // Opacity slider removed for v1.0 — the slider behaves like
+            // per-stamp flow, not per-stroke opacity, because each stamp
+            // blends independently. Until the wet-ink preview + scratch-
+            // buffer commit lands in v1.x the slider can't honor the
+            // user's "this stroke must not exceed N% alpha" expectation.
+            // brushSettings.opacity stays at its default (1.0) internally.
 
             Section("Shape") {
                 HStack {
