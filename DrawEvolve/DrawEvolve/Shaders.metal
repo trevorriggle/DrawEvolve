@@ -187,7 +187,8 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
                                           constant float4 *transform [[buffer(0)]],
                                           constant float2 *viewportSize [[buffer(1)]],
                                           constant float2 *canvasSize [[buffer(2)]],
-                                          constant float4 *docRect [[buffer(3)]]) {
+                                          constant float4 *docRect [[buffer(3)]],
+                                          constant float  *selectionRotation [[buffer(4)]]) {
     VertexOut out;
 
     // Unit quad in [0,1]² — texCoord follows the same parameterization so
@@ -202,6 +203,23 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
     float2 rectOrigin = float2(docRect[0].x, docRect[0].y);
     float2 rectSize   = float2(docRect[0].z, docRect[0].w);
     float2 docPos = rectOrigin + unit * rectSize;
+
+    // Per-selection rotation applied IN DOC SPACE around the rect's center.
+    // The user-facing convention (positive = visual CCW) matches canvasRotation,
+    // and to produce visual CCW in Y-down doc coords we apply R(-θ):
+    //   x' =  x cosθ + y sinθ
+    //   y' = -x sinθ + y cosθ
+    // This composes correctly with the canvas-level rotation applied later
+    // in screen space; the visible angle is θ_selection + canvasRotation.
+    float selTheta = selectionRotation[0];
+    if (selTheta != 0.0) {
+        float2 rectCenter = rectOrigin + rectSize * 0.5;
+        float2 rel = docPos - rectCenter;
+        float cs = cos(selTheta);
+        float ss = sin(selTheta);
+        docPos = rectCenter + float2(rel.x * cs + rel.y * ss,
+                                     -rel.x * ss + rel.y * cs);
+    }
 
     float2 viewport = viewportSize[0];
     float fitSize = max(viewport.x, viewport.y);

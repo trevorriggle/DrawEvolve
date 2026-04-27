@@ -167,6 +167,30 @@ struct DrawingCanvasView: View {
                     .ignoresSafeArea()
             }
 
+            // Free-transform handles for the active floating selection
+            // (rect/lasso/import). Sits above the marching ants overlays so
+            // the handles aren't obscured by the marquee. Hit tests are
+            // scoped to the handles themselves; the rest of the overlay's
+            // frame is transparent and lets touches fall through to MTKView.
+            TransformHandlesOverlay(canvasState: canvasState)
+                .ignoresSafeArea()
+
+            // Cancel pill — top-center, only visible while a floating
+            // selection exists. Tap-outside / tool-change confirm; this is
+            // the only revert path.
+            if canvasState.floatingSelectionTexture != nil {
+                VStack {
+                    HStack {
+                        Spacer()
+                        TransformCancelPill(canvasState: canvasState)
+                        Spacer()
+                    }
+                    .padding(.top, 60) // below the existing Delete button slot
+                    Spacer()
+                }
+                .ignoresSafeArea()
+            }
+
             // Delete button for active selection (rect or lasso)
             if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {

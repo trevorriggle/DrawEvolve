@@ -1,5 +1,7 @@
 DrawEvolve Dev Plan — Current Standings
-Last updated: April 27, 2026
+Last updated: April 27, 2026 (revised: floating-selection GPU
+rewrite, image-import-as-floating-selection, free-transform handles
+for rect/lasso/import)
 Target: TestFlight before June 1, 2026
 
 
@@ -173,7 +175,7 @@ Tool Inventory
   Lasso Select        Working (iPad retest)           Safe-area overlay misalignment fixed Apr 27; CPU mask is slow but functional
   Move Tool           Working (iPad retest)           GPU drag preview + blit commit; no marquee (Apr 27)
   Text                Working (iPad retest)           Routes through renderImage; undoable (Apr 16)
-  Image Import        Working (iPad retest)           Eager texture creation (Apr 16)
+  Image Import        Working (iPad retest)           Lands as floating selection on a new layer; movable via the GPU drag pipeline, baked on drag-release (Apr 27)
   Trash / Clear       Working
   Color Picker        Working (sim-verified)          HSB sheet respects sat/bright/alpha (Apr 27)
   Brush Settings      Working
@@ -335,6 +337,155 @@ produce identical premultiplied output (BOTH RGB and alpha scaled by
 slider opacity), AND allow cross-stroke darkening. Architecture is
 understood; the reason it didn't ship is GPU-state caution near the
 TestFlight deadline.
+
+Free-transform handles for floating selections (Apr 27, needs iPad
+retest, biggest UX surface area added in this pass):
+
+  Goal: rect/lasso/import all share one "floating selection" model
+  with corner + edge + rotation handles, like Procreate's free-
+  transform. Move tool's whole-layer drag is unaffected (no handles —
+  scaling the whole layer isn't a meaningful operation here).
+
+  Pieces:
+  • CGFloat → CGSize refactor for selectionScale. Identity is
+    CGSize(1, 1). 8 call sites updated; corners use uniform (width
+    == height), edges use one-axis (only one component changes).
+  • Shader: quadVertexShaderForRect now takes a selectionRotation
+    uniform at buffer index 4. Applied IN DOC SPACE around the rect's
+    center via R(-θ) for visual CCW (matches canvasRotation
+    convention; composes correctly with the canvas-level rotation
+    applied later in screen space — visible angle = θ_sel + canvasRot).
+  • Renderer: renderFloatingTexture and compositeFloatingTextureIntoLayer
+    plumb rotation through.
+  • TransformHandlesOverlay (Views/SelectionOverlays.swift): SwiftUI
+    overlay rendered in the canvas ZStack. Computes 4 corner + 4 edge
+    + 1 rotation handle screen positions every frame:
+      1. Build local-frame corners/edges from displayed half-extents.
+      2. Apply selectionRotation in doc (R(-θ)) — the SAME rotation
+         the shader applies, so handles land on the rendered corners.
+      3. Translate by displayed-rect center (in doc space).
+      4. documentToScreen() for SwiftUI .position.
+    Rotation is applied to handle positions BEFORE the screen
+    conversion — never as a post-render .rotationEffect on the
+    overlay, which would put handles in the wrong place once
+    canvasRotation also kicks in.
+  • Handle hit-tests: 16pt visual circles wrapped in 44pt clear
+    Rectangle for touch target (Apple HIG minimum).
+  • Scale gesture math: project finger displacement onto the original
+    diagonal direction (corners — uniform), or onto one axis (edges).
+    factor clamped to ≥ 0.05 (no flips in v1.0). Anchor (opposite
+    corner / edge midpoint) is pinned in DOC SPACE for the gesture's
+    duration; selectionOffset is solved each frame so the new center
+    + rotation + scale puts the anchor back at its captured doc
+    point. Without this compensation, scaling around origin would
+    drift the box away from the anchor.
+  • Rotation gesture: angle from rect center to finger via atan2;
+    visual CCW = -(currentAngle - initialAngle) (atan2 increases CW
+    visually in Y-down screen space).
+  • isPointInSelection now rotation-aware: when the floating
+    selection is rotated, we inverse-rotate the touch point around
+    the displayed rect's center via R(+θ) and check axis-aligned
+    containment in local frame. Required so taps inside a rotated
+    selection still trigger a body drag.
+
+  Commit / cancel UX:
+  • Tap-outside (in MetalCanvasView.touchesBegan, after the drag-
+    detection block fails) auto-commits any active floating selection
+    or whole-layer move drag, then continues the touch's normal
+    behavior (e.g., starting a new brush stroke at the tap point).
+    Mirrors Procreate.
+  • Tool-change in $currentTool sink. EXCEPTION: switching TO the
+    move tool does NOT commit, because move's whole job is to drag
+    the floating selection. Without this exception, switching to move
+    after a rect/lasso would commit the selection, then drag the
+    whole layer — exactly the opposite of intent.
+  • Cancel pill (TransformCancelPill, top-center, only visible while
+    floatingSelectionTexture is non-nil). cancelSelection() restores
+    selectionBeforeSnapshot to the layer and clearSelection()s. No
+    history entry recorded — the entire transform session collapses
+    to undo-once, per user's "one undo per session" answer.
+
+  Quality preservation on scale (per user's "stash original" rule):
+  selectionOriginalSource was already added during (1) for image
+  import. scheduleFloatingTextureResampleFromSource() now resamples
+  this UIImage to the new displayed pixel size on Task.detached(
+  priority: .userInitiated) every time a scale gesture ends. The
+  bilinear-scaled GPU texture stays visible until the swap completes
+  (off-main-thread per user's explicit instruction). Stale-scale
+  guard: the swap is skipped if the user has dragged again before
+  the resample finishes — applying a stale-size texture would briefly
+  look wrong before the next resample replaces it.
+
+  Out of scope (deferred):
+  • Skew (no UI without modifier keys on iPad).
+  • Per-handle undo (one-undo-per-session per Q4).
+  • Snap-to-aspect-ratio during edge drag.
+  • Rotation snapping (15° increments).
+  • Negative-scale flip — currently clamped at 0.05 to avoid
+    degenerate zero-area rects.
+  • Resample cancellation token for back-to-back gestures (current
+    stale-scale check tolerates 1-px error and is best-effort; a
+    proper sequence number would be cleaner for v1.0.1).
+
+  iPad retest checklist (when Mac/iPad available):
+  1. Import an image — appears at 80% of canvas, centered, with
+     handles. Bilinear scale during corner-drag; sharp on release.
+  2. Corner-drag from each of the 4 corners — uniform scale, opposite
+     corner pinned in doc space (no drift after release).
+  3. Edge-drag from each of the 4 edges — single-axis scale, opposite
+     edge pinned.
+  4. Rotation handle — rotates around current center; handle stays
+     "above the box" through full 360°. Box visually rotates CCW for
+     CCW finger drag.
+  5. Combined: rotate first, then corner-drag — anchor is the rotated
+     opposite corner; box should grow along the rotated diagonal, not
+     along screen axes.
+  6. Combined: scale first, then rotate — center stays put.
+  7. Tap outside the box → commits at current transform.
+  8. Tool change (any non-move tool) → commits.
+  9. Tool change to MOVE → does NOT commit; move tool drags the
+     existing floating selection.
+  10. Cancel pill → reverts; layer back to pre-extract / empty.
+  11. Repeated corner-drag scale-up (e.g., 2× → 3× → 5×) — image
+      should stay sharp on each release (resample from
+      selectionOriginalSource), not blurry-on-blurry.
+  12. Rotation handle while canvas itself is rotated 45° via two-
+      finger gesture — box rotates further from CURRENT visible
+      orientation, no drift.
+  13. Hit-test on rotated box — tap inside the rotated body
+      (especially in regions that ARE inside the rotated rect but
+      OUTSIDE its axis-aligned bounding box) starts a body drag.
+  14. Undo after commit — one undo restores layer to pre-session
+      state in one step.
+
+Image import "too big and stuck" (Apr 27, needs iPad retest):
+  Old behavior: importImage aspect-fit at 80% of doc, then immediately
+  baked into a fresh layer via the same per-pixel CPU Porter-Duff loop
+  that renderImage uses for selection commit. Once baked, the only way
+  to reposition was to use the move tool on the whole layer.
+
+  New behavior: import lands as a floating selection on a new (empty)
+  layer, sized to 80% of the canvas and centered. The user drags it
+  into place using the move tool (or any tap inside the bounds);
+  drag-release routes through commitSelection, which blits the
+  floating texture into the layer in a single GPU pass. The source
+  is CPU-resampled to its displayed pixel size BEFORE the GPU upload
+  (no 6000×4000 textures landing on the GPU just to be downsampled by
+  the shader), and the original full-res UIImage is stashed on the
+  state manager (selectionOriginalSource) so the upcoming scale-
+  gesture work resamples from the original each time instead of
+  degrading from successive resizes.
+
+  Safety: importing a second image while a prior floating selection
+  (rect/lasso extract or earlier import) is uncommitted now commits
+  the prior one first instead of silently throwing it away — the
+  earlier clearSelection() at the top of importImage was a data-loss
+  hazard.
+
+  Related fix: isPointInSelection now falls back to selectionOriginalRect
+  when activeSelection / selectionPath are both nil, so tapping inside
+  an imported image starts a drag with any tool. (Imports don't draw a
+  marquee — the image's own bounds are the visual cue.)
 
 Move/rect/lasso drag was unusably slow (Apr 27, GPU rewrite, needs
 iPad retest):

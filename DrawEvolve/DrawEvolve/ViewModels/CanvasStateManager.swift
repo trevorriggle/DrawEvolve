@@ -41,9 +41,17 @@ class CanvasStateManager: ObservableObject {
     // the layer texture itself is what gets translated in the shader during
     // drag, and an in-place blit moves the bits on commit.
     var isTranslatingActiveLayer: Bool = false
+    // Full-resolution source for the floating selection (only set on import,
+    // for now). Future scale-gesture work resamples from this every time the
+    // user changes the size, instead of resizing an already-resized texture
+    // — otherwise repeated handle drags degrade quality fast.
+    var selectionOriginalSource: UIImage? = nil
 
     // Transform state for selection
-    @Published var selectionScale: CGFloat = 1.0 // Scale factor for selection
+    // Scale factor for the floating selection. CGSize so corner handles
+    // (uniform — width == height) and edge handles (one-axis — width XOR
+    // height changes) share the same representation. Identity = (1, 1).
+    @Published var selectionScale: CGSize = CGSize(width: 1.0, height: 1.0)
     @Published var selectionRotation: Angle = .zero // Rotation angle for selection
     @Published var isTransformingSelection = false // True when dragging transform handles
 
@@ -68,6 +76,7 @@ class CanvasStateManager: ObservableObject {
     // visible symptom of bug 2.1. Retain as a property so the subscription lives as
     // long as the state manager.
     private var historyCancellable: AnyCancellable?
+    private var toolChangeCancellable: AnyCancellable?
     var renderer: CanvasRenderer?
     private var _screenSize: CGSize = .zero
     var screenSize: CGSize {
@@ -120,6 +129,29 @@ class CanvasStateManager: ObservableObject {
         historyCancellable = historyManager.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+
+        // Auto-commit any active floating selection (or whole-layer move drag)
+        // when the user picks a different tool. Without this, switching tools
+        // while a selection is mid-transform would either leave the selection
+        // floating indefinitely or strand the user — neither is sane UX.
+        //
+        // Exception: switching TO the move tool. Move's whole job is to drag
+        // the floating selection (or, if none, the whole active layer); auto-
+        // committing first would erase the user's selection right before they
+        // tried to move it. dropFirst() skips the initial value emission so
+        // we don't fire on init.
+        toolChangeCancellable = $currentTool
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] newTool in
+                guard let self = self else { return }
+                if newTool == .move { return }
+                if self.floatingSelectionTexture != nil {
+                    self.commitSelection()
+                } else if self.isTranslatingActiveLayer {
+                    self.commitActiveLayerTranslation()
+                }
+            }
 
         // Start with one layer
         addLayer()
@@ -374,6 +406,16 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
+        // If an earlier floating selection (prior import, or a rect/lasso
+        // extraction) is still uncommitted, bake it into its layer first —
+        // otherwise our clearSelection() below would silently throw away
+        // the user's pixels.
+        if floatingSelectionTexture != nil {
+            commitSelection()
+        } else if isTranslatingActiveLayer {
+            commitActiveLayerTranslation()
+        }
+
         addLayer()
         guard selectedLayerIndex < layers.count else {
             print("ERROR: Cannot import image - selectedLayerIndex out of range")
@@ -382,10 +424,10 @@ class CanvasStateManager: ObservableObject {
 
         // `addLayer` only appends the DrawingLayer; texture creation is lazy
         // inside MetalCanvasView.Coordinator.ensureLayerTextures(), which
-        // only runs during a Metal draw cycle. We're synchronously about to
-        // render into this layer, so the texture must exist NOW — otherwise
-        // the guard below fails silently and the imported image vanishes.
-        // (That was the "image import broken" symptom.)
+        // only runs during a Metal draw cycle. We need the texture NOW —
+        // commitSelection (called after the user drag-releases the imported
+        // image) blits the floating texture into it, and the captureSnapshot
+        // calls below need a real MTLTexture.
         if layers[selectedLayerIndex].texture == nil {
             layers[selectedLayerIndex].texture = renderer.createLayerTexture()
         }
@@ -394,16 +436,15 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        // Aspect-fit the image into ~80% of the document
+        // Aspect-fit at 80% of the canvas (matches the user's "leave room
+        // for the handles" intent for the upcoming transform feature).
         let docW = documentSize.width
         let docH = documentSize.height
         let imgW = image.size.width
         let imgH = image.size.height
         guard imgW > 0, imgH > 0 else { return }
 
-        let maxW = docW * 0.8
-        let maxH = docH * 0.8
-        let scale = min(maxW / imgW, maxH / imgH)
+        let scale = min(docW * 0.8 / imgW, docH * 0.8 / imgH)
         let drawW = imgW * scale
         let drawH = imgH * scale
         let rect = CGRect(
@@ -413,23 +454,55 @@ class CanvasStateManager: ObservableObject {
             height: drawH
         )
 
-        renderer.renderImage(image, at: rect, to: texture, screenSize: documentSize)
-        hasLoadedExistingImage = true
+        // Resample the source down to its displayed pixel size BEFORE the
+        // GPU upload — uploading a 6000×4000 photo just to have the shader
+        // downsample it for display burns memory and looks worse than a
+        // proper Core Graphics resample. The full-res source is stashed on
+        // the state manager so the upcoming scale-gesture work can resample
+        // from the original each time the user changes size, instead of
+        // degrading from successive resizes of an already-resized image.
+        let displayPixelSize = CGSize(
+            width: max(1, drawW.rounded()),
+            height: max(1, drawH.rounded())
+        )
+        let resized = resizedImage(image, to: displayPixelSize)
 
-        nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
-        let layerId = layers[selectedLayerIndex].id
-        Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
-                await MainActor.run {
-                    if let layer = self.layers.first(where: { $0.id == layerId }) {
-                        layer.updateThumbnail(thumbnail)
-                    }
-                }
-            }
+        // Wire as a floating selection on the new (empty) layer. The user
+        // can drag with the move tool (or any tap inside the image bounds);
+        // drag-release routes through commitSelection, which blits the
+        // floating texture into the layer in a single GPU pass.
+        clearSelection()
+        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        selectionBeforeSnapshot = beforeSnapshot
+        selectionLayerSnapshot = beforeSnapshot   // empty layer — nothing to "restore" beyond it
+        selectionPixels = resized
+        selectionOriginalRect = rect
+        selectionOffset = .zero
+        selectionOriginalSource = image
+        floatingSelectionTexture = renderer.makeTexture(from: resized)
+
+        if floatingSelectionTexture == nil {
+            print("⚠️ Failed to upload imported image to a Metal texture; falling back to direct composite")
+            renderer.renderImage(resized, at: rect, to: texture, screenSize: documentSize)
+            clearSelection()
         }
 
-        print("📷 Imported image into new layer at \(rect)")
+        hasLoadedExistingImage = true
+        print("📷 Imported image as floating selection at \(rect) (texture \(displayPixelSize))")
+    }
+
+    /// Aspect-fill resample at scale 1.0 so 1 UIImage point = 1 backing pixel
+    /// (otherwise UIGraphicsImageRenderer picks the screen scale and the
+    /// resulting CGImage has 2× / 3× the pixels we asked for, which then
+    /// uploads a needlessly large GPU texture).
+    private func resizedImage(_ image: UIImage, to size: CGSize) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 
     func requestFeedback(for context: DrawingContext) async {
@@ -465,10 +538,11 @@ class CanvasStateManager: ObservableObject {
         selectionBeforeSnapshot = nil
         floatingSelectionTexture = nil
         isTranslatingActiveLayer = false
+        selectionOriginalSource = nil
         selectionOffset = .zero
         previewSelection = nil
         previewLassoPath = nil
-        selectionScale = 1.0
+        selectionScale = CGSize(width: 1.0, height: 1.0)
         selectionRotation = .zero
         isTransformingSelection = false
     }
@@ -619,8 +693,8 @@ class CanvasStateManager: ObservableObject {
         let currentRect = CGRect(
             x: originalRect.origin.x + selectionOffset.x,
             y: originalRect.origin.y + selectionOffset.y,
-            width: originalRect.width * selectionScale,
-            height: originalRect.height * selectionScale
+            width: originalRect.width * selectionScale.width,
+            height: originalRect.height * selectionScale.height
         )
 
         // Step 3: Render the pixels at the new position (use documentSize for 1:1 coordinate mapping)
@@ -650,10 +724,15 @@ class CanvasStateManager: ObservableObject {
             let finalRect = CGRect(
                 x: originalRect.origin.x + selectionOffset.x,
                 y: originalRect.origin.y + selectionOffset.y,
-                width: originalRect.width * selectionScale,
-                height: originalRect.height * selectionScale
+                width: originalRect.width * selectionScale.width,
+                height: originalRect.height * selectionScale.height
             )
-            renderer.compositeFloatingTextureIntoLayer(floating, into: texture, atDocRect: finalRect)
+            renderer.compositeFloatingTextureIntoLayer(
+                floating,
+                into: texture,
+                atDocRect: finalRect,
+                rotation: Float(selectionRotation.radians)
+            )
         } else {
             // Fallback: floating texture wasn't built (e.g. extraction failed
             // to upload). Use the legacy CPU path so we still commit *something*
@@ -692,6 +771,62 @@ class CanvasStateManager: ObservableObject {
         // Clear all selection data (pixels, rects, floating texture, etc.)
         clearSelection()
         print("✅ Selection committed to texture")
+    }
+
+    /// Throw away the active floating selection without baking it. Restores
+    /// whatever the layer looked like before the selection was extracted /
+    /// imported, then clears all selection state.
+    /// (Wired to the Cancel pill in the toolbar overlay.)
+    func cancelSelection() {
+        if let renderer = renderer,
+           selectedLayerIndex < layers.count,
+           let texture = layers[selectedLayerIndex].texture,
+           let beforeSnapshot = selectionBeforeSnapshot {
+            renderer.restoreSnapshot(beforeSnapshot, to: texture)
+        }
+        clearSelection()
+    }
+
+    /// After a scale gesture ends, the floating texture has been bilinear-
+    /// upscaled (or downsampled) by the shader, which looks soft for any
+    /// large change. Resample from the original full-res source UIImage at
+    /// the new displayed pixel size on a background thread; on completion,
+    /// swap in the new texture if the user hasn't moved the goalposts.
+    /// Must be called on the main actor; spawns Task.detached internally.
+    func scheduleFloatingTextureResampleFromSource() {
+        guard let source = selectionOriginalSource,
+              let originalRect = selectionOriginalRect,
+              let renderer = renderer else { return }
+
+        let displayedW = max(1, originalRect.width  * selectionScale.width)
+        let displayedH = max(1, originalRect.height * selectionScale.height)
+        let target = CGSize(width: displayedW.rounded(), height: displayedH.rounded())
+
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeSource = source
+        Task.detached(priority: .userInitiated) {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1.0
+            format.opaque = false
+            let cgRenderer = UIGraphicsImageRenderer(size: target, format: format)
+            let resized = cgRenderer.image { _ in
+                unsafeSource.draw(in: CGRect(origin: .zero, size: target))
+            }
+            guard let newTexture = unsafeRenderer.makeTexture(from: resized) else { return }
+            await MainActor.run {
+                // Bail if the user kept dragging in the meantime — applying a
+                // resample at a stale size would make the texture briefly look
+                // wrong before the next gesture-end resample replaces it.
+                guard self.floatingSelectionTexture != nil,
+                      let currentRect = self.selectionOriginalRect,
+                      abs(currentRect.width  * self.selectionScale.width  - displayedW) < 1.0,
+                      abs(currentRect.height * self.selectionScale.height - displayedH) < 1.0 else {
+                    return
+                }
+                self.floatingSelectionTexture = newTexture
+                self.selectionPixels = resized
+            }
+        }
     }
 
     /// Begin a move-tool whole-layer drag. Used when the user taps with the

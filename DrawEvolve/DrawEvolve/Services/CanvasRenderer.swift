@@ -555,6 +555,7 @@ class CanvasRenderer: NSObject {
     func renderFloatingTexture(
         _ texture: MTLTexture,
         atDocRect docRect: CGRect,
+        rotation: Float = 0.0,
         to renderEncoder: MTLRenderCommandEncoder,
         opacity: Float = 1.0,
         zoomScale: Float = 1.0,
@@ -586,6 +587,9 @@ class CanvasRenderer: NSObject {
                                 Float(docRect.width), Float(docRect.height))
         renderEncoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
 
+        var rot = rotation
+        renderEncoder.setVertexBytes(&rot, length: MemoryLayout<Float>.stride, index: 4)
+
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
@@ -600,7 +604,8 @@ class CanvasRenderer: NSObject {
     func compositeFloatingTextureIntoLayer(
         _ floating: MTLTexture,
         into layer: MTLTexture,
-        atDocRect docRect: CGRect
+        atDocRect docRect: CGRect,
+        rotation: Float = 0.0
     ) {
         guard let pipelineState = floatingTexturePipelineState,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -648,6 +653,9 @@ class CanvasRenderer: NSObject {
             Float(docRect.height * scale)
         )
         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
+
+        var rot = rotation
+        encoder.setVertexBytes(&rot, length: MemoryLayout<Float>.stride, index: 4)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()

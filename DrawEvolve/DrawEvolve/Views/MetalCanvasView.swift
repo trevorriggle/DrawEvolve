@@ -276,10 +276,12 @@ struct MetalCanvasView: UIViewRepresentable {
                 selectionOriginalRect,
                 selectionOffsetDoc,
                 selectionScale,
+                selectionRotationRad,
                 documentSize
-            ): (Bool, Int, MTLTexture?, CGRect?, CGPoint, CGFloat, CGSize) = MainActor.assumeIsolated {
+            ): (Bool, Int, MTLTexture?, CGRect?, CGPoint, CGSize, CGFloat, CGSize) = MainActor.assumeIsolated {
                 guard let canvasState = canvasState else {
-                    return (false, -1, MTLTexture?.none, CGRect?.none, CGPoint.zero, CGFloat(1.0), CGSize.zero)
+                    return (false, -1, MTLTexture?.none, CGRect?.none, CGPoint.zero,
+                            CGSize(width: 1, height: 1), CGFloat(0), CGSize.zero)
                 }
                 return (
                     canvasState.isTranslatingActiveLayer,
@@ -288,6 +290,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     canvasState.selectionOriginalRect,
                     canvasState.selectionOffset,
                     canvasState.selectionScale,
+                    canvasState.selectionRotation.radians,
                     canvasState.documentSize
                 )
             }
@@ -330,19 +333,21 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // Floating selection (rect/lasso, or move on top of an existing
-            // selection). The active layer has a hole where the selection
-            // came from; the floating texture is composited on top at
-            // originalRect + offset every frame.
+            // selection, or imported image). The active layer has a hole
+            // (or is empty for imports); the floating texture is composited
+            // on top at originalRect + offset, scaled per-axis and rotated
+            // around its center, every frame.
             if let floating = floatingTexture, let original = selectionOriginalRect {
                 let docRect = CGRect(
                     x: original.origin.x + selectionOffsetDoc.x,
                     y: original.origin.y + selectionOffsetDoc.y,
-                    width: original.width * selectionScale,
-                    height: original.height * selectionScale
+                    width: original.width * selectionScale.width,
+                    height: original.height * selectionScale.height
                 )
                 renderer?.renderFloatingTexture(
                     floating,
                     atDocRect: docRect,
+                    rotation: Float(selectionRotationRad),
                     to: renderEncoder,
                     opacity: 1.0,
                     zoomScale: Float(zoomScale),
@@ -607,6 +612,26 @@ struct MetalCanvasView: UIViewRepresentable {
                     selectionDragStart = location
                     print("Started dragging selection at \(location)")
                     return
+                }
+
+                // Tap-outside-commit: a tap that didn't fall into the floating
+                // selection's hit area (or onto a transform handle, which the
+                // SwiftUI overlay already consumed before reaching here) means
+                // the user is choosing to act on the canvas elsewhere. Bake
+                // the floating selection into its layer first, then continue
+                // with the tap's normal behavior. Mirrors Procreate's
+                // "tap outside to confirm transform."
+                let needsCommit = MainActor.assumeIsolated {
+                    canvasState.floatingSelectionTexture != nil || canvasState.isTranslatingActiveLayer
+                }
+                if needsCommit {
+                    MainActor.assumeIsolated {
+                        if canvasState.floatingSelectionTexture != nil {
+                            canvasState.commitSelection()
+                        } else if canvasState.isTranslatingActiveLayer {
+                            canvasState.commitActiveLayerTranslation()
+                        }
+                    }
                 }
             }
 
@@ -1297,6 +1322,39 @@ struct MetalCanvasView: UIViewRepresentable {
             // Check lasso selection using point-in-polygon test
             if let path = canvasState.selectionPath, !path.isEmpty {
                 return pointInPolygon(point: point, polygon: path)
+            }
+
+            // Fallback for floating selections that don't define a marquee
+            // (image import currently). Hit-test the texture's displayed
+            // bounds — same rect the renderer is drawing on screen.
+            if let original = canvasState.selectionOriginalRect, canvasState.floatingSelectionTexture != nil {
+                let displayed = CGRect(
+                    x: original.origin.x + canvasState.selectionOffset.x,
+                    y: original.origin.y + canvasState.selectionOffset.y,
+                    width: original.width * canvasState.selectionScale.width,
+                    height: original.height * canvasState.selectionScale.height
+                )
+                // Hit-test against the rotated rect by inverse-rotating the
+                // point around the displayed rect's center, then checking
+                // axis-aligned containment. Required so taps inside a
+                // rotated selection still register; required by the user's
+                // explicit "rotation applied before hit-testing" rule.
+                let theta = canvasState.selectionRotation.radians
+                if theta == 0 {
+                    return displayed.contains(point)
+                }
+                let cx = displayed.midX
+                let cy = displayed.midY
+                let dx = point.x - cx
+                let dy = point.y - cy
+                // Inverse of doc-space R(-θ) used by the shader is R(+θ) on
+                // doc Y-down coords:  x' = x cosθ - y sinθ,  y' = x sinθ + y cosθ
+                let cosT = cos(theta)
+                let sinT = sin(theta)
+                let localX = dx * cosT - dy * sinT
+                let localY = dx * sinT + dy * cosT
+                return abs(localX) <= displayed.width  / 2 &&
+                       abs(localY) <= displayed.height / 2
             }
 
             return false
