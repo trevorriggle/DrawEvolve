@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  This file is committed because it contains only public values.
+  Real secrets go in Cloudflare Worker via `wrangler secret put`, never here.
+
+  - SUPABASE_URL: public project URL.
+  - SUPABASE_ANON_KEY: public-by-design JWT that ships in every iOS app binary;
+    security comes from Postgres RLS policies, not from secrecy of this key.
+
+  Anything that should NOT be visible to anyone with the app must live in the
+  Worker's secret store — service_role key, OpenAI key, third-party API keys, etc.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>SUPABASE_URL</key>
+	<string>https://jkjfcjptzvieaonrmkzd.supabase.co</string>
+	<key>SUPABASE_ANON_KEY</key>
+	<string>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpramZjanB0enZpZWFvbnJta3pkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNzk5ODcsImV4cCI6MjA5Mjk1NTk4N30.WEkA8zufwxAkr2EVdSOWNPxShbNSkRQBk1EiWvyRkWM</string>
+</dict>
+</plist>

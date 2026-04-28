@@ -90,7 +90,8 @@ fastlane/test_output
 iOSInjectionProject/
 
 # API Keys and Secrets
-Config.plist
+# (Config.plist intentionally NOT ignored — it holds only public values.
+#  Real secrets go in Cloudflare Worker via `wrangler secret put`.)
 .env
 *.env
 
