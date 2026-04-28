@@ -5,79 +5,112 @@
 //  Sign-in screen shown before the existing onboarding/canvas flow.
 //  Two paths: Sign in with Apple (system sheet), or email magic link.
 //
+//  Visual reskin only — auth logic, AuthManager interactions, method
+//  signatures untouched.
+//
 
 import AuthenticationServices
 import SwiftUI
 
 struct AuthGateView: View {
     @EnvironmentObject private var authManager: AuthManager
-    @State private var emailMode: EmailMode = .hidden
+    @Environment(\.colorScheme) private var colorScheme
+
     @State private var emailInput: String = ""
+    @State private var emailState: EmailState = .input
     @State private var isSendingMagicLink = false
     @FocusState private var emailFieldFocused: Bool
 
-    private enum EmailMode {
-        case hidden
-        case entering
+    private enum EmailState {
+        case input
         case sent
     }
 
+    // Layout constants — one place to tune visual rhythm.
+    private let contentMaxWidth: CGFloat = 440
+    private let horizontalPadding: CGFloat = 24
+    private let controlHeight: CGFloat = 50
+    private let cornerRadius: CGFloat = 12
+    private let logoMaxWidth: CGFloat = 240
+
     var body: some View {
-        VStack(spacing: 32) {
-            Spacer()
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
 
-            VStack(spacing: 12) {
-                Text("DrawEvolve")
-                    .font(.system(size: 44, weight: .bold, design: .rounded))
-                Text("Honest, specific feedback on your drawings.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+            VStack(spacing: 0) {
+                Spacer(minLength: 32)
+
+                brandHeader
+                    .padding(.horizontal, horizontalPadding)
+
+                Spacer(minLength: 36)
+                    .frame(maxHeight: 64)
+
+                authControls
+                    .padding(.horizontal, horizontalPadding)
+                    .frame(maxWidth: contentMaxWidth)
+
+                statusArea
+                    .padding(.horizontal, horizontalPadding)
+                    .frame(maxWidth: contentMaxWidth)
+
+                Spacer(minLength: 24)
+
+                footer
                     .padding(.horizontal, 32)
+                    .padding(.bottom, 12)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
 
-            Spacer()
+    // MARK: - Brand
 
-            VStack(spacing: 16) {
-                signInWithAppleButton
+    private var brandHeader: some View {
+        VStack(spacing: 16) {
+            logoImage
+                .frame(maxWidth: logoMaxWidth)
+                .frame(height: 90)
 
-                switch emailMode {
-                case .hidden:
-                    Button(action: { withAnimation { emailMode = .entering; emailFieldFocused = true } }) {
-                        Text("Continue with Email")
-                            .font(.body.weight(.medium))
-                            .frame(maxWidth: .infinity, minHeight: 50)
-                            .background(Color(.secondarySystemBackground))
-                            .foregroundStyle(.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                case .entering:
-                    emailEntry
-                case .sent:
-                    inboxNotice
-                }
-
-                if let error = authManager.lastError {
-                    Text(error)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 8)
-                }
-            }
-            .padding(.horizontal, 24)
-
-            Spacer()
-
-            Text("By continuing, you agree to our Terms and acknowledge our Privacy Policy.")
-                .font(.caption2)
+            Text("Honest, specific feedback on your drawings.")
+                .font(.system(.callout, design: .default))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 16)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private var logoImage: some View {
+        let base = Image("DrawEvolveLogo")
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+
+        if colorScheme == .dark {
+            // Logo PNG is solid black on transparent — invert to white in dark mode
+            // so it stays visible. Replace this with a proper dark-variant asset
+            // when one ships.
+            base.colorInvert().accessibilityLabel("DrawEvolve")
+        } else {
+            base.accessibilityLabel("DrawEvolve")
+        }
+    }
+
+    // MARK: - Auth controls
+
+    private var authControls: some View {
+        VStack(spacing: 16) {
+            signInWithAppleButton
+
+            if emailState == .input {
+                dividerOr
+                emailInputArea
+            } else {
+                inboxNotice
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: emailState)
     }
 
     private var signInWithAppleButton: some View {
@@ -86,74 +119,155 @@ struct AuthGateView: View {
         } onCompletion: { result in
             Task { await authManager.completeAppleSignIn(result) }
         }
-        .signInWithAppleButtonStyle(.black)
-        .frame(maxWidth: .infinity, minHeight: 50)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+        .frame(maxWidth: .infinity)
+        .frame(height: controlHeight)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
     }
 
-    private var emailEntry: some View {
+    private var dividerOr: some View {
+        HStack(spacing: 12) {
+            line
+            Text("or")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.tertiary)
+            line
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var line: some View {
+        Rectangle()
+            .fill(Color(.separator).opacity(0.6))
+            .frame(height: 1)
+    }
+
+    private var emailInputArea: some View {
         VStack(spacing: 12) {
             TextField("you@example.com", text: $emailInput)
-                .textFieldStyle(.roundedBorder)
                 .keyboardType(.emailAddress)
                 .textContentType(.emailAddress)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .focused($emailFieldFocused)
+                .padding(.horizontal, 16)
+                .frame(height: controlHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color(.secondarySystemBackground))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(
+                            emailFieldFocused ? Color.accentColor.opacity(0.8) : Color(.separator),
+                            lineWidth: emailFieldFocused ? 1.5 : 1
+                        )
+                )
+                .submitLabel(.send)
+                .onSubmit { sendMagicLink() }
 
-            Button(action: sendMagicLink) {
-                Group {
-                    if isSendingMagicLink {
-                        ProgressView().tint(.white)
-                    } else {
-                        Text("Send Magic Link")
-                            .font(.body.weight(.medium))
-                    }
-                }
-                .frame(maxWidth: .infinity, minHeight: 50)
-                .background(canSubmitEmail ? Color.accentColor : Color.gray.opacity(0.4))
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .disabled(!canSubmitEmail || isSendingMagicLink)
-
-            Button("Cancel") {
-                withAnimation {
-                    emailMode = .hidden
-                    emailInput = ""
-                    emailFieldFocused = false
-                }
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
+            magicLinkButton
         }
     }
 
+    private var magicLinkButton: some View {
+        Button(action: sendMagicLink) {
+            ZStack {
+                if isSendingMagicLink {
+                    ProgressView().tint(.white)
+                } else {
+                    Text("Send Magic Link")
+                        .font(.system(.body, design: .default).weight(.semibold))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: controlHeight)
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(canSubmitEmail ? Color.accentColor : Color.accentColor.opacity(0.35))
+            )
+            .foregroundStyle(.white)
+            .shadow(
+                color: canSubmitEmail ? Color.accentColor.opacity(0.25) : .clear,
+                radius: 8, y: 3
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSubmitEmail || isSendingMagicLink)
+    }
+
     private var inboxNotice: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 14) {
             Image(systemName: "envelope.badge")
-                .font(.system(size: 36))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 4)
+
             Text("Check your inbox")
-                .font(.headline)
+                .font(.system(.title3).weight(.semibold))
+
             Text("We sent a sign-in link to \(authManager.pendingMagicLinkEmail ?? emailInput). Tap it from this device to finish signing in.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+
             Button("Use a different email") {
-                withAnimation {
-                    emailMode = .entering
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    emailState = .input
                     authManager.pendingMagicLinkEmail = nil
+                    emailFieldFocused = true
                 }
             }
             .font(.footnote)
+            .foregroundStyle(.secondary)
+            .padding(.top, 2)
         }
         .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(Color(.secondarySystemBackground).opacity(0.6))
+        )
     }
+
+    // MARK: - Status (reserves space so layout doesn't jump)
+
+    private var statusArea: some View {
+        Group {
+            if let error = authManager.lastError, !error.isEmpty {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(Color.red.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            } else {
+                Color.clear
+            }
+        }
+        .frame(minHeight: 44)
+        .padding(.top, 12)
+        .animation(.easeInOut(duration: 0.2), value: authManager.lastError)
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        Text("By continuing, you agree to our Terms and acknowledge our Privacy Policy.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: - Helpers
 
     private var canSubmitEmail: Bool {
         let trimmed = emailInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.contains("@") && trimmed.contains(".")
+        return trimmed.contains("@") && trimmed.contains(".") && trimmed.count >= 5
     }
 
     private func sendMagicLink() {
@@ -163,14 +277,23 @@ struct AuthGateView: View {
             await authManager.sendMagicLink(email: emailInput)
             isSendingMagicLink = false
             if authManager.pendingMagicLinkEmail != nil {
-                withAnimation { emailMode = .sent }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    emailState = .sent
+                }
                 emailFieldFocused = false
             }
         }
     }
 }
 
-#Preview {
+#Preview("Light") {
     AuthGateView()
         .environmentObject(AuthManager.shared)
+        .preferredColorScheme(.light)
+}
+
+#Preview("Dark") {
+    AuthGateView()
+        .environmentObject(AuthManager.shared)
+        .preferredColorScheme(.dark)
 }
