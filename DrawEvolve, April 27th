@@ -2,7 +2,9 @@ DrawEvolve Dev Plan — Current Standings
 Last updated: April 28, 2026 (revised: auth + rate-limiting + security
 plan drafted at /authandratelimitingandsecurity.md; Cloudflare Worker
 prompt construction externalized into tier-aware PromptConfig presets
-with history-injection plumbing and Node test suite)
+with history-injection plumbing and Node test suite; iOS auth gate
+scaffolded — see Session log in the auth plan for the precise file-
+by-file done-vs-pending breakdown)
 Target: TestFlight before June 1, 2026
 
 

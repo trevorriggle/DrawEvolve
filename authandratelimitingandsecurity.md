@@ -6,6 +6,61 @@ Last updated: 2026-04-28
 
 ---
 
+## Session log
+
+Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build verify · 🟠 partial · ⏳ blocked on Trevor's portal/dashboard work · ☐ not started
+
+### 2026-04-28 — auth foundation pass
+
+**Cloudflare Worker (cloudflare-worker/):**
+- ✅ `index.js` rewritten: prompt construction externalized into `PromptConfig` shape with `DEFAULT_FREE_CONFIG` + `DEFAULT_PRO_CONFIG` presets, `selectConfig`, `buildSystemPrompt`, `buildUserMessage`, `getUserTier` stub, `fetchCritiqueHistory` stub, `formatHistoryEntries`. Existing prompt content preserved verbatim; client contract unchanged.
+- ✅ `test.mjs` + `package.json` added. 6 tests in `node:test` covering preset selection, tier override, history capping, styleModifier injection, free-tier history-empty path, and selectConfig mutation isolation. Run via `npm test` from `cloudflare-worker/`. Currently green.
+
+**iOS app (DrawEvolve/):**
+- ✅ `Services/AppConfig.swift` — reads `SUPABASE_URL` + `SUPABASE_ANON_KEY` from `Config.plist`, returns nil for placeholder values.
+- ✅ `Services/SupabaseManager.swift` — singleton, fails loudly in DEBUG if not configured; nil-safe at all sites.
+- 🟡 `Services/AuthManager.swift` — `@MainActor ObservableObject`. State machine (`loading | signedOut | signedIn(User)`), Sign in with Apple flow (nonce + SHA-256 + `signInWithIdToken`), email magic link (`signInWithOTP` with `drawevolve://auth/callback`), `handleDeepLink`, `signOut`, `deleteAccount` stub, `authStateChanges` listener. Code-complete; needs first-build verify against the Supabase Swift SDK API surface.
+- 🟡 `Views/AuthGateView.swift` — system Sign in with Apple button + email magic-link path with "Check your inbox" state, error surface. Renders without keys; sign-in attempts surface `notConfigured` error inline.
+- 🟡 `DrawEvolveApp.swift` updated — `@StateObject` AuthManager, `.environmentObject`, `.onOpenURL → handleDeepLink`.
+- 🟡 `Views/ContentView.swift` rewritten — routes on `authManager.state`: loading → `SplashView`, signedOut → `AuthGateView`, signedIn → existing flow (extracted to private `SignedInRoot`).
+- ✅ `Services/DrawingStorageManager.swift` — dropped cached anonymous user ID; `saveDrawing` now reads `AuthManager.shared.currentUserID` and throws `.notAuthenticated` if missing.
+- ✅ `Config/Config.example.plist` — `SUPABASE_URL` + `SUPABASE_ANON_KEY` placeholders added.
+- ✅ `Info.plist` — `CFBundleURLTypes` added for the `drawevolve` scheme.
+
+**Plan documents:**
+- ✅ `authandratelimitingandsecurity.md` — Phase 0 expanded (tier model decision, OpenAI cost ceiling, 50%/80% alerts), Phase 5c rewritten as tier-aware from day one (`TIER_LIMITS`, 429 body shape), Phase 5c-alert added (5× daily quota in 1h webhook), Phase 7 trimmed to remove items now baked in.
+- ✅ `DrawEvolve, April 27th` — header bumped to Apr 28, AI Feedback System section rewritten, Worker Auth section cross-references this file, Files That Matter expanded, new Investigations Reference entry for the prompt refactor.
+
+### 2026-04-28 (cont.) — Xcode project wiring + Supabase keys
+
+- ✅ `DrawEvolve.xcodeproj/project.pbxproj` — Phase 1 sources added to the DrawEvolve target (PBXBuildFile + PBXFileReference + Views/Services group children + PBXSourcesBuildPhase entries for AppConfig, SupabaseManager, AuthManager, AuthGateView). Commit `fb26849`.
+- ✅ Supabase project created; URL + anon key captured (project ref `jkjfcjptzvieaonrmkzd`).
+- ✅ `Config.plist` written locally at `DrawEvolve/Config/Config.plist` with the real values. File is gitignored (verified via `git check-ignore`); only the pbxproj reference is tracked.
+- ✅ `Config.plist` added to PBXResourcesBuildPhase so `Bundle.main.path(forResource: "Config", ofType: "plist")` resolves at runtime. Without this the lookup returns nil even with the file on disk. Commit `e108c0a`.
+- 📌 **Heads-up for future builds**: a fresh clone of this repo will not include `Config.plist`, so Xcode will show a yellow missing-file warning for the entry until each developer creates their own from `Config.example.plist`. Build will still succeed (the warning is non-fatal); the missing plist will surface at runtime as `AppConfig.isSupabaseConfigured == false`.
+
+### What's left in Phase 1 (the closest unfinished work)
+
+- ⏳ Fill real values into `Config.plist` (SUPABASE_URL, SUPABASE_ANON_KEY) — blocks first sign-in attempt.
+- ⏳ Xcode → target → Signing & Capabilities → **+ Capability → Sign in with Apple**. Without this the Apple button can launch the system sheet but the credential exchange fails.
+- ⏳ Xcode → File → Add Package Dependencies → confirm Supabase Swift package products (`Supabase`, `Auth`, `PostgREST`, `Storage`) are checked for the DrawEvolve target. SDK is declared in `project.pbxproj` per the Apr 28 codebase audit but had zero imports before today, which sometimes means "declared, not linked."
+- 🟠 `AnonymousUserManager` still imported by `Services/CrashReporter.swift` at 5 sites (lines 53, 78, 95, 172, 181). Pre-auth crashes still tag with the device anonymous UUID. Out of scope today; future small pass: have `CrashReporter` prefer `AuthManager.shared.currentUserID?.uuidString` and fall back to anonymous. After that, `AnonymousUserManager` can be deleted.
+- 🟡 Cold-launch session restore: code path is wired (`AuthManager.bootstrap()` → `client.auth.session`), needs iPad cold-launch test once keys are in.
+
+### Phase 0 status (Trevor's portal/dashboard work)
+
+- ⏳ Supabase: create project, capture URL + anon key + service_role key, enable Apple + Email magic-link providers, add `drawevolve://auth/callback` to redirect URLs.
+- ⏳ Apple Developer: enable Sign in with Apple capability on the App ID, create Services ID, create + download `.p8` key, paste credentials into Supabase's Apple provider config.
+- ⏳ OpenAI dashboard: set monthly Usage limit hard cap (suggested $100–$150 for TestFlight phase) and Soft limit alerts at 50% / 80%. Document the chosen cap in this file once set.
+- ☐ Slack/Discord webhook for abuse alerts (Phase 5).
+- ☐ Cloudflare Workers KV namespace `drawevolve-quota` (Phase 5).
+
+### Phase 2–7 status
+
+All ☐ not started. Nearest next step after Phase 1 ships and verifies on iPad is Phase 2 (Postgres schema + RLS migration file at `supabase/migrations/0001_init.sql`).
+
+---
+
 ## Goals
 
 1. Replace device-anonymous identity with real per-user accounts (Supabase Auth).
@@ -30,13 +85,13 @@ Last updated: 2026-04-28
 
 ### Supabase + Apple
 
-- [ ] Create Supabase project; capture project URL + anon key + service role key.
+- [~] Create Supabase project; capture project URL + anon key + service role key. **🟡 Partial**: URL + anon key captured & live in `Config.plist` (project ref `jkjfcjptzvieaonrmkzd`). `service_role` key still pending — only needed when the Worker starts validating JWTs in Phase 5a.
 - [ ] Apple Developer: confirm Sign in with Apple capability is enabled for the app's bundle ID.
 - [ ] Apple Developer: create Services ID + private key for Supabase ↔ Apple JWT exchange.
 - [ ] In Supabase dashboard → Auth → Providers: enable **Apple** (paste Services ID + key) and **Email** (magic link only — disable signup-with-password).
 - [ ] In Supabase dashboard → Auth → URL Configuration: add `drawevolve://auth/callback` to allowed redirect URLs.
 - [ ] Decide email sender: Supabase default vs. custom SMTP / Resend. (Default fine for TestFlight.)
-- [ ] Add Supabase URL + anon key to `Config.plist` (and `Config.example.plist`).
+- [x] Add Supabase URL + anon key to `Config.plist` (and `Config.example.plist`).
 
 ### Tier model (used by quota + prompt config from day one)
 
@@ -54,22 +109,22 @@ This is the last line of defense if every quota check fails simultaneously (Work
 
 ## Phase 1 — Auth foundation (client)
 
-- [ ] Add Sign in with Apple capability + entitlement in Xcode project.
-- [ ] Add `drawevolve` URL scheme to `Info.plist` for magic-link redirect.
-- [ ] Create `Services/SupabaseManager.swift` — singleton wrapping `SupabaseClient`, configured from `Config.plist`.
-- [ ] Create `Services/AuthManager.swift` — `@MainActor` `ObservableObject` exposing:
-  - `currentUser: User?` (nil = signed out)
-  - `signInWithApple() async throws`
-  - `sendMagicLink(email:) async throws`
-  - `handleDeepLink(_ url: URL) async throws` (consumes magic-link callback)
-  - `signOut() async throws`
-  - `deleteAccount() async throws` (calls Edge Function — see Phase 6)
-- [ ] Auth UI: `AuthGateView` showing app branding + two CTAs (Sign in with Apple, Continue with Email). Email path shows "Check your inbox" state after submit.
-- [ ] Wire `ContentView` to gate on `authManager.currentUser` — auth gate before onboarding/canvas.
-- [ ] Handle deep link in `DrawEvolveApp` via `.onOpenURL { … }` → `authManager.handleDeepLink(url)`.
-- [ ] Replace `AnonymousUserManager.shared.userID` references with `authManager.currentUser?.id`. Delete `AnonymousUserManager` once nothing imports it.
-- [ ] Persist session across launches (Supabase SDK does this by default — verify with cold launch test).
-- [ ] Loading states: cold-launch shows splash until session restore completes (no auth-gate flash).
+- [ ] Add Sign in with Apple capability + entitlement in Xcode project. ⏳ Trevor (Xcode UI)
+- [x] Add `drawevolve` URL scheme to `Info.plist` for magic-link redirect.
+- [x] Create `Services/SupabaseManager.swift` — singleton wrapping `SupabaseClient`, configured from `Config.plist`.
+- [x] Create `Services/AuthManager.swift` — `@MainActor` `ObservableObject` exposing:
+  - `currentUser: User?` (nil = signed out) ✅
+  - `signInWithApple()` (split into `prepareAppleSignInRequest` / `completeAppleSignIn` for SwiftUI button integration) ✅
+  - `sendMagicLink(email:)` ✅
+  - `handleDeepLink(_ url: URL)` ✅
+  - `signOut()` ✅
+  - `deleteAccount() async throws` (stub — wired in Phase 6) ✅
+- [x] Auth UI: `AuthGateView` showing app branding + two CTAs (Sign in with Apple, Continue with Email). Email path shows "Check your inbox" state after submit.
+- [x] Wire `ContentView` to gate on `authManager.currentUser` — auth gate before onboarding/canvas.
+- [x] Handle deep link in `DrawEvolveApp` via `.onOpenURL { … }` → `authManager.handleDeepLink(url)`.
+- [~] Replace `AnonymousUserManager.shared.userID` references with `authManager.currentUser?.id`. Delete `AnonymousUserManager` once nothing imports it. **🟠 Partial**: `DrawingStorageManager` updated; `CrashReporter` still imports `AnonymousUserManager` at 5 sites (out of scope today).
+- [x] Persist session across launches (Supabase SDK does this by default — verify with cold launch test). 🟡 Code wired via `AuthManager.bootstrap()`; needs iPad cold-launch verify once Config.plist has real keys.
+- [x] Loading states: cold-launch shows splash until session restore completes (no auth-gate flash).
 
 ## Phase 2 — Cloud schema + RLS
 
