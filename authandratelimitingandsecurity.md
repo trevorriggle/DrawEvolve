@@ -146,6 +146,12 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
 - ✅ Tangentially: fixed `AuthManager.randomNonce` charset typo (line 219) — uppercase sequence was missing `W` between `V` and `X`. Apple's nonce charset has 64 characters; ours had 63. Doesn't affect security (still uniform sampling), only used by Apple Sign In, but worth fixing in the same audit.
 - 📌 No `Package.resolved` is checked into the repo — Xcode's SPM workspace dirs are excluded. Pinned requirement is `supabase-swift ≥ 2.0.0 / < 3.0.0`. Once we land on a version that works for Trevor's environment we should commit `Package.resolved` so a fresh clone gets the same SDK build.
 
+### 2026-04-28 (cont.) — HTTP/3 / QUIC bias-off in DEBUG
+
+- 🟡 Simulator console showed `nw_connection_copy_connected_local_endpoint_block_invoke - Connection has no local endpoint` and `quic_conn_process_inbound - unable to parse packet` while `signInWithOTP` hung. Root cause hypothesis: URLSession opportunistically upgrades to HTTP/3 against the Supabase edge, and the simulator's QUIC stack fails without falling back cleanly to HTTP/2 — explains why the request never returns and why the auth log only shows the original `/otp` entry.
+- 🟡 `SupabaseManager` now constructs a `URLSessionConfiguration.ephemeral` with `urlCache = nil`, `requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData`, `httpMaximumConnectionsPerHost = 2`, and 30s/60s timeouts in DEBUG. The session is passed via `SupabaseClientOptions.global.session`. Rationale: there is no public API to disable HTTP/3 outright (Apple only exposes `URLRequest.assumesHTTP3Capable` for opt-in); ephemeral + no cache prevents the system's `Alt-Svc` route cache from biasing the next request toward HTTP/3. This is a *bias*, not a guarantee. Release/TestFlight still uses the default `URLSession.shared` since this issue has only been observed in the simulator.
+- 📌 Escalation if the bias-off doesn't unstick the simulator: KVC `setValue(false, forKey: "_supportsHTTP3")` on the configuration. That's a private-flag workaround — DEBUG-only, never ship to TestFlight or App Store.
+
 ### What's left in Phase 1 (the closest unfinished work)
 
 - ⏳ Fill real values into `Config.plist` (SUPABASE_URL, SUPABASE_ANON_KEY) — blocks first sign-in attempt.
