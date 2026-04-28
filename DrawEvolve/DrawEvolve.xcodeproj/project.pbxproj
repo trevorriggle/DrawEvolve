@@ -38,6 +38,10 @@
 		DE000037 /* CanvasStateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100037 /* CanvasStateManager.swift */; };
 		DE000038 /* SelectionOverlays.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100038 /* SelectionOverlays.swift */; };
 		DE000039 /* ToolButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100039 /* ToolButton.swift */; };
+		DE000040 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100040 /* AppConfig.swift */; };
+		DE000041 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100041 /* SupabaseManager.swift */; };
+		DE000042 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100042 /* AuthManager.swift */; };
+		DE000043 /* AuthGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100043 /* AuthGateView.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -79,6 +83,10 @@
 		DE100037 /* CanvasStateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasStateManager.swift; sourceTree = "<group>"; };
 		DE100038 /* SelectionOverlays.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionOverlays.swift; sourceTree = "<group>"; };
 		DE100039 /* ToolButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolButton.swift; sourceTree = "<group>"; };
+		DE100040 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		DE100041 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
+		DE100042 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
+		DE100043 /* AuthGateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthGateView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -133,6 +141,7 @@
 			isa = PBXGroup;
 			children = (
 				DE100002 /* ContentView.swift */,
+				DE100043 /* AuthGateView.swift */,
 				DE100035 /* BetaTransparencyPopup.swift */,
 				DE100012 /* OnboardingPopup.swift */,
 				DE100003 /* PromptInputView.swift */,
@@ -172,6 +181,9 @@
 				DE100024 /* DrawingStorageManager.swift */,
 				DE100029 /* AnonymousUserManager.swift */,
 				DE100036 /* CrashReporter.swift */,
+				DE100040 /* AppConfig.swift */,
+				DE100041 /* SupabaseManager.swift */,
+				DE100042 /* AuthManager.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -316,6 +328,10 @@
 				DE000037 /* CanvasStateManager.swift in Sources */,
 				DE000038 /* SelectionOverlays.swift in Sources */,
 				DE000039 /* ToolButton.swift in Sources */,
+				DE000040 /* AppConfig.swift in Sources */,
+				DE000041 /* SupabaseManager.swift in Sources */,
+				DE000042 /* AuthManager.swift in Sources */,
+				DE000043 /* AuthGateView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
