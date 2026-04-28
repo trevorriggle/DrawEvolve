@@ -4,5 +4,9 @@
 <dict>
 	<key>OPENAI_API_KEY</key>
 	<string>sk-YOUR-API-KEY-HERE</string>
+	<key>SUPABASE_URL</key>
+	<string>https://YOUR-PROJECT.supabase.co</string>
+	<key>SUPABASE_ANON_KEY</key>
+	<string>YOUR-ANON-KEY</string>
 </dict>
 </plist>

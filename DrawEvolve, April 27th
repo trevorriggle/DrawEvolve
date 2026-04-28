@@ -1,7 +1,8 @@
 DrawEvolve Dev Plan — Current Standings
-Last updated: April 27, 2026 (revised: floating-selection GPU
-rewrite, image-import-as-floating-selection, free-transform handles
-for rect/lasso/import)
+Last updated: April 28, 2026 (revised: auth + rate-limiting + security
+plan drafted at /authandratelimitingandsecurity.md; Cloudflare Worker
+prompt construction externalized into tier-aware PromptConfig presets
+with history-injection plumbing and Node test suite)
 Target: TestFlight before June 1, 2026
 
 
@@ -191,16 +192,42 @@ Tool Inventory
 
 AI Feedback System
 
-Stable. No changes needed before TestFlight.
+Stable. Tier-aware prompt scaffolding landed Apr 28 (test-suite-
+verified, no iPad retest needed — backend-only change, no client
+contract change).
 
   Worker:      https://drawevolve-backend.trevorriggle.workers.dev
-  Model:       gpt-4o, max_tokens: 1000
+  Model:       gpt-4o
+  max_tokens:  per-tier via PromptConfig (free: 1000, pro: 1500)
   Prompt:      structured (Quick Take / What's Working / Focus Area /
                Try This / 💬), skill-calibrated (Beginner /
-               Intermediate / Advanced), sent as role: system
-  Cost:        ~$0.015/critique
+               Intermediate / Advanced), sent as role: system. Base
+               prompt + skill calibration + context block + optional
+               style modifier are composed by buildSystemPrompt() from
+               named constants — no inline strings in the request
+               handler. Iterating on prompts is a one-file edit.
+  History:     Worker formats up to N prior critiques (free: 2, pro:
+               5) via HISTORY_FRAMING_DEFAULT and prepends them to
+               the user message. fetchCritiqueHistory(drawingId, env)
+               is a stub that returns [] until Phase 2 of the auth
+               plan ships the drawings table; new clients passing
+               drawingId today are forward-compatible.
+  Tier source: auth.users.app_metadata.tier ('free' | 'pro'),
+               default 'free'. Read at request time via getUserTier
+               stub (Phase 5a will wire JWT validation). Pro
+               styleModifier read from app_metadata.prompt_preferences
+               and merged onto the preset.
+  Cost:        ~$0.015/critique (free), higher for pro due to history
+               + maxOutputTokens; revisit once tiered usage is real.
+  Tests:       cloudflare-worker/test.mjs — `npm test` from the worker
+               dir, or `node --test test.mjs`. Covers preset
+               selection, tier override isolation, history capping,
+               styleModifier injection, and free-tier history-empty
+               path.
   Skill flow:  UI picker → DrawingContext.skillLevel → JSON →
-               worker → prompt template
+               worker → buildSystemPrompt() injects skill block
+  See:         /authandratelimitingandsecurity.md for the full plan
+               (auth, RLS, quotas, cost ceiling, account deletion).
 
 
 Architecture Notes — load-bearing, do not touch without reading
@@ -245,14 +272,76 @@ Memory
   effective limit is the memory ceiling, not the count.
 
 Worker Auth
-  No auth, no rate limiting, CORS wide open — acceptable for
-  TestFlight, must address before public launch.
+  No auth, no rate limiting, CORS wide open as of today — must be
+  closed BEFORE TestFlight goes wide, not after. Plan and phased
+  checklist live in /authandratelimitingandsecurity.md (Phase 5
+  covers Worker hardening: JWT gate, drawing_id ownership check,
+  tier-aware quotas via TIER_LIMITS, per-IP backstop, abuse
+  webhook). Worker code is already structured for it — getUserTier
+  and fetchCritiqueHistory are stubs ready to be wired.
   API key lives in Cloudflare Worker env var OPENAI_API_KEY.
   Deploy via `wrangler deploy` from cloudflare-worker/ with
   CLOUDFLARE_API_TOKEN set.
 
 
 Investigations Reference
+
+Worker prompt construction externalized + tier-aware (Apr 28, test-
+suite-verified, no iPad retest needed):
+  Root cause to solve later, addressed now: every prompt iteration
+  used to require touching the request handler in cloudflare-worker/
+  index.js — system prompt, skill calibration block, response format
+  template, and OpenAI call were all interleaved as one ~50-line
+  template literal. Made it hard to A/B prompt variants, hard to
+  introduce per-tier behavior cleanly (planned in
+  authandratelimitingandsecurity.md), and hard to pull the past-
+  critique-context feature into the prompt without a rewrite.
+
+  Done in a single pass to avoid double-touching index.js when
+  Phase 5 of the auth plan lands:
+    • PromptConfig shape documented at top of file. Fields:
+      systemPrompt, includeHistoryCount, historyFraming,
+      styleModifier, maxOutputTokens.
+    • Two presets exported: DEFAULT_FREE_CONFIG (history 2, tokens
+      1000) and DEFAULT_PRO_CONFIG (history 5, tokens 1500). Pro
+      preset's styleModifier is null in the constant; selectConfig
+      merges in app_metadata.prompt_preferences.styleModifier at
+      request time so per-Pro-user customization doesn't pollute the
+      preset (a returned-config-mutation guard is covered by a unit
+      test).
+    • Pure helpers extracted: selectConfig(tier, prefs),
+      buildSystemPrompt(config, context), buildUserMessage(config,
+      history, image), formatHistoryEntries(entries),
+      renderSkillCalibration(skillLevel), renderContextBlock(context).
+      Pure functions = trivially testable in Node without spinning
+      up workerd.
+    • Two stubs added for the not-yet-wired pieces:
+      getUserTier(jwt, env) returns { tier: 'free',
+      promptPreferences: null } until Phase 5a wires JWT validation;
+      fetchCritiqueHistory(drawingId, env) returns [] until Phase 2
+      ships the drawings table. Existing clients see no behavior
+      change today; new clients can start sending drawingId
+      forward-compatibly.
+    • test.mjs + package.json with "type": "module" added.
+      `node --test test.mjs` runs in <0.3s. Six tests cover: free
+      with no history → no history block; free preset ignores
+      styleModifier even if prompt_preferences provided; pro with 3
+      critiques + modifier injects all three and appends modifier;
+      pro caps history at includeHistoryCount when more is supplied;
+      tier override (free vs pro vs unknown-tier-fallback-to-free);
+      mutation isolation between selectConfig calls.
+    • Existing prompt content preserved verbatim — BASE_SYSTEM_PROMPT,
+      RESPONSE_FORMAT_TEMPLATE, skill-level calibration text are the
+      same strings as before the refactor. Only structure changed.
+
+  Why it landed before auth/quotas: pure prep work. Once Phase 5
+  starts, the only Worker-side additions left are JWT validation +
+  Postgres reads + KV-backed quota counters. The prompt scaffolding
+  is out of the way.
+
+  No client contract change. iOS app sends the same payload
+  ({ image, context }); drawingId is optional and ignored by the
+  history stub. Authorization header is read but not validated yet.
 
 Pencil "stroke vanishes mid-stroke under heavy pressure" — two causes
 (both addressed Apr 16):
@@ -607,7 +696,10 @@ Files That Matter
   Services/CanvasRenderer.swift          Metal renderer, all pixel operations, blending, composite
   DrawEvolve/Shaders.metal               GPU shaders (pressure clamp lives here)
   Services/OpenAIManager.swift           AI feedback API call (Cloudflare proxy)
-  cloudflare-worker/index.js             Prompt, OpenAI call, skill-level calibration
+  cloudflare-worker/index.js             PromptConfig presets, buildSystemPrompt/buildUserMessage, tier+history stubs, OpenAI call
+  cloudflare-worker/test.mjs             node:test suite for prompt construction (run: npm test)
+  cloudflare-worker/package.json         "type": "module" so Node loads index.js's ESM exports for tests
+  authandratelimitingandsecurity.md      Auth + RLS + quota + cost-ceiling + account-deletion plan (root-level)
   Models/DrawingContext.swift            Pre-draw questionnaire model incl. skillLevel
   Views/PromptInputView.swift            Pre-draw form incl. skill level picker
   Views/FloatingFeedbackPanel.swift      Feedback display panel

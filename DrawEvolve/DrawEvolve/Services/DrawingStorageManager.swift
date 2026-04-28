@@ -16,7 +16,6 @@ class DrawingStorageManager: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    private let userID = AnonymousUserManager.shared.userID
     private let fileManager = FileManager.default
 
     private var drawingsDirectory: URL {
@@ -65,9 +64,13 @@ class DrawingStorageManager: ObservableObject {
 
         defer { isLoading = false }
 
+        guard let userID = AuthManager.shared.currentUserID else {
+            throw DrawingStorageError.notAuthenticated
+        }
+
         let newDrawing = Drawing(
             id: UUID(),
-            userId: UUID(uuidString: userID) ?? UUID(),
+            userId: userID,
             title: title,
             imageData: imageData,
             createdAt: Date(),

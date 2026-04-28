@@ -2,12 +2,40 @@
 //  ContentView.swift
 //  DrawEvolve
 //
-//  Main navigation and state management for the app.
+//  Routes between the auth gate and the signed-in onboarding/canvas flow.
 //
 
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject private var authManager: AuthManager
+
+    var body: some View {
+        switch authManager.state {
+        case .loading:
+            SplashView()
+        case .signedOut:
+            AuthGateView()
+        case .signedIn:
+            SignedInRoot()
+        }
+    }
+}
+
+private struct SplashView: View {
+    var body: some View {
+        VStack {
+            Spacer()
+            ProgressView()
+                .controlSize(.large)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
+    }
+}
+
+private struct SignedInRoot: View {
     @AppStorage("hasSeenBetaTransparency") private var hasSeenBetaTransparency = false
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
     @AppStorage("hasCompletedPrompt") private var hasCompletedPrompt = false
@@ -18,23 +46,18 @@ struct ContentView: View {
     @State private var hasCheckedFirstLaunch = false
 
     var body: some View {
-        // Main drawing canvas (no auth required)
         DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
             .onAppear {
                 performFirstLaunchCheck()
             }
             .overlay {
-                // Beta transparency popup (shown first)
                 if showBetaTransparency {
                     BetaTransparencyPopup(isPresented: $showBetaTransparency)
                 } else {
-                    // CRITICAL: Overlay blocks hit testing even when empty
-                    // Must explicitly allow hit testing when overlay is not visible
                     Color.clear.allowsHitTesting(false)
                 }
             }
             .overlay {
-                // First-time onboarding popup
                 if showOnboarding {
                     OnboardingPopup(isPresented: $showOnboarding)
                 } else {
@@ -42,7 +65,6 @@ struct ContentView: View {
                 }
             }
             .overlay {
-                // Pre-drawing questionnaire popup
                 if showPromptInput && !hasCompletedPrompt {
                     PromptInputView(
                         context: $drawingContext,
@@ -73,9 +95,6 @@ struct ContentView: View {
         guard !hasCheckedFirstLaunch else { return }
         hasCheckedFirstLaunch = true
 
-        // Initialize anonymous user ID on first launch
-        _ = AnonymousUserManager.shared.userID
-
         // DEBUG: Reset onboarding on every launch during development
         #if DEBUG
         UserDefaults.standard.set(false, forKey: "hasSeenBetaTransparency")
@@ -86,7 +105,6 @@ struct ContentView: View {
         hasCompletedPrompt = false
         #endif
 
-        // Show beta transparency first, then onboarding
         if !hasSeenBetaTransparency {
             showBetaTransparency = true
             hasSeenBetaTransparency = true
@@ -99,4 +117,5 @@ struct ContentView: View {
 
 #Preview {
     ContentView()
+        .environmentObject(AuthManager.shared)
 }

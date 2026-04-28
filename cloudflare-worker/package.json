@@ -1,0 +1,8 @@
+{
+  "name": "drawevolve-worker",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test test.mjs"
+  }
+}
