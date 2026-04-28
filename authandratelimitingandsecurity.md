@@ -6,6 +6,92 @@ Last updated: 2026-04-28
 
 ---
 
+## CURRENT STATE — RESUME HERE
+
+A future helper or future-me should read this section first; everything below is the longer paper trail.
+
+### One-paragraph summary
+
+Phase 1 (iOS auth gate scaffolding) and the Cloudflare Worker prompt refactor are **code-complete and pushed to `origin/main`**. The Phase 2 Supabase migration is **written and pushed but not yet applied** to the live project. Trevor is on the Mac Mini / iPad doing first-build verification; he's also awaiting Apple Developer approval (gating Sign in with Apple end-to-end). Email magic-link login will work end-to-end as soon as he runs the SQL migration and toggles two Supabase dashboard switches — those are the next concrete unblockers.
+
+### Status by phase
+
+| Phase | Status | Notes |
+|---|---|---|
+| **Phase 0** — portal/dashboard work | ⏳ partial | Supabase project created (`jkjfcjptzvieaonrmkzd`), URL + anon key in `Config.plist` (committed). Apple Developer + OpenAI cap + Slack webhook + KV namespace pending. |
+| **Phase 1** — iOS auth foundation | ✅ code complete & pushed | Awaits iPad render verification + Supabase dashboard config (Email provider, redirect URL) for magic link to work. Apple Sign In awaits Apple Developer approval. |
+| **Phase 2** — Postgres schema + RLS + Storage | 🟡 SQL written, **not yet applied** | One-shot: paste `supabase/migrations/0001_init.sql` into Supabase SQL Editor → Run. |
+| **Phase 3** — cloud sync (local-first) | ☐ not started | Will rewrite `DrawingStorageManager` to push to Storage + Postgres after save; reads on launch. |
+| **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. |
+| **Phase 5** — Worker hardening (JWT gate + tier-aware quotas + abuse alert) | ☐ not started | Worker code already structured for it: `getUserTier` + `fetchCritiqueHistory` are stubs ready to wire. |
+| **Phase 6** — account deletion edge function | ☐ not started | App Store guideline 5.1.1(v) requires it; ship before TestFlight. |
+| **Phase 7** — observability + admin polish | ☐ not started | Post-TestFlight bucket. |
+
+### What Trevor needs to do next (in order)
+
+1. **Run the SQL migration**: Supabase dashboard → SQL Editor → New query → paste `supabase/migrations/0001_init.sql` → Run. Idempotent.
+2. **Enable Email provider**: Supabase → Authentication → Providers → Email → enable.
+3. **Add redirect URL**: Supabase → Authentication → URL Configuration → add `drawevolve://auth/callback`.
+4. **Verify on iPad**: cold launch → auth gate renders → tap "Send Magic Link" → real email arrives → tap link → app opens signed in. This is the first true end-to-end auth success.
+5. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
+
+### What a fresh helper should NOT do
+
+- Do not modify `AuthManager`, `SupabaseManager`, or `AppConfig` without asking — they're stable and tested in shape (compile-tested, not yet runtime-tested).
+- Do not touch `Services/AnonymousUserManager.swift`. It's still imported by `Services/CrashReporter.swift` at 5 sites; severing that requires a small follow-up pass, but it's out of scope for the current phase.
+- Do not touch the brush/canvas/Metal pipeline (`MetalCanvasView`, `CanvasRenderer`, `CanvasStateManager`, `Shaders.metal`, `HistoryManager`). Those are TestFlight-blocker territory tracked in the dev plan, separately from auth.
+- Do not push without explicit user say-so. Pattern in this session: `Bash` commits land locally; pushes happen only when Trevor says "push".
+- Do not commit secret-shaped values. The current `Config.plist` is committed because it holds **only** public values (Supabase anon key + project URL — both ship in the app binary anyway). The header comment in `Config.plist` itself documents the rule. Real secrets go in the Cloudflare Worker via `wrangler secret put`.
+
+### Recent commits (newest first; all on origin/main)
+
+```
+6b573a3  Add Phase 2 Supabase migration + document AuthGateView reskin
+fc9cdca  Reskin AuthGateView to brand visual identity
+9712f64  Commit Config.plist; remove Config.plist gitignore rule
+36eb63b  z                                  (Trevor: markdown plan log)
+e108c0a  Bundle Config.plist as a target resource
+fb26849  Add AppConfig, SupabaseManager, AuthManager, AuthGateView to DrawEvolve target
+68e458e  zzz                                (Trevor: end-of-day catch-up of Worker refactor + iOS scaffolding code)
+```
+
+### Key files (the artifacts that matter today)
+
+| File | Purpose |
+|---|---|
+| `cloudflare-worker/index.js` | PromptConfig presets, tier/history stubs, OpenAI call. **Iterate prompts here**; do not inline strings into the request handler. |
+| `cloudflare-worker/test.mjs` + `package.json` | `node --test test.mjs` from `cloudflare-worker/`. 6 tests, currently green. |
+| `DrawEvolve/Services/AppConfig.swift` | Reads `SUPABASE_URL` / `SUPABASE_ANON_KEY` from `Config.plist`; nil-safe when not configured. |
+| `DrawEvolve/Services/SupabaseManager.swift` | Singleton wrapping `SupabaseClient`. `client` is nil if Config.plist isn't filled in (DEBUG warns). |
+| `DrawEvolve/Services/AuthManager.swift` | `@MainActor ObservableObject`. State machine: `.loading / .signedOut / .signedIn(User)`. Sign in with Apple + email magic link + deep-link handler + signOut + deleteAccount stub. |
+| `DrawEvolve/Views/AuthGateView.swift` | Branded sign-in screen. Uses `Image("DrawEvolveLogo")` + AccentColor. Pure view layer; never touches AuthManager state directly except via its public methods. |
+| `DrawEvolve/Views/ContentView.swift` | Routes on `authManager.state`. SignedInRoot is the existing onboarding/canvas flow. |
+| `DrawEvolve/Config/Config.plist` | Live Supabase URL + anon key. Committed; only-public-values. |
+| `DrawEvolve/Config/Config.example.plist` | Template (vestigial since the real one is committed; safe to delete in a future cleanup). |
+| `supabase/migrations/0001_init.sql` | Phase 2 schema bootstrap. Idempotent. Run in Supabase SQL Editor. |
+| `authandratelimitingandsecurity.md` | This file — auth/security plan. |
+| `DrawEvolve, April 27th` | Main dev plan (broader feature work, not auth-specific). |
+
+### Verification runbook for the iPad render test
+
+If Trevor hasn't reported back from the iPad, here's what success looks like and what each failure mode means:
+
+1. **Cold launch** — splash → auth gate. **If you see a black screen or crash**, check the Xcode console for "SupabaseManager: SUPABASE_URL / SUPABASE_ANON_KEY not set" → Config.plist missing or path wrong.
+2. **Auth gate renders** — DrawEvolveLogo at top, tagline below, Sign in with Apple button (50pt, rounded), divider with "or", email field, Send Magic Link button, footer at bottom. **If layout is broken on iPad** (edge-to-edge, weirdly stretched), check the `frame(maxWidth: 440)` constraint in AuthGateView.swift line ~52.
+3. **Tap Send Magic Link** with a real email — should show a red error inline ("Couldn't send magic link…") UNTIL Trevor enables the Email provider in Supabase. After enable: the call succeeds and UI transitions to "Check your inbox" card. **If it crashes**, log the error from `AuthManager.sendMagicLink`'s catch.
+4. **Tap Sign in with Apple** — system sheet appears. After Apple ID auth, will show a red error ("Apple sign-in failed…") until Apple Developer approval + Supabase Apple provider is configured. **If the system sheet doesn't appear at all**, check that the Sign in with Apple capability is added in Xcode → Signing & Capabilities.
+
+### Glossary (so a helper doesn't have to decode our shorthand)
+
+- **anon key** — Supabase public JWT (`role: anon`). Ships in every iOS app binary. Safe to commit. Security comes from RLS policies, not from secrecy.
+- **service_role key** — Supabase secret JWT (`role: service_role`). Bypasses RLS. **Never** in repo, chat, or app. Lives in Cloudflare Worker secrets only (`wrangler secret put`).
+- **PromptConfig** — typed shape at the top of `cloudflare-worker/index.js`. Controls systemPrompt / history count / style modifier / max tokens. Two presets: `DEFAULT_FREE_CONFIG`, `DEFAULT_PRO_CONFIG`.
+- **TIER_LIMITS** — planned single source of truth (one object) in the Worker for per-tier rate limits. Defined in Phase 5c of this file; not yet implemented.
+- **Paige iPad** — Trevor's physical test iPad. Simulator is not trusted for touch/Pencil bugs.
+- **iPad-via-AnyDesk workflow** — Trevor edits in this codespace → pushes to GitHub → Mac Mini pulls (via AnyDesk from his work PC) → Xcode builds → deploys to Paige iPad. Round trip is slow; minimize "go test this" cycles.
+
+---
+
 ## Session log
 
 Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build verify · 🟠 partial · ⏳ blocked on Trevor's portal/dashboard work · ☐ not started
