@@ -39,6 +39,16 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
 - ✅ `Config.plist` added to PBXResourcesBuildPhase so `Bundle.main.path(forResource: "Config", ofType: "plist")` resolves at runtime. Without this the lookup returns nil even with the file on disk. Commit `e108c0a`.
 - 📌 **Heads-up for future builds**: a fresh clone of this repo will not include `Config.plist`, so Xcode will show a yellow missing-file warning for the entry until each developer creates their own from `Config.example.plist`. Build will still succeed (the warning is non-fatal); the missing plist will surface at runtime as `AppConfig.isSupabaseConfigured == false`.
 
+### 2026-04-28 (cont.) — AuthGateView reskin + Phase 2 migration drafted
+
+- ✅ `Views/AuthGateView.swift` reskinned to brand identity. Pure view-layer change — `AuthManager`, `SupabaseManager`, `AppConfig` untouched. Uses the existing `DrawEvolveLogo` asset (cursive "Draw → EVOLVE"), constrains Sign in with Apple to standard 50pt height, custom rounded email field with focus accent border, primary-filled magic-link button with accent shadow, soft inbox-notice card, muted error styling with reserved 44pt height (no layout jump), 440pt max-width container for iPad readability. Commit `fc9cdca`, pushed.
+- 🟡 `supabase/migrations/0001_init.sql` written. Single runnable file — paste into Supabase SQL editor → Run. Idempotent (safe to re-run). Contents:
+  - `public.drawings` table (one row per drawing, `critique_history` as jsonb, indexed on `(user_id, updated_at desc)`, `updated_at` touch trigger).
+  - RLS on `drawings` — four policies, all keyed on `auth.uid() = user_id`.
+  - `public.feedback_requests` log table for Phase 5 quota / abuse tracking. Read-only RLS for users (Worker writes via service_role bypass).
+  - Storage bucket `drawings` (private), with per-user read/insert/update/delete policies via `storage.foldername(name)[1] = auth.uid()::text`.
+  - `set_default_tier_on_signup()` trigger that stamps `app_metadata.tier = 'free'` on every new `auth.users` row, plus a backfill update for any pre-existing row without a tier. Worker's `getUserTier()` therefore never sees a null tier in practice.
+
 ### What's left in Phase 1 (the closest unfinished work)
 
 - ⏳ Fill real values into `Config.plist` (SUPABASE_URL, SUPABASE_ANON_KEY) — blocks first sign-in attempt.
@@ -57,7 +67,8 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
 
 ### Phase 2–7 status
 
-All ☐ not started. Nearest next step after Phase 1 ships and verifies on iPad is Phase 2 (Postgres schema + RLS migration file at `supabase/migrations/0001_init.sql`).
+- **Phase 2** 🟡 migration file written (`supabase/migrations/0001_init.sql`) but not yet applied to the live Supabase project. Apply via dashboard SQL editor — see header of the file.
+- **Phase 3–7** ☐ not started.
 
 ---
 
