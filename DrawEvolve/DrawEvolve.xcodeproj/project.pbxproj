@@ -42,6 +42,7 @@
 		DE000041 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100041 /* SupabaseManager.swift */; };
 		DE000042 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100042 /* AuthManager.swift */; };
 		DE000043 /* AuthGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100043 /* AuthGateView.swift */; };
+		DE000044 /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = DE300003 /* Config.plist */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -70,6 +71,7 @@
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
+		DE300003 /* Config.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.plist; sourceTree = "<group>"; };
 		DE400001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		DE100024 /* DrawingStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingStorageManager.swift; sourceTree = "<group>"; };
 		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
@@ -192,6 +194,7 @@
 			isa = PBXGroup;
 			children = (
 				DE300002 /* Config.example.plist */,
+				DE300003 /* Config.plist */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -289,6 +292,7 @@
 			files = (
 				DE000009 /* Preview Assets.xcassets in Resources */,
 				DE000008 /* Assets.xcassets in Resources */,
+				DE000044 /* Config.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
