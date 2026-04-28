@@ -10,7 +10,21 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var authManager: AuthManager
 
+    @ViewBuilder
     var body: some View {
+        #if DEBUG
+        if authManager.isDebugBypassed {
+            SignedInRoot()
+        } else {
+            authStateRouter
+        }
+        #else
+        authStateRouter
+        #endif
+    }
+
+    @ViewBuilder
+    private var authStateRouter: some View {
         switch authManager.state {
         case .loading:
             SplashView()

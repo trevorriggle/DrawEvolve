@@ -38,7 +38,42 @@ final class AuthManager: ObservableObject {
         return nil
     }
 
-    var currentUserID: UUID? { currentUser?.id }
+    var currentUserID: UUID? {
+        if let id = currentUser?.id { return id }
+        #if DEBUG
+        if isDebugBypassed { return Self.debugBypassUserID }
+        #endif
+        return nil
+    }
+
+    #if DEBUG
+    // MARK: - Debug bypass (compiled out of Release; UserDefaults install-scoped)
+
+    /// Synthetic UUID stamped on drawings saved while the auth gate is bypassed.
+    /// No matching `auth.users` row exists, so any cloud operation against
+    /// Supabase will fail with an RLS denial — that's intentional. The bypass
+    /// is for exercising local-only flows while real auth is gated on Apple
+    /// Developer approval.
+    static let debugBypassUserID = UUID(uuidString: "DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF")!
+
+    private static let debugBypassDefaultsKey = "drawevolve.debug.authBypass"
+
+    @Published private(set) var isDebugBypassed: Bool =
+        UserDefaults.standard.bool(forKey: "drawevolve.debug.authBypass")
+
+    /// Enter the app without going through Supabase. DEBUG only.
+    func enableDebugBypass() {
+        isDebugBypassed = true
+        UserDefaults.standard.set(true, forKey: Self.debugBypassDefaultsKey)
+        lastError = nil
+    }
+
+    /// Drop back to the auth gate. DEBUG only.
+    func disableDebugBypass() {
+        isDebugBypassed = false
+        UserDefaults.standard.set(false, forKey: Self.debugBypassDefaultsKey)
+    }
+    #endif
 
     private init() {
         Task { await bootstrap() }
