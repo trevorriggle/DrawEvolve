@@ -166,15 +166,45 @@ final class AuthManager: ObservableObject {
             return
         }
         let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let redirectURL = Self.callbackURL
+        let start = Date()
+        #if DEBUG
+        print("🪪 sendMagicLink → \(trimmed) redirectTo=\(redirectURL.absoluteString)")
+        #endif
         do {
-            try await client.auth.signInWithOTP(
-                email: trimmed,
-                redirectTo: Self.callbackURL,
-                shouldCreateUser: true
-            )
+            // 30s watchdog: signInWithOTP must return one way or the other so
+            // the spinner can't hang forever. If the SDK respects cancellation,
+            // cancelAll() will unblock the underlying URLSession task.
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await client.auth.signInWithOTP(
+                        email: trimmed,
+                        redirectTo: redirectURL,
+                        shouldCreateUser: true
+                    )
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                    throw NSError(
+                        domain: "DrawEvolve.Auth",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "signInWithOTP timed out after 30s"]
+                    )
+                }
+                _ = try await group.next()
+                group.cancelAll()
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            #if DEBUG
+            print("✅ sendMagicLink returned in \(String(format: "%.2f", elapsed))s")
+            #endif
             pendingMagicLinkEmail = trimmed
             lastError = nil
         } catch {
+            let elapsed = Date().timeIntervalSince(start)
+            #if DEBUG
+            print("❌ sendMagicLink failed after \(String(format: "%.2f", elapsed))s: \(error)")
+            #endif
             lastError = "Couldn't send magic link: \(error.localizedDescription)"
         }
     }
@@ -216,7 +246,7 @@ final class AuthManager: ObservableObject {
         var bytes = [UInt8](repeating: 0, count: length)
         let status = SecRandomCopyBytes(kSecRandomDefault, length, &bytes)
         precondition(status == errSecSuccess, "Unable to generate secure random nonce.")
-        let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._")
         return String(bytes.map { charset[Int($0) % charset.count] })
     }
 

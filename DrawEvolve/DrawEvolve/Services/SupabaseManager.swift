@@ -10,6 +10,16 @@
 import Foundation
 import Supabase
 
+#if DEBUG
+/// Pipes every SDK log message to the Xcode console. Compiled out of
+/// Release builds so production never pays the chatter cost.
+private struct DrawEvolveSupabaseLogger: SupabaseLogger {
+    func log(message: SupabaseLogMessage) {
+        print("[Supabase \(message.level)] \(message.message)")
+    }
+}
+#endif
+
 final class SupabaseManager {
     static let shared = SupabaseManager()
 
@@ -24,9 +34,19 @@ final class SupabaseManager {
             self.client = nil
             return
         }
-        self.client = SupabaseClient(supabaseURL: url, supabaseKey: key)
         #if DEBUG
-        print("✅ SupabaseManager initialized for \(url.host ?? "unknown host")")
+        self.client = SupabaseClient(
+            supabaseURL: url,
+            supabaseKey: key,
+            options: SupabaseClientOptions(
+                global: SupabaseClientOptions.GlobalOptions(
+                    logger: DrawEvolveSupabaseLogger()
+                )
+            )
+        )
+        print("✅ SupabaseManager initialized for \(url.host ?? "unknown host") (verbose logging on)")
+        #else
+        self.client = SupabaseClient(supabaseURL: url, supabaseKey: key)
         #endif
     }
 }

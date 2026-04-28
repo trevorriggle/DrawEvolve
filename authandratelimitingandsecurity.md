@@ -20,7 +20,7 @@ Phase 1 (iOS auth gate scaffolding) and the Cloudflare Worker prompt refactor ar
 |---|---|---|
 | **Phase 0** — portal/dashboard work | ⏳ partial | Supabase project created (`jkjfcjptzvieaonrmkzd`), URL + anon key in `Config.plist` (committed). Apple Developer + OpenAI cap + Slack webhook + KV namespace pending. |
 | **Phase 1** — iOS auth foundation | ✅ code complete & pushed | Awaits iPad render verification + Supabase dashboard config (Email provider, redirect URL) for magic link to work. Apple Sign In awaits Apple Developer approval. |
-| **Phase 2** — Postgres schema + RLS + Storage | 🟡 SQL written, **not yet applied** | One-shot: paste `supabase/migrations/0001_init.sql` into Supabase SQL Editor → Run. |
+| **Phase 2** — Postgres schema + RLS + Storage | ✅ applied 2026-04-28 | `supabase/migrations/0001_init.sql` ran clean in the SQL Editor. `drawings` + `feedback_requests` tables, all RLS policies, the `drawings` storage bucket, the `set_default_tier_on_signup` trigger, and the backfill are live in project `jkjfcjptzvieaonrmkzd`. |
 | **Phase 3** — cloud sync (local-first) | ☐ not started | Will rewrite `DrawingStorageManager` to push to Storage + Postgres after save; reads on launch. |
 | **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. |
 | **Phase 5** — Worker hardening (JWT gate + tier-aware quotas + abuse alert) | ☐ not started | Worker code already structured for it: `getUserTier` + `fetchCritiqueHistory` are stubs ready to wire. |
@@ -29,8 +29,8 @@ Phase 1 (iOS auth gate scaffolding) and the Cloudflare Worker prompt refactor ar
 
 ### What Trevor needs to do next (in order)
 
-1. **Run the SQL migration**: Supabase dashboard → SQL Editor → New query → paste `supabase/migrations/0001_init.sql` → Run. Idempotent.
-2. **Enable Email provider**: Supabase → Authentication → Providers → Email → enable.
+1. ~~**Run the SQL migration**~~ — done 2026-04-28; migration applied clean.
+2. **Enable Email provider**: Supabase → Authentication → Providers → Email → enable. (Magic-link only — keep "Confirm email" on, leave password sign-up off if the toggle is exposed.)
 3. **Add redirect URL**: Supabase → Authentication → URL Configuration → add `drawevolve://auth/callback`.
 4. **Verify on iPad**: cold launch → auth gate renders → tap "Send Magic Link" → real email arrives → tap link → app opens signed in. This is the first true end-to-end auth success.
 5. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
@@ -135,6 +135,17 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
   - Storage bucket `drawings` (private), with per-user read/insert/update/delete policies via `storage.foldername(name)[1] = auth.uid()::text`.
   - `set_default_tier_on_signup()` trigger that stamps `app_metadata.tier = 'free'` on every new `auth.users` row, plus a backfill update for any pre-existing row without a tier. Worker's `getUserTier()` therefore never sees a null tier in practice.
 
+### 2026-04-28 (cont.) — Phase 2 migration applied + magic-link instrumentation
+
+- ✅ `supabase/migrations/0001_init.sql` ran clean in the Supabase SQL Editor against project `jkjfcjptzvieaonrmkzd`. All Phase 2 schema is live: `drawings` + `feedback_requests` tables, RLS policies, `drawings` storage bucket + per-user policies, `set_default_tier_on_signup` trigger + backfill. Migration is idempotent so re-runs are safe.
+- ✅ Email provider enabled in Supabase dashboard. `drawevolve://auth/callback` added to Authentication → URL Configuration → Redirect URLs allow-list. Custom SMTP configured against the drawevolve domain.
+- 🟠 **Magic-link delivery investigation in flight.** Symptoms on Paige: after tapping "Send Magic Link", spinner spins indefinitely; no email arrives in any inbox; Sent Items folder on the drawevolve.com SMTP server is empty. Supabase auth log shows `/otp | request completed` and `mail.send` but no follow-up indicator. Audit confirmed the iOS code path is correct (View `isSendingMagicLink` flips off as soon as `await` returns; redirect-URL constant matches the dashboard allow-list exactly; Info.plist scheme registered) — so the fact that the spinner never clears means the await is genuinely not returning.
+- 🟡 Diagnostic instrumentation added (DEBUG-only) so the next iPad attempt produces actionable Xcode console output:
+  - `AuthManager.sendMagicLink`: `signInWithOTP` is now wrapped in a 30s watchdog (`withThrowingTaskGroup`) that throws on timeout. Both branches print elapsed time and the full `error` value (not `localizedDescription`, which is famously vague on URL/Foundation errors).
+  - `SupabaseManager`: a private `DrawEvolveSupabaseLogger` conforming to `SupabaseLogger` is now passed via `SupabaseClientOptions.global.logger`, so every SDK request/response logs to the Xcode console as `[Supabase <level>] <message>`. Both diagnostics are `#if DEBUG` so Release/TestFlight builds stay quiet.
+- ✅ Tangentially: fixed `AuthManager.randomNonce` charset typo (line 219) — uppercase sequence was missing `W` between `V` and `X`. Apple's nonce charset has 64 characters; ours had 63. Doesn't affect security (still uniform sampling), only used by Apple Sign In, but worth fixing in the same audit.
+- 📌 No `Package.resolved` is checked into the repo — Xcode's SPM workspace dirs are excluded. Pinned requirement is `supabase-swift ≥ 2.0.0 / < 3.0.0`. Once we land on a version that works for Trevor's environment we should commit `Package.resolved` so a fresh clone gets the same SDK build.
+
 ### What's left in Phase 1 (the closest unfinished work)
 
 - ⏳ Fill real values into `Config.plist` (SUPABASE_URL, SUPABASE_ANON_KEY) — blocks first sign-in attempt.
@@ -153,7 +164,7 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
 
 ### Phase 2–7 status
 
-- **Phase 2** 🟡 migration file written (`supabase/migrations/0001_init.sql`) but not yet applied to the live Supabase project. Apply via dashboard SQL editor — see header of the file.
+- **Phase 2** ✅ applied 2026-04-28 to live Supabase project (`jkjfcjptzvieaonrmkzd`) via the dashboard SQL Editor. Migration is idempotent; safe to re-run.
 - **Phase 3–7** ☐ not started.
 
 ---
