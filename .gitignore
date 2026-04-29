@@ -1,0 +1,87 @@
+# Repo-root gitignore — catches anything that lands at the top level or
+# outside the iOS subdirectory. The iOS-specific patterns also live in
+# DrawEvolve/.gitignore for backwards compatibility.
+
+# ----- Secrets & credentials -----
+# Config.plist holds only the public Supabase anon key (RLS-protected by
+# design) and is intentionally committed. Real secrets live in Cloudflare
+# Worker (`wrangler secret put`) or Supabase Edge Function env.
+.env
+.env.*
+*.env
+.envrc
+
+# Apple signing material — none of this should ever be in the repo.
+*.p12
+*.cer
+*.cert
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.pem
+*.key
+*.pfx
+*.jks
+*.keystore
+
+# Generic credential / token dumps
+credentials.json
+service-account*.json
+*.tokens
+
+# ----- macOS / Linux noise -----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ----- IDE / editor state -----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.history/
+
+# ----- Build artifacts -----
+build/
+DerivedData/
+.build/
+*.dSYM
+*.dSYM.zip
+*.ipa
+*.hmap
+*.moved-aside
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# ----- Node / Workers -----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.wrangler/
+.dev.vars
+
+# ----- Supabase CLI scratch -----
+supabase/.temp/
+supabase/.branches/
+
+# ----- Test / coverage output -----
+coverage/
+*.lcov
+.nyc_output/
+
+# ----- Logs -----
+*.log
+logs/
+
+# ----- OS-level temp -----
+*.tmp
+*.bak
+*.orig

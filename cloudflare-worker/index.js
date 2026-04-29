@@ -258,7 +258,9 @@ async function validateJWT(token, env) {
   if (env.SUPABASE_JWT_ISSUER && payload.iss !== env.SUPABASE_JWT_ISSUER) {
     throw new Error('Bad issuer');
   }
-  if (payload.aud && payload.aud !== 'authenticated') {
+  // Tokens with no `aud` claim must fail — `aud && ...` would have permitted
+  // a valid-sig forgery missing the claim entirely.
+  if (payload.aud !== 'authenticated') {
     throw new Error('Bad audience');
   }
   if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
@@ -990,7 +992,11 @@ export default {
       ctx.waitUntil(logRequest({
         env, status: REQUEST_STATUS.INTERNAL_ERROR, userId, drawingId: drawingIdLower, ipHash,
       }));
-      return jsonResponse({ error: 'Internal server error', details: error.message }, 500);
+      // Server-side: full message lands in wrangler tail for debugging.
+      // Client-side: generic copy only — never leak KV/JSON-parse/supabase-js
+      // stack traces or internal field paths to callers.
+      console.error('[fetch] internal error', error?.message);
+      return jsonResponse({ error: 'Internal server error' }, 500);
     }
   },
 };

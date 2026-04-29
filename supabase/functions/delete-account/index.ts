@@ -135,14 +135,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     try {
       await step.run();
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // Server-side: full message goes to function logs for debugging.
+      // Client-side: generic copy only — raw Postgres / Storage messages
+      // can leak schema, constraint names, or internal paths. iOS already
+      // surfaces step-specific copy via AuthError.deleteFailed(step:); the
+      // `error` field is only for diagnostics if a user reports a problem.
+      console.error(`[delete-account] step '${step.name}' failed:`, detail);
       const result: DeleteResult = {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: "Internal error",
         step: step.name,
       };
-      // Status code only — never log error.message which may contain
-      // user-identifying info from the underlying Postgres/Storage error.
-      console.error(`[delete-account] step '${step.name}' failed`);
       return jsonResponse(result, 500);
     }
   }

@@ -105,7 +105,9 @@ export async function verifyJwt(token: string, supabaseUrl: string, expectedIssu
   const now = Math.floor(Date.now() / 1000);
   if (typeof payload.exp !== "number" || payload.exp < now) throw new Error("Token expired");
   if (expectedIssuer && payload.iss !== expectedIssuer) throw new Error("Bad issuer");
-  if (payload.aud && payload.aud !== "authenticated") throw new Error("Bad audience");
+  // Tokens with no `aud` claim must fail — `aud && ...` would have permitted
+  // a valid-sig forgery missing the claim entirely.
+  if (payload.aud !== "authenticated") throw new Error("Bad audience");
   if (typeof payload.sub !== "string" || payload.sub.length === 0) throw new Error("Missing sub");
 
   return {
