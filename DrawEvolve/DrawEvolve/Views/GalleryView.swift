@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct GalleryView: View {
-    @ObservedObject private var storageManager = DrawingStorageManager.shared
+    @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
     @Environment(\.dismiss) private var dismiss
 
     @State private var showNewDrawing = false
@@ -159,7 +159,10 @@ struct GalleryView: View {
                     Button(action: {
                         selectedDrawing = drawing
                     }) {
-                        DrawingCard(drawing: drawing) {
+                        DrawingCard(
+                            drawing: drawing,
+                            thumbnail: storageManager.thumbnailData(for: drawing.id)
+                        ) {
                             drawingToDelete = drawing
                             showDeleteAlert = true
                         }
@@ -179,6 +182,7 @@ struct GalleryView: View {
 
 struct DrawingCard: View {
     let drawing: Drawing
+    let thumbnail: Data?
     let onDelete: () -> Void
 
     var body: some View {
@@ -195,7 +199,7 @@ struct DrawingCard: View {
                     .aspectRatio(1, contentMode: .fit)
                     .overlay(
                         Group {
-                            if let uiImage = UIImage(data: drawing.imageData) {
+                            if let thumbnail, let uiImage = UIImage(data: thumbnail) {
                                 Image(uiImage: uiImage)
                                     .resizable()
                                     .scaledToFill()

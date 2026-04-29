@@ -13,7 +13,9 @@ struct DrawingDetailView: View {
     @State private var showCanvas = false
     @State private var drawingContext: DrawingContext
     @State private var showDeleteAlert = false
-    @ObservedObject private var storageManager = DrawingStorageManager.shared
+    @State private var fullImageData: Data?
+    @State private var isLoadingImage = true
+    @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
 
     init(drawing: Drawing) {
         self.drawing = drawing
@@ -26,15 +28,36 @@ struct DrawingDetailView: View {
                 // Scrollable content area
                 ScrollView {
                     VStack(spacing: 24) {
-                        // Drawing image
-                        if let uiImage = UIImage(data: drawing.imageData) {
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(maxWidth: .infinity)
+                        // Drawing image — bytes live in cloud Storage now; the
+                        // storage manager checks the disk cache, then falls back
+                        // to a signed-URL download.
+                        Group {
+                            if let data = fullImageData, let uiImage = UIImage(data: data) {
+                                Image(uiImage: uiImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(maxWidth: .infinity)
+                                    .background(Color(uiColor: .secondarySystemBackground))
+                                    .cornerRadius(12)
+                                    .shadow(radius: 2)
+                            } else if isLoadingImage {
+                                ProgressView()
+                                    .frame(maxWidth: .infinity, minHeight: 240)
+                                    .background(Color(uiColor: .secondarySystemBackground))
+                                    .cornerRadius(12)
+                            } else {
+                                VStack(spacing: 8) {
+                                    Image(systemName: "photo")
+                                        .font(.largeTitle)
+                                        .foregroundColor(.secondary)
+                                    Text("Image unavailable offline")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 240)
                                 .background(Color(uiColor: .secondarySystemBackground))
                                 .cornerRadius(12)
-                                .shadow(radius: 2)
+                            }
                         }
 
                         // Drawing context (if available)
@@ -171,6 +194,11 @@ struct DrawingDetailView: View {
                 }
             }
         }
+        .task {
+            isLoadingImage = true
+            fullImageData = try? await storageManager.loadFullImage(for: drawing.id)
+            isLoadingImage = false
+        }
         .fullScreenCover(isPresented: $showCanvas) {
             DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
         }
@@ -211,7 +239,7 @@ struct InfoRow: View {
             id: UUID(),
             userId: UUID(),
             title: "Portrait Study",
-            imageData: Data(),
+            storagePath: "preview/portrait.jpg",
             createdAt: Date(),
             updatedAt: Date(),
             feedback: """

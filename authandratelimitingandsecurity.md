@@ -2,7 +2,7 @@
 
 Working checklist for the foundational plumbing pass. Tick items as they land.
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 ---
 
@@ -12,7 +12,7 @@ A future helper or future-me should read this section first; everything below is
 
 ### One-paragraph summary
 
-Phase 1 (iOS auth gate scaffolding) and the Cloudflare Worker prompt refactor are **code-complete and pushed to `origin/main`**. The Phase 2 Supabase migration is **written and pushed but not yet applied** to the live project. Trevor is on the Mac Mini / iPad doing first-build verification; he's also awaiting Apple Developer approval (gating Sign in with Apple end-to-end). Email magic-link login will work end-to-end as soon as he runs the SQL migration and toggles two Supabase dashboard switches — those are the next concrete unblockers.
+Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are code-complete. Phase 3 landed 2026-04-29: `DrawingStorageManager` was rewritten in place as `CloudDrawingStorageManager`, the `Drawing` model dropped its inline `imageData` in favor of `storage_path`, and the gallery / detail / canvas views now read images via the manager's thumbnail + signed-URL accessors. Save flow is local-first with a disk-backed pending-upload queue retried on `NWPathMonitor` reachability events. Phase 3 is **not yet iPad-verified**; Trevor needs to do an end-to-end test (sign in → save a drawing → verify it appears in the Supabase Storage bucket + `drawings` table → cold-launch → verify gallery hydrates from cloud). Existing local-only drawings under `Documents/Drawings/*.json` are untouched and still invisible to the new code; Phase 4 picks them up.
 
 ### Status by phase
 
@@ -21,8 +21,8 @@ Phase 1 (iOS auth gate scaffolding) and the Cloudflare Worker prompt refactor ar
 | **Phase 0** — portal/dashboard work | ⏳ partial | Supabase project created (`jkjfcjptzvieaonrmkzd`), URL + anon key in `Config.plist` (committed). Apple Developer + OpenAI cap + Slack webhook + KV namespace pending. |
 | **Phase 1** — iOS auth foundation | ✅ code complete & pushed | Awaits iPad render verification + Supabase dashboard config (Email provider, redirect URL) for magic link to work. Apple Sign In awaits Apple Developer approval. |
 | **Phase 2** — Postgres schema + RLS + Storage | ✅ applied 2026-04-28 | `supabase/migrations/0001_init.sql` ran clean in the SQL Editor. `drawings` + `feedback_requests` tables, all RLS policies, the `drawings` storage bucket, the `set_default_tier_on_signup` trigger, and the backfill are live in project `jkjfcjptzvieaonrmkzd`. |
-| **Phase 3** — cloud sync (local-first) | ☐ not started | Will rewrite `DrawingStorageManager` to push to Storage + Postgres after save; reads on launch. |
-| **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. |
+| **Phase 3** — cloud sync (local-first) | 🟡 code complete 2026-04-29 | `CloudDrawingStorageManager` + new `Drawing` model + view updates landed. Saves write to local cache + queue cloud upload; gallery hydrates from `drawings` table; full images load via signed URL (1h TTL). Pending uploads retry via `NWPathMonitor`. **Awaits iPad end-to-end verify.** |
+| **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. **Carryover from Phase 3:** also responsible for cleaning up `Documents/Drawings/*.json` after migration, and for evicting any `Documents/DrawEvolveCache/{metadata,thumbnails,images}/` files belonging to a `user_id` that no longer matches the signed-in user (the Phase 3 manager filters them out at hydrate time but doesn't delete). |
 | **Phase 5** — Worker hardening (JWT gate + tier-aware quotas + abuse alert) | ☐ not started | Worker code already structured for it: `getUserTier` + `fetchCritiqueHistory` are stubs ready to wire. |
 | **Phase 6** — account deletion edge function | ☐ not started | App Store guideline 5.1.1(v) requires it; ship before TestFlight. |
 | **Phase 7** — observability + admin polish | ☐ not started | Post-TestFlight bucket. |
@@ -30,14 +30,15 @@ Phase 1 (iOS auth gate scaffolding) and the Cloudflare Worker prompt refactor ar
 ### What Trevor needs to do next (in order)
 
 1. ~~**Run the SQL migration**~~ — done 2026-04-28; migration applied clean.
-2. **Enable Email provider**: Supabase → Authentication → Providers → Email → enable. (Magic-link only — keep "Confirm email" on, leave password sign-up off if the toggle is exposed.)
-3. **Add redirect URL**: Supabase → Authentication → URL Configuration → add `drawevolve://auth/callback`.
-4. **Verify on iPad**: cold launch → auth gate renders → tap "Send Magic Link" → real email arrives → tap link → app opens signed in. This is the first true end-to-end auth success.
+2. ~~**Enable Email provider** + **redirect URL**~~ — done 2026-04-28.
+3. **Verify Phase 1 magic-link end-to-end on iPad** — still the first true end-to-end auth success milestone (HTTP/3 bias-off was the last code touch on it). Once magic link works, Phase 3 verification can begin.
+4. **Verify Phase 3 end-to-end on iPad**: with a real signed-in session, save a drawing → check Supabase dashboard → Storage → `drawings` bucket has `<user_id>/<id>.jpg` + `<id>_thumb.jpg` → check `drawings` table has the row. Then cold-launch and confirm the gallery hydrates from cloud (kill local cache via the DEBUG "Clear All" button to force a clean cloud read).
 5. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
 
 ### What a fresh helper should NOT do
 
 - Do not modify `AuthManager`, `SupabaseManager`, or `AppConfig` without asking — they're stable and tested in shape (compile-tested, not yet runtime-tested).
+- Do not migrate the legacy `Documents/Drawings/*.json` files in any future code change — that is Phase 4's job. The Phase 3 storage manager intentionally ignores them.
 - Do not touch `Services/AnonymousUserManager.swift`. It's still imported by `Services/CrashReporter.swift` at 5 sites; severing that requires a small follow-up pass, but it's out of scope for the current phase.
 - Do not touch the brush/canvas/Metal pipeline (`MetalCanvasView`, `CanvasRenderer`, `CanvasStateManager`, `Shaders.metal`, `HistoryManager`). Those are TestFlight-blocker territory tracked in the dev plan, separately from auth.
 - Do not push without explicit user say-so. Pattern in this session: `Bash` commits land locally; pushes happen only when Trevor says "push".
@@ -66,6 +67,8 @@ fb26849  Add AppConfig, SupabaseManager, AuthManager, AuthGateView to DrawEvolve
 | `DrawEvolve/Services/AuthManager.swift` | `@MainActor ObservableObject`. State machine: `.loading / .signedOut / .signedIn(User)`. Sign in with Apple + email magic link + deep-link handler + signOut + deleteAccount stub. |
 | `DrawEvolve/Views/AuthGateView.swift` | Branded sign-in screen. Uses `Image("DrawEvolveLogo")` + AccentColor. Pure view layer; never touches AuthManager state directly except via its public methods. |
 | `DrawEvolve/Views/ContentView.swift` | Routes on `authManager.state`. SignedInRoot is the existing onboarding/canvas flow. |
+| `DrawEvolve/Services/DrawingStorageManager.swift` | Holds `CloudDrawingStorageManager` (Phase 3). Filename intentionally unchanged so the pbxproj didn't need editing. Local-first save with disk-backed pending-upload queue retried on `NWPathMonitor` reachability. DEBUG bypass user (`DEADBEEF-...`) skips cloud entirely at the top of the upload path. |
+| `DrawEvolve/Models/Drawing.swift` | Phase 3 model — no inline `imageData`, has `storage_path`. CodingKeys map snake_case ↔ Postgres columns. |
 | `DrawEvolve/Config/Config.plist` | Live Supabase URL + anon key. Committed; only-public-values. |
 | `DrawEvolve/Config/Config.example.plist` | Template (vestigial since the real one is committed; safe to delete in a future cleanup). |
 | `supabase/migrations/0001_init.sql` | Phase 2 schema bootstrap. Idempotent. Run in Supabase SQL Editor. |
@@ -171,7 +174,47 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
 ### Phase 2–7 status
 
 - **Phase 2** ✅ applied 2026-04-28 to live Supabase project (`jkjfcjptzvieaonrmkzd`) via the dashboard SQL Editor. Migration is idempotent; safe to re-run.
-- **Phase 3–7** ☐ not started.
+- **Phase 3** 🟡 code complete 2026-04-29 — see the 2026-04-29 session-log entry below for design notes. Awaits iPad end-to-end verification.
+- **Phase 4–7** ☐ not started.
+
+---
+
+## 2026-04-29 — Phase 3 cloud sync
+
+**iOS app (DrawEvolve/):**
+- ✅ `Models/Drawing.swift` — dropped inline `imageData: Data`; replaced with required `storagePath: String` (`<user_id>/<id>.jpg`). CodingKeys map snake_case ↔ Postgres columns. Initializer signature updated; the `#Preview` in `DrawingDetailView` updated to match.
+- 🟡 `Services/DrawingStorageManager.swift` — rewritten in place. Type renamed to `CloudDrawingStorageManager`; filename intentionally unchanged so the pbxproj didn't need editing. Public method signatures (`fetchDrawings`, `saveDrawing`, `updateDrawing`, `deleteDrawing`, `clearAllDrawings`) preserved so call sites compile after only a type-name swap. New surface: `pendingUploadCount: @Published`, `thumbnailData(for:)` (sync), `loadFullImage(for:) async throws -> Data?`.
+- 🟡 `Views/GalleryView.swift` — `CloudDrawingStorageManager.shared`; `DrawingCard` now takes `thumbnail: Data?` from `storageManager.thumbnailData(for: drawing.id)`. Re-renders pick up async-loaded thumbnails because `thumbnailCache` is `@Published` on the manager.
+- 🟡 `Views/DrawingDetailView.swift` — `CloudDrawingStorageManager.shared`; full image is `@State` loaded via `.task { fullImageData = try? await storageManager.loadFullImage(for: drawing.id) }`. Adds offline-fallback empty state.
+- 🟡 `Views/DrawingCanvasView.swift` — `CloudDrawingStorageManager.shared`; `loadExistingDrawing()` now async-loads bytes via `storageManager.loadFullImage(for:)` before pushing onto the canvas, replacing the old direct `UIImage(data: drawing.imageData)`. Renderer-ready retry loop preserved.
+
+**Local cache layout** (under `Documents/DrawEvolveCache/`):
+- `metadata/<id>.json` — Drawing metadata (no image bytes)
+- `thumbnails/<id>.jpg` — 256px JPEG (q=0.8), generated at save time, also pulled from `<user_id>/<id>_thumb.jpg` in cloud on hydrate-with-missing-cache
+- `images/<id>.jpg` — full-size JPEG (q=0.9), lazy-loaded from `<user_id>/<id>.jpg` via signed URL (1h TTL)
+- `pending/<id>.json` — retry queue entries (PendingUpload struct: drawing_id, user_id, storage_path, attempt_count, last_attempt_at)
+
+**Save flow:** local persist → in-memory `drawings` array updated → save returns success → background `Task` uploads JPEG + thumb + upserts row. NWPathMonitor retries pending entries on reachability events. Exponential backoff capped at 60s, in-memory only.
+
+**JPEG-only commitment:** the cloud schema stores `.jpg`, and the Phase 3 manager converts the canvas's PNG export to JPEG (q=0.9 full, q=0.8 thumb) before persist. This is a one-way lossy conversion. **Future feature on file (post-TestFlight):** an opt-in PNG-storage tier for users who care about lossless round-trips. Header comment in `DrawingStorageManager.swift` documents this.
+
+**DEBUG bypass behavior:** the bypass user (sentinel UUID `DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF`) skips cloud entirely at the top of the upload path — no pending-upload entries are ever written, no spurious RLS-denied errors accumulate. Local save/load works so the canvas can be exercised offline. `fetchDrawings` short-circuits to local-cache hydration when bypass is on. `clearAllDrawings` and `deleteDrawing` skip cloud teardown.
+
+**Sign-in / sign-out reactivity:** the manager observes `AuthManager.shared.$state` (and `$isDebugBypassed` in DEBUG). On any user change: in-memory `drawings`, thumbnails, retry-backoff state, and active upload tasks are cleared. Pending-upload entries on disk are filtered to the active user's `user_id` at retry time — entries from other accounts wait silently for that user to sign back in (no errors surfaced).
+
+**What I deliberately did not do:**
+- Did **not** migrate `Documents/Drawings/*.json` → that's Phase 4. Those files are now invisible to the app until Phase 4 picks them up.
+- Did **not** delete cached metadata/thumbnails/images that belong to a stale `user_id` after sign-out; only filter on read. Cleanup is also Phase 4's job.
+- Did **not** wire any "Some drawings still syncing" UI banner. `pendingUploadCount` is `@Published` and ready to bind; UI hookup is a follow-up.
+- Did **not** touch the Worker (Phase 5a JWT validation is separate).
+- Did **not** touch `AnonymousUserManager` / `CrashReporter`.
+
+**Verification still required (iPad):**
+1. Sign in via magic link.
+2. Save a drawing → check Supabase dashboard → `drawings` bucket contains `<user_id>/<id>.jpg` + `<id>_thumb.jpg` → `drawings` table contains the row.
+3. Force-quit app → cold launch → open gallery → confirm row hydrates from cloud (use DEBUG "Clear All" first to wipe local cache and verify it's a real cloud read, not just the cache).
+4. Toggle airplane mode → save a drawing → confirm it appears in gallery immediately (local-first) → re-enable network → confirm `pendingUploadCount` decrements as the queue drains.
+5. DEBUG SKIP AUTH path: enter bypass → save a drawing → confirm it appears locally and that no pending entry shows up in `Documents/DrawEvolveCache/pending/`.
 
 ---
 
@@ -293,13 +336,13 @@ create policy "users delete own drawings" on drawings
 
 ## Phase 3 — Cloud sync (local-first)
 
-- [ ] Replace `DrawingStorageManager` with `CloudDrawingStorageManager` — same public surface, hybrid implementation.
-- [ ] **Save flow**: write JSON locally → upload JPEG to Storage → upsert metadata row to Postgres → mark sync state. Local write is the source of truth on save; cloud is best-effort and retried.
-- [ ] **Load flow** on launch: query Postgres for user's drawings, hydrate gallery from metadata, lazy-load images via signed URLs (cache to disk).
-- [ ] **Offline mode**: if network fails, fall back to local cache; queue pending uploads; retry on next launch / network restore.
-- [ ] **Conflict policy**: last-write-wins by `updated_at`. Acceptable for solo-device usage; revisit if multi-device sync surfaces conflicts.
-- [ ] Drop in-JSON `imageData` for cloud-stored drawings — bytes live in Storage, JSON keeps only `storage_path`. Local cache can keep a thumbnail.
-- [ ] Thumbnails: generate 256px thumbnail at save time, store at `drawings/<user_id>/<drawing_id>_thumb.jpg`, use for gallery grid.
+- [x] Replace `DrawingStorageManager` with `CloudDrawingStorageManager` — same public surface, hybrid implementation.
+- [x] **Save flow**: write JSON locally → upload JPEG to Storage → upsert metadata row to Postgres → mark sync state. Local write is the source of truth on save; cloud is best-effort and retried.
+- [x] **Load flow** on launch: query Postgres for user's drawings, hydrate gallery from metadata, lazy-load images via signed URLs (cache to disk).
+- [x] **Offline mode**: if network fails, fall back to local cache; queue pending uploads; retry on next launch / network restore.
+- [x] **Conflict policy**: last-write-wins by `updated_at`. Acceptable for solo-device usage; revisit if multi-device sync surfaces conflicts.
+- [x] Drop in-JSON `imageData` for cloud-stored drawings — bytes live in Storage, JSON keeps only `storage_path`. Local cache can keep a thumbnail.
+- [x] Thumbnails: generate 256px thumbnail at save time, store at `drawings/<user_id>/<drawing_id>_thumb.jpg`, use for gallery grid.
 
 ## Phase 4 — Migration of existing local drawings
 
@@ -308,7 +351,8 @@ create policy "users delete own drawings" on drawings
   - [ ] For each: re-stamp `userId` with the new auth user ID, upload image bytes to Storage, insert metadata row.
   - [ ] On full success, set `didMigrateLocalDrawings = true`.
   - [ ] On partial failure, keep the flag false; surface a "Some drawings still syncing" indicator and retry on next launch.
-- [ ] Don't delete local files post-migration — they're the offline cache.
+- [ ] **After successful migration, delete the legacy `Documents/Drawings/*.json` files** — Phase 3 stopped reading them but left them in place; this is where they get cleaned up. (Phase 3 carryover.)
+- [ ] **Sweep stale local cache by user_id** — enumerate `Documents/DrawEvolveCache/{metadata,thumbnails,images,pending}/` and delete any entry whose metadata/`user_id` doesn't match the now-signed-in user. The Phase 3 manager filters them out at hydrate time but never deletes; over time this grows on shared/test devices. (Phase 3 carryover.)
 
 ## Phase 5 — Cloudflare Worker hardening (rate limit + auth)
 

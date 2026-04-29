@@ -38,7 +38,7 @@ struct DrawingCanvasView: View {
     @State private var drawingTitle = ""
     @State private var isSaving = false
     @State private var showGallery = false
-    @StateObject private var storageManager = DrawingStorageManager.shared
+    @StateObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
     @State private var showClearConfirmation = false
@@ -691,7 +691,7 @@ struct DrawingCanvasView: View {
         print("DrawingCanvasView: Loading existing drawing")
         print("  - Drawing ID: \(drawing.id)")
         print("  - Title: \(drawing.title)")
-        print("  - Image data size: \(drawing.imageData.count) bytes")
+        print("  - Storage path: \(drawing.storagePath)")
 
         // Load feedback if exists (but keep panel collapsed - user can tap sparkles to view)
         if let feedback = drawing.feedback {
@@ -706,28 +706,38 @@ struct DrawingCanvasView: View {
         critiqueHistory = drawing.critiqueHistory
         print("  - Critique history: \(critiqueHistory.count) entries")
 
-        // Load the image onto the canvas - delay until renderer is ready
-        if let uiImage = UIImage(data: drawing.imageData) {
-            print("  - UIImage created successfully: \(uiImage.size)")
-            // Retry loading until renderer is initialized
-            Task {
-                var attempts = 0
-                while canvasState.renderer == nil && attempts < 10 {
-                    try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                    attempts += 1
-                }
+        // Async-load the image bytes from the cloud-aware storage manager
+        // (disk cache → signed URL fallback) and wait for the renderer to be
+        // ready before pushing it onto the canvas.
+        Task {
+            let imageData: Data?
+            do {
+                imageData = try await storageManager.loadFullImage(for: drawing.id)
+            } catch {
+                print("❌ ERROR: loadFullImage threw: \(error)")
+                return
+            }
 
-                await MainActor.run {
-                    if canvasState.renderer != nil {
-                        canvasState.loadImage(uiImage)
-                        print("✅ Successfully loaded existing drawing image onto canvas")
-                    } else {
-                        print("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
-                    }
+            guard let bytes = imageData, let uiImage = UIImage(data: bytes) else {
+                print("❌ ERROR: Failed to obtain image bytes for \(drawing.id)")
+                return
+            }
+            print("  - UIImage loaded: \(uiImage.size), \(bytes.count) bytes")
+
+            var attempts = 0
+            while canvasState.renderer == nil && attempts < 10 {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                attempts += 1
+            }
+
+            await MainActor.run {
+                if canvasState.renderer != nil {
+                    canvasState.loadImage(uiImage)
+                    print("✅ Successfully loaded existing drawing image onto canvas")
+                } else {
+                    print("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
                 }
             }
-        } else {
-            print("❌ ERROR: Failed to create UIImage from drawing data")
         }
     }
 
