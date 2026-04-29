@@ -2,7 +2,7 @@
 
 Working checklist for the foundational plumbing pass. Tick items as they land.
 
-Last updated: 2026-04-29
+Last updated: 2026-04-30
 
 ---
 
@@ -23,7 +23,7 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
 | **Phase 2** — Postgres schema + RLS + Storage | ✅ applied 2026-04-28 | `supabase/migrations/0001_init.sql` ran clean in the SQL Editor. `drawings` + `feedback_requests` tables, all RLS policies, the `drawings` storage bucket, the `set_default_tier_on_signup` trigger, and the backfill are live in project `jkjfcjptzvieaonrmkzd`. |
 | **Phase 3** — cloud sync (local-first) | 🟡 code complete 2026-04-29 | `CloudDrawingStorageManager` + new `Drawing` model + view updates landed. Saves write to local cache + queue cloud upload; gallery hydrates from `drawings` table; full images load via signed URL (1h TTL). Pending uploads retry via `NWPathMonitor`. **Awaits iPad end-to-end verify.** |
 | **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. **Carryover from Phase 3:** also responsible for cleaning up `Documents/Drawings/*.json` after migration, and for evicting any `Documents/DrawEvolveCache/{metadata,thumbnails,images}/` files belonging to a `user_id` that no longer matches the signed-in user (the Phase 3 manager filters them out at hydrate time but doesn't delete). |
-| **Phase 5** — Worker hardening (JWT gate + tier-aware quotas + abuse alert) | ☐ not started | Worker code already structured for it: `getUserTier` + `fetchCritiqueHistory` are stubs ready to wire. |
+| **Phase 5a + 5b** — Worker JWT gate + request validation | 🟡 code complete 2026-04-30 | ES256/JWKS verification (Supabase asymmetric signing — confirmed live at `.well-known/jwks.json`); 10-min JWKS cache with kid-rotation refetch; per-request validation (drawing_id ownership, 8MB image cap, JPEG/PNG magic-byte check, context shape). Real `getUserTier` + `fetchCritiqueHistory` replace the Phase 1 stubs. iOS `OpenAIManager` now attaches `Authorization: Bearer` and sends `drawingId`. **Phase 5c (rate limits), 5d (server-side feedback persist), 5e (logging)** still ☐. |
 | **Phase 6** — account deletion edge function | ☐ not started | App Store guideline 5.1.1(v) requires it; ship before TestFlight. |
 | **Phase 7** — observability + admin polish | ☐ not started | Post-TestFlight bucket. |
 
@@ -175,7 +175,53 @@ Legend: ✅ done & verified · 🟡 code-complete, awaits iPad / Xcode build ver
 
 - **Phase 2** ✅ applied 2026-04-28 to live Supabase project (`jkjfcjptzvieaonrmkzd`) via the dashboard SQL Editor. Migration is idempotent; safe to re-run.
 - **Phase 3** 🟡 code complete 2026-04-29 — see the 2026-04-29 session-log entry below for design notes. Awaits iPad end-to-end verification.
-- **Phase 4–7** ☐ not started.
+- **Phase 4** ⏭️ skipped — confirmed no pre-auth users / no legacy data exists; Trevor wipes dev iPad local data manually if needed.
+- **Phase 5a + 5b** 🟡 code complete 2026-04-30 — see the 2026-04-30 session-log entry below. Awaits coordinated iOS + Worker deploy.
+- **Phase 5c–7** ☐ not started.
+
+---
+
+## 2026-04-30 — Phase 5a + 5b coordinated iOS + Worker pass
+
+**Cloudflare Worker (cloudflare-worker/):**
+- ✅ `index.js` — Phase 5a auth gate: `validateJWT(token, env)` does ES256 (ECDSA P-256) signature verification via `crypto.subtle.verify` against the project's JWKS. JWKS fetched from `<SUPABASE_URL>/auth/v1/.well-known/jwks.json` and cached at module scope for 10 min; on `kid` not found we invalidate and refetch once before giving up. Validates `exp`, `iss` (against `SUPABASE_JWT_ISSUER` env), `aud` ("authenticated"), `sub`. Any failure → 401 with no body, no leakage.
+- ✅ `index.js` — Phase 5b validators: `validateImagePayload` (≤8MB base64 + JPEG/PNG magic bytes), `validateContext` (object shape, optional string fields), `verifyDrawingOwnership` (PostgREST query against `drawings` with service_role key — bypasses RLS, scopes by `id` AND `user_id`). Order in handler: auth → body parse → drawing_id presence → image → context → ownership → tier+history → OpenAI. Cheap checks first; ownership Postgres roundtrip last.
+- ✅ `index.js` — `getUserTier(payload)` and `fetchCritiqueHistory(drawingId, env)` replace the Phase 1 stubs. Tier reads from validated `payload.app_metadata.tier` (sync — no extra Supabase call). History pulls `drawings.critique_history` jsonb for the drawing. Both fall back to safe defaults (free, []) on any failure.
+- ✅ `test.mjs` — 17 new tests for `validateImagePayload` (JPEG/PNG/garbage/oversized/empty/malformed base64), `validateContext` (full/empty/partial/wrong types/array rejection/forward-compat), `getUserTier(payload)` (default free, missing payload, pro+preferences, unknown tier, end-to-end → selectConfig). All 23 tests green via `node --test test.mjs`. JWT/Postgres integration paths are covered by end-to-end iPad testing — not unit-testable in node:test alone.
+- ✅ `wrangler.toml` + `DEPLOYMENT.md` — required secrets documented: `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_JWT_ISSUER`, `SUPABASE_SERVICE_ROLE_KEY`. **Note**: HS256 / `SUPABASE_JWT_SECRET` is NOT used — Trevor's project supports ES256/JWKS, which is the spec.
+
+**iOS app (DrawEvolve/):**
+- ✅ `Services/OpenAIManager.swift` — new signature `requestFeedback(image:, context:, drawingId: UUID)`. Fetches `client.auth.session.accessToken` via `SupabaseManager.shared.client`, attaches `Authorization: Bearer <jwt>`. Sends `drawingId.uuidString.lowercased()` (Phase 3 lowercase convention). Distinguishes 401 (`.unauthorized` — session expired) and 403 (`.forbidden` — ownership mismatch) from generic server errors. New error cases: `.notAuthenticated`, `.unauthorized`, `.forbidden`.
+- ✅ `ViewModels/CanvasStateManager.swift` — `requestFeedback(for: DrawingContext, drawingId: UUID)` threads the id through.
+- ✅ `Views/DrawingCanvasView.swift` — auto-save-before-feedback. `requestFeedback()` now calls `ensureDrawingPersistedToCloud()` first: if `currentDrawingID` is nil, generates a default title via `defaultSketchTitle(for:)` formatter (`"Sketch · MMM d, h:mm a"`, e.g. `"Sketch · Apr 30, 10:14 AM"`) and saves silently — no dialog, no notification per spec. Then awaits `storageManager.awaitCloudSync(for:)` so the row exists in Postgres before the Worker sees the ownership-check request. Auto-save / sync failures surface inline via `canvasState.errorMessage`.
+- ✅ `Services/DrawingStorageManager.swift` — `awaitCloudSync(for: UUID) async throws` blocks on the active upload task; throws `.cloudSyncFailed` if the pending entry remains afterward (upload errored / in backoff). Normal saves remain local-first / fire-and-forget — only the auto-save-before-feedback path pays the latency.
+
+**DEBUG bypass implication:** the bypass user has no Supabase session, so any feedback request from a bypassed canvas will fail with `.notAuthenticated` *before* hitting the Worker. This is correct — feedback genuinely requires a real auth session under Phase 5a. Trevor's bypass is for exercising local-only flows (canvas, save, gallery) without Supabase, not feedback.
+
+**Lowercase-pattern audit during this pass:** no drift found. All new UUID-as-string conversions use `.uuidString.lowercased()` (iOS) or `.toLowerCase()` (Worker). Worker also defensively lowercases the `drawing_id` from the request body before any PostgREST query.
+
+**Required Worker deploy steps (for Trevor):**
+```bash
+wrangler secret put SUPABASE_URL                # https://jkjfcjptzvieaonrmkzd.supabase.co
+wrangler secret put SUPABASE_JWT_ISSUER         # https://jkjfcjptzvieaonrmkzd.supabase.co/auth/v1
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY   # service_role JWT from Supabase dashboard
+# OPENAI_API_KEY already set
+wrangler deploy
+```
+
+**iPad verification (after Worker is deployed):**
+1. Sign in via magic link.
+2. Draw something. Tap "Get Feedback" *without* hitting Save first.
+3. Expect: brief delay (auto-save + cloud sync), then feedback streams. Gallery now contains a "Sketch · <date>" entry — rename via gallery if desired.
+4. Save a real drawing with a chosen title. Request feedback. Verify `drawings.critique_history` in Supabase dashboard accumulates entries (drives Phase 5d's iterative-coaching prompt).
+5. Sign out → back in. Old session JWT invalidated. Try feedback → expect 401 surfaced as "Your session has expired."
+
+**Out of scope for this pass (still ☐):**
+- 5c — tier-aware rate limits + KV quotas + per-IP backstop
+- 5c-alert — 5×-quota webhook
+- 5d — server-side feedback persistence (Worker writes to `critique_history` instead of trusting client)
+- 5e — `feedback_requests` log rows
+- Phase 6 — account deletion edge function
 
 ---
 
@@ -360,18 +406,18 @@ This is the biggest current attack surface. Layered defense:
 
 ### 5a. Auth gate
 
-- [ ] Worker requires `Authorization: Bearer <supabase_jwt>` on all feedback endpoints.
-- [ ] Validate JWT against Supabase JWKS (verify signature, `aud`, `exp`, `iss`).
-- [ ] Extract `sub` (user ID) for use in rate limiting + logging.
-- [ ] Reject unauthenticated requests with 401 (no body — don't leak which routes exist).
+- [x] Worker requires `Authorization: Bearer <supabase_jwt>` on all feedback endpoints.
+- [x] Validate JWT against Supabase JWKS (ES256 / P-256 via `crypto.subtle.verify`, with 10-min JWKS cache + kid-rotation refetch).
+- [x] Extract `sub` (user ID) for use in rate limiting + logging.
+- [x] Reject unauthenticated requests with 401 (no body — don't leak which routes exist).
 
 ### 5b. Request validation
 
-- [ ] Require `drawing_id` parameter in feedback request body.
-- [ ] Server-side check: `drawing_id` must belong to the JWT's user (query Postgres with service role, scoped by `user_id`).
-- [ ] Cap image payload size (e.g. 8 MB base64 max).
-- [ ] Validate base64 decodes to a real JPEG/PNG (magic byte check).
-- [ ] Reject if `context` field is missing or malformed.
+- [x] Require `drawing_id` parameter in feedback request body.
+- [x] Server-side check: `drawing_id` must belong to the JWT's user (query Postgres with service role, scoped by `user_id`).
+- [x] Cap image payload size (8 MB base64 max).
+- [x] Validate base64 decodes to a real JPEG/PNG (magic byte check).
+- [x] Reject if `context` field is missing or malformed.
 
 ### 5c. Rate limiting (tier-aware from day one, per-user not per-IP — mobile IPs are unreliable)
 

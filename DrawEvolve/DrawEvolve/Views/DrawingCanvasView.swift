@@ -807,7 +807,14 @@ struct DrawingCanvasView: View {
         isRequestingFeedback = true
 
         Task {
-            await canvasState.requestFeedback(for: context)
+            do {
+                let drawingId = try await ensureDrawingPersistedToCloud()
+                await canvasState.requestFeedback(for: context, drawingId: drawingId)
+            } catch {
+                print("❌ requestFeedback prerequisites failed: \(error.localizedDescription)")
+                canvasState.errorMessage = error.localizedDescription
+                canvasState.showError = true
+            }
             isRequestingFeedback = false
 
             // Add new feedback to critique history
@@ -826,6 +833,52 @@ struct DrawingCanvasView: View {
                 }
             }
         }
+    }
+
+    /// Phase 5b plumbing: every feedback request needs a drawing_id that
+    /// already exists in the cloud `drawings` table for the current user.
+    ///
+    /// If the canvas is already tied to a saved drawing, just await any
+    /// in-flight cloud upload and return its id. Otherwise auto-save with a
+    /// generated timestamp title ("Sketch · Apr 29, 10:14 AM"), wait for the
+    /// cloud upload to finish, and return the new id. Throws if cloud sync
+    /// fails — caller should not proceed to the Worker call in that case.
+    private func ensureDrawingPersistedToCloud() async throws -> UUID {
+        if let id = currentDrawingID {
+            try await storageManager.awaitCloudSync(for: id)
+            return id
+        }
+
+        guard let image = canvasState.exportImage(),
+              let imageData = image.pngData() else {
+            throw OpenAIError.imageEncodingFailed
+        }
+
+        let title = Self.defaultSketchTitle(for: Date())
+        if drawingTitle.isEmpty { drawingTitle = title }
+
+        let saved = try await storageManager.saveDrawing(
+            title: title,
+            imageData: imageData,
+            feedback: canvasState.feedback,
+            context: context,
+            critiqueHistory: critiqueHistory
+        )
+        currentDrawingID = saved.id
+        isEditingExisting = true
+        try await storageManager.awaitCloudSync(for: saved.id)
+        return saved.id
+    }
+
+    private static let sketchTitleFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d, h:mm a"
+        return f
+    }()
+
+    private static func defaultSketchTitle(for date: Date) -> String {
+        "Sketch · \(sketchTitleFormatter.string(from: date))"
     }
 }
 

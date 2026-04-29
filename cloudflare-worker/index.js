@@ -14,16 +14,16 @@
 //   }
 //
 // Tier flow:
-//   1. getUserTier(jwt, env) -> { tier, promptPreferences } from auth.users.app_metadata
-//   2. selectConfig(tier, promptPreferences) -> PromptConfig (preset + per-user overrides for Pro)
-//   3. fetchCritiqueHistory(drawingId, env) -> [{ feedback, timestamp, ... }] from drawings.critique_history
-//   4. buildSystemPrompt(config, context) + buildUserMessage(config, history) -> messages
-//   5. POST to OpenAI; return feedback.
+//   1. validateJWT(token, env) -> verified payload (Phase 5a — ES256 / JWKS)
+//   2. getUserTier(payload) -> { tier, promptPreferences } from app_metadata
+//   3. selectConfig(tier, promptPreferences) -> PromptConfig (preset + per-user overrides for Pro)
+//   4. fetchCritiqueHistory(drawingId, env) -> [{ feedback, timestamp, ... }] from drawings.critique_history
+//   5. buildSystemPrompt(config, context) + buildUserMessage(config, history) -> messages
+//   6. POST to OpenAI; return feedback.
 //
-// Phases 1, 2, 5a, 5b of authandratelimitingandsecurity.md will fill in real JWT
-// validation + Postgres reads. Until those land the stubs return safe defaults
-// (free tier, no history) so the Worker keeps working unchanged for existing
-// clients.
+// Phases 5c–5e (rate limiting, server-side feedback persistence, request
+// logging) are not yet implemented. Until 5c lands, abuse mitigation is just
+// the per-user auth + ownership check below — no quota enforcement.
 
 const BASE_SYSTEM_PROMPT = `You are a seasoned drawing coach inside the DrawEvolve app. You have 15 years of studio teaching experience, you've seen thousands of student portfolios, and you give feedback the way a sharp, honest mentor would over someone's shoulder — specific to what you see, never generic.
 
@@ -162,14 +162,226 @@ function buildUserMessage(config, history, base64Image) {
   return parts;
 }
 
-// Stubs — Phase 1 / 5a will replace these with real JWT validation + Postgres reads.
-async function getUserTier(_jwt, _env) {
-  return { tier: 'free', promptPreferences: null };
+// =============================================================================
+// Phase 5a — JWT validation (ES256 / JWKS)
+// =============================================================================
+//
+// Supabase signs project JWTs with ES256 (ECDSA P-256). Public keys are
+// published at <SUPABASE_URL>/auth/v1/.well-known/jwks.json. We fetch + cache
+// them at module scope; cache survives across requests within a Worker isolate.
+// On `kid` rotation (new signing key Supabase hasn't published before our cache
+// expires) we invalidate-and-refetch once before giving up.
+
+const JWKS_TTL_MS = 10 * 60 * 1000;   // 10 minutes per Phase 5a spec
+let jwksCache = { keys: null, fetchedAt: 0 };
+
+async function fetchJWKS(env) {
+  if (!env.SUPABASE_URL) {
+    throw new Error('SUPABASE_URL not configured');
+  }
+  const url = `${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
+  const body = await res.json();
+  if (!Array.isArray(body.keys)) throw new Error('JWKS response missing keys array');
+  jwksCache = { keys: body.keys, fetchedAt: Date.now() };
+  return body.keys;
 }
 
-async function fetchCritiqueHistory(_drawingId, _env) {
-  return [];
+async function getJWKS(env) {
+  const fresh = jwksCache.keys && (Date.now() - jwksCache.fetchedAt) < JWKS_TTL_MS;
+  return fresh ? jwksCache.keys : fetchJWKS(env);
 }
+
+async function findKeyByKid(kid, env) {
+  let keys = await getJWKS(env);
+  let key = keys.find((k) => k.kid === kid);
+  if (key) return key;
+  // Possible key rotation — invalidate cache and try one more time.
+  jwksCache = { keys: null, fetchedAt: 0 };
+  keys = await getJWKS(env);
+  return keys.find((k) => k.kid === kid) ?? null;
+}
+
+function base64UrlToBytes(b64u) {
+  const pad = '='.repeat((4 - (b64u.length % 4)) % 4);
+  const b64 = (b64u + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function base64UrlToString(b64u) {
+  return new TextDecoder().decode(base64UrlToBytes(b64u));
+}
+
+/**
+ * Verify a Supabase ES256 JWT against the project's JWKS. Returns the decoded
+ * payload on success; throws on any failure (malformed, expired, bad sig,
+ * wrong issuer/audience). Callers should treat any thrown error as 401 — we
+ * deliberately do NOT surface the reason to the client.
+ */
+async function validateJWT(token, env) {
+  if (!token || typeof token !== 'string') throw new Error('No token');
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('Malformed JWT');
+  const [headerB64, payloadB64, sigB64] = parts;
+
+  const header = JSON.parse(base64UrlToString(headerB64));
+  if (header.alg !== 'ES256') throw new Error(`Unexpected alg: ${header.alg}`);
+  if (!header.kid) throw new Error('Missing kid');
+
+  const jwk = await findKeyByKid(header.kid, env);
+  if (!jwk) throw new Error('No matching kid in JWKS');
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify'],
+  );
+  const sig = base64UrlToBytes(sigB64);
+  const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const ok = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    cryptoKey,
+    sig,
+    data,
+  );
+  if (!ok) throw new Error('Signature invalid');
+
+  const payload = JSON.parse(base64UrlToString(payloadB64));
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== 'number' || payload.exp < now) throw new Error('Token expired');
+  if (env.SUPABASE_JWT_ISSUER && payload.iss !== env.SUPABASE_JWT_ISSUER) {
+    throw new Error('Bad issuer');
+  }
+  if (payload.aud && payload.aud !== 'authenticated') {
+    throw new Error('Bad audience');
+  }
+  if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
+    throw new Error('Missing sub');
+  }
+  return payload;
+}
+
+// =============================================================================
+// Phase 5b — request validation
+// =============================================================================
+
+const MAX_IMAGE_BASE64_BYTES = 8 * 1024 * 1024; // 8 MB of base64 chars (~6 MB binary)
+
+/**
+ * Returns 'jpeg' | 'png' | false. Validates payload size + magic bytes; does
+ * not fully validate the image (we trust GPT-4o Vision to handle malformed
+ * pixels without burning tokens — we just block obvious junk + oversized junk).
+ */
+function validateImagePayload(base64) {
+  if (typeof base64 !== 'string' || base64.length === 0) return false;
+  if (base64.length > MAX_IMAGE_BASE64_BYTES) return false;
+  let head;
+  try {
+    head = atob(base64.slice(0, 16));
+  } catch {
+    return false;
+  }
+  if (head.length < 4) return false;
+  const b0 = head.charCodeAt(0);
+  const b1 = head.charCodeAt(1);
+  const b2 = head.charCodeAt(2);
+  const b3 = head.charCodeAt(3);
+  // JPEG: FF D8 FF (next byte varies — E0/E1/DB/etc.)
+  if (b0 === 0xff && b1 === 0xd8 && b2 === 0xff) return 'jpeg';
+  // PNG: 89 50 4E 47
+  if (b0 === 0x89 && b1 === 0x50 && b2 === 0x4e && b3 === 0x47) return 'png';
+  return false;
+}
+
+const CONTEXT_STRING_FIELDS = [
+  'skillLevel',
+  'subject',
+  'style',
+  'artists',
+  'techniques',
+  'focus',
+  'additionalContext',
+];
+
+function validateContext(context) {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return false;
+  for (const key of CONTEXT_STRING_FIELDS) {
+    if (key in context && typeof context[key] !== 'string') return false;
+  }
+  return true;
+}
+
+/**
+ * Returns true iff a row exists in `drawings` with the given id AND user_id.
+ * Uses the service_role key so RLS is bypassed — we're enforcing scope
+ * ourselves via the WHERE clause, which is what we want for ownership checks
+ * (we already know the user from a validated JWT).
+ */
+async function verifyDrawingOwnership(userId, drawingId, env) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return false;
+  const url = `${env.SUPABASE_URL}/rest/v1/drawings`
+    + `?id=eq.${encodeURIComponent(drawingId)}`
+    + `&user_id=eq.${encodeURIComponent(userId)}`
+    + `&select=id&limit=1`;
+  const res = await fetch(url, {
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      Accept: 'application/json',
+    },
+  });
+  if (!res.ok) return false;
+  const rows = await res.json();
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+// =============================================================================
+// Tier + history (replaces the Phase 1 stubs)
+// =============================================================================
+
+/**
+ * Reads tier + Pro overrides from a validated JWT payload's app_metadata.
+ * Default: free tier with no styleModifier. Synchronous because everything
+ * comes from the JWT we already have in hand.
+ */
+function getUserTier(payload) {
+  const tier = payload?.app_metadata?.tier === 'pro' ? 'pro' : 'free';
+  const promptPreferences = payload?.app_metadata?.prompt_preferences ?? null;
+  return { tier, promptPreferences };
+}
+
+/**
+ * Pulls the critique_history jsonb array for the given drawing id. Used so the
+ * iterative-coaching prompt has prior critiques to reference. Returns [] on
+ * any failure — feedback will still generate, just without history context.
+ */
+async function fetchCritiqueHistory(drawingId, env) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return [];
+  const url = `${env.SUPABASE_URL}/rest/v1/drawings`
+    + `?id=eq.${encodeURIComponent(drawingId)}`
+    + `&select=critique_history&limit=1`;
+  const res = await fetch(url, {
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      Accept: 'application/json',
+    },
+  });
+  if (!res.ok) return [];
+  const rows = await res.json();
+  const history = rows?.[0]?.critique_history;
+  return Array.isArray(history) ? history : [];
+}
+
+// =============================================================================
+// HTTP scaffolding
+// =============================================================================
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -184,6 +396,11 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+function unauthorized() {
+  // No body — don't leak which routes exist or why the JWT was rejected.
+  return new Response(null, { status: 401, headers: CORS_HEADERS });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -193,13 +410,45 @@ export default {
       return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
+    // Phase 5a — auth gate. Anything other than a valid Supabase JWT → 401.
+    const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? null;
+    let payload;
     try {
-      const { image, context, drawingId } = await request.json();
-      const jwt = request.headers.get('Authorization')?.replace(/^Bearer\s+/, '') ?? null;
+      payload = await validateJWT(token, env);
+    } catch {
+      return unauthorized();
+    }
+    const userId = payload.sub; // Supabase auth.uid() is always lowercase.
 
-      const { tier, promptPreferences } = await getUserTier(jwt, env);
+    try {
+      const body = await request.json().catch(() => null);
+      if (!body || typeof body !== 'object') {
+        return jsonResponse({ error: 'Invalid request body' }, 400);
+      }
+
+      const { image, context, drawingId } = body;
+
+      // Phase 5b — request validation. Cheap checks first; ownership query last.
+      if (typeof drawingId !== 'string' || drawingId.length === 0) {
+        return jsonResponse({ error: 'Missing drawing_id' }, 400);
+      }
+      const drawingIdLower = drawingId.toLowerCase(); // pattern compliance from Phase 3
+
+      if (!validateImagePayload(image)) {
+        return jsonResponse({ error: 'Invalid or oversized image payload' }, 400);
+      }
+      if (!validateContext(context)) {
+        return jsonResponse({ error: 'Invalid context' }, 400);
+      }
+
+      const owns = await verifyDrawingOwnership(userId, drawingIdLower, env);
+      if (!owns) {
+        return jsonResponse({ error: 'Forbidden' }, 403);
+      }
+
+      const { tier, promptPreferences } = getUserTier(payload);
       const config = selectConfig(tier, promptPreferences);
-      const history = await fetchCritiqueHistory(drawingId, env);
+      const history = await fetchCritiqueHistory(drawingIdLower, env);
 
       const systemPrompt = buildSystemPrompt(config, context ?? {});
       const userContent = buildUserMessage(config, history, image);
@@ -208,7 +457,7 @@ export default {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${env.OPENAI_API_KEY}`,
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
         },
         body: JSON.stringify({
           model: 'gpt-4o',
@@ -242,4 +491,7 @@ export {
   formatHistoryEntries,
   renderSkillCalibration,
   renderContextBlock,
+  validateImagePayload,
+  validateContext,
+  getUserTier,
 };

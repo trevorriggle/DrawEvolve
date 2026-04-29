@@ -1,5 +1,34 @@
 # Deploy DrawEvolve Backend to Cloudflare Workers
 
+## Required secrets (Phase 5a/5b)
+
+Every feedback request now requires a valid Supabase JWT and a `drawing_id`
+that belongs to the JWT's user. To deploy, four secrets must be set on the
+Worker via `wrangler secret put <NAME>`:
+
+| Secret | Where to find it | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | OpenAI dashboard → API Keys | GPT-4o Vision call |
+| `SUPABASE_URL` | Supabase dashboard → Project Settings → API → Project URL (e.g. `https://jkjfcjptzvieaonrmkzd.supabase.co`) | JWKS endpoint + PostgREST queries |
+| `SUPABASE_JWT_ISSUER` | Same URL with `/auth/v1` appended (e.g. `https://jkjfcjptzvieaonrmkzd.supabase.co/auth/v1`) | Verified against every JWT's `iss` claim |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase dashboard → Project Settings → API → `service_role` key | Ownership check + critique-history fetch (bypasses RLS) |
+
+**Never commit `SUPABASE_SERVICE_ROLE_KEY`** — it's god-mode for the Postgres
+database. Worker secrets live only in Cloudflare's encrypted store.
+
+JWT validation uses **ES256 with the project's public JWKS** (Phase 5a). No
+shared HMAC secret is needed; the Worker fetches
+`<SUPABASE_URL>/auth/v1/.well-known/jwks.json` and caches it for 10 minutes.
+
+```bash
+wrangler secret put OPENAI_API_KEY
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_JWT_ISSUER
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+```
+
+After all four are set: `wrangler deploy`.
+
 ## Files Created
 - `index.js` - The Cloudflare Worker code
 - `wrangler.toml` - Configuration file

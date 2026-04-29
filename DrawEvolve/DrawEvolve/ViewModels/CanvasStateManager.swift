@@ -505,7 +505,11 @@ class CanvasStateManager: ObservableObject {
         }
     }
 
-    func requestFeedback(for context: DrawingContext) async {
+    /// `drawingId` must reference a row that already exists in the cloud
+    /// `drawings` table for the current user — Phase 5b's Worker enforces
+    /// ownership via service_role lookup. Caller is responsible for ensuring
+    /// the drawing has been persisted to cloud before invoking this.
+    func requestFeedback(for context: DrawingContext, drawingId: UUID) async {
         guard let image = exportImage() else {
             showError(message: "Failed to export drawing")
             return
@@ -514,7 +518,8 @@ class CanvasStateManager: ObservableObject {
         do {
             let feedbackText = try await OpenAIManager.shared.requestFeedback(
                 image: image,
-                context: context
+                context: context,
+                drawingId: drawingId
             )
             feedback = feedbackText
         } catch {

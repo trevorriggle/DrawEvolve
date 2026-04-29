@@ -460,6 +460,26 @@ final class CloudDrawingStorageManager: ObservableObject {
         return nil
     }
 
+    /// Block until the in-flight upload for `id` finishes (success or failure).
+    /// Throws `DrawingStorageError.cloudSyncFailed` if the pending entry is
+    /// still on disk after the upload task completes — meaning the upload
+    /// errored out and is now in backoff.
+    ///
+    /// This exists for the Phase 5b auto-save-before-feedback path: the
+    /// Worker's ownership check requires the drawing's row to exist in
+    /// Postgres, so the caller must wait for cloud persist before requesting
+    /// feedback. Normal saves remain local-first / fire-and-forget; only this
+    /// caller pays the latency.
+    func awaitCloudSync(for id: UUID) async throws {
+        if let task = activeUploadTasks[id] {
+            await task.value
+        }
+        let pendingURL = pendingDir.appendingPathComponent("\(id.uuidString).json")
+        if fileManager.fileExists(atPath: pendingURL.path) {
+            throw DrawingStorageError.cloudSyncFailed
+        }
+    }
+
     /// Loads the full-size image: disk cache first, then signed URL from Storage.
     /// Returns nil if the image truly can't be located (bypass user with no local
     /// copy, or offline + cache miss).
@@ -906,6 +926,7 @@ enum DrawingStorageError: LocalizedError {
     case notAuthenticated
     case saveFailed
     case fetchFailed
+    case cloudSyncFailed
 
     var errorDescription: String? {
         switch self {
@@ -915,6 +936,8 @@ enum DrawingStorageError: LocalizedError {
             return "Failed to save drawing"
         case .fetchFailed:
             return "Failed to fetch drawings"
+        case .cloudSyncFailed:
+            return "Couldn't sync drawing to cloud — try again in a moment"
         }
     }
 }

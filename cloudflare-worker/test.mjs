@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import {
   DEFAULT_FREE_CONFIG,
   DEFAULT_PRO_CONFIG,
@@ -7,6 +8,9 @@ import {
   selectConfig,
   buildSystemPrompt,
   buildUserMessage,
+  validateImagePayload,
+  validateContext,
+  getUserTier,
 } from './index.js';
 
 const baseContext = {
@@ -18,6 +22,17 @@ const baseContext = {
   focus: '',
   additionalContext: '',
 };
+
+// Helper: build a base64 payload that starts with the given magic bytes,
+// padded out so atob() of the first slice has at least 4 bytes to inspect.
+function base64WithMagic(magicBytes, padBytes = 32) {
+  const buf = Buffer.from([...magicBytes, ...new Array(padBytes).fill(0)]);
+  return buf.toString('base64');
+}
+
+// =============================================================================
+// Existing prompt-pipeline tests (unchanged from Phase 1)
+// =============================================================================
 
 test('free tier with no history produces a user message with no history block', () => {
   const config = selectConfig('free', null);
@@ -128,4 +143,131 @@ test('mutating returned config does not pollute presets', () => {
   a.maxOutputTokens = 99999;
   const b = selectConfig('free', null);
   assert.equal(b.maxOutputTokens, DEFAULT_FREE_CONFIG.maxOutputTokens);
+});
+
+// =============================================================================
+// Phase 5b — validateImagePayload
+// =============================================================================
+
+test('validateImagePayload accepts a JPEG by magic bytes', () => {
+  const jpegBase64 = base64WithMagic([0xff, 0xd8, 0xff, 0xe0]);
+  assert.equal(validateImagePayload(jpegBase64), 'jpeg');
+});
+
+test('validateImagePayload accepts a PNG by magic bytes', () => {
+  const pngBase64 = base64WithMagic([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.equal(validateImagePayload(pngBase64), 'png');
+});
+
+test('validateImagePayload rejects arbitrary non-image bytes', () => {
+  const garbageBase64 = base64WithMagic([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+  assert.equal(validateImagePayload(garbageBase64), false);
+});
+
+test('validateImagePayload rejects oversized payloads (>8MB base64)', () => {
+  // 9 MB of base64 chars — well over the 8 MB cap.
+  const oversized = 'A'.repeat(9 * 1024 * 1024);
+  assert.equal(validateImagePayload(oversized), false);
+});
+
+test('validateImagePayload rejects empty / non-string input', () => {
+  assert.equal(validateImagePayload(''),         false);
+  assert.equal(validateImagePayload(null),       false);
+  assert.equal(validateImagePayload(undefined),  false);
+  assert.equal(validateImagePayload(12345),      false);
+  assert.equal(validateImagePayload({}),         false);
+});
+
+test('validateImagePayload rejects malformed base64', () => {
+  // Characters outside the base64 alphabet → atob() throws.
+  assert.equal(validateImagePayload('!!!!!!!!!!!!!!!'), false);
+});
+
+// =============================================================================
+// Phase 5b — validateContext
+// =============================================================================
+
+test('validateContext accepts a fully-populated DrawingContext shape', () => {
+  assert.equal(validateContext(baseContext), true);
+});
+
+test('validateContext accepts an empty object (all fields optional)', () => {
+  assert.equal(validateContext({}), true);
+});
+
+test('validateContext accepts a partial object', () => {
+  assert.equal(validateContext({ subject: 'a tree', skillLevel: 'Beginner' }), true);
+});
+
+test('validateContext rejects null / non-object / array', () => {
+  assert.equal(validateContext(null),       false);
+  assert.equal(validateContext(undefined),  false);
+  assert.equal(validateContext('string'),   false);
+  assert.equal(validateContext(42),         false);
+  assert.equal(validateContext([]),         false); // arrays are typeof 'object' — must be rejected
+});
+
+test('validateContext rejects when a known field has a wrong type', () => {
+  assert.equal(validateContext({ subject: 12345 }),          false);
+  assert.equal(validateContext({ skillLevel: ['Beginner'] }),false);
+  assert.equal(validateContext({ additionalContext: {} }),   false);
+});
+
+test('validateContext tolerates unknown keys (forward-compat)', () => {
+  assert.equal(validateContext({ subject: 'x', futureField: 'y' }), true);
+});
+
+// =============================================================================
+// Phase 5a — getUserTier (now reads from validated JWT payload, not a stub)
+// =============================================================================
+
+test('getUserTier defaults to free when payload has no app_metadata.tier', () => {
+  assert.deepEqual(
+    getUserTier({ sub: 'abc', app_metadata: {} }),
+    { tier: 'free', promptPreferences: null },
+  );
+});
+
+test('getUserTier defaults to free when payload is missing entirely', () => {
+  assert.deepEqual(
+    getUserTier(undefined),
+    { tier: 'free', promptPreferences: null },
+  );
+});
+
+test('getUserTier returns pro + promptPreferences when present', () => {
+  const payload = {
+    sub: 'abc',
+    app_metadata: {
+      tier: 'pro',
+      prompt_preferences: { styleModifier: 'Be brutal.' },
+    },
+  };
+  assert.deepEqual(getUserTier(payload), {
+    tier: 'pro',
+    promptPreferences: { styleModifier: 'Be brutal.' },
+  });
+});
+
+test('getUserTier ignores unknown tier values and falls back to free', () => {
+  const payload = { sub: 'abc', app_metadata: { tier: 'enterprise' } };
+  assert.deepEqual(
+    getUserTier(payload),
+    { tier: 'free', promptPreferences: null },
+  );
+});
+
+test('getUserTier flow into selectConfig respects pro promptPreferences', () => {
+  // Integration sanity: payload → tier → config all line up.
+  const payload = {
+    sub: 'abc',
+    app_metadata: {
+      tier: 'pro',
+      prompt_preferences: { styleModifier: 'Reference Sargent.' },
+    },
+  };
+  const { tier, promptPreferences } = getUserTier(payload);
+  const config = selectConfig(tier, promptPreferences);
+  assert.equal(config.styleModifier, 'Reference Sargent.');
+  assert.equal(config.includeHistoryCount, DEFAULT_PRO_CONFIG.includeHistoryCount);
 });
