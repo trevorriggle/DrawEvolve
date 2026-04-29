@@ -221,8 +221,12 @@ final class CloudDrawingStorageManager: ObservableObject {
             }
             await hydrateThumbnails(for: decoded)
         } catch {
-            print("☁️ fetchDrawings cloud query failed: \(error.localizedDescription) — falling back to local cache")
-            error.log(context: "CloudDrawingStorageManager.fetchDrawings")
+            // Surface the underlying DecodingError detail (.keyNotFound, etc.)
+            // so future decode bugs are diagnosable from the Xcode console
+            // instead of just "data couldn't be read".
+            let detail = Self.describeDecodeFailure(error)
+            print("☁️ fetchDrawings cloud query failed: \(detail) — falling back to local cache")
+            error.log(context: "CloudDrawingStorageManager.fetchDrawings: \(detail)")
             errorMessage = "Couldn't reach the cloud — showing cached drawings"
             await hydrateFromLocalCache(for: activeUserID)
         }
@@ -233,12 +237,16 @@ final class CloudDrawingStorageManager: ObservableObject {
         var loaded: [Drawing] = []
         let decoder = Self.makeDecoder()
         for url in urls where url.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: url),
-                  let drawing = try? decoder.decode(Drawing.self, from: data) else { continue }
-            // Filter out other users' cached metadata so a different account
-            // can't see them after sign-out.
-            guard drawing.userId == userID else { continue }
-            loaded.append(drawing)
+            guard let data = try? Data(contentsOf: url) else { continue }
+            do {
+                let drawing = try decoder.decode(Drawing.self, from: data)
+                // Filter out other users' cached metadata so a different account
+                // can't see them after sign-out.
+                guard drawing.userId == userID else { continue }
+                loaded.append(drawing)
+            } catch {
+                print("⚠️ Local cache decode failed for \(url.lastPathComponent): \(Self.describeDecodeFailure(error))")
+            }
         }
         drawings = loaded.sorted { $0.updatedAt > $1.updatedAt }
         await hydrateThumbnails(for: drawings)
@@ -722,25 +730,62 @@ final class CloudDrawingStorageManager: ObservableObject {
 
     // MARK: - Codable helpers
 
-    /// Decoder configured for Postgres ISO8601 timestamps with optional fractional
-    /// seconds (Supabase returns both formats depending on the column).
+    /// Decoder configured for the date formats Supabase / Postgres actually
+    /// returns. PostgREST emits timestamptz columns as e.g.
+    /// `"2026-04-29T13:43:57.339+00:00"` (fractional seconds, explicit
+    /// `+00:00` offset, often 3 digits but sometimes 6). Date values stored
+    /// inside jsonb columns (e.g. `critique_history[].timestamp`) come back
+    /// in whatever format the original encoder used — typically ISO8601
+    /// with `Z`. The custom strategy below tries multiple parsers in order
+    /// so all observed shapes round-trip cleanly.
     private static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let str = try container.decode(String.self)
-            let withFractional = ISO8601DateFormatter()
-            withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let d = withFractional.date(from: str) { return d }
-            let plain = ISO8601DateFormatter()
-            plain.formatOptions = [.withInternetDateTime]
-            if let d = plain.date(from: str) { return d }
+            if let date = parseFlexibleDate(str) {
+                return date
+            }
             throw DecodingError.dataCorruptedError(
                 in: container,
-                debugDescription: "Unrecognized ISO8601 date string: \(str)"
+                debugDescription: "Unrecognized date string: '\(str)'"
             )
         }
         return decoder
+    }
+
+    /// Tries every known shape Supabase / Postgres might emit for a Date.
+    /// Order matters: ISO8601DateFormatter is faster than DateFormatter and
+    /// covers the common cases; the explicit format strings below are the
+    /// long-tail fallbacks (variable fractional digit counts, `+00:00` vs
+    /// `Z`, etc.) that ISO8601DateFormatter has historically been picky about.
+    private static func parseFlexibleDate(_ str: String) -> Date? {
+        let isoFractional = ISO8601DateFormatter()
+        isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = isoFractional.date(from: str) { return d }
+
+        let isoPlain = ISO8601DateFormatter()
+        isoPlain.formatOptions = [.withInternetDateTime]
+        if let d = isoPlain.date(from: str) { return d }
+
+        // Postgres timestamptz can come back with 6 fractional digits ("microseconds")
+        // and either an explicit ±HH:MM offset (xxx) or "Z" (XXX). Cover both.
+        let fallbackFormats = [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSxxx",
+            "yyyy-MM-dd'T'HH:mm:ssxxx",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+        ]
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for fmt in fallbackFormats {
+            formatter.dateFormat = fmt
+            if let d = formatter.date(from: str) { return d }
+        }
+        return nil
     }
 
     private static func makeEncoder() -> JSONEncoder {
@@ -752,6 +797,33 @@ final class CloudDrawingStorageManager: ObservableObject {
             try container.encode(formatter.string(from: date))
         }
         return encoder
+    }
+
+    /// Renders a DecodingError with the coding path, the failing value's
+    /// type/key, and the underlying description. Falls back to
+    /// localizedDescription for non-decode errors. Used by the catch in
+    /// fetchDrawings so the Xcode console actually points at the broken field.
+    static func describeDecodeFailure(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        func path(_ context: DecodingError.Context) -> String {
+            let parts = context.codingPath.map { $0.stringValue }
+            return parts.isEmpty ? "<root>" : parts.joined(separator: ".")
+        }
+        switch decodingError {
+        case .keyNotFound(let key, let ctx):
+            return "DecodingError.keyNotFound: '\(key.stringValue)' at '\(path(ctx))' — \(ctx.debugDescription)"
+        case .typeMismatch(let type, let ctx):
+            return "DecodingError.typeMismatch: expected \(type) at '\(path(ctx))' — \(ctx.debugDescription)"
+        case .valueNotFound(let type, let ctx):
+            return "DecodingError.valueNotFound: \(type) at '\(path(ctx))' — \(ctx.debugDescription)"
+        case .dataCorrupted(let ctx):
+            let underlying = ctx.underlyingError.map { " (underlying: \($0))" } ?? ""
+            return "DecodingError.dataCorrupted at '\(path(ctx))' — \(ctx.debugDescription)\(underlying)"
+        @unknown default:
+            return "DecodingError (unrecognized variant): \(decodingError)"
+        }
     }
 }
 
