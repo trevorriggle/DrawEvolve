@@ -24,7 +24,9 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
 | **Phase 3** — cloud sync (local-first) | 🟡 code complete 2026-04-29 | `CloudDrawingStorageManager` + new `Drawing` model + view updates landed. Saves write to local cache + queue cloud upload; gallery hydrates from `drawings` table; full images load via signed URL (1h TTL). Pending uploads retry via `NWPathMonitor`. **Awaits iPad end-to-end verify.** |
 | **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. **Carryover from Phase 3:** also responsible for cleaning up `Documents/Drawings/*.json` after migration, and for evicting any `Documents/DrawEvolveCache/{metadata,thumbnails,images}/` files belonging to a `user_id` that no longer matches the signed-in user (the Phase 3 manager filters them out at hydrate time but doesn't delete). |
 | **Phase 5a + 5b** — Worker JWT gate + request validation | ✅ code complete & verified end-to-end 2026-04-29 | ES256/JWKS verification (Supabase asymmetric signing — confirmed live at `.well-known/jwks.json`); 10-min JWKS cache with kid-rotation refetch; per-request validation (drawing_id ownership, 8MB image cap, JPEG/PNG magic-byte check, context shape). Real `getUserTier` + `fetchCritiqueHistory` replace the Phase 1 stubs. iOS `OpenAIManager` now attaches `Authorization: Bearer` and sends `drawingId`. |
-| **Phase 5c** — rate limits + cost ceilings | 🟡 code complete 2026-04-29 | `TIER_LIMITS` (free: 5/min · 20/day; pro: 15/min · 200/day) + per-IP backstop (100/hr) + per-user 5×-quota anomaly counter. KV-backed: `quota:<uid>:<utc-day>`, `rate:<uid>` (rolling 60s window), `ip:<sha256(ip)>:<utc-hour>`, `hourly:<uid>:<utc-hour>`. Daily counter increments AFTER successful OpenAI delivery so failed requests don't burn quota; per-minute + per-IP record the *attempt* so concurrent bursts can't slip past the gate. 429 body `{ error, scope, tier, limit, used, retryAfter, message }` with tier-aware human-readable `message`. Anomaly secret named `ANOMALY_ALERT_WEBHOOK` (renamed from `ABUSE_ALERT_WEBHOOK` in earlier draft); falls back to `console.error` when unset. iOS `OpenAIError.rateLimited` surfaces server `message` verbatim. **Awaits**: KV namespace creation, `wrangler deploy`, iPad verification, OpenAI $75 monthly cap. **Phase 5d, 5e** still ☐. |
+| **Phase 5c** — rate limits + cost ceilings | ✅ verified 2026-04-29 | `TIER_LIMITS` (free: 5/min · 20/day; pro: 15/min · 200/day) + per-IP backstop (100/hr) + per-user 5×-quota anomaly counter. KV-backed: `quota:<uid>:<utc-day>`, `rate:<uid>` (rolling 60s window), `ip:<sha256(ip)>:<utc-hour>`, `hourly:<uid>:<utc-hour>`. Daily counter increments AFTER successful OpenAI delivery; per-minute + per-IP record the *attempt*. 429 body has tier-aware human-readable `message`. Anomaly secret `ANOMALY_ALERT_WEBHOOK` (optional). |
+| **Phase 5d** — server-side critique persistence + idempotency | 🟡 code complete 2026-04-29 | Worker writes critiques to `drawings.critique_history` via `append_critique(uuid, jsonb)` security-definer RPC (atomic jsonb-array append; migration `0002`). Every request includes a lowercase UUID `client_request_id`; first response cached at `idempotency:<uid>:<crid>` for 1h, replays return cached body with `X-Idempotent-Replay: 1` header and never re-charge OpenAI. `DrawingUpsertPayload` omits `critique_history` from PATCH bodies — Worker is sole writer. iOS `CritiqueEntry` is dual-key Codable (decodes both legacy `feedback`/`timestamp` and new `content`/`created_at`). **Awaits**: migration `0002` applied, `wrangler deploy`, iPad verification. |
+| **Phase 5e** — request logging + abuse detection infra | 🟡 code complete 2026-04-29 | One row per request lands in `feedback_requests` via service-role POST. Canonical `REQUEST_STATUS` enum: `success`, `quota_exceeded`, `auth_failed`, `validation_failed`, `ownership_denied`, `model_error` (OpenAI's fault), `internal_error` (our fault — distinct so abuse queries stay clean), `idempotent_replay`, `persistence_orphan`. Logging is non-blocking (`ctx.waitUntil`) and non-load-bearing (failures swallowed via `console.error` only). Migration `0003` drops NOT NULL on `user_id` so auth-failed rows can land without a validated user; RLS naturally hides null-user rows from authenticated reads. Saved abuse-detection SQL lives in this doc (see "Phase 5e abuse-detection saved query" below). **Awaits**: migration `0003` applied, `wrangler deploy`, verification matrix on iPad. |
 | **Phase 6** — account deletion edge function | ☐ not started | App Store guideline 5.1.1(v) requires it; ship before TestFlight. |
 | **Phase 7** — observability + admin polish | ☐ not started | Post-TestFlight bucket. |
 
@@ -38,7 +40,22 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
    - `wrangler kv:namespace create drawevolve-quota` → paste the returned id into `cloudflare-worker/wrangler.toml` (replacing `REPLACE_WITH_NAMESPACE_ID`) → `wrangler deploy`.
    - Set OpenAI monthly cap to **$75** with email alerts at 50%/80% (REQUIRED before public TestFlight).
    - *(Optional, deferrable)* Once a Slack incoming webhook URL exists, run `wrangler secret put ANOMALY_ALERT_WEBHOOK`. Until then, anomaly alerts surface as `console.error` in `wrangler tail`.
-6. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
+6. **Phase 5d/5e migrations** (single SQL Editor run, then redeploy):
+   ```bash
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0002_append_critique_function.sql
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0003_feedback_requests_nullable_user.sql
+   ```
+   Or paste both into Supabase SQL Editor → Run. Then `cd cloudflare-worker && wrangler deploy`.
+7. **Phase 5e verification matrix** — trigger one of each terminal state and query `select status, count(*) from feedback_requests group by status order by 2 desc;`:
+   - `success`: one normal critique.
+   - `idempotent_replay`: re-send the same `client_request_id`.
+   - `quota_exceeded`: 6 rapid taps as a free user.
+   - `auth_failed`: curl with no `Authorization` header.
+   - `validation_failed`: curl with empty body.
+   - `ownership_denied`: curl with a `drawingId` UUID that doesn't belong to the JWT's user.
+   - `persistence_orphan`: temporarily rename the `append_critique` function in SQL editor → trigger feedback → confirm row → restore function.
+   - `model_error` / `internal_error` are hard to trigger artificially — skip unless they show up organically.
+8. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
 
 ### What a fresh helper should NOT do
 
@@ -456,9 +473,56 @@ These are conservative starting values; revise once we have a week of real usage
 
 ### 5e. Logging
 
-- [ ] `feedback_requests` table: id, user_id, drawing_id, requested_at, prompt_token_count, completion_token_count, status (`success` | `quota_exceeded` | `model_error`), client_ip_hash.
-- [ ] Worker writes one row per request (success or fail) via service role.
-- [ ] Index `(user_id, requested_at desc)` for abuse queries.
+- [x] `feedback_requests` table: id, user_id (nullable as of migration `0003` so auth-failed rows can land), drawing_id (nullable when failure happens before drawing_id is extracted), requested_at, prompt_token_count, completion_token_count, status, client_ip_hash (sha256 of `CF-Connecting-IP`, never the raw IP).
+- [x] Worker writes one row per request via service role on every terminal state. Non-blocking via `ctx.waitUntil()`. Logging failures are swallowed to a single `console.error` — observability never breaks the user-facing flow.
+- [x] Index `(user_id, requested_at desc)` for abuse queries (already in `0001_init.sql`).
+- [x] Status enum **canonical set** (also documented at the top of the Phase 5e block in `cloudflare-worker/index.js`):
+  - `success` — critique returned and persisted.
+  - `quota_exceeded` — 429 daily / per-minute / per-IP gate.
+  - `auth_failed` — 401 invalid or missing JWT (only state where `user_id` is null).
+  - `validation_failed` — 400 malformed body, image, context, or `client_request_id`.
+  - `ownership_denied` — 403 drawing doesn't belong to the JWT's user.
+  - `model_error` — 502 OpenAI returned non-ok or empty completion. *OpenAI's fault.*
+  - `internal_error` — 500 Worker bug / KV outage / anything that's *our* fault. **Distinct from `model_error`** so abuse-detection queries don't conflate provider hiccups with our own bugs.
+  - `idempotent_replay` — 200 served from idempotency cache. Tokens null (no OpenAI call).
+  - `persistence_orphan` — OpenAI delivered, `append_critique` RPC failed. Tokens populated; user got the critique once.
+
+#### Phase 5e abuse-detection saved query
+
+Run in Supabase SQL Editor. Returns nothing on a healthy day. Future Phase 7 work could wrap this in `pg_cron` or a scheduled CF Worker that fires `ANOMALY_ALERT_WEBHOOK` from real query results — currently the Worker's in-process anomaly counter (`hourly:<uid>:<utc-hour>` in QUOTA_KV) only catches threshold crossings inside a single Worker isolate, which can miss bursts that span isolates.
+
+```sql
+-- Users exceeding 5x their daily quota in any 1-hour rolling window.
+with windows as (
+  select
+    user_id,
+    date_trunc('hour', requested_at) as hour_bucket,
+    count(*) filter (where status = 'success') as success_count
+  from public.feedback_requests
+  where requested_at > now() - interval '24 hours'
+    and user_id is not null
+  group by user_id, date_trunc('hour', requested_at)
+),
+tier_lookup as (
+  select id as user_id,
+         coalesce((raw_app_meta_data->>'tier'), 'free') as tier
+  from auth.users
+)
+select w.user_id,
+       t.tier,
+       w.hour_bucket,
+       w.success_count,
+       case when t.tier = 'pro' then 200 else 20 end                 as daily_quota,
+       (case when t.tier = 'pro' then 200 else 20 end) * 5            as alert_threshold
+from windows w
+join tier_lookup t using (user_id)
+where w.success_count >= (case when t.tier = 'pro' then 200 else 20 end) * 5
+order by w.hour_bucket desc;
+```
+
+#### Future critique-history / usage surface (no work needed now)
+
+The existing RLS policy `auth.uid() = user_id` already permits authenticated users to read their own `feedback_requests` rows. A future iOS Settings → "Usage" screen (showing the user their own request log, status breakdown, token totals) needs **no** schema or RLS change — just a SwiftUI view that calls `client.from("feedback_requests").select().order("requested_at", ascending: false)`. Auth-failed rows (null `user_id`) stay invisible to all authenticated reads.
 
 ## Phase 6 — Account lifecycle (App Store compliance)
 

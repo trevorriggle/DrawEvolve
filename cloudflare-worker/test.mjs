@@ -22,6 +22,8 @@ import {
   recordIdempotent,
   buildCritiqueEntry,
   persistCritique,
+  REQUEST_STATUS,
+  logRequest,
 } from './index.js';
 
 const baseContext = {
@@ -605,4 +607,167 @@ test('idempotency cache expires after 1h TTL', async () => {
     null,
   );
 });
+
+// =============================================================================
+// Phase 5e — request logging
+// =============================================================================
+//
+// The fetch handler invokes logRequest via ctx.waitUntil, so the contract we
+// care about is what logRequest sends to PostgREST given the inputs each
+// terminal branch gathers. Tests stub the fetcher and inspect the captured
+// POST body.
+
+const TEST_IP_HASH = 'a'.repeat(64);
+
+function captureFetcher() {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    return { ok: true, status: 201 };
+  };
+  return { fetcher, calls };
+}
+
+test('logRequest success path writes status=success with token counts populated', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const { fetcher, calls } = captureFetcher();
+
+  await logRequest({
+    env,
+    status: REQUEST_STATUS.SUCCESS,
+    userId: FREE_USER,
+    drawingId: TEST_DRAWING_ID,
+    ipHash: TEST_IP_HASH,
+    promptTokens: 1024,
+    completionTokens: 512,
+    fetcher,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://test.supabase.co/rest/v1/feedback_requests');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers.apikey, 'fake-service-role-key');
+  assert.equal(calls[0].init.headers.Prefer, 'return=minimal');
+  assert.deepEqual(calls[0].body, {
+    user_id: FREE_USER,
+    drawing_id: TEST_DRAWING_ID,
+    status: 'success',
+    prompt_token_count: 1024,
+    completion_token_count: 512,
+    client_ip_hash: TEST_IP_HASH,
+  });
+});
+
+test('logRequest quota_exceeded path leaves token counts null', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const { fetcher, calls } = captureFetcher();
+
+  await logRequest({
+    env,
+    status: REQUEST_STATUS.QUOTA_EXCEEDED,
+    userId: FREE_USER,
+    drawingId: TEST_DRAWING_ID,
+    ipHash: TEST_IP_HASH,
+    fetcher,
+  });
+
+  assert.equal(calls[0].body.status, 'quota_exceeded');
+  assert.equal(calls[0].body.prompt_token_count, null);
+  assert.equal(calls[0].body.completion_token_count, null);
+  assert.equal(calls[0].body.drawing_id, TEST_DRAWING_ID, 'drawing_id is known when rate-limited (extracted before the gate)');
+});
+
+test('logRequest auth_failed path has null user_id and null drawing_id but populated ip_hash', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const { fetcher, calls } = captureFetcher();
+
+  await logRequest({
+    env,
+    status: REQUEST_STATUS.AUTH_FAILED,
+    ipHash: TEST_IP_HASH,
+    fetcher,
+  });
+
+  assert.deepEqual(calls[0].body, {
+    user_id: null,
+    drawing_id: null,
+    status: 'auth_failed',
+    prompt_token_count: null,
+    completion_token_count: null,
+    client_ip_hash: TEST_IP_HASH,
+  });
+});
+
+test('logRequest persistence_orphan path keeps token counts (OpenAI delivered, RPC failed)', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const { fetcher, calls } = captureFetcher();
+
+  await logRequest({
+    env,
+    status: REQUEST_STATUS.PERSISTENCE_ORPHAN,
+    userId: FREE_USER,
+    drawingId: TEST_DRAWING_ID,
+    ipHash: TEST_IP_HASH,
+    promptTokens: 800,
+    completionTokens: 350,
+    fetcher,
+  });
+
+  assert.equal(calls[0].body.status, 'persistence_orphan');
+  assert.equal(calls[0].body.prompt_token_count, 800);
+  assert.equal(calls[0].body.completion_token_count, 350);
+});
+
+test('logRequest swallows fetcher errors and never throws (observability is non-load-bearing)', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+
+  const errorCalls = [];
+  const originalError = console.error;
+  console.error = (...args) => { errorCalls.push(args); };
+  try {
+    // Branch 1: fetcher returns non-ok — log a status code.
+    await logRequest({
+      env, status: REQUEST_STATUS.SUCCESS, userId: FREE_USER, ipHash: TEST_IP_HASH,
+      fetcher: async () => ({ ok: false, status: 503 }),
+    });
+    // Branch 2: fetcher throws — log the error message.
+    await logRequest({
+      env, status: REQUEST_STATUS.SUCCESS, userId: FREE_USER, ipHash: TEST_IP_HASH,
+      fetcher: async () => { throw new Error('boom'); },
+    });
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(errorCalls.length, 2, 'both failure modes should log exactly once');
+  assert.match(String(errorCalls[0][0]), /non-ok/);
+  assert.match(String(errorCalls[1][0]), /threw/);
+});
+
+test('REQUEST_STATUS keeps model_error and internal_error distinct', () => {
+  // Abuse-detection queries depend on this distinction — model_error is
+  // "OpenAI's fault," internal_error is "our fault." Don't conflate.
+  assert.equal(REQUEST_STATUS.MODEL_ERROR, 'model_error');
+  assert.equal(REQUEST_STATUS.INTERNAL_ERROR, 'internal_error');
+  assert.notEqual(REQUEST_STATUS.MODEL_ERROR, REQUEST_STATUS.INTERNAL_ERROR);
+});
+
+test('logRequest idempotent_replay path', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const { fetcher, calls } = captureFetcher();
+
+  await logRequest({
+    env,
+    status: REQUEST_STATUS.IDEMPOTENT_REPLAY,
+    userId: FREE_USER,
+    drawingId: TEST_DRAWING_ID,
+    ipHash: TEST_IP_HASH,
+    fetcher,
+  });
+
+  assert.equal(calls[0].body.status, 'idempotent_replay');
+  assert.equal(calls[0].body.prompt_token_count, null,
+    'replay does not call OpenAI — token counts must be null');
+});
+
 

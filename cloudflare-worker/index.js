@@ -684,6 +684,84 @@ async function persistCritique({ env, drawingId, entry, fetcher = fetch }) {
 }
 
 // =============================================================================
+// Phase 5e — request logging
+// =============================================================================
+//
+// One row per request hitting a terminal state lands in
+// public.feedback_requests via service_role insert. Logging is non-blocking
+// (callers wrap in ctx.waitUntil) and non-load-bearing — a logging failure
+// must never break the user-facing flow. RLS hides null-user_id (auth_failed)
+// rows from authenticated reads; only service_role sees them.
+//
+// Status semantics (canonical set, document changes here AND in the auth plan):
+//   success            — critique returned and persisted to drawings.critique_history
+//   quota_exceeded     — 429 daily / per-minute / per-IP limit hit
+//   auth_failed        — 401 invalid or missing JWT
+//   validation_failed  — 400 malformed body, image, context, or client_request_id
+//   ownership_denied   — 403 drawing doesn't belong to the JWT's user
+//   model_error        — 502 OpenAI returned non-ok or empty completion
+//   internal_error     — 500 Worker bug / KV failure / anything that's *our* fault
+//                        (kept distinct from model_error so abuse-detection
+//                         queries don't conflate "OpenAI hiccup" with "our bug")
+//   idempotent_replay  — 200 served from idempotency cache (still logged so
+//                        repeat-pattern analytics can see it)
+//   persistence_orphan — OpenAI succeeded, append_critique RPC failed.
+//                        Token counts populated; user got the critique.
+
+const REQUEST_STATUS = Object.freeze({
+  SUCCESS:            'success',
+  QUOTA_EXCEEDED:     'quota_exceeded',
+  AUTH_FAILED:        'auth_failed',
+  VALIDATION_FAILED:  'validation_failed',
+  OWNERSHIP_DENIED:   'ownership_denied',
+  MODEL_ERROR:        'model_error',
+  INTERNAL_ERROR:     'internal_error',
+  IDEMPOTENT_REPLAY:  'idempotent_replay',
+  PERSISTENCE_ORPHAN: 'persistence_orphan',
+});
+
+/**
+ * Insert one row into feedback_requests. Non-blocking by design: callers
+ * pass this Promise to ctx.waitUntil(). Wrapped in try/catch — a logging
+ * failure must never propagate to the user response. fetcher is dependency-
+ * injected so tests can stub without globals.
+ */
+async function logRequest({
+  env,
+  status,
+  userId = null,
+  drawingId = null,
+  ipHash = null,
+  promptTokens = null,
+  completionTokens = null,
+  fetcher = fetch,
+}) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return;
+  try {
+    const res = await fetcher(`${env.SUPABASE_URL}/rest/v1/feedback_requests`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        drawing_id: drawingId,
+        status,
+        prompt_token_count: promptTokens,
+        completion_token_count: completionTokens,
+        client_ip_hash: ipHash,
+      }),
+    });
+    if (!res.ok) console.error('[log] feedback_requests non-ok', res.status);
+  } catch (err) {
+    console.error('[log] feedback_requests threw', err?.message);
+  }
+}
+
+// =============================================================================
 // HTTP scaffolding
 // =============================================================================
 
@@ -706,7 +784,7 @@ function unauthorized() {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
@@ -714,20 +792,30 @@ export default {
       return jsonResponse({ error: 'Method not allowed' }, 405);
     }
 
+    // Phase 5e — capture IP up front so auth_failed / validation_failed
+    // logs have ipHash even when no other request context is available.
+    const ip = request.headers.get('CF-Connecting-IP') ?? '';
+    const ipHash = await sha256Hex(ip || 'unknown');
+
     // Phase 5a — auth gate. Anything other than a valid Supabase JWT → 401.
     const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? null;
     let payload;
     try {
       payload = await validateJWT(token, env);
     } catch (err) {
+      // Both signals: console for live wrangler tail debugging, table row
+      // for retrospective analysis. Different audiences, different lifetimes.
       console.log('[fetch] JWT validation failed', err?.message);
+      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, ipHash }));
       return unauthorized();
     }
     const userId = payload.sub; // Supabase auth.uid() is always lowercase.
 
+    let drawingIdLower = null; // available to the catch block once parsed
     try {
       const body = await request.json().catch(() => null);
       if (!body || typeof body !== 'object') {
+        ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, ipHash }));
         return jsonResponse({ error: 'Invalid request body' }, 400);
       }
 
@@ -735,30 +823,46 @@ export default {
 
       // Phase 5b — request validation. Cheap checks first; ownership query last.
       if (typeof drawingId !== 'string' || drawingId.length === 0) {
+        ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, ipHash }));
         return jsonResponse({ error: 'Missing drawing_id' }, 400);
       }
-      const drawingIdLower = drawingId.toLowerCase(); // pattern compliance from Phase 3
+      drawingIdLower = drawingId.toLowerCase(); // pattern compliance from Phase 3
 
       // Phase 5d — idempotency gate. Validates the request id format and short-
       // circuits replays before image validation / rate limits / OpenAI. A
       // cached hit returns the original response verbatim and never burns
       // quota again.
       if (typeof clientRequestIdRaw !== 'string') {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'Missing client_request_id' }, 400);
       }
       const clientRequestId = clientRequestIdRaw.toLowerCase();
       if (!isValidClientRequestId(clientRequestId)) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'Invalid client_request_id' }, 400);
       }
       const cached = await checkIdempotency({ env, userId, clientRequestId });
       if (cached) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.IDEMPOTENT_REPLAY, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse(cached, 200, { 'X-Idempotent-Replay': '1' });
       }
 
       if (!validateImagePayload(image)) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'Invalid or oversized image payload' }, 400);
       }
       if (!validateContext(context)) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'Invalid context' }, 400);
       }
 
@@ -766,10 +870,12 @@ export default {
 
       // Phase 5c — rate limits. Run before the ownership query so we don't
       // burn a Postgres call on a request we're about to 429 anyway.
-      const ip = request.headers.get('CF-Connecting-IP') ?? '';
       const now = Date.now();
       const decision = await enforceRateLimits({ env, userId, ip, tier, now });
       if (!decision.ok) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.QUOTA_EXCEEDED, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse(decision.body, decision.status, {
           'Retry-After': String(decision.body.retryAfter),
         });
@@ -777,6 +883,9 @@ export default {
 
       const owns = await verifyDrawingOwnership(userId, drawingIdLower, env);
       if (!owns) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.OWNERSHIP_DENIED, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'Forbidden' }, 403);
       }
 
@@ -804,12 +913,18 @@ export default {
 
       if (!response.ok) {
         console.error('[openai] non-ok status', response.status);
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.MODEL_ERROR, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'Upstream model error' }, 502);
       }
 
       const data = await response.json();
       const feedback = data.choices?.[0]?.message?.content;
       if (!feedback) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.MODEL_ERROR, userId, drawingId: drawingIdLower, ipHash,
+        }));
         return jsonResponse({ error: 'No feedback generated' }, 502);
       }
 
@@ -826,9 +941,11 @@ export default {
         usage: data.usage,
         now,
       });
+      let persisted = true;
       try {
         await persistCritique({ env, drawingId: drawingIdLower, entry });
       } catch (err) {
+        persisted = false;
         console.error('[persistence] orphan critique', {
           drawingId: drawingIdLower,
           userId,
@@ -851,8 +968,28 @@ export default {
         console.error('[idempotency] recordIdempotent failed', err?.message),
       );
 
+      // Phase 5e — terminal log. Tokens populated in both branches because
+      // OpenAI delivered; status differs based on whether the row write stuck.
+      const promptTokens = data.usage?.prompt_tokens ?? null;
+      const completionTokens = data.usage?.completion_tokens ?? null;
+      ctx.waitUntil(logRequest({
+        env,
+        status: persisted ? REQUEST_STATUS.SUCCESS : REQUEST_STATUS.PERSISTENCE_ORPHAN,
+        userId,
+        drawingId: drawingIdLower,
+        ipHash,
+        promptTokens,
+        completionTokens,
+      }));
+
       return jsonResponse(responseBody);
     } catch (error) {
+      // INTERNAL_ERROR (Worker bug, KV outage, anything that's *our* fault).
+      // Distinct from MODEL_ERROR so abuse-detection queries don't conflate
+      // OpenAI hiccups with our own bugs.
+      ctx.waitUntil(logRequest({
+        env, status: REQUEST_STATUS.INTERNAL_ERROR, userId, drawingId: drawingIdLower, ipHash,
+      }));
       return jsonResponse({ error: 'Internal server error', details: error.message }, 500);
     }
   },
@@ -887,4 +1024,6 @@ export {
   recordIdempotent,
   buildCritiqueEntry,
   persistCritique,
+  REQUEST_STATUS,
+  logRequest,
 };
