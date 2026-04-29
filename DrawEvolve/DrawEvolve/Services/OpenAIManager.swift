@@ -23,6 +23,7 @@ enum OpenAIError: LocalizedError {
     case notAuthenticated
     case unauthorized
     case forbidden
+    case rateLimited(message: String, retryAfter: Int)
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +41,9 @@ enum OpenAIError: LocalizedError {
             return "Your session has expired. Sign out and sign in again."
         case .forbidden:
             return "We couldn't verify this drawing belongs to you. Try saving it again."
+        case .rateLimited(let message, _):
+            // Server message is already tier-aware and human-readable — surface verbatim.
+            return message
         }
     }
 }
@@ -145,6 +149,18 @@ actor OpenAIManager {
                 context: "OpenAIManager.requestFeedback - 403 from Worker (drawing ownership mismatch)"
             )
             throw OpenAIError.forbidden
+        case 429:
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let message = json?["message"] as? String
+                ?? "You've hit your usage limit. Please try again later."
+            let retryAfter = json?["retryAfter"] as? Int ?? 60
+            let scope = json?["scope"] as? String ?? "unknown"
+            let err = OpenAIError.rateLimited(message: message, retryAfter: retryAfter)
+            CrashReporter.shared.logError(
+                err,
+                context: "OpenAIManager.requestFeedback - 429 from Worker (scope: \(scope), retryAfter: \(retryAfter)s)"
+            )
+            throw err
         default:
             if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let errorMessage = errorJson["error"] as? String {

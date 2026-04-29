@@ -29,6 +29,47 @@ wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 
 After all four are set: `wrangler deploy`.
 
+## Phase 5c manual steps (rate limiting + cost ceilings)
+
+### KV namespace (REQUIRED before deploy)
+
+The Worker reads/writes daily quotas, per-minute timestamps, per-IP backstop
+counters, and an hourly anomaly counter from a single KV namespace bound as
+`QUOTA_KV`.
+
+```bash
+wrangler kv:namespace create drawevolve-quota
+```
+
+Wrangler prints a namespace `id`. Paste it into `wrangler.toml`, replacing
+`REPLACE_WITH_NAMESPACE_ID`. Without this, `wrangler deploy` will fail.
+
+### OpenAI monthly cap (REQUIRED before public TestFlight)
+
+The KV-backed Worker checks are the first line of defense. The provider-level
+cap is the last line — enforced by OpenAI itself, cannot be bypassed by any
+bug in our stack.
+
+1. Go to [platform.openai.com → Settings → Limits](https://platform.openai.com/account/limits).
+2. Set **Monthly budget** to **$75** for the TestFlight phase. (Covers ~50
+   active free-tier users at full daily quota with headroom; revisit before
+   public launch.)
+3. Configure email alerts at **50%** ($37.50) and **80%** ($60).
+
+This is mandatory before distributing the build to anyone outside the team.
+
+### Anomaly alert webhook (OPTIONAL — defer until ready)
+
+If `ANOMALY_ALERT_WEBHOOK` is configured, the Worker POSTs JSON when a single
+user crosses 5× their daily quota in a 1-hour window (likely JWT theft or a
+runaway client). Until configured, threshold crossings fall back to
+`console.error` and surface in `wrangler tail`.
+
+```bash
+wrangler secret put ANOMALY_ALERT_WEBHOOK
+# Paste a Slack incoming webhook URL (or compatible) when prompted.
+```
+
 ## Files Created
 - `index.js` - The Cloudflare Worker code
 - `wrangler.toml` - Configuration file

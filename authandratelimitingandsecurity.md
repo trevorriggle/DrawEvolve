@@ -2,7 +2,7 @@
 
 Working checklist for the foundational plumbing pass. Tick items as they land.
 
-Last updated: 2026-04-30
+Last updated: 2026-04-29
 
 ---
 
@@ -23,7 +23,8 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
 | **Phase 2** — Postgres schema + RLS + Storage | ✅ applied 2026-04-28 | `supabase/migrations/0001_init.sql` ran clean in the SQL Editor. `drawings` + `feedback_requests` tables, all RLS policies, the `drawings` storage bucket, the `set_default_tier_on_signup` trigger, and the backfill are live in project `jkjfcjptzvieaonrmkzd`. |
 | **Phase 3** — cloud sync (local-first) | 🟡 code complete 2026-04-29 | `CloudDrawingStorageManager` + new `Drawing` model + view updates landed. Saves write to local cache + queue cloud upload; gallery hydrates from `drawings` table; full images load via signed URL (1h TTL). Pending uploads retry via `NWPathMonitor`. **Awaits iPad end-to-end verify.** |
 | **Phase 4** — existing-drawing migration on first signin | ☐ not started | Re-stamps anonymous-tagged local drawings with the auth user ID, batch-uploads to cloud. **Carryover from Phase 3:** also responsible for cleaning up `Documents/Drawings/*.json` after migration, and for evicting any `Documents/DrawEvolveCache/{metadata,thumbnails,images}/` files belonging to a `user_id` that no longer matches the signed-in user (the Phase 3 manager filters them out at hydrate time but doesn't delete). |
-| **Phase 5a + 5b** — Worker JWT gate + request validation | 🟡 code complete 2026-04-30 | ES256/JWKS verification (Supabase asymmetric signing — confirmed live at `.well-known/jwks.json`); 10-min JWKS cache with kid-rotation refetch; per-request validation (drawing_id ownership, 8MB image cap, JPEG/PNG magic-byte check, context shape). Real `getUserTier` + `fetchCritiqueHistory` replace the Phase 1 stubs. iOS `OpenAIManager` now attaches `Authorization: Bearer` and sends `drawingId`. **Phase 5c (rate limits), 5d (server-side feedback persist), 5e (logging)** still ☐. |
+| **Phase 5a + 5b** — Worker JWT gate + request validation | ✅ code complete & verified end-to-end 2026-04-29 | ES256/JWKS verification (Supabase asymmetric signing — confirmed live at `.well-known/jwks.json`); 10-min JWKS cache with kid-rotation refetch; per-request validation (drawing_id ownership, 8MB image cap, JPEG/PNG magic-byte check, context shape). Real `getUserTier` + `fetchCritiqueHistory` replace the Phase 1 stubs. iOS `OpenAIManager` now attaches `Authorization: Bearer` and sends `drawingId`. |
+| **Phase 5c** — rate limits + cost ceilings | 🟡 code complete 2026-04-29 | `TIER_LIMITS` (free: 5/min · 20/day; pro: 15/min · 200/day) + per-IP backstop (100/hr) + per-user 5×-quota anomaly counter. KV-backed: `quota:<uid>:<utc-day>`, `rate:<uid>` (rolling 60s window), `ip:<sha256(ip)>:<utc-hour>`, `hourly:<uid>:<utc-hour>`. Daily counter increments AFTER successful OpenAI delivery so failed requests don't burn quota; per-minute + per-IP record the *attempt* so concurrent bursts can't slip past the gate. 429 body `{ error, scope, tier, limit, used, retryAfter, message }` with tier-aware human-readable `message`. Anomaly secret named `ANOMALY_ALERT_WEBHOOK` (renamed from `ABUSE_ALERT_WEBHOOK` in earlier draft); falls back to `console.error` when unset. iOS `OpenAIError.rateLimited` surfaces server `message` verbatim. **Awaits**: KV namespace creation, `wrangler deploy`, iPad verification, OpenAI $75 monthly cap. **Phase 5d, 5e** still ☐. |
 | **Phase 6** — account deletion edge function | ☐ not started | App Store guideline 5.1.1(v) requires it; ship before TestFlight. |
 | **Phase 7** — observability + admin polish | ☐ not started | Post-TestFlight bucket. |
 
@@ -33,7 +34,11 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
 2. ~~**Enable Email provider** + **redirect URL**~~ — done 2026-04-28.
 3. **Verify Phase 1 magic-link end-to-end on iPad** — still the first true end-to-end auth success milestone (HTTP/3 bias-off was the last code touch on it). Once magic link works, Phase 3 verification can begin.
 4. **Verify Phase 3 end-to-end on iPad**: with a real signed-in session, save a drawing → check Supabase dashboard → Storage → `drawings` bucket has `<user_id>/<id>.jpg` + `<id>_thumb.jpg` → check `drawings` table has the row. Then cold-launch and confirm the gallery hydrates from cloud (kill local cache via the DEBUG "Clear All" button to force a clean cloud read).
-5. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
+5. **Phase 5c manual steps** (do these before / alongside iPad verification):
+   - `wrangler kv:namespace create drawevolve-quota` → paste the returned id into `cloudflare-worker/wrangler.toml` (replacing `REPLACE_WITH_NAMESPACE_ID`) → `wrangler deploy`.
+   - Set OpenAI monthly cap to **$75** with email alerts at 50%/80% (REQUIRED before public TestFlight).
+   - *(Optional, deferrable)* Once a Slack incoming webhook URL exists, run `wrangler secret put ANOMALY_ALERT_WEBHOOK`. Until then, anomaly alerts surface as `console.error` in `wrangler tail`.
+6. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
 
 ### What a fresh helper should NOT do
 
@@ -434,14 +439,14 @@ const TIER_LIMITS = {
 
 These are conservative starting values; revise once we have a week of real usage data.
 
-- [ ] Per-minute hard cap by tier: enforced in-Worker against KV-backed counters keyed `rate:<user_id>:<yyyy-mm-ddThh:mm>` with 60s TTL (Cloudflare Rate Limiting product is an option for the per-IP backstop below, but per-user limits need the tier lookup so they live in code).
-- [ ] Daily soft quota by tier: tracked in Workers KV at `quota:<user_id>:<yyyy-mm-dd>` → count. Increment **after** a successful OpenAI response (don't burn quota on Worker errors). 24h TTL; UTC day boundary.
-- [ ] On quota exhausted: return **429** with body `{ error: 'quota_exceeded', tier, limit, retryAfter }` and `Retry-After` header. The `tier` and `limit` fields let the client render context-appropriate copy: free users see "Free tier: 20/day. Upgrade to Pro for 200/day."; pro users see "Pro daily limit reached — resets at 00:00 UTC."
-- [ ] Per-IP backstop: 100 req/min across all users from one IP (Cloudflare Rate Limiting rule). Catches one attacker creating many free accounts from a single IP.
+- [x] Per-minute hard cap by tier: enforced in-Worker against a KV-backed rolling window of timestamps at `rate:<user_id>` (120s TTL, filter to `now - t < 60_000` on read). Recorded *before* the OpenAI call so concurrent bursts can't slip past the gate.
+- [x] Daily soft quota by tier: tracked in Workers KV at `quota:<user_id>:<yyyy-mm-dd>` → count. Increment **after** a successful OpenAI response (don't burn quota on Worker errors). 48h TTL (so requests within a few hours after midnight don't read a stale-but-not-yet-expired value); UTC day boundary.
+- [x] On quota exhausted: return **429** with body `{ error, scope, tier, limit, used, retryAfter, message }` and `Retry-After` header. The `message` field is the canonical user-facing copy (tier-aware: free mentions Pro upgrade, pro just states the reset time, IP scope omits tier mention entirely). iOS surfaces it verbatim through `OpenAIError.rateLimited`.
+- [x] Per-IP backstop: 100 req/hr per hashed IP (`ip:<sha256(ip)>:<yyyy-mm-ddThh>`, 1h TTL). Implemented in-Worker rather than via the Cloudflare Rate Limiting product so KV semantics match the per-user counters.
 
 ### 5c-alert. Per-user abuse alert (Worker-level webhook)
 
-- [ ] If any single `user_id` exceeds **5× their daily quota** within a 1-hour window, POST to a logging webhook (Slack incoming webhook or similar). 5× a free-tier daily quota inside an hour means either JWT theft, a quota-bypass bug, or a runaway client — all of which warrant a human look. Track recent hourly counts in KV at `hourly:<user_id>:<yyyy-mm-ddThh>` with 2h TTL. Webhook URL stored as Worker secret `ABUSE_ALERT_WEBHOOK`.
+- [x] If any single `user_id` exceeds **5× their daily quota** within a 1-hour window, POST to a logging webhook (Slack incoming webhook or similar). 5× a free-tier daily quota inside an hour means either JWT theft, a quota-bypass bug, or a runaway client — all of which warrant a human look. Tracked in KV at `hourly:<user_id>:<yyyy-mm-ddThh>` with 2h TTL. Fires only on the *transition* past threshold (not every subsequent request). Webhook URL stored as Worker secret **`ANOMALY_ALERT_WEBHOOK`** (renamed from earlier draft `ABUSE_ALERT_WEBHOOK`); when unset, threshold crossings fall back to `console.error` visible in `wrangler tail`.
 
 ### 5d. Server-side feedback persistence
 

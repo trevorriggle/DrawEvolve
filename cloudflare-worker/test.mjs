@@ -11,6 +11,12 @@ import {
   validateImagePayload,
   validateContext,
   getUserTier,
+  TIER_LIMITS,
+  IP_HOURLY_CAP,
+  ANOMALY_MULTIPLIER,
+  utcDayKey,
+  enforceRateLimits,
+  recordSuccessfulCritique,
 } from './index.js';
 
 const baseContext = {
@@ -270,4 +276,171 @@ test('getUserTier flow into selectConfig respects pro promptPreferences', () => 
   const config = selectConfig(tier, promptPreferences);
   assert.equal(config.styleModifier, 'Reference Sargent.');
   assert.equal(config.includeHistoryCount, DEFAULT_PRO_CONFIG.includeHistoryCount);
+});
+
+// =============================================================================
+// Phase 5c — rate limits + quotas
+// =============================================================================
+//
+// FakeKV mirrors the relevant slice of the Workers KV API: get/put + an
+// expirationTtl option interpreted against an injectable now (`setNow`) so
+// the UTC-midnight reset test can fast-forward without touching real time.
+
+class FakeKV {
+  constructor() {
+    this.store = new Map();
+    this.now = 0;
+  }
+  setNow(now) { this.now = now; }
+  async get(key) {
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt !== null && entry.expiresAt <= this.now) {
+      this.store.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+  async put(key, value, options = {}) {
+    const expiresAt = options.expirationTtl
+      ? this.now + options.expirationTtl * 1000
+      : null;
+    this.store.set(key, { value: String(value), expiresAt });
+  }
+}
+
+function makeEnv(extra = {}) {
+  const kv = new FakeKV();
+  return { env: { QUOTA_KV: kv, ...extra }, kv };
+}
+
+const FREE_USER = '00000000-0000-0000-0000-000000000001';
+const PRO_USER  = '00000000-0000-0000-0000-000000000002';
+const FIXED_NOW = Date.UTC(2026, 3, 29, 12, 0, 0); // 2026-04-29T12:00:00Z
+
+test('free tier 21st daily request returns 429 with correct shape and retryAfter', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const dayKey = utcDayKey(FIXED_NOW);
+  await kv.put(`quota:${FREE_USER}:${dayKey}`, '20', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceRateLimits({
+    env, userId: FREE_USER, ip: '203.0.113.1', tier: 'free', now: FIXED_NOW,
+  });
+
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'quota_exceeded');
+  assert.equal(decision.body.scope, 'daily');
+  assert.equal(decision.body.tier, 'free');
+  assert.equal(decision.body.limit, TIER_LIMITS.free.perDay);
+  assert.equal(decision.body.used, 20);
+  // Noon UTC → 12 hours until midnight = 43200s. Allow ±2s slack.
+  assert.ok(Math.abs(decision.body.retryAfter - 12 * 3600) < 2);
+  assert.match(decision.body.message, /free tier/i);
+  assert.match(decision.body.message, /upgrade to pro/i);
+});
+
+test('pro tier 16th request in 60s returns 429 with minute scope', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // 15 timestamps within the last 60s — at the perMinute cap for pro.
+  const stamps = Array.from({ length: 15 }, (_, i) => FIXED_NOW - (1000 + i * 100));
+  await kv.put(`rate:${PRO_USER}`, JSON.stringify(stamps), { expirationTtl: 120 });
+
+  const decision = await enforceRateLimits({
+    env, userId: PRO_USER, ip: '203.0.113.2', tier: 'pro', now: FIXED_NOW,
+  });
+
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'rate_limited');
+  assert.equal(decision.body.scope, 'minute');
+  assert.equal(decision.body.tier, 'pro');
+  assert.equal(decision.body.limit, TIER_LIMITS.pro.perMinute);
+  assert.equal(decision.body.used, 15);
+  assert.ok(decision.body.retryAfter >= 1 && decision.body.retryAfter <= 60);
+  assert.match(decision.body.message, /slow down/i);
+});
+
+test('per-IP backstop blocks the 101st hourly request even with valid JWTs', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // Pre-populate the IP counter at the cap. We don't know the hash up front,
+  // so derive it from sha256Hex via the same import.
+  const { sha256Hex, utcHourKey } = await import('./index.js');
+  const ip = '198.51.100.99';
+  const hash = await sha256Hex(ip);
+  await kv.put(`ip:${hash}:${utcHourKey(FIXED_NOW)}`, String(IP_HOURLY_CAP), { expirationTtl: 3600 });
+
+  const decision = await enforceRateLimits({
+    env, userId: FREE_USER, ip, tier: 'free', now: FIXED_NOW,
+  });
+
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'ip_rate_limited');
+  assert.equal(decision.body.scope, 'ip');
+  // IP message must NOT leak tier information.
+  assert.ok(!/free|pro/i.test(decision.body.message));
+  assert.match(decision.body.message, /network/i);
+});
+
+test('daily counter is keyed by UTC day — request at next-day 00:00:01Z lands on a fresh key', async () => {
+  const { env, kv } = makeEnv();
+  // 2026-04-29T23:59:59Z — fully consumed quota.
+  const lateNight = Date.UTC(2026, 3, 29, 23, 59, 59);
+  kv.setNow(lateNight);
+  await kv.put(`quota:${FREE_USER}:${utcDayKey(lateNight)}`, '20', { expirationTtl: 48 * 3600 });
+
+  // Verify same day still 429s.
+  const blocked = await enforceRateLimits({
+    env, userId: FREE_USER, ip: '203.0.113.5', tier: 'free', now: lateNight,
+  });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.body.scope, 'daily');
+
+  // Roll over.
+  const nextDay = Date.UTC(2026, 3, 30, 0, 0, 1);
+  kv.setNow(nextDay);
+  const fresh = await enforceRateLimits({
+    env, userId: FREE_USER, ip: '203.0.113.5', tier: 'free', now: nextDay,
+  });
+  assert.equal(fresh.ok, true, 'next-UTC-day request should pass the daily gate');
+  assert.notEqual(utcDayKey(lateNight), utcDayKey(nextDay));
+});
+
+test('anomaly alert fires exactly once on 5× daily quota threshold (no webhook → console.error)', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const threshold = TIER_LIMITS.free.perDay * ANOMALY_MULTIPLIER;
+  // Pre-populate the hourly counter at threshold-1 so the next success crosses.
+  const { utcHourKey } = await import('./index.js');
+  const hourKey = utcHourKey(FIXED_NOW);
+  await kv.put(`hourly:${FREE_USER}:${hourKey}`, String(threshold - 1), { expirationTtl: 2 * 3600 });
+
+  const ctx = {
+    dailyKey: `quota:${FREE_USER}:${utcDayKey(FIXED_NOW)}`,
+    dailyCount: 0,
+    tier: 'free',
+    userId: FREE_USER,
+    hourKey,
+    limits: TIER_LIMITS.free,
+  };
+
+  const calls = [];
+  const originalError = console.error;
+  console.error = (...args) => { calls.push(args); };
+  try {
+    // Crossing call — should log.
+    await recordSuccessfulCritique({ env, ctx, now: FIXED_NOW });
+    assert.equal(calls.length, 1, 'console.error should fire exactly once on threshold crossing');
+    assert.match(String(calls[0][0]), /anomaly/i);
+
+    // Subsequent call in same window — must NOT fire again.
+    await recordSuccessfulCritique({ env, ctx: { ...ctx, dailyCount: 1 }, now: FIXED_NOW });
+    assert.equal(calls.length, 1, 'console.error should not fire again after threshold');
+  } finally {
+    console.error = originalError;
+  }
 });

@@ -12,11 +12,25 @@ compatibility_date = "2024-01-01"
 #                                 checks + critique-history fetches. Treat as
 #                                 god-mode credential — never commit, never log.
 #
+# Optional secrets:
+#   ANOMALY_ALERT_WEBHOOK       — Slack (or compatible) incoming webhook URL.
+#                                 Worker POSTs JSON when a single user crosses
+#                                 5× their daily quota in a 1-hour window. If
+#                                 unset, threshold crossings fall back to
+#                                 console.error visible in `wrangler tail`.
+#
 # Phase 5a uses ES256 / JWKS verification (no SUPABASE_JWT_SECRET needed).
 # The Worker fetches the JWKS at <SUPABASE_URL>/auth/v1/.well-known/jwks.json
 # and caches it in module scope for 10 minutes (with kid-rotation refetch).
 #
 # See cloudflare-worker/DEPLOYMENT.md for the full setup runbook.
+
+# Phase 5c — KV namespace for rate-limit counters and daily quotas.
+# Trevor: create the namespace (`wrangler kv:namespace create drawevolve-quota`)
+# and paste the returned id below before the next deploy.
+[[kv_namespaces]]
+binding = "QUOTA_KV"
+id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 
 # [vars]
 # SUPABASE_URL and SUPABASE_JWT_ISSUER could live here as plaintext vars

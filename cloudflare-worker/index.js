@@ -336,7 +336,10 @@ async function verifyDrawingOwnership(userId, drawingId, env) {
       Accept: 'application/json',
     },
   });
-  if (!res.ok) return false;
+  if (!res.ok) {
+    console.log('[ownership] supabase non-ok status', res.status);
+    return false;
+  }
   const rows = await res.json();
   return Array.isArray(rows) && rows.length > 0;
 }
@@ -380,6 +383,225 @@ async function fetchCritiqueHistory(drawingId, env) {
 }
 
 // =============================================================================
+// Phase 5c — rate limiting + cost ceilings
+// =============================================================================
+//
+// Three KV-backed gates run in front of the OpenAI call, plus one anomaly
+// counter that runs behind it:
+//
+//   quota:<user_id>:<utc-day>       daily counter, 48h TTL  → tier.perDay
+//   rate:<user_id>                  rolling window of timestamps, 120s TTL → tier.perMinute
+//   ip:<sha256(ip)>:<utc-hour>      per-IP counter, 1h TTL  → IP_HOURLY_CAP
+//   hourly:<user_id>:<utc-hour>     anomaly counter, 2h TTL → 5× tier.perDay fires alert
+//
+// Daily quota counts *delivered* critiques (incremented after OpenAI success).
+// Per-minute + per-IP record the *attempt* before OpenAI so concurrent bursts
+// can't slip past the gate while OpenAI is still responding.
+
+const TIER_LIMITS = {
+  free: { perMinute: 5,  perDay: 20  },
+  pro:  { perMinute: 15, perDay: 200 },
+};
+const IP_HOURLY_CAP = 100;
+const ANOMALY_MULTIPLIER = 5;
+
+function utcDayKey(now) {
+  const d = new Date(now);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function utcHourKey(now) {
+  const d = new Date(now);
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  return `${utcDayKey(now)}T${h}`;
+}
+
+function secondsUntilNextUtcMidnight(now) {
+  const d = new Date(now);
+  const next = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+  return Math.max(1, Math.ceil((next - now) / 1000));
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+async function sha256Hex(input) {
+  const buf = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function dailyMessage(tier, limit, retryAfterSeconds) {
+  const reset = formatDuration(retryAfterSeconds);
+  if (tier === 'pro') {
+    return `You've reached the Pro tier limit of ${limit} critiques today. Your quota resets at midnight UTC (in ${reset}).`;
+  }
+  const proLimit = TIER_LIMITS.pro.perDay;
+  return `You've reached the free tier limit of ${limit} critiques today. Your quota resets at midnight UTC (in ${reset}). Upgrade to Pro for ${proLimit} critiques per day.`;
+}
+
+function perMinuteMessage(retryAfterSeconds) {
+  return `Slow down a moment — you're sending requests too quickly. Try again in ${formatDuration(retryAfterSeconds)}.`;
+}
+
+function ipMessage() {
+  return 'Too many requests from your network. Please try again in about an hour.';
+}
+
+/**
+ * Reads the three rate-limit counters and either rejects with a 429 decision
+ * or records the attempt (per-minute + per-IP) and returns a ctx for the
+ * post-OpenAI daily increment. KV is eventually consistent — under high
+ * concurrency a small overshoot is possible; that's acceptable for a soft
+ * rate limit and the per-IP backstop bounds the worst case.
+ */
+async function enforceRateLimits({ env, userId, ip, tier, now }) {
+  const limits = TIER_LIMITS[tier] ?? TIER_LIMITS.free;
+  const dayKey = utcDayKey(now);
+  const hourKey = utcHourKey(now);
+  const ipHash = await sha256Hex(ip || 'unknown');
+
+  const dailyKey   = `quota:${userId}:${dayKey}`;
+  const minuteKey  = `rate:${userId}`;
+  const ipKey      = `ip:${ipHash}:${hourKey}`;
+
+  const [dailyRaw, minuteRaw, ipRaw] = await Promise.all([
+    env.QUOTA_KV.get(dailyKey),
+    env.QUOTA_KV.get(minuteKey),
+    env.QUOTA_KV.get(ipKey),
+  ]);
+
+  const dailyCount = parseInt(dailyRaw ?? '0', 10) || 0;
+  if (dailyCount >= limits.perDay) {
+    const retryAfter = secondsUntilNextUtcMidnight(now);
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'quota_exceeded',
+        scope: 'daily',
+        tier,
+        limit: limits.perDay,
+        used: dailyCount,
+        retryAfter,
+        message: dailyMessage(tier, limits.perDay, retryAfter),
+      },
+    };
+  }
+
+  let recent = [];
+  if (minuteRaw) {
+    try {
+      const parsed = JSON.parse(minuteRaw);
+      if (Array.isArray(parsed)) {
+        recent = parsed.filter((t) => typeof t === 'number' && now - t < 60_000);
+      }
+    } catch {
+      recent = [];
+    }
+  }
+  if (recent.length >= limits.perMinute) {
+    const oldest = Math.min(...recent);
+    const retryAfter = Math.max(1, Math.ceil((60_000 - (now - oldest)) / 1000));
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'rate_limited',
+        scope: 'minute',
+        tier,
+        limit: limits.perMinute,
+        used: recent.length,
+        retryAfter,
+        message: perMinuteMessage(retryAfter),
+      },
+    };
+  }
+
+  const ipCount = parseInt(ipRaw ?? '0', 10) || 0;
+  if (ipCount >= IP_HOURLY_CAP) {
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'ip_rate_limited',
+        scope: 'ip',
+        limit: IP_HOURLY_CAP,
+        used: ipCount,
+        retryAfter: 3600,
+        message: ipMessage(),
+      },
+    };
+  }
+
+  // All gates passed — record the attempt against per-minute + per-IP now so
+  // concurrent requests in flight see the bump. Daily is incremented later,
+  // only on OpenAI success.
+  await Promise.all([
+    env.QUOTA_KV.put(minuteKey, JSON.stringify([...recent, now]), { expirationTtl: 120 }),
+    env.QUOTA_KV.put(ipKey, String(ipCount + 1), { expirationTtl: 3600 }),
+  ]);
+
+  return { ok: true, ctx: { dailyKey, dailyCount, tier, userId, hourKey, limits } };
+}
+
+/**
+ * Increments the daily quota counter and the hourly anomaly counter. Called
+ * AFTER a successful OpenAI response — failed requests don't burn quota. If
+ * the hourly counter crosses 5× the daily quota on this request (and only on
+ * the transition, not on subsequent requests in the same window) fires the
+ * webhook or falls back to console.error.
+ */
+async function recordSuccessfulCritique({ env, ctx, now }) {
+  const { dailyKey, dailyCount, tier, userId, hourKey, limits } = ctx;
+  const newDaily = dailyCount + 1;
+
+  const anomalyKey = `hourly:${userId}:${hourKey}`;
+  const prevHourlyRaw = await env.QUOTA_KV.get(anomalyKey);
+  const prevHourly = parseInt(prevHourlyRaw ?? '0', 10) || 0;
+  const newHourly = prevHourly + 1;
+
+  await Promise.all([
+    env.QUOTA_KV.put(dailyKey, String(newDaily), { expirationTtl: 48 * 3600 }),
+    env.QUOTA_KV.put(anomalyKey, String(newHourly), { expirationTtl: 2 * 3600 }),
+  ]);
+
+  const threshold = limits.perDay * ANOMALY_MULTIPLIER;
+  if (prevHourly < threshold && newHourly >= threshold) {
+    const payload = {
+      user_id: userId,
+      tier,
+      count: newHourly,
+      limit: limits.perDay,
+      window: hourKey,
+      timestamp: new Date(now).toISOString(),
+    };
+    if (env.ANOMALY_ALERT_WEBHOOK) {
+      try {
+        await fetch(env.ANOMALY_ALERT_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (err) {
+        console.error('[anomaly] webhook fetch failed', err?.message);
+      }
+    } else {
+      console.error('[anomaly] threshold crossed (no webhook configured)', payload);
+    }
+  }
+}
+
+// =============================================================================
 // HTTP scaffolding
 // =============================================================================
 
@@ -389,10 +611,10 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
+    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS, ...extraHeaders },
   });
 }
 
@@ -415,7 +637,8 @@ export default {
     let payload;
     try {
       payload = await validateJWT(token, env);
-    } catch {
+    } catch (err) {
+      console.log('[fetch] JWT validation failed', err?.message);
       return unauthorized();
     }
     const userId = payload.sub; // Supabase auth.uid() is always lowercase.
@@ -441,12 +664,24 @@ export default {
         return jsonResponse({ error: 'Invalid context' }, 400);
       }
 
+      const { tier, promptPreferences } = getUserTier(payload);
+
+      // Phase 5c — rate limits. Run before the ownership query so we don't
+      // burn a Postgres call on a request we're about to 429 anyway.
+      const ip = request.headers.get('CF-Connecting-IP') ?? '';
+      const now = Date.now();
+      const decision = await enforceRateLimits({ env, userId, ip, tier, now });
+      if (!decision.ok) {
+        return jsonResponse(decision.body, decision.status, {
+          'Retry-After': String(decision.body.retryAfter),
+        });
+      }
+
       const owns = await verifyDrawingOwnership(userId, drawingIdLower, env);
       if (!owns) {
         return jsonResponse({ error: 'Forbidden' }, 403);
       }
 
-      const { tier, promptPreferences } = getUserTier(payload);
       const config = selectConfig(tier, promptPreferences);
       const history = await fetchCritiqueHistory(drawingIdLower, env);
 
@@ -469,10 +704,25 @@ export default {
         }),
       });
 
+      if (!response.ok) {
+        console.error('[openai] non-ok status', response.status);
+        return jsonResponse({ error: 'Upstream model error' }, 502);
+      }
+
       const data = await response.json();
-      return jsonResponse({
-        feedback: data.choices?.[0]?.message?.content || 'No feedback generated',
-      });
+      const feedback = data.choices?.[0]?.message?.content;
+      if (!feedback) {
+        return jsonResponse({ error: 'No feedback generated' }, 502);
+      }
+
+      // Quota burns only on a delivered critique. Anomaly counter rides along.
+      // Don't await — the response shouldn't wait on bookkeeping, and any
+      // failure here is logged but doesn't affect the user.
+      recordSuccessfulCritique({ env, ctx: decision.ctx, now }).catch((err) =>
+        console.error('[quota] recordSuccessfulCritique failed', err?.message),
+      );
+
+      return jsonResponse({ feedback });
     } catch (error) {
       return jsonResponse({ error: 'Internal server error', details: error.message }, 500);
     }
@@ -494,4 +744,13 @@ export {
   validateImagePayload,
   validateContext,
   getUserTier,
+  TIER_LIMITS,
+  IP_HOURLY_CAP,
+  ANOMALY_MULTIPLIER,
+  utcDayKey,
+  utcHourKey,
+  secondsUntilNextUtcMidnight,
+  sha256Hex,
+  enforceRateLimits,
+  recordSuccessfulCritique,
 };
