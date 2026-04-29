@@ -223,20 +223,66 @@ final class AuthManager: ObservableObject {
 
     // MARK: - Sign out
 
+    /// Signs out of Supabase, clears the local cache, and lets `authStateChanges`
+    /// bounce ContentView back to AuthGateView. **Cloud data is preserved** —
+    /// the user's drawings + critique history remain in Supabase and re-hydrate
+    /// on the next sign-in.
     func signOut() async {
         guard let client = SupabaseManager.shared.client else { return }
         do {
             try await client.auth.signOut()
+            await CloudDrawingStorageManager.shared.clearLocalCache()
         } catch {
             lastError = "Sign-out failed: \(error.localizedDescription)"
         }
     }
 
-    // MARK: - Account deletion (Phase 6 — calls a Supabase Edge Function)
+    // MARK: - Account deletion (Phase 6 — calls the delete-account edge function)
 
+    /// Calls the `delete-account` Supabase Edge Function which performs the
+    /// hard-delete cascade (Storage → drawings → profile → audit row → auth.users).
+    /// On success, signs out and clears the local cache; the user lands back on
+    /// AuthGateView as a stranger. On failure, throws — caller stays signed in
+    /// with cloud data intact.
+    ///
+    /// AUTH HEADER: Supabase's Swift SDK `client.functions.invoke(...)` does
+    /// **automatically** attach the current session's JWT in the Authorization
+    /// header — that's what the edge function's JWKS verification reads. **Do
+    /// not** strip or override the `Authorization` header here; doing so would
+    /// make every delete request fail with 401. This contract is documented in
+    /// supabase-swift's FunctionsClient and is not configurable per-call.
     func deleteAccount() async throws {
-        // Wired up in Phase 6 of authandratelimitingandsecurity.md.
-        throw AuthError.notImplemented
+        guard let client = SupabaseManager.shared.client else {
+            throw AuthError.notConfigured
+        }
+
+        // Explicit type annotation drives supabase-swift's
+        // `invoke<T: Decodable>(_:options:decoder:)` overload. The SDK
+        // attaches `Authorization: Bearer <session.accessToken>`
+        // automatically — see the doc comment above.
+        let result: DeleteAccountResult = try await client.functions.invoke(
+            "delete-account",
+            options: FunctionInvokeOptions(method: .post)
+        )
+        if !result.success {
+            throw AuthError.deleteFailed(
+                step: result.step ?? "unknown",
+                message: result.error ?? "Unknown error"
+            )
+        }
+
+        // Best-effort cleanup. If signOut throws (network blip after server-
+        // side deletion already happened), the auth.users row is gone, the
+        // SDK's next refresh will fail, and `authStateChanges` will route
+        // the user back to AuthGateView regardless.
+        try? await client.auth.signOut()
+        await CloudDrawingStorageManager.shared.clearLocalCache()
+    }
+
+    private struct DeleteAccountResult: Decodable {
+        let success: Bool
+        let error: String?
+        let step: String?
     }
 
     // MARK: - Crypto helpers
@@ -260,6 +306,11 @@ final class AuthManager: ObservableObject {
 enum AuthError: LocalizedError {
     case notConfigured
     case notImplemented
+    /// Edge function returned `{ success: false, step, error }`. The audit
+    /// step is special-cased in the user-facing copy below: it's the safest
+    /// failure mode (no user data has been touched yet) so the message
+    /// reassures rather than alarms.
+    case deleteFailed(step: String, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -267,6 +318,27 @@ enum AuthError: LocalizedError {
             return "Sign-in is unavailable: SUPABASE_URL and SUPABASE_ANON_KEY are not set in Config.plist."
         case .notImplemented:
             return "Account deletion isn't wired up yet."
+        case .deleteFailed(let step, _):
+            switch step {
+            case "audit":
+                // Audit insert is BEFORE auth deletion in the cascade. If it
+                // fails, nothing destructive has happened yet — phrase it
+                // reassuringly so the user retries without panic.
+                return "We couldn't start the deletion. Your account and all your data are still intact. Please try again in a moment."
+            case "auth":
+                // Auth deletion is the last step. If it fails, all the user
+                // data is already gone but the auth row remains. Surface
+                // honestly — they need to contact support to finish.
+                return "Your data has been removed but we couldn't finalize the account closure. Please contact support so we can complete it."
+            case "storage":
+                return "Couldn't remove your stored drawings. No data has been deleted yet — please try again."
+            case "drawings":
+                return "Couldn't remove your drawing records. Some data may have been partially cleaned up — please try again or contact support."
+            case "profile":
+                return "Couldn't remove your profile data. No drawings have been deleted yet — please try again."
+            default:
+                return "Account deletion failed at step '\(step)'. Please try again."
+            }
         }
     }
 }

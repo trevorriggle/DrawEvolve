@@ -38,6 +38,7 @@ struct DrawingCanvasView: View {
     @State private var drawingTitle = ""
     @State private var isSaving = false
     @State private var showGallery = false
+    @State private var showSettings = false   // Phase 6 — gear in collapsible chrome
     @StateObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
@@ -491,6 +492,21 @@ struct DrawingCanvasView: View {
                         Spacer()
 
                         VStack(spacing: 12) {
+                            // Phase 6 — Settings gear. Lives inside the
+                            // collapsible chrome (sibling of Save / Get
+                            // Feedback) so the chevron toggle hides it
+                            // alongside the rest of the chrome.
+                            Button(action: { showSettings = true }) {
+                                Image(systemName: "gearshape")
+                                    .font(.system(size: 22))
+                                    .foregroundColor(.primary)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color(uiColor: .systemBackground).opacity(0.95))
+                                    .clipShape(Circle())
+                                    .shadow(radius: 4)
+                            }
+                            .accessibilityLabel("Settings")
+
                             // Save to Gallery button
                             Button(action: {
                                 showSaveDialog = true
@@ -592,6 +608,9 @@ struct DrawingCanvasView: View {
                         }
                     }
             }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
         }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}

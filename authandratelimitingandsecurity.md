@@ -27,7 +27,7 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
 | **Phase 5c** — rate limits + cost ceilings | ✅ verified 2026-04-29 | `TIER_LIMITS` (free: 5/min · 20/day; pro: 15/min · 200/day) + per-IP backstop (100/hr) + per-user 5×-quota anomaly counter. KV-backed: `quota:<uid>:<utc-day>`, `rate:<uid>` (rolling 60s window), `ip:<sha256(ip)>:<utc-hour>`, `hourly:<uid>:<utc-hour>`. Daily counter increments AFTER successful OpenAI delivery; per-minute + per-IP record the *attempt*. 429 body has tier-aware human-readable `message`. Anomaly secret `ANOMALY_ALERT_WEBHOOK` (optional). |
 | **Phase 5d** — server-side critique persistence + idempotency | 🟡 code complete 2026-04-29 | Worker writes critiques to `drawings.critique_history` via `append_critique(uuid, jsonb)` security-definer RPC (atomic jsonb-array append; migration `0002`). Every request includes a lowercase UUID `client_request_id`; first response cached at `idempotency:<uid>:<crid>` for 1h, replays return cached body with `X-Idempotent-Replay: 1` header and never re-charge OpenAI. `DrawingUpsertPayload` omits `critique_history` from PATCH bodies — Worker is sole writer. iOS `CritiqueEntry` is dual-key Codable (decodes both legacy `feedback`/`timestamp` and new `content`/`created_at`). **Awaits**: migration `0002` applied, `wrangler deploy`, iPad verification. |
 | **Phase 5e** — request logging + abuse detection infra | 🟡 code complete 2026-04-29 | One row per request lands in `feedback_requests` via service-role POST. Canonical `REQUEST_STATUS` enum: `success`, `quota_exceeded`, `auth_failed`, `validation_failed`, `ownership_denied`, `model_error` (OpenAI's fault), `internal_error` (our fault — distinct so abuse queries stay clean), `idempotent_replay`, `persistence_orphan`. Logging is non-blocking (`ctx.waitUntil`) and non-load-bearing (failures swallowed via `console.error` only). Migration `0003` drops NOT NULL on `user_id` so auth-failed rows can land without a validated user; RLS naturally hides null-user rows from authenticated reads. Saved abuse-detection SQL lives in this doc (see "Phase 5e abuse-detection saved query" below). **Awaits**: migration `0003` applied, `wrangler deploy`, verification matrix on iPad. |
-| **Phase 6** — account deletion edge function | ☐ not started | App Store guideline 5.1.1(v) requires it; ship before TestFlight. |
+| **Phase 6** — account lifecycle (sign out + delete account) | 🟡 code complete 2026-04-29 | `delete-account` edge function (Deno) does the cascade: Storage objects → `drawings` rows → `profiles` row (no-op if table missing) → `account_deletions` audit row → `auth.admin.deleteUser`. Hard-stop on failure with `{ success: false, error, step }`; iOS surfaces step-specific copy (audit-step failure phrased reassuringly since user data still intact). Migration `0004` adds `account_deletions` (no FK to auth.users — must outlive the user). New `SettingsView` reachable via gear inside the canvas's collapsible chrome — hides with the chevron. Type-DELETE-to-confirm guard, case-sensitive. `clearLocalCache()` distinct from existing `clearAllDrawings()` so sign-out preserves cloud. iPad-only target (`TARGETED_DEVICE_FAMILY = "2"`). **Awaits**: migration `0004` applied, edge function deployed via `supabase functions deploy delete-account`, iPad smoke test. |
 | **Phase 7** — observability + admin polish | ☐ not started | Post-TestFlight bucket. |
 
 ### What Trevor needs to do next (in order)
@@ -55,7 +55,39 @@ Phases 1 (auth gate), 2 (schema + RLS), and **3 (cloud sync, local-first)** are 
    - `ownership_denied`: curl with a `drawingId` UUID that doesn't belong to the JWT's user.
    - `persistence_orphan`: temporarily rename the `append_critique` function in SQL editor → trigger feedback → confirm row → restore function.
    - `model_error` / `internal_error` are hard to trigger artificially — skip unless they show up organically.
-8. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
+8. **Phase 6 manual steps** (account deletion + sign out):
+   - Apply migration:
+     ```bash
+     psql "$SUPABASE_DB_URL" -f supabase/migrations/0004_account_deletions_audit.sql
+     ```
+     Or paste into Supabase SQL Editor → Run.
+   - Supabase CLI is now installed in Codespaces (binary at `/usr/local/bin/supabase`, version 2.95.4 — installed via direct release download since `npm install -g` is blocked by Supabase). Standardize on Codespaces as the deploy environment going forward; don't deploy from the Mac.
+   - Authenticate the CLI once per Codespaces rebuild:
+     ```bash
+     supabase login --token <PAT>
+     # Get a Personal Access Token from
+     # https://supabase.com/dashboard/account/tokens (Generate New Token).
+     # The OAuth browser flow doesn't work in Codespaces — token-based login is the path.
+     ```
+   - Link the project (once per Codespaces rebuild):
+     ```bash
+     cd /workspaces/DrawEvolve
+     supabase link --project-ref jkjfcjptzvieaonrmkzd
+     ```
+   - Deploy:
+     ```bash
+     supabase functions deploy delete-account
+     ```
+     Service-role key + SUPABASE_URL are auto-injected; no extra secrets needed (the function reads JWKS from `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`).
+   - **Phase 6 iPad smoke matrix**:
+     - Canvas → tap gear (only visible when chrome expanded) → Settings appears.
+     - Sign Out → confirm → bounce to AuthGateView. Sign back in → drawings re-hydrate from cloud.
+     - Delete Account → modal opens. Type lowercase `delete` → confirm stays disabled. Type `DELETE` → enables → tap → bounce to AuthGateView with no special messaging.
+     - Sign up with the same email again → succeeds (proves hard delete).
+     - Supabase dashboard → `account_deletions` table → row present with the email and `reason='user_initiated'`.
+     - **Multi-device delete propagation**: documented but not hand-verified during initial smoke. The behavior is provided by the Supabase SDK's auth-refresh logic — when device A deletes the account, device B's next session refresh will fail (revoked user) and `authStateChanges` emits `signedOut`, routing ContentView to AuthGateView. No DrawEvolve code is involved in this path.
+     - **Confirm gear hides on chrome collapse**: tap the chevron → gear should disappear alongside the action buttons.
+9. **Apple Sign In**: blocked on Apple Developer approval. When that lands, see the "Apple Developer side" runbook below in this file.
 
 ### What a fresh helper should NOT do
 
@@ -526,15 +558,26 @@ The existing RLS policy `auth.uid() = user_id` already permits authenticated use
 
 ## Phase 6 — Account lifecycle (App Store compliance)
 
-- [ ] Account deletion is required by App Store guideline 5.1.1(v). Build it now, not later.
-- [ ] Supabase Edge Function `delete-account`:
-  - Verifies caller's JWT.
-  - Deletes Storage objects under `drawings/<user_id>/`.
-  - Deletes drawings rows (cascade handles `feedback_requests`).
-  - Calls `auth.admin.deleteUser(user_id)`.
-- [ ] Client: settings screen → "Delete Account" → confirmation modal → call edge function → sign out → return to auth gate.
-- [ ] Sign out: `supabase.auth.signOut()` + clear local cache + return to auth gate.
-- [ ] Session refresh: rely on Supabase SDK's auto-refresh; verify token rotation works on long-running sessions.
+- [x] Account deletion required by App Store guideline 5.1.1(v).
+- [x] Supabase Edge Function `delete-account` (`supabase/functions/delete-account/`):
+  - [x] Verifies caller's JWT via explicit JWKS-based ES256 (port of Worker's Phase 5a `validateJWT` into Deno; cache + kid-rotation refetch). The JWT's `sub` is the only source of truth for who's deleted — any `user_id` in the request body is **ignored**.
+  - [x] Cascade order (hard-stop on any step failure, audit before auth so failures past audit still leave a record):
+    1. `storage` — list + bulk-delete all objects under `<user_id>/` in `drawings` bucket (paginated; safety cap at 100 list/delete cycles).
+    2. `drawings` — `delete from drawings where user_id = $1` (FK cascade handles `feedback_requests`; jsonb `critique_history` dies with the row).
+    3. `profile` — defensive delete from `public.profiles`. "Relation does not exist" (Postgres `42P01`) is treated as a no-op so the function works whether or not a profiles table has been added.
+    4. `audit` — insert into `account_deletions` with `{ user_id, email (from JWT), reason: 'user_initiated' }`.
+    5. `auth` — `supabase.auth.admin.deleteUser(user_id)`.
+  - [x] Returns `{ success: true }` or `{ success: false, error, step }`. iOS surfaces step-specific copy via `AuthError.deleteFailed(step:message:)` — audit-step failures are phrased reassuringly ("your account is still intact") since they happen before any destructive action; auth-step failures honestly explain the user needs to contact support.
+- [x] Migration `0004_account_deletions_audit.sql`: `account_deletions` table with no FK to `auth.users` (must outlive the user). Service-role-only (no RLS policies).
+- [x] iOS Settings (`Views/SettingsView.swift`):
+  - [x] Reachable via gear icon inside the canvas's collapsible chrome (sibling of Save / Get Feedback inside `if !isToolbarCollapsed`). Hides with the chevron toggle — non-collapsing entry points were ruled out per the "hide all chrome" UX intent.
+  - [x] Account section shows email; Sign Out button (neutral); Delete Account button (destructive, opens modal); About section with version+build from `Bundle.main` and Privacy Policy / Terms of Service links (`drawevolve.com/privacy`, `/terms` placeholder URLs — Trevor will host docs separately).
+  - [x] Delete confirmation modal: type `DELETE` (case-sensitive — lowercase `delete` does **not** enable the button) to enable a destructive Confirm button. Cancel button is prominent. Loading state during invocation. Inline red error on failure; user stays signed in with cloud data intact on failure.
+- [x] Sign out: `client.auth.signOut()` + `CloudDrawingStorageManager.shared.clearLocalCache()`. Cloud data preserved — sign back in re-hydrates from `drawings` table. New `clearLocalCache()` is distinct from the existing DEBUG-only `clearAllDrawings()` (which wipes cloud too).
+- [x] iPad-only target: `TARGETED_DEVICE_FAMILY = "2"` in both Debug and Release. iPhone deferred to post-launch — DrawEvolve is positioned as a craft tool for iPad+Pencil.
+- [x] Session refresh: relying on Supabase SDK auto-refresh (Phase 1 behavior). On revoked user / hard delete elsewhere, the SDK's refresh fails, `authStateChanges` emits `signedOut`, and `ContentView` swaps to `AuthGateView` automatically. No new infrastructure needed.
+
+**SDK auth-header contract.** `supabase-swift`'s `client.functions.invoke(...)` automatically attaches `Authorization: Bearer <session.accessToken>` from the active session — that's what the edge function's JWKS verification reads. Documented in `AuthManager.deleteAccount`'s doc comment so future agents don't strip or override it.
 
 ## Phase 7 — Hardening + observability (post-TestFlight nice-to-haves)
 

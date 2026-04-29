@@ -401,6 +401,31 @@ final class CloudDrawingStorageManager: ObservableObject {
         }
     }
 
+    // MARK: - Local cache wipe (Phase 6 — sign out / post-delete)
+
+    /// Wipes the local-only state without touching cloud / Storage. Used by
+    /// sign-out (cloud data preserved so a future sign-in re-hydrates) and
+    /// by the post-delete-account cleanup (cloud data is already gone, this
+    /// just clears the bytes still on disk).
+    ///
+    /// Distinct from `clearAllDrawings()` (which hits cloud too — DEBUG only).
+    func clearLocalCache() async {
+        for (_, task) in activeUploadTasks { task.cancel() }
+        activeUploadTasks.removeAll()
+        nextRetryAt.removeAll()
+
+        drawings.removeAll()
+        thumbnailCache.removeAll()
+        pendingUploadCount = 0
+
+        // Wipe contents of the four cache subdirs but leave the directories
+        // in place — they're recreated lazily on first use otherwise.
+        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir] {
+            let urls = (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            for url in urls { try? fileManager.removeItem(at: url) }
+        }
+    }
+
     // MARK: - Clear all (DEBUG)
 
     func clearAllDrawings() async throws {
