@@ -770,6 +770,14 @@ final class CloudDrawingStorageManager: ObservableObject {
 
         // Postgres timestamptz can come back with 6 fractional digits ("microseconds")
         // and either an explicit ±HH:MM offset (xxx) or "Z" (XXX). Cover both.
+        //
+        // The "naked" formats at the bottom (no timezone suffix at all) are for
+        // dates the supabase-swift PostgrestEncoder writes into jsonb payloads
+        // — e.g. CritiqueEntry.timestamp ends up stored as
+        // "2026-04-29T13:43:30.253" with no Z and no offset. Top-level
+        // timestamptz columns don't have this problem because PostgREST
+        // formats those itself with an explicit offset. Naked datetimes are
+        // interpreted as UTC because the formatter's timeZone is set below.
         let fallbackFormats = [
             "yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx",
             "yyyy-MM-dd'T'HH:mm:ss.SSSxxx",
@@ -777,6 +785,9 @@ final class CloudDrawingStorageManager: ObservableObject {
             "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS",
+            "yyyy-MM-dd'T'HH:mm:ss",
         ]
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
