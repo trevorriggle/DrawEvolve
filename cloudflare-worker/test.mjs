@@ -17,6 +17,11 @@ import {
   utcDayKey,
   enforceRateLimits,
   recordSuccessfulCritique,
+  isValidClientRequestId,
+  checkIdempotency,
+  recordIdempotent,
+  buildCritiqueEntry,
+  persistCritique,
 } from './index.js';
 
 const baseContext = {
@@ -444,3 +449,160 @@ test('anomaly alert fires exactly once on 5× daily quota threshold (no webhook 
     console.error = originalError;
   }
 });
+
+// =============================================================================
+// Phase 5d — server-side persistence + idempotency
+// =============================================================================
+
+const TEST_REQUEST_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const TEST_DRAWING_ID = '11111111-2222-3333-4444-555555555555';
+const TEST_SUPABASE = {
+  SUPABASE_URL: 'https://test.supabase.co',
+  SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role-key',
+};
+
+test('isValidClientRequestId accepts lowercase UUIDs only', () => {
+  assert.equal(isValidClientRequestId(TEST_REQUEST_ID), true);
+  // Uppercase rejected — project convention is lowercase everywhere.
+  assert.equal(isValidClientRequestId(TEST_REQUEST_ID.toUpperCase()), false);
+  // Missing hyphens.
+  assert.equal(isValidClientRequestId(TEST_REQUEST_ID.replaceAll('-', '')), false);
+  // Non-string.
+  assert.equal(isValidClientRequestId(null), false);
+  assert.equal(isValidClientRequestId(undefined), false);
+  assert.equal(isValidClientRequestId(12345), false);
+  // Wrong length.
+  assert.equal(isValidClientRequestId('aaaaaaaa-bbbb-cccc-dddd-eee'), false);
+});
+
+test('persistCritique calls append_critique RPC with the canonical entry shape', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200 };
+  };
+
+  const config = selectConfig('pro', { styleModifier: 'Reference Sargent.' });
+  const entry = buildCritiqueEntry({
+    feedback: 'Nice gesture in the shoulder line.',
+    sequenceNumber: 3,
+    config,
+    tier: 'pro',
+    usage: { prompt_tokens: 800, completion_tokens: 350 },
+    now: FIXED_NOW,
+  });
+
+  await persistCritique({ env, drawingId: TEST_DRAWING_ID, entry, fetcher });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://test.supabase.co/rest/v1/rpc/append_critique');
+  assert.equal(calls[0].init.method, 'POST');
+  assert.equal(calls[0].init.headers.apikey, 'fake-service-role-key');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer fake-service-role-key');
+
+  const sentBody = JSON.parse(calls[0].init.body);
+  assert.equal(sentBody.p_drawing_id, TEST_DRAWING_ID);
+  assert.equal(sentBody.p_entry.sequence_number, 3);
+  assert.equal(sentBody.p_entry.content, 'Nice gesture in the shoulder line.');
+  assert.equal(sentBody.p_entry.prompt_config.tier, 'pro');
+  assert.equal(sentBody.p_entry.prompt_config.includeHistoryCount, DEFAULT_PRO_CONFIG.includeHistoryCount);
+  assert.equal(sentBody.p_entry.prompt_config.styleModifier, 'Reference Sargent.');
+  assert.equal(sentBody.p_entry.prompt_token_count, 800);
+  assert.equal(sentBody.p_entry.completion_token_count, 350);
+  // ISO-8601, derived from the injected `now`.
+  assert.equal(sentBody.p_entry.created_at, new Date(FIXED_NOW).toISOString());
+});
+
+test('persistCritique throws on non-2xx and the orphan log path includes userId + drawingId', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const fetcher = async () => ({ ok: false, status: 503 });
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config: selectConfig('free', null),
+    tier: 'free',
+    usage: { prompt_tokens: 0, completion_tokens: 0 },
+    now: FIXED_NOW,
+  });
+
+  await assert.rejects(
+    () => persistCritique({ env, drawingId: TEST_DRAWING_ID, entry, fetcher }),
+    /append_critique HTTP 503/,
+  );
+
+  // The fetch handler wraps this in console.error with both ids — verify
+  // shape directly so future refactors don't drop a field.
+  const calls = [];
+  const originalError = console.error;
+  console.error = (...args) => { calls.push(args); };
+  try {
+    try {
+      await persistCritique({ env, drawingId: TEST_DRAWING_ID, entry, fetcher });
+    } catch (err) {
+      console.error('[persistence] orphan critique', {
+        drawingId: TEST_DRAWING_ID,
+        userId: FREE_USER,
+        error: err?.message,
+      });
+    }
+    assert.equal(calls.length, 1);
+    assert.match(String(calls[0][0]), /orphan critique/);
+    assert.deepEqual(calls[0][1], {
+      drawingId: TEST_DRAWING_ID,
+      userId: FREE_USER,
+      error: 'append_critique HTTP 503',
+    });
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('idempotent retry returns cached body and never re-invokes RPC or quota helpers', async () => {
+  const { env, kv } = makeEnv(TEST_SUPABASE);
+  kv.setNow(FIXED_NOW);
+
+  // Seed cache as if the original request had completed.
+  const originalBody = {
+    feedback: 'First take: composition is solid.',
+    critique_entry: { sequence_number: 1, content: 'First take: composition is solid.' },
+  };
+  await recordIdempotent({ env, userId: FREE_USER, clientRequestId: TEST_REQUEST_ID, body: originalBody });
+
+  // Cache key shape contract: idempotency:<uid>:<crid>.
+  const expectedKey = `idempotency:${FREE_USER}:${TEST_REQUEST_ID}`;
+  assert.ok(await kv.get(expectedKey), 'cache should have the seeded entry under the documented key');
+
+  const replay = await checkIdempotency({ env, userId: FREE_USER, clientRequestId: TEST_REQUEST_ID });
+  assert.deepEqual(replay, originalBody, 'replay must return the exact original body');
+
+  // Different user, same request id → miss (scoping prevents cross-user leak).
+  const otherUserReplay = await checkIdempotency({ env, userId: PRO_USER, clientRequestId: TEST_REQUEST_ID });
+  assert.equal(otherUserReplay, null);
+});
+
+test('idempotency cache expires after 1h TTL', async () => {
+  const { env, kv } = makeEnv(TEST_SUPABASE);
+  kv.setNow(FIXED_NOW);
+  await recordIdempotent({
+    env,
+    userId: FREE_USER,
+    clientRequestId: TEST_REQUEST_ID,
+    body: { feedback: 'cached' },
+  });
+
+  // 59 minutes later — still fresh.
+  kv.setNow(FIXED_NOW + 59 * 60 * 1000);
+  assert.notEqual(
+    await checkIdempotency({ env, userId: FREE_USER, clientRequestId: TEST_REQUEST_ID }),
+    null,
+  );
+
+  // 1h 1min later — expired.
+  kv.setNow(FIXED_NOW + 61 * 60 * 1000);
+  assert.equal(
+    await checkIdempotency({ env, userId: FREE_USER, clientRequestId: TEST_REQUEST_ID }),
+    null,
+  );
+});
+

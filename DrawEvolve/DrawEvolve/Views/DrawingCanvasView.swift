@@ -817,9 +817,13 @@ struct DrawingCanvasView: View {
             }
             isRequestingFeedback = false
 
-            // Add new feedback to critique history
+            // Phase 5d: the Worker is the sole writer to critique_history in
+            // the cloud. We append the server-returned entry to local state
+            // for immediate display; the cloud row stays canonical on the
+            // next gallery hydrate. Fall back to a synthesized entry if the
+            // Worker response didn't include one (e.g. older deployment).
             if let feedback = canvasState.feedback {
-                let critiqueEntry = CritiqueEntry(
+                let critiqueEntry = canvasState.lastCritiqueEntry ?? CritiqueEntry(
                     feedback: feedback,
                     timestamp: Date(),
                     context: context

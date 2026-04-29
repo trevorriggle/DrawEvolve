@@ -654,9 +654,12 @@ final class CloudDrawingStorageManager: ObservableObject {
                         options: FileOptions(contentType: "image/jpeg", upsert: true)
                     )
             }
+            // Phase 5d: upsert via DrawingUpsertPayload, NOT the raw Drawing.
+            // The payload omits `critique_history` because the Worker is the
+            // sole writer to that column. See DrawingUpsertPayload doc comment.
             try await client
                 .from("drawings")
-                .upsert(drawing)
+                .upsert(DrawingUpsertPayload(drawing: drawing))
                 .execute()
 
             removePendingEntry(id: id)

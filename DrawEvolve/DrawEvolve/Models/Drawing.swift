@@ -101,3 +101,40 @@ struct Drawing: Codable, Identifiable {
         self.critiqueHistory = critiqueHistory
     }
 }
+
+// MARK: - Cloud upsert payload (Phase 5d)
+
+/// Wire shape for upserting a drawing row to PostgREST. **Worker is the sole
+/// writer to `critique_history` after Phase 5d — do not PATCH this field
+/// from the client.** Including it here would race with the Worker's
+/// `append_critique` RPC and could clobber server-written entries on the next
+/// save. The column has a `default '[]'::jsonb` in the schema, so omitting
+/// it on INSERT initializes it correctly; omitting it on UPDATE leaves the
+/// existing value alone, which is exactly what we want.
+struct DrawingUpsertPayload: Encodable {
+    let drawing: Drawing
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case userId = "user_id"
+        case title
+        case storagePath = "storage_path"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case feedback
+        case context
+        // critiqueHistory deliberately omitted — see doc comment above.
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(drawing.id.uuidString.lowercased(), forKey: .id)
+        try container.encode(drawing.userId.uuidString.lowercased(), forKey: .userId)
+        try container.encode(drawing.title, forKey: .title)
+        try container.encode(drawing.storagePath, forKey: .storagePath)
+        try container.encode(drawing.createdAt, forKey: .createdAt)
+        try container.encode(drawing.updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(drawing.feedback, forKey: .feedback)
+        try container.encodeIfPresent(drawing.context, forKey: .context)
+    }
+}

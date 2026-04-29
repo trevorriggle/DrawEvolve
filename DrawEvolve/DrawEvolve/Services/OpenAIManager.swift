@@ -28,13 +28,16 @@ enum OpenAIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "OpenAI API key is missing. Please add it to your Config.plist."
+            return "Feedback isn't available right now. Please try again later."
         case .invalidResponse:
-            return "Received an invalid response from OpenAI."
+            return "We got an unexpected response from the server. Please try again."
         case .serverError(let message):
-            return "Server error: \(message)"
+            // Callers MUST pass a human-friendly message — this is rendered as-is
+            // in the alert. Never pass Worker error codes (e.g. "rate_limited")
+            // here; codes belong in CrashReporter context, not user copy.
+            return message
         case .imageEncodingFailed:
-            return "Failed to encode the image for upload."
+            return "We couldn't prepare your drawing for upload. Try saving it again."
         case .notAuthenticated:
             return "Sign in to request feedback."
         case .unauthorized:
@@ -61,6 +64,16 @@ actor OpenAIManager {
         print("✅ OpenAIManager using secure backend proxy at: \(backendURL)")
     }
 
+    /// Result of a successful feedback request. Phase 5d: the Worker now
+    /// persists the critique to `drawings.critique_history` server-side and
+    /// returns the canonical entry alongside the feedback text. Callers use
+    /// `critiqueEntry` to update local UI state — the cloud row is the
+    /// source of truth on next gallery refresh.
+    struct FeedbackResponse {
+        let feedback: String
+        let critiqueEntry: CritiqueEntry?
+    }
+
     /// Requests feedback via our secure backend proxy.
     ///
     /// `drawingId` must reference a row in the `drawings` table owned by the
@@ -68,7 +81,12 @@ actor OpenAIManager {
     /// 403. Callers should ensure the drawing has been persisted to cloud
     /// (see `CloudDrawingStorageManager.awaitCloudSync(for:)`) before calling
     /// this, otherwise the row won't exist yet and the request will fail.
-    func requestFeedback(image: UIImage, context: DrawingContext, drawingId: UUID) async throws -> String {
+    ///
+    /// Phase 5d: every request includes a fresh lowercase UUID
+    /// `client_request_id`. The Worker caches the response under that key
+    /// for 1h so retries on flaky networks don't double-charge OpenAI or
+    /// double-write to Postgres.
+    func requestFeedback(image: UIImage, context: DrawingContext, drawingId: UUID) async throws -> FeedbackResponse {
         // Convert image to base64
         guard let imageData = image.jpegData(compressionQuality: 0.8) else {
             let error = OpenAIError.imageEncodingFailed
@@ -101,10 +119,13 @@ actor OpenAIManager {
 
         // Send to OUR backend (not OpenAI directly).
         // drawingId is sent lowercase to match the Phase 3 cloud convention
-        // (auth.uid()::text + storage paths are all lowercase).
+        // (auth.uid()::text + storage paths are all lowercase). Phase 5d adds
+        // client_request_id for idempotency — same lowercase convention.
+        let clientRequestId = UUID().uuidString.lowercased()
         let requestBody: [String: Any] = [
             "image": base64Image,
             "drawingId": drawingId.uuidString.lowercased(),
+            "client_request_id": clientRequestId,
             "context": [
                 "skillLevel": context.skillLevel,
                 "subject": context.subject,
@@ -153,27 +174,41 @@ actor OpenAIManager {
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let message = json?["message"] as? String
                 ?? "You've hit your usage limit. Please try again later."
-            let retryAfter = json?["retryAfter"] as? Int ?? 60
+            // JSON numbers can bridge as Int or Double depending on serializer
+            // — accept either so retryAfter isn't silently lost.
+            let retryAfter = (json?["retryAfter"] as? NSNumber)?.intValue ?? 60
             let scope = json?["scope"] as? String ?? "unknown"
+            let errorCode = json?["error"] as? String ?? "unknown"
             let err = OpenAIError.rateLimited(message: message, retryAfter: retryAfter)
             CrashReporter.shared.logError(
                 err,
-                context: "OpenAIManager.requestFeedback - 429 from Worker (scope: \(scope), retryAfter: \(retryAfter)s)"
+                context: "OpenAIManager.requestFeedback - 429 from Worker (error: \(errorCode), scope: \(scope), retryAfter: \(retryAfter)s)"
             )
             throw err
         default:
-            if let errorJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errorMessage = errorJson["error"] as? String {
-                let error = OpenAIError.serverError(errorMessage)
-                CrashReporter.shared.logError(error, context: "OpenAIManager.requestFeedback - Server error: \(errorMessage)")
-                throw error
+            // Capture the Worker's `error` code for diagnostics ONLY — never
+            // surface it to the user (codes like "rate_limited" leak as ugly
+            // copy). User-facing message is keyed off the status code.
+            let errorJson = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let errorCode = errorJson?["error"] as? String ?? "none"
+            let userMessage: String
+            switch httpResponse.statusCode {
+            case 500...599:
+                userMessage = "We're having trouble reaching our servers right now. Please try again in a moment."
+            case 400...499:
+                userMessage = "Something went wrong with this request. Please try again."
+            default:
+                userMessage = "Something went wrong. Please try again."
             }
-            let error = OpenAIError.serverError("HTTP \(httpResponse.statusCode)")
-            CrashReporter.shared.logError(error, context: "OpenAIManager.requestFeedback - HTTP \(httpResponse.statusCode)")
+            let error = OpenAIError.serverError(userMessage)
+            CrashReporter.shared.logError(
+                error,
+                context: "OpenAIManager.requestFeedback - HTTP \(httpResponse.statusCode) (worker error code: \(errorCode))"
+            )
             throw error
         }
 
-        // Parse backend response
+        // Parse backend response.
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let feedback = json["feedback"] as? String else {
             let error = OpenAIError.invalidResponse
@@ -181,6 +216,34 @@ actor OpenAIManager {
             throw error
         }
 
-        return feedback
+        // Phase 5d: decode the server-supplied critique_entry. Falls back to
+        // nil if missing or malformed — caller will synthesize a local entry
+        // for display in that case (graceful handling of older Worker
+        // deployments that don't yet return this field).
+        var critiqueEntry: CritiqueEntry?
+        if let entryDict = json["critique_entry"] as? [String: Any],
+           let entryData = try? JSONSerialization.data(withJSONObject: entryDict) {
+            let decoder = JSONDecoder()
+            // Worker emits created_at via Date.toISOString() — always
+            // includes fractional seconds. Built-in .iso8601 strategy
+            // doesn't accept fractional seconds, so parse explicitly.
+            let isoFractional = ISO8601DateFormatter()
+            isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let isoPlain = ISO8601DateFormatter()
+            isoPlain.formatOptions = [.withInternetDateTime]
+            decoder.dateDecodingStrategy = .custom { dec in
+                let container = try dec.singleValueContainer()
+                let str = try container.decode(String.self)
+                if let date = isoFractional.date(from: str) { return date }
+                if let date = isoPlain.date(from: str) { return date }
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Unparseable critique_entry date: \(str)"
+                )
+            }
+            critiqueEntry = try? decoder.decode(CritiqueEntry.self, from: entryData)
+        }
+
+        return FeedbackResponse(feedback: feedback, critiqueEntry: critiqueEntry)
     }
 }

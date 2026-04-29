@@ -17,6 +17,11 @@ class CanvasStateManager: ObservableObject {
     @Published var currentTool: DrawingTool = .brush
     @Published var brushSettings = BrushSettings()
     @Published var feedback: String?
+    /// Phase 5d: the Worker-persisted critique entry returned alongside the
+    /// feedback text. Consumers append this directly to local
+    /// `critiqueHistory` for immediate display; the cloud row is canonical
+    /// on the next gallery hydrate.
+    @Published var lastCritiqueEntry: CritiqueEntry?
     @Published var showError = false
     @Published var errorMessage = ""
     @Published var activeSelection: CGRect? = nil // Active selection rectangle
@@ -509,6 +514,11 @@ class CanvasStateManager: ObservableObject {
     /// `drawings` table for the current user — Phase 5b's Worker enforces
     /// ownership via service_role lookup. Caller is responsible for ensuring
     /// the drawing has been persisted to cloud before invoking this.
+    ///
+    /// Phase 5d: the Worker now also persists the critique to
+    /// `drawings.critique_history` and returns the canonical entry. The
+    /// caller reads `lastCritiqueEntry` after this call returns to update
+    /// local UI state — no local synthesis or appending.
     func requestFeedback(for context: DrawingContext, drawingId: UUID) async {
         guard let image = exportImage() else {
             showError(message: "Failed to export drawing")
@@ -516,12 +526,13 @@ class CanvasStateManager: ObservableObject {
         }
 
         do {
-            let feedbackText = try await OpenAIManager.shared.requestFeedback(
+            let response = try await OpenAIManager.shared.requestFeedback(
                 image: image,
                 context: context,
                 drawingId: drawingId
             )
-            feedback = feedbackText
+            feedback = response.feedback
+            lastCritiqueEntry = response.critiqueEntry
         } catch {
             showError(message: error.localizedDescription)
         }

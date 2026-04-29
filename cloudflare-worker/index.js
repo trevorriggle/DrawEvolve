@@ -602,6 +602,88 @@ async function recordSuccessfulCritique({ env, ctx, now }) {
 }
 
 // =============================================================================
+// Phase 5d — server-side persistence + idempotency
+// =============================================================================
+//
+// After OpenAI returns a critique, the Worker (not the client) appends the
+// entry to drawings.critique_history via a security-definer Postgres function
+// `append_critique(uuid, jsonb)`. The function does an atomic
+// `critique_history || jsonb_build_array($entry)` so concurrent writes
+// linearize without a SELECT-then-UPDATE race.
+//
+// Idempotency: every request carries a client-generated UUID
+// `client_request_id`. The first response is cached at
+// `idempotency:<user_id>:<client_request_id>` for 1h. Replays return the same
+// body verbatim with `X-Idempotent-Replay: 1`, do not call OpenAI, do not
+// write to Postgres, do not increment quota.
+//
+// Failure modes:
+//   - OpenAI fails → 502, no quota burn, no Postgres write, no cache.
+//   - Postgres write fails after OpenAI succeeded → user still gets the
+//     critique (graceful degradation), orphan logged via console.error,
+//     quota IS counted (the OpenAI cost was real), idempotency cache IS
+//     written (so the same request_id won't double-spend).
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isValidClientRequestId(s) {
+  return typeof s === 'string' && UUID_RE.test(s);
+}
+
+async function checkIdempotency({ env, userId, clientRequestId }) {
+  const key = `idempotency:${userId}:${clientRequestId}`;
+  const raw = await env.QUOTA_KV.get(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function recordIdempotent({ env, userId, clientRequestId, body }) {
+  const key = `idempotency:${userId}:${clientRequestId}`;
+  await env.QUOTA_KV.put(key, JSON.stringify(body), { expirationTtl: 3600 });
+}
+
+function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usage, now }) {
+  return {
+    sequence_number: sequenceNumber,
+    content: feedback,
+    prompt_config: {
+      tier,
+      includeHistoryCount: config.includeHistoryCount,
+      styleModifier: config.styleModifier ?? null,
+    },
+    prompt_token_count: usage?.prompt_tokens ?? 0,
+    completion_token_count: usage?.completion_tokens ?? 0,
+    created_at: new Date(now).toISOString(),
+  };
+}
+
+/**
+ * Atomically append a critique entry to drawings.critique_history. fetcher is
+ * dependency-injected so tests can stub the Postgres call without touching
+ * globalThis.fetch.
+ */
+async function persistCritique({ env, drawingId, entry, fetcher = fetch }) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('persistCritique env not configured');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/rpc/append_critique`;
+  const res = await fetcher(url, {
+    method: 'POST',
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_drawing_id: drawingId, p_entry: entry }),
+  });
+  if (!res.ok) throw new Error(`append_critique HTTP ${res.status}`);
+}
+
+// =============================================================================
 // HTTP scaffolding
 // =============================================================================
 
@@ -649,13 +731,29 @@ export default {
         return jsonResponse({ error: 'Invalid request body' }, 400);
       }
 
-      const { image, context, drawingId } = body;
+      const { image, context, drawingId, client_request_id: clientRequestIdRaw } = body;
 
       // Phase 5b — request validation. Cheap checks first; ownership query last.
       if (typeof drawingId !== 'string' || drawingId.length === 0) {
         return jsonResponse({ error: 'Missing drawing_id' }, 400);
       }
       const drawingIdLower = drawingId.toLowerCase(); // pattern compliance from Phase 3
+
+      // Phase 5d — idempotency gate. Validates the request id format and short-
+      // circuits replays before image validation / rate limits / OpenAI. A
+      // cached hit returns the original response verbatim and never burns
+      // quota again.
+      if (typeof clientRequestIdRaw !== 'string') {
+        return jsonResponse({ error: 'Missing client_request_id' }, 400);
+      }
+      const clientRequestId = clientRequestIdRaw.toLowerCase();
+      if (!isValidClientRequestId(clientRequestId)) {
+        return jsonResponse({ error: 'Invalid client_request_id' }, 400);
+      }
+      const cached = await checkIdempotency({ env, userId, clientRequestId });
+      if (cached) {
+        return jsonResponse(cached, 200, { 'X-Idempotent-Replay': '1' });
+      }
 
       if (!validateImagePayload(image)) {
         return jsonResponse({ error: 'Invalid or oversized image payload' }, 400);
@@ -715,6 +813,29 @@ export default {
         return jsonResponse({ error: 'No feedback generated' }, 502);
       }
 
+      // Phase 5d — persistence. Build the canonical entry, append atomically
+      // to drawings.critique_history. Failures are logged but don't block the
+      // response: the user gets their critique once even if the row write
+      // failed (graceful degradation).
+      const sequenceNumber = (Array.isArray(history) ? history.length : 0) + 1;
+      const entry = buildCritiqueEntry({
+        feedback,
+        sequenceNumber,
+        config,
+        tier,
+        usage: data.usage,
+        now,
+      });
+      try {
+        await persistCritique({ env, drawingId: drawingIdLower, entry });
+      } catch (err) {
+        console.error('[persistence] orphan critique', {
+          drawingId: drawingIdLower,
+          userId,
+          error: err?.message,
+        });
+      }
+
       // Quota burns only on a delivered critique. Anomaly counter rides along.
       // Don't await — the response shouldn't wait on bookkeeping, and any
       // failure here is logged but doesn't affect the user.
@@ -722,7 +843,15 @@ export default {
         console.error('[quota] recordSuccessfulCritique failed', err?.message),
       );
 
-      return jsonResponse({ feedback });
+      // Phase 5d — idempotency cache. Stores the body we're about to return so
+      // a retry of the same client_request_id within 1h gets the exact same
+      // response without re-charging OpenAI.
+      const responseBody = { feedback, critique_entry: entry };
+      recordIdempotent({ env, userId, clientRequestId, body: responseBody }).catch((err) =>
+        console.error('[idempotency] recordIdempotent failed', err?.message),
+      );
+
+      return jsonResponse(responseBody);
     } catch (error) {
       return jsonResponse({ error: 'Internal server error', details: error.message }, 500);
     }
@@ -753,4 +882,9 @@ export {
   sha256Hex,
   enforceRateLimits,
   recordSuccessfulCritique,
+  isValidClientRequestId,
+  checkIdempotency,
+  recordIdempotent,
+  buildCritiqueEntry,
+  persistCritique,
 };
