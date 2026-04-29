@@ -484,82 +484,12 @@ struct DrawingCanvasView: View {
             }
             .transition(.move(edge: .trailing).combined(with: .opacity))
 
-            // Bottom right - Action buttons (collapses with toolbar)
+            // Bottom right - Action buttons (collapses with toolbar). Extracted
+            // into a computed property because the inline expression pushed
+            // the body past the Swift type-checker's tolerance once the gear
+            // button landed in Phase 6.
             if !isToolbarCollapsed {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-
-                        VStack(spacing: 12) {
-                            // Phase 6 — Settings gear. Lives inside the
-                            // collapsible chrome (sibling of Save / Get
-                            // Feedback) so the chevron toggle hides it
-                            // alongside the rest of the chrome.
-                            Button(action: { showSettings = true }) {
-                                Image(systemName: "gearshape")
-                                    .font(.system(size: 22))
-                                    .foregroundColor(.primary)
-                                    .frame(width: 44, height: 44)
-                                    .background(Color(uiColor: .systemBackground).opacity(0.95))
-                                    .clipShape(Circle())
-                                    .shadow(radius: 4)
-                            }
-                            .accessibilityLabel("Settings")
-
-                            // Save to Gallery button
-                            Button(action: {
-                                showSaveDialog = true
-                            }) {
-                                HStack(spacing: 8) {
-                                    if isSaving {
-                                        ProgressView()
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: "square.and.arrow.down")
-                                            .font(.system(size: 18))
-                                        Text("Save to Gallery")
-                                            .font(.headline)
-                                    }
-                                }
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 14)
-                                .background(Color.green)
-                                .foregroundColor(.white)
-                                .cornerRadius(12)
-                                .shadow(radius: 4)
-                            }
-                            .disabled(isSaving || canvasState.isEmpty)
-                            .opacity(canvasState.isEmpty ? 0.5 : 1.0)
-
-                            // Get Feedback button
-                            Button(action: requestFeedback) {
-                                HStack(spacing: 8) {
-                                    if isRequestingFeedback {
-                                        ProgressView()
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: "sparkles")
-                                            .font(.system(size: 18))
-                                        Text("Get Feedback")
-                                            .font(.headline)
-                                    }
-                                }
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 14)
-                                .background(Color.accentColor)
-                                .foregroundColor(.white)
-                                .cornerRadius(12)
-                                .shadow(radius: 4)
-                            }
-                            .disabled(isRequestingFeedback || canvasState.isEmpty)
-                            .opacity(canvasState.isEmpty ? 0.5 : 1.0)
-                        }
-                        .padding(.trailing, 12)
-                        .padding(.bottom, 12)
-                    }
-                }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                bottomRightActionButtons
             }
         }
         .sheet(isPresented: $showColorPicker) {
@@ -678,6 +608,90 @@ struct DrawingCanvasView: View {
             loadExistingDrawing()
         }
         .preferredColorScheme(colorSchemeValue)
+    }
+
+    // MARK: - Bottom-right action buttons (Phase 6 extraction)
+    //
+    // Pulled out of `body` because the inline expression (gear + Save +
+    // Get Feedback all stacked with conditional ProgressView swaps) tipped
+    // the Swift type-checker over its tolerance threshold once the gear
+    // button was added. Each button is a separate small computed property
+    // so future additions don't have to re-do this extraction.
+
+    private var bottomRightActionButtons: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                VStack(spacing: 12) {
+                    settingsGearButton
+                    saveToGalleryButton
+                    getFeedbackButton
+                }
+                .padding(.trailing, 12)
+                .padding(.bottom, 12)
+            }
+        }
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+    }
+
+    private var settingsGearButton: some View {
+        Button(action: { showSettings = true }) {
+            Image(systemName: "gearshape")
+                .font(.system(size: 22))
+                .foregroundColor(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                .clipShape(Circle())
+                .shadow(radius: 4)
+        }
+        .accessibilityLabel("Settings")
+    }
+
+    private var saveToGalleryButton: some View {
+        Button(action: { showSaveDialog = true }) {
+            HStack(spacing: 8) {
+                if isSaving {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 18))
+                    Text("Save to Gallery")
+                        .font(.headline)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(Color.green)
+            .foregroundColor(.white)
+            .cornerRadius(12)
+            .shadow(radius: 4)
+        }
+        .disabled(isSaving || canvasState.isEmpty)
+        .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+    }
+
+    private var getFeedbackButton: some View {
+        Button(action: requestFeedback) {
+            HStack(spacing: 8) {
+                if isRequestingFeedback {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 18))
+                    Text("Get Feedback")
+                        .font(.headline)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(Color.accentColor)
+            .foregroundColor(.white)
+            .cornerRadius(12)
+            .shadow(radius: 4)
+        }
+        .disabled(isRequestingFeedback || canvasState.isEmpty)
+        .opacity(canvasState.isEmpty ? 0.5 : 1.0)
     }
 
     private var colorSchemeValue: ColorScheme? {
