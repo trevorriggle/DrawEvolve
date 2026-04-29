@@ -45,7 +45,13 @@ struct Drawing: Codable, Identifiable {
         id = try container.decode(UUID.self, forKey: .id)
         userId = try container.decode(UUID.self, forKey: .userId)
         title = try container.decode(String.self, forKey: .title)
-        storagePath = try container.decode(String.self, forKey: .storagePath)
+        // Normalize storage_path to lowercase on decode. Cloud responses are
+        // already lowercase (the encoder writes lowercase, Postgres preserves
+        // text exactly). This branch matters for stale local cache entries
+        // written by pre-fix builds: they get auto-corrected the moment
+        // they're hydrated, so subsequent uploads/downloads/deletes use the
+        // RLS-compatible lowercase path without a manual cache flush.
+        storagePath = try container.decode(String.self, forKey: .storagePath).lowercased()
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         feedback = try container.decodeIfPresent(String.self, forKey: .feedback)
@@ -55,8 +61,15 @@ struct Drawing: Codable, Identifiable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(userId, forKey: .userId)
+        // Encode UUID columns as lowercase strings so the values written to
+        // Postgres stay consistent with auth.uid()::text (lowercase) and with
+        // the storage paths constructed elsewhere. Postgres uuid columns
+        // normalize internally so case wouldn't break the comparison, but
+        // keeping every wire-format UUID lowercase means the temporary
+        // lower() wrappers in the RLS policies can be removed once iOS is
+        // fully consistent.
+        try container.encode(id.uuidString.lowercased(), forKey: .id)
+        try container.encode(userId.uuidString.lowercased(), forKey: .userId)
         try container.encode(title, forKey: .title)
         try container.encode(storagePath, forKey: .storagePath)
         try container.encode(createdAt, forKey: .createdAt)

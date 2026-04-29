@@ -260,7 +260,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             guard drawing.userId == activeUserID,
                   let client = SupabaseManager.shared.client else { continue }
 
-            let thumbPath = "\(drawing.userId.uuidString)/\(drawing.id.uuidString)_thumb.jpg"
+            let thumbPath = thumbnailStoragePath(for: drawing)
             do {
                 let bytes = try await client.storage
                     .from(storageBucketID)
@@ -291,7 +291,10 @@ final class CloudDrawingStorageManager: ObservableObject {
         }
 
         let drawingID = UUID()
-        let storagePath = "\(userID.uuidString)/\(drawingID.uuidString).jpg"
+        // RLS compares the storage object's first path segment against
+        // auth.uid()::text (lowercase). Swift's UUID.uuidString is uppercase,
+        // so use the .lowercaseUUIDString accessor to match.
+        let storagePath = "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString).jpg"
         let now = Date()
 
         let drawing = Drawing(
@@ -380,7 +383,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             try await client
                 .from("drawings")
                 .delete()
-                .eq("id", value: drawing.id.uuidString)
+                .eq("id", value: drawing.id.lowercaseUUIDString)
                 .execute()
             _ = try? await client.storage
                 .from(storageBucketID)
@@ -423,7 +426,7 @@ final class CloudDrawingStorageManager: ObservableObject {
                 try await client
                     .from("drawings")
                     .delete()
-                    .eq("id", value: drawing.id.uuidString)
+                    .eq("id", value: drawing.id.lowercaseUUIDString)
                     .execute()
                 _ = try? await client.storage
                     .from(storageBucketID)
@@ -713,7 +716,8 @@ final class CloudDrawingStorageManager: ObservableObject {
     }
 
     private func thumbnailStoragePath(for drawing: Drawing) -> String {
-        "\(drawing.userId.uuidString)/\(drawing.id.uuidString)_thumb.jpg"
+        // Lowercase to match auth.uid()::text in RLS — see the UUID extension below.
+        "\(drawing.userId.lowercaseUUIDString)/\(drawing.id.lowercaseUUIDString)_thumb.jpg"
     }
 
     // MARK: - Codable helpers
@@ -751,6 +755,19 @@ final class CloudDrawingStorageManager: ObservableObject {
     }
 }
 
+// MARK: - UUID lowercasing for cloud / RLS
+
+extension UUID {
+    /// Lowercase UUID string for any value that participates in a Supabase
+    /// Storage path or a PostgREST text comparison against `auth.uid()::text`.
+    /// Swift's default `uuidString` is uppercase; Postgres' `auth.uid()::text`
+    /// returns lowercase. RLS policies were temporarily patched with `lower()`
+    /// wrappers to absorb the mismatch — once every iOS call site uses this
+    /// accessor, the `lower()` wrappers in RLS become redundant and can be
+    /// removed (a cleanup task tracked in authandratelimitingandsecurity.md).
+    var lowercaseUUIDString: String { uuidString.lowercased() }
+}
+
 // MARK: - Pending upload entry
 
 private struct PendingUpload: Codable {
@@ -768,6 +785,35 @@ private struct PendingUpload: Codable {
         case createdAt = "created_at"
         case attemptCount = "attempt_count"
         case lastAttemptAt = "last_attempt_at"
+    }
+
+    init(
+        drawingID: UUID,
+        userID: UUID,
+        storagePath: String,
+        createdAt: Date,
+        attemptCount: Int = 0,
+        lastAttemptAt: Date? = nil
+    ) {
+        self.drawingID = drawingID
+        self.userID = userID
+        self.storagePath = storagePath
+        self.createdAt = createdAt
+        self.attemptCount = attemptCount
+        self.lastAttemptAt = lastAttemptAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        drawingID = try container.decode(UUID.self, forKey: .drawingID)
+        userID = try container.decode(UUID.self, forKey: .userID)
+        // Normalize on read — see the matching note in Drawing.init(from:).
+        // Pending entries written by pre-fix builds carry uppercase paths;
+        // lowercasing here means retry attempts use the RLS-compatible form.
+        storagePath = try container.decode(String.self, forKey: .storagePath).lowercased()
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        attemptCount = try container.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
+        lastAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt)
     }
 }
 
