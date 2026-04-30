@@ -515,43 +515,61 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Paint bucket: filling at \(location)")
                 guard selectedLayerIndex < layers.count,
                       let texture = layers[selectedLayerIndex].texture,
-                      let renderer = renderer else {
+                      let renderer = renderer,
+                      let canvasState = canvasState else {
                     print("ERROR: Cannot fill - invalid layer or texture")
                     return
                 }
 
-                // Capture before snapshot
+                // Re-entrancy guard: ignore taps while a previous fill is
+                // still running on the background queue. The HUD over the
+                // canvas also blocks hits, but this is the authoritative
+                // check.
+                if canvasState.isFilling {
+                    print("Paint bucket: ignoring tap, fill already in progress")
+                    return
+                }
+
+                // Capture before snapshot (stays on main, like other tools).
                 let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-                // Perform flood fill (using document size for coordinate scaling)
-                let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
-                renderer.floodFill(at: location, with: brushSettings.color, in: texture, screenSize: documentSize)
+                let documentSize = MainActor.assumeIsolated { canvasState.documentSize }
+                let currentLayerIndex = selectedLayerIndex
+                let layerId = layers[selectedLayerIndex].id
 
-                // Capture after snapshot
-                let afterSnapshot = renderer.captureSnapshot(of: texture)
-
-                // Record in history
-                if let before = beforeSnapshot, let after = afterSnapshot, let canvasState = canvasState {
-                    let layerId = layers[selectedLayerIndex].id
-                    Task { @MainActor in
+                let dispatched = renderer.floodFill(
+                    at: location,
+                    with: brushSettings.color,
+                    in: texture,
+                    screenSize: documentSize
+                ) { [weak self] in
+                    // Back on main, after texture.replace has landed.
+                    let afterSnapshot = renderer.captureSnapshot(of: texture)
+                    if let before = beforeSnapshot, let after = afterSnapshot {
                         canvasState.historyManager.record(.stroke(
                             layerId: layerId,
                             beforeSnapshot: before,
                             afterSnapshot: after
                         ))
                     }
-                }
 
-                // Update thumbnail
-                let currentLayerIndex = selectedLayerIndex
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
-                        DispatchQueue.main.async {
-                            self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                    // Update thumbnail (existing pattern). [weak self] above
+                    // is what this nested block needs; the outer closure
+                    // itself doesn't reference self otherwise.
+                    DispatchQueue.global(qos: .utility).async {
+                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                            DispatchQueue.main.async {
+                                self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                            }
                         }
                     }
+
+                    canvasState.isFilling = false
                 }
 
+                if dispatched {
+                    canvasState.isFilling = true
+                }
                 return
             }
 

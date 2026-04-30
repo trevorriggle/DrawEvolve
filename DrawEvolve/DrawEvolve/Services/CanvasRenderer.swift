@@ -1018,8 +1018,28 @@ class CanvasRenderer: NSObject {
         }
     }
 
-    /// Flood fill (paint bucket) algorithm
-    func floodFill(at point: CGPoint, with color: UIColor, in texture: MTLTexture, screenSize: CGSize) {
+    /// Flood fill (paint bucket).
+    ///
+    /// Validation (point in bounds, target ≠ fill) and the full-texture
+    /// `getBytes` happen synchronously on the caller's thread. The fill loop
+    /// itself runs on a background queue — at 4096² this used to block the
+    /// main thread for hundreds of ms, so the caller is expected to show a
+    /// HUD between the call and `completion`. `texture.replace` and
+    /// `completion` fire on the main queue.
+    ///
+    /// Returns `true` if background work was dispatched (caller should leave
+    /// any HUD up until `completion` runs); `false` if the fill was skipped
+    /// because the start point was out of bounds or already the fill color
+    /// (caller should not show a HUD — completion is **not** invoked in that
+    /// case).
+    @discardableResult
+    func floodFill(
+        at point: CGPoint,
+        with color: UIColor,
+        in texture: MTLTexture,
+        screenSize: CGSize,
+        completion: @escaping () -> Void
+    ) -> Bool {
         print("CanvasRenderer: Flood fill at \(point) with color")
 
         // Scale coordinates from screen space to texture space
@@ -1027,13 +1047,13 @@ class CanvasRenderer: NSObject {
         let scaleY = CGFloat(texture.height) / screenSize.height
         let texturePoint = CGPoint(x: point.x * scaleX, y: point.y * scaleY)
 
-        let x = Int(texturePoint.x)
-        let y = Int(texturePoint.y)
+        let startX = Int(texturePoint.x)
+        let startY = Int(texturePoint.y)
 
         // Validate coordinates
-        guard x >= 0, y >= 0, x < texture.width, y < texture.height else {
+        guard startX >= 0, startY >= 0, startX < texture.width, startY < texture.height else {
             print("ERROR: Point outside texture bounds")
-            return
+            return false
         }
 
         // Read pixel data from texture
@@ -1058,10 +1078,10 @@ class CanvasRenderer: NSObject {
         }
 
         // Get target color at click point
-        let targetIndex = (y * width + x) * 4
+        let targetIndex = (startY * width + startX) * 4
         guard targetIndex + 3 < pixelData.count else {
             print("ERROR: Invalid pixel index")
-            return
+            return false
         }
 
         let targetB = pixelData[targetIndex]
@@ -1084,79 +1104,81 @@ class CanvasRenderer: NSObject {
            abs(Int(targetR) - Int(fillR)) <= tolerance &&
            abs(Int(targetA) - Int(fillA)) <= tolerance {
             print("Target and fill colors are the same, skipping fill")
-            return
+            return false
         }
 
-        // Perform flood fill using stack-based approach
-        var stack: [(Int, Int)] = [(x, y)]
-        var visited = Set<Int>()
+        // Heavy work runs on a background queue. We capture `pixelData` by
+        // value so the GCD block owns its own mutable buffer; texture.replace
+        // and `completion` are dispatched back to main once the fill loop
+        // finishes.
+        DispatchQueue.global(qos: .userInitiated).async {
+            var data = pixelData
 
-        func matches(_ px: Int, _ py: Int) -> Bool {
-            guard px >= 0, py >= 0, px < width, py < height else { return false }
-            let idx = (py * width + px) * 4
-            guard idx + 3 < pixelData.count else { return false }
+            // Flat-byte visited mask (1 byte/pixel — 16 MiB on 4096²)
+            // replaces the previous `Set<Int>`, which boxed every visited
+            // pixel index and triggered hash-table rehashes for large fills.
+            // Algorithm and connectivity are unchanged: 4-connected stack
+            // flood fill with the same tolerance check.
+            var visited = [UInt8](repeating: 0, count: width * height)
+            var stack: [(Int, Int)] = [(startX, startY)]
+            var fillCount = 0
+            let maxFill = width * height // Safety limit
 
-            let pixelKey = py * width + px
-            if visited.contains(pixelKey) { return false }
+            data.withUnsafeMutableBytes { rawBuffer in
+                guard let basePtr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
 
-            let b = pixelData[idx]
-            let g = pixelData[idx + 1]
-            let r = pixelData[idx + 2]
-            let a = pixelData[idx + 3]
+                while !stack.isEmpty && fillCount < maxFill {
+                    let (px, py) = stack.removeLast()
+                    guard px >= 0, py >= 0, px < width, py < height else { continue }
+                    let pixelKey = py * width + px
+                    if visited[pixelKey] != 0 { continue }
+                    let idx = pixelKey * 4
+                    let pb = basePtr[idx]
+                    let pg = basePtr[idx + 1]
+                    let pr = basePtr[idx + 2]
+                    let pa = basePtr[idx + 3]
+                    if abs(Int(pb) - Int(targetB)) > tolerance ||
+                       abs(Int(pg) - Int(targetG)) > tolerance ||
+                       abs(Int(pr) - Int(targetR)) > tolerance ||
+                       abs(Int(pa) - Int(targetA)) > tolerance {
+                        continue
+                    }
 
-            return abs(Int(b) - Int(targetB)) <= tolerance &&
-                   abs(Int(g) - Int(targetG)) <= tolerance &&
-                   abs(Int(r) - Int(targetR)) <= tolerance &&
-                   abs(Int(a) - Int(targetA)) <= tolerance
+                    visited[pixelKey] = 1
+                    basePtr[idx] = fillB
+                    basePtr[idx + 1] = fillG
+                    basePtr[idx + 2] = fillR
+                    basePtr[idx + 3] = fillA
+                    fillCount += 1
+
+                    stack.append((px + 1, py))
+                    stack.append((px - 1, py))
+                    stack.append((px, py + 1))
+                    stack.append((px, py - 1))
+                }
+            }
+
+            print("Filled \(fillCount) pixels")
+
+            DispatchQueue.main.async {
+                data.withUnsafeBytes { ptr in
+                    guard let baseAddress = ptr.baseAddress else { return }
+                    texture.replace(
+                        region: MTLRegion(
+                            origin: MTLOrigin(x: 0, y: 0, z: 0),
+                            size: MTLSize(width: width, height: height, depth: 1)
+                        ),
+                        mipmapLevel: 0,
+                        withBytes: baseAddress,
+                        bytesPerRow: bytesPerRow
+                    )
+                }
+                print("Flood fill complete")
+                completion()
+            }
         }
 
-        func setPixel(_ px: Int, _ py: Int) {
-            let idx = (py * width + px) * 4
-            guard idx + 3 < pixelData.count else { return }
-            pixelData[idx] = fillB
-            pixelData[idx + 1] = fillG
-            pixelData[idx + 2] = fillR
-            pixelData[idx + 3] = fillA
-        }
-
-        // Stack-based flood fill (prevents stack overflow)
-        var fillCount = 0
-        let maxFill = width * height // Safety limit
-
-        while !stack.isEmpty && fillCount < maxFill {
-            let (px, py) = stack.removeLast()
-
-            if !matches(px, py) { continue }
-
-            let pixelKey = py * width + px
-            visited.insert(pixelKey)
-            setPixel(px, py)
-            fillCount += 1
-
-            // Add neighbors
-            stack.append((px + 1, py))
-            stack.append((px - 1, py))
-            stack.append((px, py + 1))
-            stack.append((px, py - 1))
-        }
-
-        print("Filled \(fillCount) pixels")
-
-        // Write modified pixel data back to texture
-        pixelData.withUnsafeBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            texture.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0,
-                withBytes: baseAddress,
-                bytesPerRow: bytesPerRow
-            )
-        }
-
-        print("Flood fill complete")
+        return true
     }
 
     /// Capture a snapshot of a texture's pixel data for undo/redo

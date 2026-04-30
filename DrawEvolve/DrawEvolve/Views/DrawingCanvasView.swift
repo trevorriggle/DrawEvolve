@@ -117,6 +117,30 @@ struct DrawingCanvasView: View {
                     .ignoresSafeArea()
             }
 
+            // Paint-bucket flood fill HUD. Shown over the canvas while the
+            // background fill is running; blocks input as a belt-and-
+            // suspenders alongside the isFilling re-entrancy guard in
+            // MetalCanvasView.touchesBegan. Indeterminate spinner — fill
+            // duration on a 4096² canvas is sub-second on iPad Pro.
+            if canvasState.isFilling {
+                ZStack {
+                    Color.black.opacity(0.25)
+                        .ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                        Text("Filling…")
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                    }
+                    .padding(24)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(12)
+                }
+                .transition(.opacity)
+            }
+
             // Canvas transform indicators (top-right) — zoom % moved into the
             // floating toolbar (Apr 16) so it's no longer hidden behind the
             // gallery button. Rotation indicator stays here.

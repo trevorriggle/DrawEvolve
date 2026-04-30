@@ -16,6 +16,10 @@ class CanvasStateManager: ObservableObject {
     @Published var selectedLayerIndex = 0
     @Published var currentTool: DrawingTool = .brush
     @Published var brushSettings = BrushSettings()
+    /// True while the paint-bucket flood fill is running on a background queue.
+    /// The canvas re-entrancy-guards on this so a second tap can't kick off a
+    /// concurrent fill, and DrawingCanvasView shows a HUD over the canvas.
+    @Published var isFilling: Bool = false
     @Published var feedback: String?
     /// Phase 5d: the Worker-persisted critique entry returned alongside the
     /// feedback text. Consumers append this directly to local
