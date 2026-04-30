@@ -147,13 +147,16 @@ struct GalleryView: View {
     // .primary (the dark/black of a normal nav title).
 
     private var tabStripView: some View {
-        HStack(spacing: 0) {
+        // Fixed 28pt inline gap (≈ one em at .largeTitle bold) between labels
+        // and left-aligned within the available width — mirrors the original
+        // .navigationTitle's leading anchor rather than centering across the
+        // bar.
+        HStack(alignment: .firstTextBaseline, spacing: 28) {
             tabButton(.drawings, label: "My Drawings")
-            Spacer(minLength: 24)
             tabButton(.prompts, label: "My Prompts")
-            Spacer(minLength: 24)
             tabButton(.evolution, label: "My Evolution")
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }
