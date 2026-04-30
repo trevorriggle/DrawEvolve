@@ -139,14 +139,22 @@ struct GalleryView: View {
     }
 
     // MARK: - Tab Strip
+    //
+    // Three large-title labels side-by-side, styled to match the original
+    // .navigationTitle(.large) treatment that this strip replaced. Selection
+    // is communicated by text color only — no pills, no backgrounds, no
+    // borders. Selected = Color.accentColor (the app's blue), unselected =
+    // .primary (the dark/black of a normal nav title).
 
     private var tabStripView: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             tabButton(.drawings, label: "My Drawings")
+            Spacer(minLength: 24)
             tabButton(.prompts, label: "My Prompts")
+            Spacer(minLength: 24)
             tabButton(.evolution, label: "My Evolution")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }
 
@@ -154,13 +162,10 @@ struct GalleryView: View {
         let isSelected = selectedTab == tab
         return Button(action: { selectedTab = tab }) {
             Text(label)
-                .font(.subheadline.weight(.medium))
-                .foregroundColor(isSelected ? .white : .primary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(isSelected ? Color.accentColor : Color.clear)
-                .cornerRadius(8)
+                .font(.largeTitle.weight(.bold))
+                .foregroundColor(isSelected ? .accentColor : .primary)
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Coming Soon Placeholder
