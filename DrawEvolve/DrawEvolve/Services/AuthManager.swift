@@ -33,6 +33,7 @@ final class AuthManager: ObservableObject {
 
     private var currentAppleNonce: String? = nil
     private var currentGoogleNonce: String? = nil
+    private var currentGoogleCodeVerifier: String? = nil
     private var googleAuthSession: ASWebAuthenticationSession? = nil
     private let googlePresentationProvider = GooglePresentationProvider()
     private var stateObserver: Task<Void, Never>? = nil
@@ -164,47 +165,65 @@ final class AuthManager: ObservableObject {
 
     // MARK: - Sign in with Google
     //
-    // OpenID Connect implicit flow via ASWebAuthenticationSession (no SDK).
-    // Google's auth endpoint returns an id_token in the URL fragment, which
-    // we exchange for a Supabase session — same shape as the Apple exchange.
-    // Redirect URI is Google's reverse-client-ID scheme; do NOT reuse
-    // drawevolve://, that's reserved for magic-link callbacks.
+    // OpenID Connect authorization-code flow with PKCE via
+    // ASWebAuthenticationSession (no SDK). Google returns an authorization
+    // code in the callback URL's QUERY STRING (not fragment); we POST it
+    // along with the PKCE code_verifier to Google's token endpoint, get
+    // back an id_token, then hand that to Supabase — same final step as
+    // the Apple exchange. iOS clients have no client_secret; PKCE proves
+    // possession instead. Redirect URI is Google's reverse-client-ID
+    // scheme; do NOT reuse drawevolve://, that's reserved for magic-link
+    // callbacks.
 
     private static let googleClientID = "228877785649-cm4qdh7d841fpkcmronltsnh8ub224dh.apps.googleusercontent.com"
     private static let googleCallbackScheme = "com.googleusercontent.apps.228877785649-cm4qdh7d841fpkcmronltsnh8ub224dh"
     private static let googleRedirectURI = "\(googleCallbackScheme):/oauth2redirect"
+    private static let googleTokenEndpoint = URL(string: "https://oauth2.googleapis.com/token")!
 
-    /// Generate a fresh nonce + SHA256 hash for the Google authorization request.
-    /// Mirrors `prepareAppleSignInRequest`: raw nonce stays on `self`, hashed
-    /// nonce goes to Google so Supabase can verify via the returned id_token.
+    /// Generate a fresh nonce + PKCE pair for the Google authorization request.
+    /// Raw nonce + raw code_verifier stay on `self` until the token exchange
+    /// completes; the hashed nonce + base64url(SHA256(verifier)) go to Google.
     @discardableResult
-    private func prepareGoogleSignIn() -> String {
+    private func prepareGoogleSignIn() -> (hashedNonce: String, codeChallenge: String) {
         let nonce = Self.randomNonce()
         currentGoogleNonce = nonce
-        return Self.sha256(nonce)
+        // PKCE spec: 43–128 unreserved chars. randomNonce default is 32, so
+        // bump to 64 to land safely inside the allowed range.
+        let verifier = Self.randomNonce(length: 64)
+        currentGoogleCodeVerifier = verifier
+        return (Self.sha256(nonce), Self.sha256Base64URL(verifier))
+    }
+
+    private func clearGoogleAuthState() {
+        currentGoogleNonce = nil
+        currentGoogleCodeVerifier = nil
+        googleAuthSession = nil
     }
 
     /// Drive the full Google OAuth flow: open the auth URL in
-    /// ASWebAuthenticationSession, parse the id_token from the callback URL
-    /// fragment, exchange it for a Supabase session.
+    /// ASWebAuthenticationSession, pull the authorization code out of the
+    /// callback URL's query string, exchange it at Google's token endpoint
+    /// for an id_token, then exchange that for a Supabase session.
     func signInWithGoogle() async {
         guard let client = SupabaseManager.shared.client else {
             lastError = AuthError.notConfigured.errorDescription
             return
         }
 
-        let hashedNonce = prepareGoogleSignIn()
+        let challenge = prepareGoogleSignIn()
         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")
         components?.queryItems = [
             URLQueryItem(name: "client_id", value: Self.googleClientID),
             URLQueryItem(name: "redirect_uri", value: Self.googleRedirectURI),
-            URLQueryItem(name: "response_type", value: "id_token"),
+            URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "scope", value: "openid email profile"),
-            URLQueryItem(name: "nonce", value: hashedNonce),
+            URLQueryItem(name: "nonce", value: challenge.hashedNonce),
+            URLQueryItem(name: "code_challenge", value: challenge.codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
         ]
         guard let authURL = components?.url else {
             lastError = "Google sign-in returned an unexpected response."
-            currentGoogleNonce = nil
+            clearGoogleAuthState()
             return
         }
 
@@ -236,40 +255,76 @@ final class AuthManager: ObservableObject {
             if (error as NSError).code != ASWebAuthenticationSessionError.canceledLogin.rawValue {
                 lastError = "Google sign-in failed: \(error.localizedDescription)"
             }
-            currentGoogleNonce = nil
-            googleAuthSession = nil
+            clearGoogleAuthState()
             return
         }
         googleAuthSession = nil
 
-        guard let idToken = Self.parseFragmentValue(from: callbackURL, key: "id_token"),
-              let nonce = currentGoogleNonce else {
+        guard let code = Self.parseQueryValue(from: callbackURL, key: "code"),
+              let nonce = currentGoogleNonce,
+              let verifier = currentGoogleCodeVerifier else {
             lastError = "Google sign-in returned an unexpected response."
-            currentGoogleNonce = nil
+            clearGoogleAuthState()
             return
         }
 
         do {
+            let idToken = try await Self.exchangeGoogleAuthCode(code: code, verifier: verifier)
             _ = try await client.auth.signInWithIdToken(
                 credentials: .init(provider: .google, idToken: idToken, nonce: nonce)
             )
-            currentGoogleNonce = nil
+            clearGoogleAuthState()
             lastError = nil
         } catch {
             lastError = "Google sign-in failed: \(error.localizedDescription)"
-            currentGoogleNonce = nil
+            clearGoogleAuthState()
         }
     }
 
-    /// Pull a single key out of a URL's fragment (e.g. `#id_token=...&authuser=...`).
-    private static func parseFragmentValue(from url: URL, key: String) -> String? {
-        guard let fragment = url.fragment else { return nil }
-        for pair in fragment.split(separator: "&") {
-            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
-            guard parts.count == 2, parts[0] == key else { continue }
-            return parts[1].removingPercentEncoding ?? parts[1]
+    /// POST the authorization code + PKCE verifier to Google's token endpoint
+    /// and return the id_token. iOS clients have no client_secret; PKCE
+    /// (the verifier matching the challenge from the auth request) proves
+    /// possession instead.
+    private static func exchangeGoogleAuthCode(code: String, verifier: String) async throws -> String {
+        var bodyComponents = URLComponents()
+        bodyComponents.queryItems = [
+            URLQueryItem(name: "grant_type", value: "authorization_code"),
+            URLQueryItem(name: "code", value: code),
+            URLQueryItem(name: "client_id", value: googleClientID),
+            URLQueryItem(name: "code_verifier", value: verifier),
+            URLQueryItem(name: "redirect_uri", value: googleRedirectURI),
+        ]
+        var request = URLRequest(url: googleTokenEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = bodyComponents.percentEncodedQuery?.data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "DrawEvolve.Auth",
+                code: status,
+                userInfo: [NSLocalizedDescriptionKey: "Google token exchange failed (\(status)): \(body)"]
+            )
         }
-        return nil
+        return try JSONDecoder().decode(GoogleTokenResponse.self, from: data).idToken
+    }
+
+    private struct GoogleTokenResponse: Decodable {
+        let idToken: String
+        enum CodingKeys: String, CodingKey { case idToken = "id_token" }
+    }
+
+    /// Pull a single key out of a URL's query string (e.g. `?code=...&state=...`).
+    /// Code flow returns the authorization code as a query param, not in the
+    /// fragment like implicit flow did.
+    private static func parseQueryValue(from url: URL, key: String) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name == key })?
+            .value
     }
 
     // MARK: - Email magic link
@@ -414,6 +469,16 @@ final class AuthManager: ObservableObject {
         SHA256.hash(data: Data(input.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    /// BASE64URL(SHA256(input)) — the PKCE S256 code_challenge encoding.
+    /// Standard base64 with `+`/`/` swapped for `-`/`_` and padding stripped.
+    private static func sha256Base64URL(_ input: String) -> String {
+        Data(SHA256.hash(data: Data(input.utf8)))
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
