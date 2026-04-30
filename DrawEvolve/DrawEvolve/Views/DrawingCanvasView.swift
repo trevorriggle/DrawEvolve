@@ -37,6 +37,10 @@ struct DrawingCanvasView: View {
     @State private var showSaveDialog = false
     @State private var drawingTitle = ""
     @State private var isSaving = false
+    /// Transient "Saved" checkmark on the Save button. Flips to true after a
+    /// successful save (first-save or silent overwrite), auto-clears ~1.5s
+    /// later so the button returns to its idle label.
+    @State private var showSavedConfirmation = false
     @State private var showGallery = false
     @State private var showSettings = false   // Phase 6 — gear in collapsible chrome
     @StateObject private var storageManager = CloudDrawingStorageManager.shared
@@ -673,10 +677,24 @@ struct DrawingCanvasView: View {
     }
 
     private var saveToGalleryButton: some View {
-        Button(action: { showSaveDialog = true }) {
+        // First save (currentDrawingID == nil) opens the title-input alert.
+        // Subsequent taps on an already-saved drawing skip the alert and
+        // overwrite silently — the previously-entered title is reused.
+        Button(action: {
+            if currentDrawingID == nil {
+                showSaveDialog = true
+            } else {
+                Task { await saveDrawing() }
+            }
+        }) {
             HStack(spacing: 8) {
                 if isSaving {
                     ProgressView().tint(.white)
+                } else if showSavedConfirmation {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 18))
+                    Text("Saved")
+                        .font(.headline)
                 } else {
                     Image(systemName: "square.and.arrow.down")
                         .font(.system(size: 18))
@@ -820,6 +838,7 @@ struct DrawingCanvasView: View {
 
         print("  - Image exported: \(imageData.count) bytes")
 
+        var didSucceed = false
         do {
             if let drawingID = currentDrawingID {
                 // Update existing drawing. Pass the canvas's local critique history
@@ -853,11 +872,20 @@ struct DrawingCanvasView: View {
                 print("✅ Drawing saved successfully with ID: \(savedDrawing.id)")
                 print("  - Future saves will UPDATE this drawing, not create new ones")
             }
+            didSucceed = true
         } catch {
             print("❌ ERROR: Failed to save drawing: \(error)")
         }
 
         isSaving = false
+
+        if didSucceed {
+            showSavedConfirmation = true
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                showSavedConfirmation = false
+            }
+        }
     }
 
     private func requestFeedback() {
