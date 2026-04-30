@@ -22,6 +22,7 @@ struct SettingsView: View {
             Form {
                 accountSection
                 actionsSection
+                legalSection
                 aboutSection
             }
             .navigationTitle("Settings")
@@ -81,6 +82,13 @@ struct SettingsView: View {
         }
     }
 
+    private var legalSection: some View {
+        Section {
+            Link("Privacy Policy", destination: URL(string: "https://drawevolve.com/privacy")!)
+            Link("Terms of Service", destination: URL(string: "https://drawevolve.com/terms")!)
+        }
+    }
+
     private var aboutSection: some View {
         Section("About") {
             HStack {
@@ -88,9 +96,6 @@ struct SettingsView: View {
                 Spacer()
                 Text(Self.versionAndBuild).foregroundStyle(.secondary)
             }
-            // Placeholder URLs — Trevor will host the actual docs separately.
-            Link("Privacy Policy", destination: URL(string: "https://drawevolve.com/privacy")!)
-            Link("Terms of Service", destination: URL(string: "https://drawevolve.com/terms")!)
         }
     }
 

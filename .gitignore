@@ -12,6 +12,7 @@
 .envrc
 
 # Apple signing material — none of this should ever be in the repo.
+*.p8
 *.p12
 *.cer
 *.cert
@@ -23,6 +24,9 @@
 *.pfx
 *.jks
 *.keystore
+
+# One-off Apple SIWA JWT generator (recreate from chat history when needed).
+scripts/generate-apple-secret.mjs
 
 # Generic credential / token dumps
 credentials.json
