@@ -10,6 +10,12 @@ import PhotosUI
 @preconcurrency import Metal
 
 struct DrawingCanvasView: View {
+    /// Visual scaffolding for upcoming social features. Defaults to true so
+    /// the icon appears in normal builds; flip to false pre-archive to hide
+    /// without removing the layout (no `#if DEBUG` — this is a deliberate
+    /// release-time toggle, not a debug-only switch).
+    private static let showGlobeIcon = true
+
     @Binding var context: DrawingContext
     let existingDrawing: Drawing? // Optional existing drawing to load
 
@@ -255,6 +261,7 @@ struct DrawingCanvasView: View {
             // Floating toolbar overlay (top layer, left side)
             VStack(alignment: .leading, spacing: 0) {
                 if !isToolbarCollapsed {
+                    VStack(spacing: 0) {
                     ScrollView {
                         // Zoom % readout at the top of the toolbar (Apr 16).
                         // Always visible so the user can see the current zoom
@@ -397,6 +404,21 @@ struct DrawingCanvasView: View {
                         .padding(.horizontal, 8)
                         .padding(.bottom, 8)
                     }
+
+                    if Self.showGlobeIcon {
+                        Divider()
+                        Button(action: {
+                            // TODO: Wire to social features when implemented.
+                        }) {
+                            Image(systemName: "globe")
+                                .font(.system(size: 44))
+                                .foregroundColor(.primary)
+                                .frame(width: 88, height: 88)
+                        }
+                        .accessibilityLabel("Social")
+                    }
+                    } // end inner VStack(spacing: 0); contents kept at original
+                      // indent to avoid a re-indent churn diff for unrelated lines.
                     .frame(width: 104) // 2 columns of 44px + padding
                     .background(Color(uiColor: .systemBackground).opacity(0.95))
                     .cornerRadius(12)
@@ -491,26 +513,35 @@ struct DrawingCanvasView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            // Top right - Gallery button (always visible)
+            // Top right - Gallery button (always visible) + gear icon
+            // (visibility tied to toolbar collapse). The two share a VStack so
+            // the gear sits flush below the gallery icon without magic-number
+            // padding; only the gear has the move/opacity transition since the
+            // gallery icon stays put.
             VStack {
                 HStack {
                     Spacer()
+                    VStack(spacing: 8) {
+                        Button(action: { showGallery = true }) {
+                            Image(systemName: "photo.on.rectangle")
+                                .font(.system(size: 32))
+                                .foregroundColor(.accentColor)
+                                .frame(width: 50, height: 50)
+                                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                                .clipShape(Circle())
+                                .shadow(radius: 4)
+                        }
 
-                    Button(action: { showGallery = true }) {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.system(size: 32))
-                            .foregroundColor(.accentColor)
-                            .frame(width: 50, height: 50)
-                            .background(Color(uiColor: .systemBackground).opacity(0.95))
-                            .clipShape(Circle())
-                            .shadow(radius: 4)
+                        if !isToolbarCollapsed {
+                            settingsGearButton
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                        }
                     }
                     .padding(.top, 12)
                     .padding(.trailing, 12)
                 }
                 Spacer()
             }
-            .transition(.move(edge: .trailing).combined(with: .opacity))
 
             // Bottom right - Action buttons (collapses with toolbar). Extracted
             // into a computed property because the inline expression pushed
@@ -652,7 +683,6 @@ struct DrawingCanvasView: View {
             HStack {
                 Spacer()
                 VStack(spacing: 12) {
-                    settingsGearButton
                     saveToGalleryButton
                     getFeedbackButton
                 }

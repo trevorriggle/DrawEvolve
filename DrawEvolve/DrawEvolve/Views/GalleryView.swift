@@ -8,9 +8,15 @@
 import SwiftUI
 
 struct GalleryView: View {
+    /// Top-level sections of the gallery. `.drawings` is fully wired today;
+    /// `.prompts` and `.evolution` are placeholder scaffolding for upcoming
+    /// features (see CUSTOM_PROMPTS_PLAN.md for the prompts work).
+    private enum Tab: Hashable { case drawings, prompts, evolution }
+
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
     @Environment(\.dismiss) private var dismiss
 
+    @State private var selectedTab: Tab = .drawings
     @State private var showNewDrawing = false
     @State private var showPromptFirst = false
     @State private var selectedDrawing: Drawing?
@@ -29,17 +35,33 @@ struct GalleryView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                if storageManager.isLoading && storageManager.drawings.isEmpty {
-                    ProgressView("Loading your drawings...")
-                } else if storageManager.drawings.isEmpty {
-                    emptyStateView
-                } else {
-                    drawingsGridView
+            VStack(spacing: 0) {
+                tabStripView
+                Group {
+                    switch selectedTab {
+                    case .drawings:
+                        ZStack {
+                            if storageManager.isLoading && storageManager.drawings.isEmpty {
+                                ProgressView("Loading your drawings...")
+                            } else if storageManager.drawings.isEmpty {
+                                emptyStateView
+                            } else {
+                                drawingsGridView
+                            }
+                        }
+                    case .prompts:
+                        // TODO: Implement My Prompts. Placeholder for visual scaffolding.
+                        comingSoonView(icon: "text.bubble", title: "My Prompts")
+                    case .evolution:
+                        // TODO: Implement My Evolution. Placeholder for visual scaffolding.
+                        comingSoonView(icon: "chart.line.uptrend.xyaxis", title: "My Evolution")
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationTitle("My Drawings")
-            .navigationBarTitleDisplayMode(.large)
+            // No .navigationTitle: the tab strip is the identifier. Toolbar
+            // items (Close, +, debug Clear All) remain the only nav-bar
+            // content.
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
@@ -114,6 +136,52 @@ struct GalleryView: View {
                 Text("This will permanently delete ALL drawings. This cannot be undone.")
             }
         }
+    }
+
+    // MARK: - Tab Strip
+
+    private var tabStripView: some View {
+        HStack(spacing: 8) {
+            tabButton(.drawings, label: "My Drawings")
+            tabButton(.prompts, label: "My Prompts")
+            tabButton(.evolution, label: "My Evolution")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private func tabButton(_ tab: Tab, label: String) -> some View {
+        let isSelected = selectedTab == tab
+        return Button(action: { selectedTab = tab }) {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+                .foregroundColor(isSelected ? .white : .primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(isSelected ? Color.accentColor : Color.clear)
+                .cornerRadius(8)
+        }
+    }
+
+    // MARK: - Coming Soon Placeholder
+
+    private func comingSoonView(icon: String, title: String) -> some View {
+        VStack(spacing: 24) {
+            Image(systemName: icon)
+                .font(.system(size: 80))
+                .foregroundColor(.secondary.opacity(0.5))
+
+            VStack(spacing: 8) {
+                Text(title)
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text("Coming soon")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
     }
 
     // MARK: - Empty State
