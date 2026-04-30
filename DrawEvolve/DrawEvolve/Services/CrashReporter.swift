@@ -12,7 +12,7 @@ import OSLog
 class CrashReporter {
     static let shared = CrashReporter()
 
-    private let logger = Logger(subsystem: "com.drawevolve.app", category: "CrashReporter")
+    private let logger = Logger(subsystem: "com.rigtech.drawevolve", category: "CrashReporter")
     private let crashLogKey = "crashLogs"
     private let maxCrashLogs = 50
 
