@@ -30,6 +30,14 @@
 				<string>drawevolve</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.googleusercontent.apps.228877785649-cm4qdh7d841fpkcmronltsnh8ub224dh</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.228877785649-cm4qdh7d841fpkcmronltsnh8ub224dh</string>
+			</array>
+		</dict>
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>

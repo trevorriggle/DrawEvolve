@@ -12,6 +12,7 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 import Supabase
+import UIKit
 
 @MainActor
 final class AuthManager: ObservableObject {
@@ -31,6 +32,9 @@ final class AuthManager: ObservableObject {
     static var callbackURL: URL { URL(string: callbackURLString)! }
 
     private var currentAppleNonce: String? = nil
+    private var currentGoogleNonce: String? = nil
+    private var googleAuthSession: ASWebAuthenticationSession? = nil
+    private let googlePresentationProvider = GooglePresentationProvider()
     private var stateObserver: Task<Void, Never>? = nil
 
     var currentUser: User? {
@@ -156,6 +160,116 @@ final class AuthManager: ObservableObject {
         } catch {
             lastError = "Apple sign-in failed: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Sign in with Google
+    //
+    // OpenID Connect implicit flow via ASWebAuthenticationSession (no SDK).
+    // Google's auth endpoint returns an id_token in the URL fragment, which
+    // we exchange for a Supabase session — same shape as the Apple exchange.
+    // Redirect URI is Google's reverse-client-ID scheme; do NOT reuse
+    // drawevolve://, that's reserved for magic-link callbacks.
+
+    private static let googleClientID = "228877785649-cm4qdh7d841fpkcmronltsnh8ub224dh.apps.googleusercontent.com"
+    private static let googleCallbackScheme = "com.googleusercontent.apps.228877785649-cm4qdh7d841fpkcmronltsnh8ub224dh"
+    private static let googleRedirectURI = "\(googleCallbackScheme):/oauth2redirect"
+
+    /// Generate a fresh nonce + SHA256 hash for the Google authorization request.
+    /// Mirrors `prepareAppleSignInRequest`: raw nonce stays on `self`, hashed
+    /// nonce goes to Google so Supabase can verify via the returned id_token.
+    @discardableResult
+    private func prepareGoogleSignIn() -> String {
+        let nonce = Self.randomNonce()
+        currentGoogleNonce = nonce
+        return Self.sha256(nonce)
+    }
+
+    /// Drive the full Google OAuth flow: open the auth URL in
+    /// ASWebAuthenticationSession, parse the id_token from the callback URL
+    /// fragment, exchange it for a Supabase session.
+    func signInWithGoogle() async {
+        guard let client = SupabaseManager.shared.client else {
+            lastError = AuthError.notConfigured.errorDescription
+            return
+        }
+
+        let hashedNonce = prepareGoogleSignIn()
+        var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")
+        components?.queryItems = [
+            URLQueryItem(name: "client_id", value: Self.googleClientID),
+            URLQueryItem(name: "redirect_uri", value: Self.googleRedirectURI),
+            URLQueryItem(name: "response_type", value: "id_token"),
+            URLQueryItem(name: "scope", value: "openid email profile"),
+            URLQueryItem(name: "nonce", value: hashedNonce),
+        ]
+        guard let authURL = components?.url else {
+            lastError = "Google sign-in returned an unexpected response."
+            currentGoogleNonce = nil
+            return
+        }
+
+        let callbackURL: URL
+        do {
+            callbackURL = try await withCheckedThrowingContinuation { continuation in
+                let session = ASWebAuthenticationSession(
+                    url: authURL,
+                    callbackURLScheme: Self.googleCallbackScheme
+                ) { url, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if let url {
+                        continuation.resume(returning: url)
+                    } else {
+                        continuation.resume(throwing: NSError(
+                            domain: "DrawEvolve.Auth",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Google sign-in returned no URL."]
+                        ))
+                    }
+                }
+                session.presentationContextProvider = googlePresentationProvider
+                googleAuthSession = session
+                session.start()
+            }
+        } catch {
+            // User-cancellation matches SIWA's silent no-op convention.
+            if (error as NSError).code != ASWebAuthenticationSessionError.canceledLogin.rawValue {
+                lastError = "Google sign-in failed: \(error.localizedDescription)"
+            }
+            currentGoogleNonce = nil
+            googleAuthSession = nil
+            return
+        }
+        googleAuthSession = nil
+
+        guard let idToken = Self.parseFragmentValue(from: callbackURL, key: "id_token"),
+              let nonce = currentGoogleNonce else {
+            lastError = "Google sign-in returned an unexpected response."
+            currentGoogleNonce = nil
+            return
+        }
+
+        do {
+            _ = try await client.auth.signInWithIdToken(
+                credentials: .init(provider: .google, idToken: idToken, nonce: nonce)
+            )
+            currentGoogleNonce = nil
+            lastError = nil
+        } catch {
+            lastError = "Google sign-in failed: \(error.localizedDescription)"
+            currentGoogleNonce = nil
+        }
+    }
+
+    /// Pull a single key out of a URL's fragment (e.g. `#id_token=...&authuser=...`).
+    private static func parseFragmentValue(from url: URL, key: String) -> String? {
+        guard let fragment = url.fragment else { return nil }
+        for pair in fragment.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, parts[0] == key else { continue }
+            return parts[1].removingPercentEncoding ?? parts[1]
+        }
+        return nil
     }
 
     // MARK: - Email magic link
@@ -340,5 +454,19 @@ enum AuthError: LocalizedError {
                 return "Account deletion failed at step '\(step)'. Please try again."
             }
         }
+    }
+}
+
+// MARK: - Google web auth presentation anchor
+//
+// ASWebAuthenticationSession needs a UIWindow anchor via NSObject conformance.
+// AuthManager isn't NSObject, so this small bridge carries the protocol.
+
+private final class GooglePresentationProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        let scenes = UIApplication.shared.connectedScenes
+        let active = scenes.first { $0.activationState == .foregroundActive } as? UIWindowScene
+        let scene = active ?? scenes.first { $0 is UIWindowScene } as? UIWindowScene
+        return scene?.windows.first { $0.isKeyWindow } ?? scene?.windows.first ?? ASPresentationAnchor()
     }
 }

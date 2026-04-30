@@ -107,6 +107,7 @@ struct AuthGateView: View {
     private var authControls: some View {
         VStack(spacing: 16) {
             signInWithAppleButton
+            signInWithGoogleButton
 
             if emailState == .input {
                 dividerOr
@@ -129,6 +130,34 @@ struct AuthGateView: View {
         .frame(height: controlHeight)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+    }
+
+    private var signInWithGoogleButton: some View {
+        Button {
+            Task { await authManager.signInWithGoogle() }
+        } label: {
+            HStack(spacing: 12) {
+                Text("G")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Color(red: 66/255, green: 133/255, blue: 244/255))
+                Text("Sign in with Google")
+                    .font(.system(.body, design: .default).weight(.semibold))
+                    .foregroundStyle(Color.primary)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: controlHeight)
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(Color(.separator).opacity(0.5), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .shadow(color: .black.opacity(0.04), radius: 6, y: 2)
+        }
+        .buttonStyle(.plain)
     }
 
     private var dividerOr: some View {
@@ -172,8 +201,19 @@ struct AuthGateView: View {
                 .submitLabel(.send)
                 .onSubmit { sendMagicLink() }
 
+            magicLinkWarning
+
             magicLinkButton
         }
+    }
+
+    private var magicLinkWarning: some View {
+        Text("Open the magic link only on this device. Opening it elsewhere won't sign you in here.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var magicLinkButton: some View {
