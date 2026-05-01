@@ -25,7 +25,13 @@
 // logging) are not yet implemented. Until 5c lands, abuse mitigation is just
 // the per-user auth + ownership check below — no quota enforcement.
 
-const VOICE_ART_PROFESSOR = `You are an art professor giving a one-on-one critique inside the DrawEvolve app. You teach through the elements of art (line, shape, form, value, color, texture, space) and the principles of design (balance, contrast, emphasis, movement, pattern, rhythm, unity, variety). You reach for that vocabulary when it makes the critique clearer, and you use plain language when plain language lands better. You don't lecture — you talk like a professor in a studio, pointing at the work.`;
+const VOICE_STUDIO_MENTOR = `You are an art professor giving a one-on-one critique inside the DrawEvolve app. You teach through the elements of art (line, shape, form, value, color, texture, space) and the principles of design (balance, contrast, emphasis, movement, pattern, rhythm, unity, variety). You reach for that vocabulary when it makes the critique clearer, and you use plain language when plain language lands better. You don't lecture — you talk like a professor in a studio, pointing at the work.`;
+
+const VOICE_THE_CRIT = `You are a working artist running a senior MFA crit inside the DrawEvolve app. You treat the student as a peer with their own intent — someone making artistic choices, not a beginner being shepherded. You ask probing questions about those choices — 'what were you going for in the negative space here?' — alongside making observations, instead of always prescribing what to fix. You're direct and unsoftened: you don't pad criticism with reassurance, and you don't manufacture praise to balance honest observations. But directness is not aggression. You critique the work seriously because you take the student seriously, not to demonstrate rigor. You assume the student came here for honest engagement with their work, and you give them that.`;
+
+const VOICE_FUNDAMENTALS_COACH = `You are a draftsmanship coach inside the DrawEvolve app. Your conviction is that craft fundamentals — proportion, value structure, perspective, anatomy, line economy, edge control — unlock everything else. Until those are solid, expressive choices are unsupported. You almost always pick a fundamentals issue as the Focus Area, even when expressive choices are also off. You're prescriptive and exercise-oriented: instead of 'consider the composition,' you say 'block out the bounding shapes first, then check the proportions against the reference, then commit to line.' You believe in measurement, in study from observation, in repeating the same exercise until the muscle memory is there. You're warm but unsentimental. Improvement, in your view, is mostly about hours of correct practice — not insight.`;
+
+const VOICE_RENAISSANCE_MASTER = `You are a master of a Florentine workshop in the year 1503, somehow critiquing a student's drawing through the DrawEvolve app. You speak as though the student is your apprentice. You use period-accurate language — 'thy work,' 'the panel,' 'the master' — without overdoing it; one or two archaic constructions per critique is enough to set the voice. You judge by classical principles: disegno, the discipline of the line, the careful study of anatomy from life and from the antique, the proportions established by Vitruvius and refined by your contemporaries. You compare the student's marks to fresco technique, panel painting, silverpoint, the work of your peers in Florence. You take the work entirely seriously — you do not break the persona to wink at the student. The humor, when it lands, comes from the discipline of the voice, not from jokes.`;
 
 const SHARED_SYSTEM_RULES = `CORE RULES:
 - You are looking at a real student drawing sent as an image. Every observation must reference specific visual evidence in THIS drawing. No generic advice, no praise that could apply to any drawing.
@@ -91,7 +97,27 @@ If you are shown prior critiques on this drawing, you are not starting fresh. Yo
 - The "stay on ONE issue" rule above still applies, but on critique #2+ the choice of WHICH issue is constrained by what came before. Do not optimize for "most impactful" in isolation — optimize for continuity of coaching.
 - When you reference a prior critique in your response, do so naturally ("last time we worked on the value structure"), not by quoting yourself.`;
 
-const BASE_SYSTEM_PROMPT = `${VOICE_ART_PROFESSOR}\n\n${SHARED_SYSTEM_RULES}`;
+function assembleSystemPrompt(voice) {
+  return `${voice}\n\n${SHARED_SYSTEM_RULES}`;
+}
+
+// PRESET_VOICES.studio_mentor / .the_crit / .fundamentals_coach /
+// .renaissance_master — keys MUST match VALID_PRESET_IDS. selectVoice
+// reads from this map for hardcoded preset paths (no DB hit) and
+// fetches custom_prompts.body for `custom:<uuid>` IDs.
+const PRESET_VOICES = Object.freeze({
+  studio_mentor:       VOICE_STUDIO_MENTOR,
+  the_crit:            VOICE_THE_CRIT,
+  fundamentals_coach:  VOICE_FUNDAMENTALS_COACH,
+  renaissance_master:  VOICE_RENAISSANCE_MASTER,
+});
+
+// Kept for test stability and as the studio-mentor-assembled default that
+// selectConfig stamps into config.systemPrompt. The handler overrides this
+// per-request via assembleSystemPrompt(selectVoice(...)) so the user's
+// chosen preset_id actually swaps the voice. Tests that don't go through
+// the handler still get the studio_mentor voice via this default.
+const BASE_SYSTEM_PROMPT = assembleSystemPrompt(VOICE_STUDIO_MENTOR);
 
 const RESPONSE_FORMAT_TEMPLATE = (skillLevel) => {
   const normalized = skillLevel?.toLowerCase()?.trim();
@@ -842,6 +868,68 @@ async function resolvePresetId(presetIdInput, userId, env, fetcher = fetch) {
 }
 
 /**
+ * Resolves a preset_id to its voice content for prompt assembly. Hardcoded
+ * preset IDs return their VOICE_* constant directly with no DB hit. Custom
+ * IDs (`custom:<uuid>`) fetch the body from custom_prompts, defense-in-
+ * depth re-filtering by user_id even though resolvePresetId already
+ * verified ownership earlier in the request path. Different concern,
+ * different gate: resolvePresetId is the pre-quota validation gate;
+ * selectVoice is the post-quota assembly step. Kept independent.
+ *
+ * On any failure (env missing, fetch non-ok, empty/missing row, missing
+ * body field, thrown exception) falls back to VOICE_STUDIO_MENTOR with a
+ * console.error log. The user always gets a critique; the failure is
+ * visible in observability with a distinct message per failure mode.
+ *
+ * fetcher is dependency-injected for tests.
+ */
+async function selectVoice(presetId, userId, env, fetcher = fetch) {
+  if (typeof presetId === 'string'
+      && Object.prototype.hasOwnProperty.call(PRESET_VOICES, presetId)) {
+    return PRESET_VOICES[presetId];
+  }
+  if (typeof presetId !== 'string' || !presetId.startsWith(CUSTOM_PROMPT_PREFIX)) {
+    // Unknown / undefined / null / non-custom — defensive fallback. The
+    // handler path normally won't reach this branch because resolvePresetId
+    // would have already rejected invalid input, but selectVoice is also
+    // called from tests and may be called from future code paths.
+    return VOICE_STUDIO_MENTOR;
+  }
+  const uuid = presetId.slice(CUSTOM_PROMPT_PREFIX_LEN);
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('[selectVoice] env not configured; falling back to studio_mentor');
+    return VOICE_STUDIO_MENTOR;
+  }
+  try {
+    const url = `${env.SUPABASE_URL}/rest/v1/custom_prompts`
+      + `?id=eq.${encodeURIComponent(uuid)}`
+      + `&user_id=eq.${encodeURIComponent(userId)}`
+      + `&select=body&limit=1`;
+    const res = await fetcher(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        Accept: 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.error('[selectVoice] custom_prompts fetch non-ok', res.status);
+      return VOICE_STUDIO_MENTOR;
+    }
+    const rows = await res.json();
+    const body = rows?.[0]?.body;
+    if (typeof body !== 'string' || body.length === 0) {
+      console.error('[selectVoice] custom_prompts row missing body', { uuid });
+      return VOICE_STUDIO_MENTOR;
+    }
+    return body;
+  } catch (err) {
+    console.error('[selectVoice] threw', err?.message);
+    return VOICE_STUDIO_MENTOR;
+  }
+}
+
+/**
  * PATCH drawings.preset_id when it differs from what's currently on the row.
  * Caller decides whether to invoke based on the comparison; this helper
  * just does the write. fetcher is dependency-injected for tests.
@@ -1055,10 +1143,11 @@ const OPENAI_TEMPERATURE = 0.4;
 const OPENAI_SEED = 42;
 const OPENAI_REASONING_EFFORT = 'none';
 
-// Preset voices the Worker will eventually swap into the system prompt.
-// Commit A wires the plumbing — validation, persistence, write-through —
-// but voice selection still uses VOICE_ART_PROFESSOR for every request
-// regardless of what preset_id arrives. Voice swap lands in Commit B.
+// Preset voices the Worker swaps into the system prompt per request.
+// Resolution flow: validateContext (format) → resolvePresetId (ownership)
+// → selectVoice (body fetch for custom:<uuid>, lookup for hardcoded). On
+// any failure during selectVoice, falls back to VOICE_STUDIO_MENTOR with
+// logged error so the user still gets a critique.
 const VALID_PRESET_IDS = Object.freeze(new Set([
   'studio_mentor',
   'the_crit',
@@ -1276,7 +1365,7 @@ export default {
         return jsonResponse({ error: 'Forbidden' }, 403);
       }
 
-      const config = selectConfig(tier, promptPreferences);
+      const baseConfig = selectConfig(tier, promptPreferences);
       const { history, presetId: existingPresetId } = await fetchCritiqueHistory(drawingIdLower, env);
 
       // Resolve preset_id. For custom:<uuid>, this verifies the row exists
@@ -1295,6 +1384,12 @@ export default {
         }));
         return jsonResponse({ error: err?.code ?? 'preset_id_resolution_failed' }, status);
       }
+
+      // Select the voice for this request and assemble the system prompt
+      // with it. selectVoice falls back to VOICE_STUDIO_MENTOR on any
+      // failure with a console.error log; the user always gets a critique.
+      const voice = await selectVoice(resolvedPresetId, userId, env);
+      const config = { ...baseConfig, systemPrompt: assembleSystemPrompt(voice) };
 
       const systemPrompt = buildSystemPrompt(config, context ?? {});
       const userContent = buildUserMessage(config, history, image);
@@ -1466,7 +1561,13 @@ export default {
 // Named exports for unit tests (see test.mjs).
 export {
   BASE_SYSTEM_PROMPT,
-  VOICE_ART_PROFESSOR,
+  VOICE_STUDIO_MENTOR,
+  VOICE_THE_CRIT,
+  VOICE_FUNDAMENTALS_COACH,
+  VOICE_RENAISSANCE_MASTER,
+  PRESET_VOICES,
+  selectVoice,
+  assembleSystemPrompt,
   SHARED_SYSTEM_RULES,
   HISTORY_FRAMING_DEFAULT,
   DEFAULT_FREE_CONFIG,

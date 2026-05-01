@@ -2,6 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import {
+  BASE_SYSTEM_PROMPT,
+  VOICE_STUDIO_MENTOR,
+  VOICE_THE_CRIT,
+  VOICE_FUNDAMENTALS_COACH,
+  VOICE_RENAISSANCE_MASTER,
+  PRESET_VOICES,
+  selectVoice,
+  assembleSystemPrompt,
   DEFAULT_FREE_CONFIG,
   DEFAULT_PRO_CONFIG,
   HISTORY_FRAMING_DEFAULT,
@@ -128,16 +136,17 @@ test('pro tier with 3 prior critiques and styleModifier injects all three and ap
     systemPrompt.includes('ADDITIONAL STYLE GUIDANCE'),
     'styleModifier should be wrapped in the labeled section',
   );
-  // Regression guard: VOICE_ART_PROFESSOR must remain composed into the
-  // assembled system prompt. If this fails, the voice content has been
-  // dropped from BASE_SYSTEM_PROMPT composition.
-  assert.ok(
-    systemPrompt.includes('art professor'),
-    'art-professor voice content should be present in the assembled system prompt',
-  );
+  // Regression guard: VOICE_STUDIO_MENTOR must remain composed into the
+  // assembled system prompt. 'elements of art' is uniquely present in
+  // VOICE_STUDIO_MENTOR and absent from SHARED_SYSTEM_RULES,
+  // renderSkillCalibration, and RESPONSE_FORMAT_TEMPLATE — so this guard
+  // genuinely fails if the voice block is dropped from composition.
+  // (An earlier 'art professor' guard was weak: that phrase also appears
+  // in SHARED_SYSTEM_RULES' CLOSING ASIDE block, so it would pass even
+  // if the voice were stripped. Removed.)
   assert.ok(
     systemPrompt.includes('elements of art'),
-    'elements/principles vocabulary should be present in the voice block',
+    'studio-mentor voice (elements/principles vocabulary) should be present',
   );
 });
 
@@ -1251,4 +1260,142 @@ test('validateContextLengths caps preset_id at 50 chars', () => {
   const err = validateContextLengths({ preset_id: 'a'.repeat(51) });
   assert.equal(err?.field, 'preset_id');
   assert.equal(err?.max, 50);
+});
+
+// =============================================================================
+// Preset voices — content + selectVoice (Commit B of 3)
+// =============================================================================
+
+test('PRESET_VOICES exposes all four hardcoded preset IDs as non-empty strings', () => {
+  // Lock-in: the four keys here MUST match VALID_PRESET_IDS.
+  for (const id of ['studio_mentor', 'the_crit', 'fundamentals_coach', 'renaissance_master']) {
+    assert.ok(
+      typeof PRESET_VOICES[id] === 'string' && PRESET_VOICES[id].length > 0,
+      `PRESET_VOICES.${id} should be a non-empty string`,
+    );
+  }
+});
+
+test('each voice constant carries its distinguishing substring', () => {
+  // These substrings are unique to each voice and don't appear in
+  // SHARED_SYSTEM_RULES, renderSkillCalibration, or RESPONSE_FORMAT_TEMPLATE.
+  // Guards against accidental cross-contamination during edits.
+  assert.match(VOICE_STUDIO_MENTOR,      /elements of art/);
+  assert.match(VOICE_THE_CRIT,           /senior MFA crit/);
+  assert.match(VOICE_FUNDAMENTALS_COACH, /draftsmanship coach/);
+  assert.match(VOICE_RENAISSANCE_MASTER, /Florentine workshop in the year 1503/);
+});
+
+test('assembleSystemPrompt composes voice + SHARED_SYSTEM_RULES for each voice', () => {
+  for (const voice of [VOICE_STUDIO_MENTOR, VOICE_THE_CRIT, VOICE_FUNDAMENTALS_COACH, VOICE_RENAISSANCE_MASTER]) {
+    const assembled = assembleSystemPrompt(voice);
+    // Voice content appears verbatim.
+    assert.ok(assembled.includes(voice), 'voice content should appear verbatim');
+    // All four SHARED_SYSTEM_RULES top-level sections present.
+    assert.match(assembled, /CORE RULES:/);
+    assert.match(assembled, /SUBJECT VERIFICATION/);
+    assert.match(assembled, /CLOSING ASIDE/);
+    assert.match(assembled, /ITERATIVE COACHING/);
+  }
+});
+
+test('BASE_SYSTEM_PROMPT equals assembleSystemPrompt(VOICE_STUDIO_MENTOR)', () => {
+  // BASE_SYSTEM_PROMPT is preserved as the studio-mentor-assembled value
+  // for test stability and as the default in selectConfig presets.
+  assert.equal(BASE_SYSTEM_PROMPT, assembleSystemPrompt(VOICE_STUDIO_MENTOR));
+});
+
+test('selectVoice returns the matching voice for each hardcoded preset ID without a DB hit', async () => {
+  let called = false;
+  const fetcher = async () => { called = true; return { ok: true, json: async () => [] }; };
+  for (const [id, voice] of Object.entries(PRESET_VOICES)) {
+    const result = await selectVoice(id, FREE_USER, TEST_SUPABASE, fetcher);
+    assert.equal(result, voice, `selectVoice('${id}') should return PRESET_VOICES.${id}`);
+  }
+  assert.equal(called, false, 'no fetch should happen for hardcoded preset IDs');
+});
+
+test('selectVoice fetches the body for custom:<uuid> with user_id refilter', async () => {
+  const customId = 'custom:550e8400-e29b-41d4-a716-446655440000';
+  let captured;
+  const fetcher = async (url) => {
+    captured = url;
+    return { ok: true, json: async () => [{ body: 'Be exceptionally critical of negative space.' }] };
+  };
+  const result = await selectVoice(customId, FREE_USER, TEST_SUPABASE, fetcher);
+  assert.equal(result, 'Be exceptionally critical of negative space.');
+  // Defense-in-depth: the user_id filter is present on the SELECT.
+  assert.match(captured, /custom_prompts/);
+  assert.match(captured, /id=eq\.550e8400/);
+  assert.match(captured, new RegExp(`user_id=eq\\.${FREE_USER}`));
+  assert.match(captured, /select=body/);
+});
+
+test('selectVoice falls back to VOICE_STUDIO_MENTOR on PostgREST non-ok', async () => {
+  // console.error suppression: the node:test runner runs tests serially by
+  // default in this suite (no --test-concurrency set); reassigning
+  // console.error here can't race other tests' logs. Restored in finally.
+  const errorCalls = [];
+  const originalError = console.error;
+  console.error = (...args) => { errorCalls.push(args); };
+  try {
+    const fetcher = async () => ({ ok: false, status: 503 });
+    const result = await selectVoice(
+      'custom:550e8400-e29b-41d4-a716-446655440000',
+      FREE_USER, TEST_SUPABASE, fetcher,
+    );
+    assert.equal(result, VOICE_STUDIO_MENTOR);
+    assert.ok(errorCalls.length >= 1);
+    assert.match(String(errorCalls[0][0]), /selectVoice/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('selectVoice falls back to VOICE_STUDIO_MENTOR on missing/empty row', async () => {
+  // (Same suppression rationale as above — serial runner; safe to swap.)
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    // Empty array — row not found
+    const empty = async () => ({ ok: true, json: async () => [] });
+    assert.equal(
+      await selectVoice('custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, TEST_SUPABASE, empty),
+      VOICE_STUDIO_MENTOR,
+    );
+    // Row present but body is empty string
+    const emptyBody = async () => ({ ok: true, json: async () => [{ body: '' }] });
+    assert.equal(
+      await selectVoice('custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, TEST_SUPABASE, emptyBody),
+      VOICE_STUDIO_MENTOR,
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('selectVoice falls back to VOICE_STUDIO_MENTOR on undefined / null / unknown / non-custom preset', async () => {
+  let called = false;
+  const fetcher = async () => { called = true; return { ok: true, json: async () => [] }; };
+  for (const input of [undefined, null, '', 'not_a_real_preset', 12345]) {
+    assert.equal(
+      await selectVoice(input, FREE_USER, TEST_SUPABASE, fetcher),
+      VOICE_STUDIO_MENTOR,
+    );
+  }
+  assert.equal(called, false, 'no fetch for non-custom inputs');
+});
+
+test('selectVoice falls back when env is not configured', async () => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const result = await selectVoice(
+      'custom:550e8400-e29b-41d4-a716-446655440000',
+      FREE_USER, {}, // no SUPABASE_URL / SERVICE_ROLE_KEY
+    );
+    assert.equal(result, VOICE_STUDIO_MENTOR);
+  } finally {
+    console.error = originalError;
+  }
 });
