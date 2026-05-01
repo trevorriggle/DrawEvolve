@@ -1129,10 +1129,14 @@ async function logRequest({
 //   - seed is best-effort on OpenAI's side — not a guarantee of identical
 //     outputs, but with reduced temperature it makes replays meaningfully
 //     more stable for debugging and a more consistent student experience.
-//   - reasoning effort: passed as `reasoning: { effort: ... }` on the
-//     request body. Default is 'none' — testing gpt-5.1 in isolation before
-//     paying for reasoning tokens. 'low' / 'medium' / 'high' enable
-//     reasoning at additional cost.
+//   - reasoning effort: passed as a flat `reasoning_effort` field on the
+//     /v1/chat/completions request body (NOT the nested `reasoning: { effort }`
+//     shape — that's the /v1/responses endpoint's API. An earlier attempt
+//     used the nested form and OpenAI 400'd with "Unknown parameter:
+//     'reasoning'"; the rename plus the documented-value swap below fixes
+//     it). Default is 'minimal' — the cheapest documented gpt-5 value,
+//     meaning "do as little reasoning as possible." 'low' / 'medium' /
+//     'high' enable reasoning at additional cost.
 //
 // The request also forwards the authenticated Supabase user id as the
 // `user` field on the request body — OpenAI uses this for their own abuse
@@ -1141,7 +1145,7 @@ async function logRequest({
 const OPENAI_MODEL = 'gpt-5.1';
 const OPENAI_TEMPERATURE = 0.4;
 const OPENAI_SEED = 42;
-const OPENAI_REASONING_EFFORT = 'none';
+const OPENAI_REASONING_EFFORT = 'minimal';
 
 // Preset voices the Worker swaps into the system prompt per request.
 // Resolution flow: validateContext (format) → resolvePresetId (ownership)
@@ -1430,7 +1434,7 @@ export default {
           max_tokens: config.maxOutputTokens,
           temperature: OPENAI_TEMPERATURE,
           seed: OPENAI_SEED,
-          reasoning: { effort: OPENAI_REASONING_EFFORT },
+          reasoning_effort: OPENAI_REASONING_EFFORT,
           user: userId,
         }),
       });
