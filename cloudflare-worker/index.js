@@ -792,6 +792,26 @@ async function logRequest({
 }
 
 // =============================================================================
+// OpenAI request tunables
+// =============================================================================
+//
+// Determinism / variance knobs for the chat completion. Both apply per-request
+// in the body of the fetch at the bottom of the handler.
+//   - temperature 0.4 reduces non-determinism without making output robotic.
+//     OpenAI's default is 1.0, which combined with no seed produces
+//     contradictory Focus Areas across replays of the same drawing state.
+//   - seed is best-effort on OpenAI's side — not a guarantee of identical
+//     outputs, but with reduced temperature it makes replays meaningfully
+//     more stable for debugging and a more consistent student experience.
+//
+// The request also forwards the authenticated Supabase user id as the
+// `user` field on the request body — OpenAI uses this for their own abuse
+// detection. Free signal, set inline at the call site since it varies.
+
+const OPENAI_TEMPERATURE = 0.4;
+const OPENAI_SEED = 42;
+
+// =============================================================================
 // HTTP scaffolding
 // =============================================================================
 
@@ -938,6 +958,9 @@ export default {
             { role: 'user', content: userContent },
           ],
           max_tokens: config.maxOutputTokens,
+          temperature: OPENAI_TEMPERATURE,
+          seed: OPENAI_SEED,
+          user: userId,
         }),
       });
 
