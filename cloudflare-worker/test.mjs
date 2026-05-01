@@ -13,6 +13,9 @@ import {
   validateImagePayload,
   validateContextLengths,
   validateWorkerConfig,
+  isValidPresetId,
+  resolvePresetId,
+  DEFAULT_PRESET_ID,
   DAILY_SPEND_CAP_USD,
   computeRequestCost,
   getDailySpend,
@@ -842,6 +845,7 @@ test('persistCritique calls append_critique RPC with the canonical entry shape',
     tier: 'pro',
     usage: { prompt_tokens: 800, completion_tokens: 350 },
     now: FIXED_NOW,
+    presetId: 'renaissance_master',
   });
 
   await persistCritique({ env, drawingId: TEST_DRAWING_ID, entry, fetcher });
@@ -861,6 +865,9 @@ test('persistCritique calls append_critique RPC with the canonical entry shape',
   assert.equal(sentBody.p_entry.prompt_config.styleModifier, 'Reference Sargent.');
   assert.equal(sentBody.p_entry.prompt_token_count, 800);
   assert.equal(sentBody.p_entry.completion_token_count, 350);
+  // preset_id sits at top level, NOT inside prompt_config.
+  assert.equal(sentBody.p_entry.preset_id, 'renaissance_master');
+  assert.equal(sentBody.p_entry.prompt_config.preset_id, undefined);
   // ISO-8601, derived from the injected `now`.
   assert.equal(sentBody.p_entry.created_at, new Date(FIXED_NOW).toISOString());
 });
@@ -1119,4 +1126,129 @@ test('logRequest idempotent_replay path', async () => {
     'replay does not call OpenAI — token counts must be null');
 });
 
+// =============================================================================
+// Preset voices + custom prompts plumbing (Commit A of 3)
+// =============================================================================
 
+test('isValidPresetId accepts the four hardcoded preset IDs', () => {
+  for (const id of ['studio_mentor', 'the_crit', 'fundamentals_coach', 'renaissance_master']) {
+    assert.equal(isValidPresetId(id), true, `should accept ${id}`);
+  }
+});
+
+test('isValidPresetId accepts a valid custom:UUID', () => {
+  assert.equal(isValidPresetId('custom:550e8400-e29b-41d4-a716-446655440000'), true);
+});
+
+test('isValidPresetId rejects invalid inputs', () => {
+  assert.equal(isValidPresetId(undefined), false);
+  assert.equal(isValidPresetId(null), false);
+  assert.equal(isValidPresetId(''), false);
+  assert.equal(isValidPresetId('something_else'), false);
+  assert.equal(isValidPresetId('custom:not-a-uuid'), false);
+  assert.equal(isValidPresetId('custom:'), false);
+  // Case-sensitive: uppercase prefix or preset ID is rejected.
+  assert.equal(isValidPresetId('CUSTOM:550e8400-e29b-41d4-a716-446655440000'), false);
+  assert.equal(isValidPresetId('Studio_Mentor'), false);
+  assert.equal(isValidPresetId(12345), false);
+});
+
+test('resolvePresetId returns DEFAULT_PRESET_ID when input is missing', async () => {
+  for (const input of [undefined, null, '']) {
+    assert.equal(await resolvePresetId(input, FREE_USER, {}), DEFAULT_PRESET_ID);
+  }
+});
+
+test('resolvePresetId returns hardcoded preset IDs without a DB hit', async () => {
+  let called = false;
+  const fetcher = async () => { called = true; return { ok: true, json: async () => [] }; };
+  for (const id of ['studio_mentor', 'the_crit', 'fundamentals_coach', 'renaissance_master']) {
+    const result = await resolvePresetId(id, FREE_USER, TEST_SUPABASE, fetcher);
+    assert.equal(result, id);
+  }
+  assert.equal(called, false, 'no fetch should happen for hardcoded presets');
+});
+
+test('resolvePresetId throws invalid_preset_id for malformed input', async () => {
+  await assert.rejects(
+    () => resolvePresetId('not_a_real_preset', FREE_USER, TEST_SUPABASE),
+    (err) => err.code === 'invalid_preset_id',
+  );
+  await assert.rejects(
+    () => resolvePresetId('custom:not-a-uuid', FREE_USER, TEST_SUPABASE),
+    (err) => err.code === 'invalid_preset_id',
+  );
+});
+
+test('resolvePresetId verifies ownership for custom:UUID — match returns the input', async () => {
+  const customId = 'custom:550e8400-e29b-41d4-a716-446655440000';
+  let captured;
+  const fetcher = async (url) => {
+    captured = url;
+    return { ok: true, json: async () => [{ id: '550e8400-e29b-41d4-a716-446655440000' }] };
+  };
+  const result = await resolvePresetId(customId, FREE_USER, TEST_SUPABASE, fetcher);
+  assert.equal(result, customId);
+  assert.match(captured, /custom_prompts/);
+  assert.match(captured, /id=eq\.550e8400/);
+  assert.match(captured, new RegExp(`user_id=eq\\.${FREE_USER}`));
+});
+
+test('resolvePresetId throws custom_prompt_not_found when the row does not belong to the user', async () => {
+  const fetcher = async () => ({ ok: true, json: async () => [] }); // empty PostgREST result
+  await assert.rejects(
+    () => resolvePresetId('custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, TEST_SUPABASE, fetcher),
+    (err) => err.code === 'custom_prompt_not_found',
+  );
+});
+
+test('resolvePresetId throws custom_prompt_lookup_failed on PostgREST non-2xx', async () => {
+  const fetcher = async () => ({ ok: false, status: 503 });
+  await assert.rejects(
+    () => resolvePresetId('custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, TEST_SUPABASE, fetcher),
+    (err) => err.code === 'custom_prompt_lookup_failed',
+  );
+});
+
+test('buildCritiqueEntry includes preset_id at top level (not inside prompt_config)', () => {
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config: selectConfig('free', null),
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+    presetId: 'renaissance_master',
+  });
+  assert.equal(entry.preset_id, 'renaissance_master');
+  assert.equal(entry.prompt_config.preset_id, undefined,
+    'preset_id is voice identity, not a prompt-config knob');
+});
+
+test('buildCritiqueEntry defaults preset_id to studio_mentor when omitted', () => {
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config: selectConfig('free', null),
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+  });
+  assert.equal(entry.preset_id, DEFAULT_PRESET_ID);
+});
+
+test('validateContext type-checks preset_id like other context fields', () => {
+  assert.equal(validateContext({ preset_id: 'studio_mentor' }), true);
+  assert.equal(validateContext({ preset_id: 12345 }), false);
+});
+
+test('validateContextLengths caps preset_id at 50 chars', () => {
+  // 'custom:' (7) + 36-char UUID = 43; well under 50.
+  assert.equal(validateContextLengths({ preset_id: 'custom:550e8400-e29b-41d4-a716-446655440000' }), null);
+  // At cap (50) — still passes.
+  assert.equal(validateContextLengths({ preset_id: 'a'.repeat(50) }), null);
+  // Over cap (51) — fails with field name.
+  const err = validateContextLengths({ preset_id: 'a'.repeat(51) });
+  assert.equal(err?.field, 'preset_id');
+  assert.equal(err?.max, 50);
+});

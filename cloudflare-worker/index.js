@@ -403,13 +403,15 @@ const CONTEXT_STRING_FIELDS = [
   'techniques',
   'focus',
   'additionalContext',
+  'preset_id',
 ];
 
 // Per-field length caps. Closes a cost-amplification path: the unbounded
 // strings would otherwise flow straight into the prompt, inflating prompt
 // tokens × every-request × every-user. Sizes match realistic UI inputs:
 // short labels (200), comma-separated artist list (500), free-form notes
-// (2000).
+// (2000). preset_id is a short identifier — `custom:<uuid>` is 43 chars,
+// 50 leaves headroom for any future preset namespace.
 const CONTEXT_FIELD_MAX_LENGTHS = {
   skillLevel: 200,
   subject: 200,
@@ -418,6 +420,7 @@ const CONTEXT_FIELD_MAX_LENGTHS = {
   techniques: 200,
   focus: 200,
   additionalContext: 2000,
+  preset_id: 50,
 };
 
 function validateContext(context) {
@@ -488,15 +491,19 @@ function getUserTier(payload) {
 }
 
 /**
- * Pulls the critique_history jsonb array for the given drawing id. Used so the
- * iterative-coaching prompt has prior critiques to reference. Returns [] on
- * any failure — feedback will still generate, just without history context.
+ * Pulls the critique_history jsonb array AND the current preset_id for the
+ * given drawing id. Returns { history, presetId }. Used so the iterative-
+ * coaching prompt has prior critiques to reference, and so the handler can
+ * decide whether to write through a new preset_id (only on change). Returns
+ * { history: [], presetId: DEFAULT_PRESET_ID } on any failure — feedback
+ * will still generate, just without history context.
  */
 async function fetchCritiqueHistory(drawingId, env) {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return [];
+  const empty = { history: [], presetId: DEFAULT_PRESET_ID };
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) return empty;
   const url = `${env.SUPABASE_URL}/rest/v1/drawings`
     + `?id=eq.${encodeURIComponent(drawingId)}`
-    + `&select=critique_history&limit=1`;
+    + `&select=critique_history,preset_id&limit=1`;
   const res = await fetch(url, {
     headers: {
       apikey: env.SUPABASE_SERVICE_ROLE_KEY,
@@ -504,10 +511,13 @@ async function fetchCritiqueHistory(drawingId, env) {
       Accept: 'application/json',
     },
   });
-  if (!res.ok) return [];
+  if (!res.ok) return empty;
   const rows = await res.json();
-  const history = rows?.[0]?.critique_history;
-  return Array.isArray(history) ? history : [];
+  const row = rows?.[0];
+  return {
+    history: Array.isArray(row?.critique_history) ? row.critique_history : [],
+    presetId: typeof row?.preset_id === 'string' ? row.preset_id : DEFAULT_PRESET_ID,
+  };
 }
 
 // =============================================================================
@@ -758,6 +768,127 @@ function isValidClientRequestId(s) {
   return typeof s === 'string' && UUID_RE.test(s);
 }
 
+/**
+ * Format check for preset_id. Accepts the four hardcoded preset IDs or a
+ * `custom:<uuid>` reference. Pure function — no DB hit. Ownership of a
+ * custom prompt is verified later by resolvePresetId.
+ */
+function isValidPresetId(presetIdInput) {
+  if (typeof presetIdInput !== 'string' || presetIdInput.length === 0) return false;
+  if (VALID_PRESET_IDS.has(presetIdInput)) return true;
+  if (presetIdInput.startsWith(CUSTOM_PROMPT_PREFIX)) {
+    const uuid = presetIdInput.slice(CUSTOM_PROMPT_PREFIX_LEN);
+    return UUID_RE.test(uuid);
+  }
+  return false;
+}
+
+/**
+ * Resolve the incoming preset_id to the canonical string we persist.
+ * Hardcoded preset IDs return as-is with no DB hit. Custom IDs
+ * (`custom:<uuid>`) are verified against the custom_prompts table —
+ * the row must exist AND belong to the requesting user. Returns the
+ * validated string, or throws an Error with a stable `code` the handler
+ * maps to a precise HTTP status:
+ *   - 'invalid_preset_id'             → 400 (malformed input)
+ *   - 'custom_prompt_not_found'       → 403 (row missing or not user's)
+ *   - 'custom_prompt_lookup_failed'   → 502 (PostgREST non-2xx)
+ *   - 'config_missing'                → 500 (env not configured)
+ *
+ * fetcher is dependency-injected for tests.
+ */
+async function resolvePresetId(presetIdInput, userId, env, fetcher = fetch) {
+  if (presetIdInput === undefined || presetIdInput === null || presetIdInput === '') {
+    return DEFAULT_PRESET_ID;
+  }
+  if (!isValidPresetId(presetIdInput)) {
+    const err = new Error('invalid_preset_id');
+    err.code = 'invalid_preset_id';
+    throw err;
+  }
+  if (VALID_PRESET_IDS.has(presetIdInput)) {
+    return presetIdInput;
+  }
+  // custom:<uuid> path — verify ownership against custom_prompts.
+  const uuid = presetIdInput.slice(CUSTOM_PROMPT_PREFIX_LEN);
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    const err = new Error('config_missing');
+    err.code = 'config_missing';
+    throw err;
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/custom_prompts`
+    + `?id=eq.${encodeURIComponent(uuid)}`
+    + `&user_id=eq.${encodeURIComponent(userId)}`
+    + `&select=id&limit=1`;
+  const res = await fetcher(url, {
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      Accept: 'application/json',
+    },
+  });
+  if (!res.ok) {
+    const err = new Error('custom_prompt_lookup_failed');
+    err.code = 'custom_prompt_lookup_failed';
+    throw err;
+  }
+  const rows = await res.json();
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const err = new Error('custom_prompt_not_found');
+    err.code = 'custom_prompt_not_found';
+    throw err;
+  }
+  return presetIdInput;
+}
+
+/**
+ * PATCH drawings.preset_id when it differs from what's currently on the row.
+ * Caller decides whether to invoke based on the comparison; this helper
+ * just does the write. fetcher is dependency-injected for tests.
+ */
+async function updateDrawingPresetId({ env, drawingId, presetId, fetcher = fetch }) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('updateDrawingPresetId env not configured');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/drawings?id=eq.${encodeURIComponent(drawingId)}`;
+  const res = await fetcher(url, {
+    method: 'PATCH',
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ preset_id: presetId }),
+  });
+  if (!res.ok) throw new Error(`updateDrawingPresetId HTTP ${res.status}`);
+}
+
+/**
+ * PATCH user_preferences.preferred_preset_id. The signup trigger guarantees
+ * the row exists; if the trigger ever fails to seed it, the PATCH 404s, the
+ * caller logs, and the user-facing critique still succeeds (graceful
+ * degradation). The "ensure a row exists" responsibility belongs to the
+ * trigger, not the request path.
+ */
+async function updateUserPreferredPreset({ env, userId, presetId, fetcher = fetch }) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('updateUserPreferredPreset env not configured');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/user_preferences?user_id=eq.${encodeURIComponent(userId)}`;
+  const res = await fetcher(url, {
+    method: 'PATCH',
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ preferred_preset_id: presetId }),
+  });
+  if (!res.ok) throw new Error(`updateUserPreferredPreset HTTP ${res.status}`);
+}
+
 async function checkIdempotency({ env, userId, clientRequestId }) {
   const key = `idempotency:${userId}:${clientRequestId}`;
   const raw = await env.QUOTA_KV.get(key);
@@ -774,9 +905,13 @@ async function recordIdempotent({ env, userId, clientRequestId, body }) {
   await env.QUOTA_KV.put(key, JSON.stringify(body), { expirationTtl: 3600 });
 }
 
-function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usage, now }) {
+function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usage, now, presetId }) {
   return {
     sequence_number: sequenceNumber,
+    // preset_id sits at the top level (not inside prompt_config) because it
+    // identifies the voice that produced the row, not a prompt-shaping knob.
+    // Future analytics queries are cleaner this way.
+    preset_id: presetId ?? DEFAULT_PRESET_ID,
     content: feedback,
     prompt_config: {
       tier,
@@ -919,6 +1054,21 @@ const OPENAI_MODEL = 'gpt-5.1';
 const OPENAI_TEMPERATURE = 0.4;
 const OPENAI_SEED = 42;
 const OPENAI_REASONING_EFFORT = 'none';
+
+// Preset voices the Worker will eventually swap into the system prompt.
+// Commit A wires the plumbing — validation, persistence, write-through —
+// but voice selection still uses VOICE_ART_PROFESSOR for every request
+// regardless of what preset_id arrives. Voice swap lands in Commit B.
+const VALID_PRESET_IDS = Object.freeze(new Set([
+  'studio_mentor',
+  'the_crit',
+  'fundamentals_coach',
+  'renaissance_master',
+]));
+
+const DEFAULT_PRESET_ID = 'studio_mentor';
+const CUSTOM_PROMPT_PREFIX = 'custom:';
+const CUSTOM_PROMPT_PREFIX_LEN = CUSTOM_PROMPT_PREFIX.length;
 
 // Hard provider-level daily spend ceiling enforced at the Worker before any
 // OpenAI call. Fail-closes with 503 once exceeded, until UTC midnight rolls
@@ -1085,6 +1235,24 @@ export default {
         }, 400);
       }
 
+      // preset_id format check (cheap; defense before rate-limit gate). The
+      // ownership check on custom:<uuid> happens later via resolvePresetId.
+      if (context?.preset_id !== undefined && !isValidPresetId(context.preset_id)) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({ error: 'Invalid preset_id format.' }, 400);
+      }
+
+      // set_as_default is a top-level body field (not inside context) — it's
+      // a per-request command, not part of the drawing context.
+      if (body.set_as_default !== undefined && typeof body.set_as_default !== 'boolean') {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({ error: 'set_as_default must be a boolean.' }, 400);
+      }
+
       const { tier, promptPreferences } = getUserTier(payload);
 
       // Phase 5c — rate limits. Run before the ownership query so we don't
@@ -1109,7 +1277,24 @@ export default {
       }
 
       const config = selectConfig(tier, promptPreferences);
-      const history = await fetchCritiqueHistory(drawingIdLower, env);
+      const { history, presetId: existingPresetId } = await fetchCritiqueHistory(drawingIdLower, env);
+
+      // Resolve preset_id. For custom:<uuid>, this verifies the row exists
+      // AND belongs to this user. Hardcoded preset IDs short-circuit
+      // without a DB hit.
+      let resolvedPresetId;
+      try {
+        resolvedPresetId = await resolvePresetId(context?.preset_id, userId, env);
+      } catch (err) {
+        const status = err?.code === 'custom_prompt_not_found' ? 403
+                     : err?.code === 'custom_prompt_lookup_failed' ? 502
+                     : err?.code === 'config_missing' ? 500
+                     : 400;
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({ error: err?.code ?? 'preset_id_resolution_failed' }, status);
+      }
 
       const systemPrompt = buildSystemPrompt(config, context ?? {});
       const userContent = buildUserMessage(config, history, image);
@@ -1191,6 +1376,7 @@ export default {
         tier,
         usage: data.usage,
         now,
+        presetId: resolvedPresetId,
       });
       let persisted = true;
       try {
@@ -1202,6 +1388,25 @@ export default {
           userId,
           error: err?.message,
         });
+      }
+
+      // Write-through: if the resolved preset_id differs from what's currently
+      // on the drawings row, update it. Skip the round-trip when they match
+      // (the common case once a user settles on a preset). Fire-and-forget;
+      // failure is logged. The critique entry already records the resolved
+      // preset_id, so a missed write-through doesn't lose data.
+      if (resolvedPresetId !== existingPresetId) {
+        updateDrawingPresetId({ env, drawingId: drawingIdLower, presetId: resolvedPresetId }).catch((err) =>
+          console.error('[preset] updateDrawingPresetId failed', err?.message),
+        );
+      }
+
+      // set_as_default flag → user_preferences.preferred_preset_id. Only fires
+      // when the request explicitly opts in. Same fire-and-forget shape.
+      if (body.set_as_default === true) {
+        updateUserPreferredPreset({ env, userId, presetId: resolvedPresetId }).catch((err) =>
+          console.error('[preset] updateUserPreferredPreset failed', err?.message),
+        );
       }
 
       // Quota burns only on a delivered critique. Anomaly counter rides along.
@@ -1277,6 +1482,13 @@ export {
   validateContext,
   validateContextLengths,
   validateWorkerConfig,
+  isValidPresetId,
+  resolvePresetId,
+  updateDrawingPresetId,
+  updateUserPreferredPreset,
+  VALID_PRESET_IDS,
+  DEFAULT_PRESET_ID,
+  CUSTOM_PROMPT_PREFIX,
   getUserTier,
   DAILY_SPEND_CAP_USD,
   computeRequestCost,
