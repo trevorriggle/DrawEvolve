@@ -330,7 +330,10 @@ async function validateJWT(token, env) {
   const payload = JSON.parse(base64UrlToString(payloadB64));
   const now = Math.floor(Date.now() / 1000);
   if (typeof payload.exp !== 'number' || payload.exp < now) throw new Error('Token expired');
-  if (env.SUPABASE_JWT_ISSUER && payload.iss !== env.SUPABASE_JWT_ISSUER) {
+  // SUPABASE_JWT_ISSUER is required — the handler validates env before calling
+  // here, so we always have a comparator. Previously this check was skipped
+  // when the env var was unset, silently weakening auth on misconfigured deploys.
+  if (payload.iss !== env.SUPABASE_JWT_ISSUER) {
     throw new Error('Bad issuer');
   }
   // Tokens with no `aud` claim must fail — `aud && ...` would have permitted
@@ -342,6 +345,22 @@ async function validateJWT(token, env) {
     throw new Error('Missing sub');
   }
   return payload;
+}
+
+/**
+ * Returns null if all required env config is present; else returns a string
+ * describing the missing piece. Run at the top of the fetch handler before
+ * any auth or KV work so a misconfigured deploy fails fast and visibly
+ * rather than degrading silently. Add new required env keys here.
+ */
+function validateWorkerConfig(env) {
+  if (!env || typeof env !== 'object') {
+    return 'Server misconfigured: env missing.';
+  }
+  if (!env.SUPABASE_JWT_ISSUER) {
+    return 'Server misconfigured: SUPABASE_JWT_ISSUER missing.';
+  }
+  return null;
 }
 
 // =============================================================================
@@ -386,12 +405,44 @@ const CONTEXT_STRING_FIELDS = [
   'additionalContext',
 ];
 
+// Per-field length caps. Closes a cost-amplification path: the unbounded
+// strings would otherwise flow straight into the prompt, inflating prompt
+// tokens × every-request × every-user. Sizes match realistic UI inputs:
+// short labels (200), comma-separated artist list (500), free-form notes
+// (2000).
+const CONTEXT_FIELD_MAX_LENGTHS = {
+  skillLevel: 200,
+  subject: 200,
+  style: 200,
+  artists: 500,
+  techniques: 200,
+  focus: 200,
+  additionalContext: 2000,
+};
+
 function validateContext(context) {
   if (!context || typeof context !== 'object' || Array.isArray(context)) return false;
   for (const key of CONTEXT_STRING_FIELDS) {
     if (key in context && typeof context[key] !== 'string') return false;
   }
   return true;
+}
+
+/**
+ * Returns null if every present string field is within its length cap; else
+ * returns { field, max, length } describing the first violation. Run AFTER
+ * validateContext (which guarantees fields are strings when present), so this
+ * function only checks length, not type.
+ */
+function validateContextLengths(context) {
+  if (!context || typeof context !== 'object') return null;
+  for (const [key, max] of Object.entries(CONTEXT_FIELD_MAX_LENGTHS)) {
+    const val = context[key];
+    if (typeof val === 'string' && val.length > max) {
+      return { field: key, max, length: val.length };
+    }
+  }
+  return null;
 }
 
 /**
@@ -869,12 +920,54 @@ const OPENAI_TEMPERATURE = 0.4;
 const OPENAI_SEED = 42;
 const OPENAI_REASONING_EFFORT = 'none';
 
+// Hard provider-level daily spend ceiling enforced at the Worker before any
+// OpenAI call. Fail-closes with 503 once exceeded, until UTC midnight rolls
+// the day key over. Sized for TestFlight; revisit upward as user volume grows.
+// This is a HARD ceiling, not a per-user limit — see TIER_LIMITS for those.
+const DAILY_SPEND_CAP_USD = 5.00;
+
+// Approximate per-token rates for cost computation. Kept as a flat pair
+// because we run on a single model at a time. When OPENAI_MODEL changes,
+// update these to match the new model's published rates.
+const COST_PER_INPUT_TOKEN_USD = 0.63 / 1_000_000;   // gpt-5.1
+const COST_PER_OUTPUT_TOKEN_USD = 5.00 / 1_000_000;  // gpt-5.1
+
+function computeRequestCost(usage) {
+  const inputTokens = usage?.prompt_tokens ?? 0;
+  const outputTokens = usage?.completion_tokens ?? 0;
+  return inputTokens * COST_PER_INPUT_TOKEN_USD + outputTokens * COST_PER_OUTPUT_TOKEN_USD;
+}
+
+async function getDailySpend(env, dayKey) {
+  if (!env.QUOTA_KV) return 0;
+  const raw = await env.QUOTA_KV.get(`daily_spend:${dayKey}`);
+  const parsed = parseFloat(raw ?? '0');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function incrementDailySpend(env, dayKey, amountUsd) {
+  // Read-modify-write — small undercount possible under concurrent writes.
+  // Acceptable for a daily ceiling at TestFlight scale; the per-IP and
+  // per-user rate limits ahead of this gate bound the realistic concurrency.
+  // 48h TTL prevents stale day-keys from accumulating in KV.
+  if (!env.QUOTA_KV) return amountUsd;
+  const current = await getDailySpend(env, dayKey);
+  const next = current + amountUsd;
+  await env.QUOTA_KV.put(`daily_spend:${dayKey}`, String(next), { expirationTtl: 48 * 3600 });
+  return next;
+}
+
 // =============================================================================
 // HTTP scaffolding
 // =============================================================================
 
+// CORS locked to the production web origin. The iOS app is the primary
+// client and doesn't trigger CORS, so this only matters for browser callers.
+// Previously '*', which let any origin call the endpoint with a stolen JWT.
+// If localhost or another origin needs access later, add it here — the cost
+// of plurality is one extra header value, not architectural.
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': 'https://drawevolve.com',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
@@ -898,6 +991,15 @@ export default {
     }
     if (request.method !== 'POST') {
       return jsonResponse({ error: 'Method not allowed' }, 405);
+    }
+
+    // Fail fast on missing required env. Previously SUPABASE_JWT_ISSUER was
+    // silently optional in validateJWT, which meant a misconfigured deploy
+    // would weaken auth without anyone noticing. Now we 500 visibly.
+    const configErr = validateWorkerConfig(env);
+    if (configErr) {
+      console.error('[config]', configErr);
+      return jsonResponse({ error: configErr }, 500);
     }
 
     // Phase 5e — capture IP up front so auth_failed / validation_failed
@@ -973,6 +1075,15 @@ export default {
         }));
         return jsonResponse({ error: 'Invalid context' }, 400);
       }
+      const lengthErr = validateContextLengths(context);
+      if (lengthErr) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({
+          error: `Context field '${lengthErr.field}' exceeds maximum length of ${lengthErr.max} characters.`,
+        }, 400);
+      }
 
       const { tier, promptPreferences } = getUserTier(payload);
 
@@ -1003,16 +1114,26 @@ export default {
       const systemPrompt = buildSystemPrompt(config, context ?? {});
       const userContent = buildUserMessage(config, history, image);
 
-      // [DIAGNOSTIC] TEMPORARY — verifying history rendering reaches the model.
-      // REVERT in follow-up commit. Excludes image_url part to avoid logging
-      // base64 payloads.
-      console.log('[DIAGNOSTIC] OpenAI request prep', {
-        drawingId: drawingIdLower,
-        historyLength: Array.isArray(history) ? history.length : 0,
-        includeHistoryCount: config.includeHistoryCount,
-        systemPrompt,
-        userText: userContent.find(p => p.type === 'text')?.text ?? '<no text part>',
-      });
+      // Pre-flight: enforce the global daily spend cap. Fail-closed before we
+      // hit OpenAI's dashboard limit so the failure mode is a graceful 503
+      // rather than scattered 429/500s from OpenAI itself. Read-modify-write
+      // via KV; small undercounts under high concurrency are acceptable for
+      // a hard ceiling at TestFlight scale.
+      const todayKey = utcDayKey(now);
+      const dailySpend = await getDailySpend(env, todayKey);
+      if (dailySpend >= DAILY_SPEND_CAP_USD) {
+        console.error('[spend-cap] daily limit hit', {
+          spent: dailySpend.toFixed(4),
+          cap: DAILY_SPEND_CAP_USD,
+          dayKey: todayKey,
+        });
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.QUOTA_EXCEEDED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({
+          error: 'Service temporarily unavailable due to daily limit. Please try again tomorrow.',
+        }, 503);
+      }
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -1090,6 +1211,14 @@ export default {
         console.error('[quota] recordSuccessfulCritique failed', err?.message),
       );
 
+      // Update the global daily spend total for the cap. Same fire-and-forget
+      // shape as recordSuccessfulCritique — failure is logged, never blocks
+      // the user response. Computed from THIS request's reported usage.
+      const requestCost = computeRequestCost(data.usage);
+      incrementDailySpend(env, todayKey, requestCost).catch((err) =>
+        console.error('[spend-cap] incrementDailySpend failed', err?.message),
+      );
+
       // Phase 5d — idempotency cache. Stores the body we're about to return so
       // a retry of the same client_request_id within 1h gets the exact same
       // response without re-charging OpenAI.
@@ -1146,7 +1275,13 @@ export {
   renderContextBlock,
   validateImagePayload,
   validateContext,
+  validateContextLengths,
+  validateWorkerConfig,
   getUserTier,
+  DAILY_SPEND_CAP_USD,
+  computeRequestCost,
+  getDailySpend,
+  incrementDailySpend,
   TIER_LIMITS,
   IP_HOURLY_CAP,
   ANOMALY_MULTIPLIER,

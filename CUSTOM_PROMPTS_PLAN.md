@@ -90,3 +90,9 @@ This path doesn't preclude later consolidation if the two-section approach feels
 ---
 
 *Source: prompt-engineering audit run 2026-04-30 against `main`. See conversation history for the full evidence trail.*
+
+---
+
+## Future: Stuck Detection
+
+When the same Focus Area persists across 3+ critiques on the same drawing, modify the prompt to suggest a different angle, a focused study, or stepping away from the drawing. Requires Focus Area extraction (Prompt #4 in the prompt-tactics track) to ship first. Prevents iterative coaching from feeling like grinding when a student is genuinely stuck.

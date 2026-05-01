@@ -32,3 +32,14 @@ Possible fixes (not done here):
 Currently no way to rename a saved drawing. Save = overwrite (correct), but no "Rename" affordance is surfaced anywhere. Considered: long-press or context menu on the drawing thumbnail in the Gallery, with a "Rename" action that updates `drawings.title`. Could also live in `DrawingDetailView` as a menu item.
 
 Not blocking v1; users who care can delete + re-save with a new name today.
+
+---
+
+## iOS DrawingContext.swift skill-level default diverges from worker
+
+`DrawEvolve/DrawEvolve/Models/DrawingContext.swift` defaults `skillLevel` to `"Beginner"` in three locations — line 12 (property declaration), line 25 (init parameter), line 51 (`decodeIfPresent` fallback). The Cloudflare Worker default is now `'Intermediate'` (`cloudflare-worker/index.js:131`).
+
+Harmless in production: `PromptInputView.swift` is a segmented picker that always writes a value before submission, so the Worker's missing-value fallback is effectively never hit. But the defaults are divergent and a future caller that bypasses the picker (programmatic save, new screen, automation) would see different defaults on the two sides.
+
+Fix when next in Xcode: align the iOS default to `"Intermediate"` in all three locations.
+

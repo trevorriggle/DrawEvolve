@@ -11,6 +11,12 @@ import {
   renderTruncationMarker,
   renderSkillCalibration,
   validateImagePayload,
+  validateContextLengths,
+  validateWorkerConfig,
+  DAILY_SPEND_CAP_USD,
+  computeRequestCost,
+  getDailySpend,
+  incrementDailySpend,
   validateContext,
   getUserTier,
   TIER_LIMITS,
@@ -453,6 +459,124 @@ test('validateContext rejects when a known field has a wrong type', () => {
 
 test('validateContext tolerates unknown keys (forward-compat)', () => {
   assert.equal(validateContext({ subject: 'x', futureField: 'y' }), true);
+});
+
+// =============================================================================
+// Context length caps — validateContextLengths
+// =============================================================================
+
+test('validateContextLengths returns null when all fields are within their caps', () => {
+  assert.equal(validateContextLengths({}), null);
+  assert.equal(validateContextLengths({ subject: 'a portrait' }), null);
+  // At exactly the cap is allowed (inclusive).
+  assert.equal(validateContextLengths({ subject: 'a'.repeat(200) }), null);
+  assert.equal(validateContextLengths({ artists: 'a'.repeat(500) }), null);
+  assert.equal(validateContextLengths({ additionalContext: 'a'.repeat(2000) }), null);
+});
+
+test('validateContextLengths flags additionalContext over its 2000 cap with the field name and length', () => {
+  const err = validateContextLengths({ additionalContext: 'a'.repeat(2001) });
+  assert.equal(err?.field,  'additionalContext');
+  assert.equal(err?.max,    2000);
+  assert.equal(err?.length, 2001);
+});
+
+test('validateContextLengths uses per-field caps (subject 200, artists 500)', () => {
+  // subject cap is 200 — 201 fails
+  const subErr = validateContextLengths({ subject: 'a'.repeat(201) });
+  assert.equal(subErr?.field, 'subject');
+  assert.equal(subErr?.max,   200);
+  // artists cap is 500 — 501 fails, 200 passes (under the smaller subject cap doesn't apply to artists)
+  const artErr = validateContextLengths({ artists: 'a'.repeat(501) });
+  assert.equal(artErr?.field, 'artists');
+  assert.equal(artErr?.max,   500);
+});
+
+test('validateContextLengths ignores non-string values (validateContext catches those first)', () => {
+  // validateContextLengths is run AFTER validateContext, so by the time we reach
+  // it, all present fields are guaranteed strings. The function tolerates
+  // non-strings as a defense in depth.
+  assert.equal(validateContextLengths({ subject: 12345 }), null);
+  assert.equal(validateContextLengths({ subject: null }),  null);
+});
+
+// =============================================================================
+// Worker config validation — validateWorkerConfig
+// =============================================================================
+
+test('validateWorkerConfig flags missing SUPABASE_JWT_ISSUER', () => {
+  const err = validateWorkerConfig({});
+  assert.match(String(err), /SUPABASE_JWT_ISSUER/);
+});
+
+test('validateWorkerConfig returns null when SUPABASE_JWT_ISSUER is set', () => {
+  assert.equal(
+    validateWorkerConfig({ SUPABASE_JWT_ISSUER: 'https://x.supabase.co/auth/v1' }),
+    null,
+  );
+});
+
+test('validateWorkerConfig flags missing env entirely', () => {
+  assert.match(String(validateWorkerConfig(null)),      /env missing/);
+  assert.match(String(validateWorkerConfig(undefined)), /env missing/);
+});
+
+// =============================================================================
+// Daily spend cap
+// =============================================================================
+
+test('DAILY_SPEND_CAP_USD is set to a sane TestFlight value', () => {
+  assert.ok(typeof DAILY_SPEND_CAP_USD === 'number' && DAILY_SPEND_CAP_USD > 0);
+  assert.ok(DAILY_SPEND_CAP_USD <= 25, 'cap should be modest at TestFlight scale');
+});
+
+test('computeRequestCost uses gpt-5.1 input/output rates', () => {
+  // 1M input @ $0.63 + 1M output @ $5 = $5.63
+  const big = computeRequestCost({ prompt_tokens: 1_000_000, completion_tokens: 1_000_000 });
+  assert.ok(Math.abs(big - 5.63) < 1e-9);
+  // Realistic critique: ~2K input + ~700 output
+  const realistic = computeRequestCost({ prompt_tokens: 2000, completion_tokens: 700 });
+  // 2000 * 0.63e-6 + 700 * 5e-6 = 0.00126 + 0.0035 = 0.00476
+  assert.ok(Math.abs(realistic - 0.00476) < 1e-6);
+  // Missing usage is 0, never NaN.
+  assert.equal(computeRequestCost({}),         0);
+  assert.equal(computeRequestCost(undefined),  0);
+});
+
+test('getDailySpend returns 0 for missing key, parses stored number', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  assert.equal(await getDailySpend(env, '2026-04-29'), 0);
+  await kv.put('daily_spend:2026-04-29', '1.2345', { expirationTtl: 48 * 3600 });
+  assert.equal(await getDailySpend(env, '2026-04-29'), 1.2345);
+  // Malformed values fall back to 0, not NaN.
+  await kv.put('daily_spend:2026-04-30', 'not-a-number', { expirationTtl: 48 * 3600 });
+  assert.equal(await getDailySpend(env, '2026-04-30'), 0);
+});
+
+test('incrementDailySpend adds to existing total and persists', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  await kv.put('daily_spend:2026-04-29', '0.50', { expirationTtl: 48 * 3600 });
+  const next = await incrementDailySpend(env, '2026-04-29', 0.25);
+  assert.ok(Math.abs(next - 0.75) < 1e-9);
+  assert.ok(Math.abs((await getDailySpend(env, '2026-04-29')) - 0.75) < 1e-9);
+});
+
+test('daily spend cap gating: at-or-above the cap blocks; below the cap allows', async () => {
+  // Validates the predicate the handler uses ("dailySpend >= DAILY_SPEND_CAP_USD")
+  // by exercising the helper that feeds it.
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // Seed exactly at the cap.
+  await kv.put('daily_spend:2026-04-29', String(DAILY_SPEND_CAP_USD), { expirationTtl: 48 * 3600 });
+  const spent = await getDailySpend(env, '2026-04-29');
+  assert.ok(spent >= DAILY_SPEND_CAP_USD, 'at-cap reads as at-or-above the cap');
+
+  // Drop slightly below.
+  await kv.put('daily_spend:2026-04-29', String(DAILY_SPEND_CAP_USD - 0.01), { expirationTtl: 48 * 3600 });
+  const under = await getDailySpend(env, '2026-04-29');
+  assert.ok(under < DAILY_SPEND_CAP_USD, 'below-cap reads as below the cap');
 });
 
 // =============================================================================
