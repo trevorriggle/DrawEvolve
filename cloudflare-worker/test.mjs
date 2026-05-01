@@ -8,6 +8,7 @@ import {
   selectConfig,
   buildSystemPrompt,
   buildUserMessage,
+  renderSkillCalibration,
   validateImagePayload,
   validateContext,
   getUserTier,
@@ -100,6 +101,17 @@ test('pro tier with 3 prior critiques and styleModifier injects all three and ap
     systemPrompt.includes('ADDITIONAL STYLE GUIDANCE'),
     'styleModifier should be wrapped in the labeled section',
   );
+  // Regression guard: VOICE_ART_PROFESSOR must remain composed into the
+  // assembled system prompt. If this fails, the voice content has been
+  // dropped from BASE_SYSTEM_PROMPT composition.
+  assert.ok(
+    systemPrompt.includes('art professor'),
+    'art-professor voice content should be present in the assembled system prompt',
+  );
+  assert.ok(
+    systemPrompt.includes('elements of art'),
+    'elements/principles vocabulary should be present in the voice block',
+  );
 });
 
 test('pro tier respects includeHistoryCount cap when more history exists', () => {
@@ -156,6 +168,46 @@ test('mutating returned config does not pollute presets', () => {
   a.maxOutputTokens = 99999;
   const b = selectConfig('free', null);
   assert.equal(b.maxOutputTokens, DEFAULT_FREE_CONFIG.maxOutputTokens);
+});
+
+test('renderSkillCalibration matches case-insensitively and trims whitespace', () => {
+  const lower  = renderSkillCalibration('beginner');
+  const upper  = renderSkillCalibration('BEGINNER');
+  const title  = renderSkillCalibration('Beginner');
+  const padded = renderSkillCalibration('  Beginner  ');
+  assert.equal(lower, upper);
+  assert.equal(lower, title);
+  assert.equal(lower, padded);
+  // Sanity: it actually resolved to the beginner body, not the fallback.
+  assert.match(lower, /newer to drawing/i);
+
+  // Same shape for advanced — confirms the normalization isn't beginner-only.
+  assert.equal(
+    renderSkillCalibration('advanced'),
+    renderSkillCalibration('ADVANCED'),
+  );
+  assert.match(renderSkillCalibration('advanced'), /serious skill/i);
+});
+
+test('renderSkillCalibration falls back to Intermediate body for missing/empty/unrecognized input', () => {
+  const intermediate = renderSkillCalibration('Intermediate');
+  // The Intermediate body is the documented fallback for anything that isn't
+  // explicitly beginner or advanced (case-insensitive).
+  assert.equal(renderSkillCalibration('intermediate'),  intermediate);
+  assert.equal(renderSkillCalibration('Pro'),           intermediate);
+  assert.equal(renderSkillCalibration('enterprise'),    intermediate);
+  assert.equal(renderSkillCalibration(''),              intermediate);
+  assert.equal(renderSkillCalibration('   '),           intermediate);
+  assert.equal(renderSkillCalibration(undefined),       intermediate);
+  assert.equal(renderSkillCalibration(null),            intermediate);
+
+  // Sanity: it's actually the intermediate body.
+  assert.match(intermediate, /working fundamentals but is still building/);
+
+  // Integration: buildSystemPrompt with no skillLevel must use the same body
+  // (the default switched from Beginner to Intermediate alongside this).
+  const sysPrompt = buildSystemPrompt(selectConfig('free', null), { subject: 'a tree' });
+  assert.match(sysPrompt, /working fundamentals but is still building/);
 });
 
 // =============================================================================
