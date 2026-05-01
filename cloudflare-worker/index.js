@@ -10,7 +10,7 @@
 //     includeHistoryCount: number, // how many prior critiques on this drawing to include (0 = none)
 //     historyFraming: string,      // wrapper text introducing past critiques to the model
 //     styleModifier: string | null,// optional appended instruction (Pro tier override)
-//     maxOutputTokens: number      // OpenAI max_tokens for the response
+//     maxOutputTokens: number      // OpenAI max_completion_tokens for the response (was max_tokens on gpt-4o)
 //   }
 //
 // Tier flow:
@@ -1431,7 +1431,9 @@ export default {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userContent },
           ],
-          max_tokens: config.maxOutputTokens,
+          // gpt-5 series uses max_completion_tokens; max_tokens is rejected as
+          // unsupported. Same migration footgun as the reasoning_effort rename.
+          max_completion_tokens: config.maxOutputTokens,
           temperature: OPENAI_TEMPERATURE,
           seed: OPENAI_SEED,
           reasoning_effort: OPENAI_REASONING_EFFORT,
