@@ -122,6 +122,13 @@ actor OpenAIManager {
         // (auth.uid()::text + storage paths are all lowercase). Phase 5d adds
         // client_request_id for idempotency — same lowercase convention.
         let clientRequestId = UUID().uuidString.lowercased()
+
+        // Read the user's selected preset voice. Lives in UserDefaults under
+        // the key the My Prompts view writes to via @AppStorage. Default
+        // "studio_mentor" matches the worker's DEFAULT_PRESET_ID and the
+        // AppStorage default in the view — three sources, one value.
+        let selectedPresetID = UserDefaults.standard.string(forKey: "selectedPresetID") ?? "studio_mentor"
+
         let requestBody: [String: Any] = [
             "image": base64Image,
             "drawingId": drawingId.uuidString.lowercased(),
@@ -134,6 +141,11 @@ actor OpenAIManager {
                 "techniques": context.techniques,
                 "focus": context.focus,
                 "additionalContext": context.additionalContext,
+                // snake_case to match the worker's CONTEXT_STRING_FIELDS
+                // contract — sending "presetId" would silently fail validation
+                // and the worker would default to studio_mentor without
+                // surfacing an error.
+                "preset_id": selectedPresetID,
             ],
         ]
 

@@ -7,10 +7,37 @@
 
 import SwiftUI
 
+// MARK: - Preset Voice Picker (data)
+
+/// One row in the My Prompts list. ID strings MUST match the worker's
+/// VALID_PRESET_IDS set (cloudflare-worker/index.js) — sending an unknown
+/// ID gets the request rejected with 400. Display copy is iOS-only.
+private struct PresetVoiceOption: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let description: String
+}
+
+private let presetVoiceOptions: [PresetVoiceOption] = [
+    .init(id: "studio_mentor",
+          name: "Studio Mentor",
+          description: "Honest, balanced critique grounded in elements and principles of art."),
+    .init(id: "the_crit",
+          name: "The Crit",
+          description: "MFA-style peer review. Direct, probing, no padded reassurance."),
+    .init(id: "fundamentals_coach",
+          name: "Fundamentals Coach",
+          description: "Drills proportion, value, perspective, and craft mechanics first."),
+    .init(id: "renaissance_master",
+          name: "Renaissance Master",
+          description: "A Florentine workshop master, somewhere around 1503."),
+]
+
 struct GalleryView: View {
     /// Top-level sections of the gallery. `.drawings` is fully wired today;
-    /// `.prompts` and `.evolution` are placeholder scaffolding for upcoming
-    /// features (see CUSTOM_PROMPTS_PLAN.md for the prompts work).
+    /// `.prompts` is the preset-voice picker (Commit C of the preset voices
+    /// feature); `.evolution` is placeholder scaffolding for an upcoming
+    /// feature.
     private enum Tab: Hashable { case drawings, prompts, evolution }
 
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
@@ -27,6 +54,11 @@ struct GalleryView: View {
 
     // Debug: Clear all drawings
     @State private var showClearAllAlert = false
+
+    // Persisted across launches via UserDefaults. OpenAIManager reads the same
+    // key directly when assembling each request, so the worker sees the user's
+    // current selection without view-layer state propagation.
+    @AppStorage("selectedPresetID") private var selectedPresetID: String = "studio_mentor"
 
     let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -50,8 +82,7 @@ struct GalleryView: View {
                             }
                         }
                     case .prompts:
-                        // TODO: Implement My Prompts. Placeholder for visual scaffolding.
-                        comingSoonView(icon: "text.bubble", title: "My Prompts")
+                        myPromptsView
                     case .evolution:
                         // TODO: Implement My Evolution. Placeholder for visual scaffolding.
                         comingSoonView(icon: "chart.line.uptrend.xyaxis", title: "My Evolution")
@@ -190,6 +221,44 @@ struct GalleryView: View {
             }
         }
         .padding()
+    }
+
+    // MARK: - My Prompts (preset voice picker)
+
+    private var myPromptsView: some View {
+        List {
+            Section {
+                ForEach(presetVoiceOptions) { preset in
+                    Button {
+                        selectedPresetID = preset.id
+                    } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(preset.name)
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                Text(preset.description)
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            if selectedPresetID == preset.id {
+                                Image(systemName: "checkmark")
+                                    .font(.headline)
+                                    .foregroundColor(.accentColor)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            } header: {
+                Text("AI Critique Voice")
+            } footer: {
+                Text("This voice is used for every Get Feedback request. You can switch any time.")
+            }
+        }
+        .listStyle(.insetGrouped)
     }
 
     // MARK: - Empty State
