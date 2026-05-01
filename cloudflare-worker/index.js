@@ -945,6 +945,17 @@ export default {
       const systemPrompt = buildSystemPrompt(config, context ?? {});
       const userContent = buildUserMessage(config, history, image);
 
+      // [DIAGNOSTIC] TEMPORARY — verifying history rendering reaches the model.
+      // REVERT in follow-up commit. Excludes image_url part to avoid logging
+      // base64 payloads.
+      console.log('[DIAGNOSTIC] OpenAI request prep', {
+        drawingId: drawingIdLower,
+        historyLength: Array.isArray(history) ? history.length : 0,
+        includeHistoryCount: config.includeHistoryCount,
+        systemPrompt,
+        userText: userContent.find(p => p.type === 'text')?.text ?? '<no text part>',
+      });
+
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {

@@ -36,3 +36,10 @@ id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 # SUPABASE_URL and SUPABASE_JWT_ISSUER could live here as plaintext vars
 # instead of secrets — they're not sensitive — but keeping them as secrets
 # means rotating projects doesn't require a wrangler.toml redeploy.
+
+# Workers Logs — without this, console.log output is silently dropped at the
+# Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for
+# cost control once volume warrants it.
+[observability]
+enabled = true
+head_sampling_rate = 1
