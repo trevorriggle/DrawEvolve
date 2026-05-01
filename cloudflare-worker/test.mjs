@@ -8,6 +8,7 @@ import {
   selectConfig,
   buildSystemPrompt,
   buildUserMessage,
+  renderTruncationMarker,
   renderSkillCalibration,
   validateImagePayload,
   validateContext,
@@ -36,6 +37,23 @@ const baseContext = {
   focus: '',
   additionalContext: '',
 };
+
+// Mirrors the row shape that buildCritiqueEntry (cloudflare-worker/index.js)
+// writes into drawings.critique_history and that fetchCritiqueHistory reads
+// back. Use this when testing rendering against production data — ad-hoc
+// in-test entries with a `feedback` key drifted from reality and previously
+// hid a rendering bug. Override per-test via the spread argument.
+function productionCritiqueRow(overrides = {}) {
+  return {
+    sequence_number: 1,
+    content: 'Sample critique body.',
+    prompt_config: { tier: 'free', includeHistoryCount: 2, styleModifier: null },
+    prompt_token_count: 800,
+    completion_token_count: 350,
+    created_at: '2026-04-25T14:32:00.000Z',
+    ...overrides,
+  };
+}
 
 // Helper: build a base64 payload that starts with the given magic bytes,
 // padded out so atob() of the first slice has at least 4 bytes to inspect.
@@ -130,6 +148,20 @@ test('pro tier respects includeHistoryCount cap when more history exists', () =>
   for (let i = 1; i <= 5; i++) {
     assert.ok(!userText.includes(`Critique number ${i}.`), `critique ${i} should be dropped`);
   }
+
+  // Truncation marker must appear (5 of 10 dropped → plural form, curly apostrophe).
+  assert.ok(
+    userText.includes('(5 earlier critiques on this drawing exist but aren’t shown here.)'),
+    'plural truncation marker should be present when 5 entries are dropped',
+  );
+  // Curly apostrophe lock-in — guards against a regression to ASCII U+0027.
+  assert.ok(userText.includes('aren’t'), 'curly apostrophe should be used in marker');
+
+  // Marker must appear before the entries block so the model reads it first.
+  const markerIndex = userText.indexOf('aren’t shown here');
+  const firstEntry  = userText.indexOf('[Critique');
+  assert.ok(markerIndex >= 0 && firstEntry >= 0 && markerIndex < firstEntry,
+    'truncation marker should precede the formatted entries');
 });
 
 test('tier override from app_metadata correctly overrides the preset', () => {
@@ -208,6 +240,116 @@ test('renderSkillCalibration falls back to Intermediate body for missing/empty/u
   // (the default switched from Beginner to Intermediate alongside this).
   const sysPrompt = buildSystemPrompt(selectConfig('free', null), { subject: 'a tree' });
   assert.match(sysPrompt, /working fundamentals but is still building/);
+});
+
+test('renders production-shape entries with absolute sequence numbers and content body', () => {
+  const config = selectConfig('pro', null); // includeHistoryCount = 5
+  const history = [
+    productionCritiqueRow({ sequence_number: 1, content: 'First: gestural construction is loose.',     created_at: '2026-04-01T10:00:00Z' }),
+    productionCritiqueRow({ sequence_number: 2, content: 'Second: values stuck in the mids.',          created_at: '2026-04-08T10:00:00Z' }),
+    productionCritiqueRow({ sequence_number: 3, content: 'Third: edges read fuzzy in the focal area.', created_at: '2026-04-15T10:00:00Z' }),
+  ];
+  const userText = buildUserMessage(config, history, 'IMG')[0].text;
+
+  // Headers driven by sequence_number + created_at.
+  assert.ok(userText.includes('[Critique 1 — 2026-04-01T10:00:00Z]'));
+  assert.ok(userText.includes('[Critique 2 — 2026-04-08T10:00:00Z]'));
+  assert.ok(userText.includes('[Critique 3 — 2026-04-15T10:00:00Z]'));
+
+  // Body content from `content` field — regression guard for the prior bug
+  // where formatHistoryEntries only read `feedback`/`text` and rendered
+  // empty bodies for production data.
+  assert.ok(userText.includes('gestural construction is loose'));
+  assert.ok(userText.includes('values stuck in the mids'));
+  assert.ok(userText.includes('edges read fuzzy in the focal area'));
+
+  // No truncation here (3 ≤ 5).
+  assert.ok(!userText.includes('aren’t shown here'));
+  assert.ok(!userText.includes('isn’t shown here'));
+});
+
+test('truncation preserves absolute sequence numbers from mid-history', () => {
+  const config = { ...DEFAULT_FREE_CONFIG, includeHistoryCount: 2 };
+  // 5 production-shape entries; free-tier window keeps last 2 (seq 4 and 5).
+  const history = Array.from({ length: 5 }, (_, i) =>
+    productionCritiqueRow({
+      sequence_number: i + 1,
+      content: `Body ${i + 1}.`,
+      created_at: `2026-04-${String(i + 1).padStart(2, '0')}T10:00:00Z`,
+    }),
+  );
+  const userText = buildUserMessage(config, history, 'IMG')[0].text;
+
+  // Headers must show 4 and 5, not 1 and 2 — that's the whole point.
+  assert.ok(userText.includes('[Critique 4 — 2026-04-04T10:00:00Z]'));
+  assert.ok(userText.includes('[Critique 5 — 2026-04-05T10:00:00Z]'));
+  assert.ok(!userText.includes('[Critique 1 —'));
+  assert.ok(!userText.includes('[Critique 2 —'));
+  assert.ok(!userText.includes('[Critique 3 —'));
+
+  // Truncation marker (3 dropped → plural).
+  assert.ok(userText.includes('(3 earlier critiques on this drawing exist but aren’t shown here.)'));
+
+  // Bodies for the kept entries render correctly.
+  assert.ok(userText.includes('Body 4.'));
+  assert.ok(userText.includes('Body 5.'));
+});
+
+test('formatHistoryEntries falls back to slice position when sequence_number is missing', () => {
+  const config = { ...DEFAULT_FREE_CONFIG, includeHistoryCount: 5 };
+  // Entries without sequence_number — simulates legacy/malformed rows.
+  const history = [
+    { feedback: 'A.', timestamp: '2026-04-01' },
+    { feedback: 'B.', timestamp: '2026-04-02' },
+  ];
+  const userText = buildUserMessage(config, history, 'IMG')[0].text;
+  // Slice positions: 1, 2.
+  assert.ok(userText.includes('[Critique 1 — 2026-04-01]'));
+  assert.ok(userText.includes('[Critique 2 — 2026-04-02]'));
+  // Bodies still render via the feedback fallback.
+  assert.ok(userText.includes('A.'));
+  assert.ok(userText.includes('B.'));
+  // No truncation here (2 ≤ 5).
+  assert.ok(!userText.includes('shown here'));
+});
+
+test('truncation marker pluralizes correctly and is absent when nothing is dropped', () => {
+  const buildText = (totalEntries, cap) => {
+    const config = { ...DEFAULT_FREE_CONFIG, includeHistoryCount: cap };
+    const history = Array.from({ length: totalEntries }, (_, i) =>
+      productionCritiqueRow({ sequence_number: i + 1, content: `Body ${i + 1}.` }),
+    );
+    return buildUserMessage(config, history, 'IMG')[0].text;
+  };
+
+  // 1 dropped → singular grammar.
+  const oneDropped = buildText(2, 1);
+  assert.ok(oneDropped.includes('(1 earlier critique on this drawing exists but isn’t shown here.)'));
+
+  // 3 dropped → plural grammar.
+  const threeDropped = buildText(5, 2);
+  assert.ok(threeDropped.includes('(3 earlier critiques on this drawing exist but aren’t shown here.)'));
+
+  // 0 dropped → no marker at all.
+  const noDrop = buildText(2, 5);
+  assert.ok(!noDrop.includes('shown here'));
+  assert.ok(!noDrop.includes('earlier critique'));
+});
+
+test('renderTruncationMarker handles 0/1/N with curly apostrophes', () => {
+  assert.equal(renderTruncationMarker(0),  '');
+  assert.equal(renderTruncationMarker(-1), '');
+  assert.equal(
+    renderTruncationMarker(1),
+    '(1 earlier critique on this drawing exists but isn’t shown here.)',
+  );
+  assert.equal(
+    renderTruncationMarker(7),
+    '(7 earlier critiques on this drawing exist but aren’t shown here.)',
+  );
+  // Curly apostrophe lock-in (U+2019, not U+0027).
+  assert.ok(renderTruncationMarker(1).includes('’'));
+  assert.ok(!renderTruncationMarker(1).includes("'"));
 });
 
 // =============================================================================

@@ -144,22 +144,42 @@ function buildSystemPrompt(config, context) {
 function formatHistoryEntries(entries) {
   return entries
     .map((entry, i) => {
+      // Header numeral comes from the persisted absolute sequence number when
+      // present (buildCritiqueEntry guarantees it). Slice-position fallback
+      // covers legacy/malformed rows so a missing field never crashes render.
+      const seqNum = typeof entry.sequence_number === 'number' && entry.sequence_number > 0
+        ? entry.sequence_number
+        : i + 1;
+      // Production rows use `content` (set by buildCritiqueEntry). In-test
+      // ad-hoc rows have used `feedback`; `text` is a legacy spelling. Order
+      // puts `content` first so production wins if a row ever has both fields.
+      const text = entry.content ?? entry.feedback ?? entry.text ?? '';
       const stamp = entry.timestamp ?? entry.created_at ?? '';
-      const text = entry.feedback ?? entry.text ?? '';
-      return `[Critique ${i + 1}${stamp ? ` — ${stamp}` : ''}]\n${text}`;
+      return `[Critique ${seqNum}${stamp ? ` — ${stamp}` : ''}]\n${text}`;
     })
     .join('\n\n');
 }
 
+function renderTruncationMarker(droppedCount) {
+  if (droppedCount <= 0) return '';
+  const noun = droppedCount === 1 ? 'critique' : 'critiques';
+  const verb = droppedCount === 1 ? 'exists'   : 'exist';
+  const aux  = droppedCount === 1 ? 'isn’t'    : 'aren’t';
+  return `(${droppedCount} earlier ${noun} on this drawing ${verb} but ${aux} shown here.)`;
+}
+
 function buildUserMessage(config, history, base64Image) {
-  const slice = Array.isArray(history)
-    ? history.slice(-config.includeHistoryCount)
-    : [];
+  const fullHistory = Array.isArray(history) ? history : [];
+  const slice = fullHistory.slice(-config.includeHistoryCount);
+  const droppedCount = fullHistory.length - slice.length;
+
   const parts = [];
   if (config.includeHistoryCount > 0 && slice.length > 0) {
+    const marker = renderTruncationMarker(droppedCount);
+    const truncationBlock = marker ? `${marker}\n\n` : '';
     parts.push({
       type: 'text',
-      text: `${config.historyFraming}\n\n${formatHistoryEntries(slice)}\n\nNow critique the current state of the drawing below.`,
+      text: `${config.historyFraming}\n\n${truncationBlock}${formatHistoryEntries(slice)}\n\nNow critique the current state of the drawing below.`,
     });
   } else {
     parts.push({ type: 'text', text: 'Please critique this drawing.' });
@@ -1021,6 +1041,7 @@ export {
   buildSystemPrompt,
   buildUserMessage,
   formatHistoryEntries,
+  renderTruncationMarker,
   renderSkillCalibration,
   renderContextBlock,
   validateImagePayload,
