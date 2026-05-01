@@ -352,6 +352,37 @@ test('renderTruncationMarker handles 0/1/N with curly apostrophes', () => {
   assert.ok(!renderTruncationMarker(1).includes("'"));
 });
 
+test('assembled system prompt contains the SUBJECT VERIFICATION and CLOSING ASIDE strict-requirements blocks', () => {
+  const sysPrompt = buildSystemPrompt(selectConfig('free', null), baseContext);
+  // SUBJECT VERIFICATION (catches accidental deletion of the missing-feature /
+  // subject-drift checks that were added after gpt-4o + gpt-5.1 simulator
+  // rounds both failed to flag a no-ear Bart and a Bart-to-pumpkin drift).
+  assert.ok(sysPrompt.includes('SUBJECT VERIFICATION — REQUIRED FIRST STEP'));
+  assert.ok(sysPrompt.includes('CANONICAL FEATURE CHECK'));
+  assert.ok(sysPrompt.includes('SUBJECT MATCH CHECK'));
+  // CLOSING ASIDE strict block (catches accidental revert to loose tone guidance).
+  assert.ok(sysPrompt.includes('CLOSING ASIDE — STRICT REQUIREMENTS'));
+});
+
+test('CLOSING ASIDE block keeps the REQUIRED / FORBIDDEN / EXAMPLES imperative structure', () => {
+  // The imperative structure is what makes the rule load-bearing — narrative
+  // tone guidance was insufficient against the model's trained sycophancy
+  // defaults. This guards against an accidental simplification to prose.
+  const sysPrompt = buildSystemPrompt(selectConfig('free', null), baseContext);
+  assert.ok(sysPrompt.includes('REQUIRED:'));
+  assert.ok(sysPrompt.includes('FORBIDDEN:'));
+  assert.ok(sysPrompt.includes('ACCEPTABLE EXAMPLES:'));
+  assert.ok(sysPrompt.includes('UNACCEPTABLE EXAMPLES'));
+});
+
+test('old loose closing-aside CORE RULES bullet has been removed', () => {
+  // Catches the accidental partial-revert where the new strict block lands
+  // but the old contradictory bullet sneaks back into CORE RULES.
+  const sysPrompt = buildSystemPrompt(selectConfig('free', null), baseContext);
+  assert.ok(!sysPrompt.includes('End with one dry, observational aside'));
+  assert.ok(!sysPrompt.includes('"fun fact" energy'));
+});
+
 // =============================================================================
 // Phase 5b — validateImagePayload
 // =============================================================================
