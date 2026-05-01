@@ -845,26 +845,26 @@ async function logRequest({
 // Per-request knobs for the chat completion. All four apply in the body of the
 // fetch at the bottom of the handler.
 //   - model: extracted to a constant so we can A/B different OpenAI models
-//     without touching the request body. Currently gpt-4o — briefly swapped
-//     to gpt-5.1 and rolled back; see commit history. The constant stays in
-//     place as the single source of truth for the next swap attempt.
+//     without touching the request body. Currently gpt-5.1 (mid-tier, Nov
+//     2025). An earlier gpt-5.1 attempt returned 400 from OpenAI and was
+//     rolled back; permanent error-body logging is now in place (in the
+//     fetch handler) so any recurrence surfaces in Cloudflare logs.
 //   - temperature 0.4 reduces non-determinism without making output robotic.
 //     OpenAI's default is 1.0, which combined with no seed produces
 //     contradictory Focus Areas across replays of the same drawing state.
 //   - seed is best-effort on OpenAI's side — not a guarantee of identical
 //     outputs, but with reduced temperature it makes replays meaningfully
 //     more stable for debugging and a more consistent student experience.
-//   - reasoning effort: the constant is here for a future re-attempt, but
-//     it is NOT currently wired into the request body — gpt-4o rejects the
-//     `reasoning` field. When we next try a reasoning-capable model
-//     (gpt-5.x), restore `reasoning: { effort: OPENAI_REASONING_EFFORT }`
-//     to the request body alongside the model swap.
+//   - reasoning effort: passed as `reasoning: { effort: ... }` on the
+//     request body. Default is 'none' — testing gpt-5.1 in isolation before
+//     paying for reasoning tokens. 'low' / 'medium' / 'high' enable
+//     reasoning at additional cost.
 //
 // The request also forwards the authenticated Supabase user id as the
 // `user` field on the request body — OpenAI uses this for their own abuse
 // detection. Free signal, set inline at the call site since it varies.
 
-const OPENAI_MODEL = 'gpt-4o';
+const OPENAI_MODEL = 'gpt-5.1';
 const OPENAI_TEMPERATURE = 0.4;
 const OPENAI_SEED = 42;
 const OPENAI_REASONING_EFFORT = 'none';
@@ -1029,6 +1029,7 @@ export default {
           max_tokens: config.maxOutputTokens,
           temperature: OPENAI_TEMPERATURE,
           seed: OPENAI_SEED,
+          reasoning: { effort: OPENAI_REASONING_EFFORT },
           user: userId,
         }),
       });
