@@ -1133,10 +1133,13 @@ async function logRequest({
 //     /v1/chat/completions request body (NOT the nested `reasoning: { effort }`
 //     shape — that's the /v1/responses endpoint's API. An earlier attempt
 //     used the nested form and OpenAI 400'd with "Unknown parameter:
-//     'reasoning'"; the rename plus the documented-value swap below fixes
-//     it). Default is 'minimal' — the cheapest documented gpt-5 value,
-//     meaning "do as little reasoning as possible." 'low' / 'medium' /
-//     'high' enable reasoning at additional cost.
+//     'reasoning'"). For gpt-5.1, OpenAI's accepted values are 'none' /
+//     'low' / 'medium' / 'high' — confirmed empirically by production
+//     400s. We tried 'minimal' during the migration based on a training-
+//     data assumption that gpt-5 series accepted it; OpenAI rejected
+//     it as unsupported for this model. 'none' is the cheapest option
+//     and means "do as little reasoning as possible." Escalate to 'low'
+//     or higher if scrutiny failures persist after model + prompt rules.
 //
 // The request also forwards the authenticated Supabase user id as the
 // `user` field on the request body — OpenAI uses this for their own abuse
@@ -1145,7 +1148,7 @@ async function logRequest({
 const OPENAI_MODEL = 'gpt-5.1';
 const OPENAI_TEMPERATURE = 0.4;
 const OPENAI_SEED = 42;
-const OPENAI_REASONING_EFFORT = 'minimal';
+const OPENAI_REASONING_EFFORT = 'none';
 
 // Preset voices the Worker swaps into the system prompt per request.
 // Resolution flow: validateContext (format) → resolvePresetId (ownership)
