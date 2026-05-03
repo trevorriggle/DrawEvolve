@@ -37,6 +37,16 @@ id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 # instead of secrets — they're not sensitive — but keeping them as secrets
 # means rotating projects doesn't require a wrangler.toml redeploy.
 
+# Phase 5f — App Attest. APP_ATTEST_TEAM_ID and APP_ATTEST_BUNDLE_ID feed
+# the rpId hash we check against authenticatorData on every request — must
+# match the iOS bundle/team that signed the device's keys. APP_ATTEST_ENV
+# selects the AAGUID we accept ('appattestdevelop' for dev, 'appattest' +
+# 7 zero bytes for production); flip when promoting a build to App Store.
+[vars]
+APP_ATTEST_TEAM_ID = ""              # 10-char Apple Team ID (e.g. ABCDE12345)
+APP_ATTEST_BUNDLE_ID = "com.drawevolve.app"
+APP_ATTEST_ENV = "development"       # "development" | "production"
+
 # Workers Logs — without this, console.log output is silently dropped at the
 # Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for
 # cost control once volume warrants it.

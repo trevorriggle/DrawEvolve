@@ -43,6 +43,24 @@ import {
   persistCritique,
   REQUEST_STATUS,
   logRequest,
+  // Phase 5f — App Attest
+  cborDecode,
+  parseX509,
+  spkiPublicKeyBytes,
+  ecdsaDerToRaw,
+  derOidToString,
+  bytesEqual,
+  bytesToHex,
+  hexToBytes,
+  base64ToBytes,
+  computeAppAttestClientDataHash,
+  verifyAppAttestAssertion,
+  issueAppAttestChallenge,
+  consumeAppAttestChallenge,
+  storeAttestedKey,
+  getAttestedKey,
+  updateAttestedKeyCounter,
+  readAppAttestHeaders,
 } from './index.js';
 
 const baseContext = {
@@ -1398,4 +1416,297 @@ test('selectVoice falls back when env is not configured', async () => {
   } finally {
     console.error = originalError;
   }
+});
+
+// =============================================================================
+// Phase 5f — App Attest
+// =============================================================================
+//
+// Two layers of test:
+//  - Pure functions (CBOR, ASN.1, byte helpers, clientDataHash) on hand-built
+//    inputs.
+//  - Assertion verification end-to-end with a synthetic P-256 keypair: build
+//    a CBOR-encoded "assertion," hand it to verifyAppAttestAssertion, expect
+//    success; replay with the same counter, expect failure; tamper one byte,
+//    expect failure. We can't test attestation E2E without a real Apple
+//    device, but the assertion path is the one that runs on every request.
+
+import { webcrypto } from 'node:crypto';
+const subtle = webcrypto.subtle;
+
+// ---- minimal CBOR encoder for tests ---------------------------------------
+// Just enough to build assertion-shaped maps with byte-string values.
+
+function cborEncodeUint(n) {
+  if (n < 24) return Uint8Array.of(n);
+  if (n < 0x100) return Uint8Array.of(24, n);
+  if (n < 0x10000) return Uint8Array.of(25, n >> 8, n & 0xff);
+  if (n < 0x100000000) return Uint8Array.of(26, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+  throw new Error('cborEncodeUint > 2^32 not supported in test helper');
+}
+function cborTagLen(major, length) {
+  const lenBytes = cborEncodeUint(length);
+  const head = (major << 5) | (lenBytes[0] & 0x1f);
+  return Uint8Array.of(head, ...lenBytes.subarray(1));
+}
+function cborEncodeBytes(bytes) {
+  return concat(cborTagLen(2, bytes.length), bytes);
+}
+function cborEncodeText(str) {
+  const enc = new TextEncoder().encode(str);
+  return concat(cborTagLen(3, enc.length), enc);
+}
+function cborEncodeMap(entries) {
+  let body = new Uint8Array(0);
+  for (const [k, v] of entries) body = concat(body, cborEncodeText(k), v);
+  return concat(cborTagLen(5, entries.length), body);
+}
+function concat(...arrs) {
+  let total = 0;
+  for (const a of arrs) total += a.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrs) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+// Convert WebCrypto's spki-export to the raw uncompressed point. SPKI for
+// P-256 ECDSA always ends with the BIT STRING value, which starts with an
+// "unused bits" byte (0x00) and then 0x04 || X(32) || Y(32). Find the last
+// 65-byte uncompressed point in the export.
+async function p256RawPubKey(keyPair) {
+  const spki = new Uint8Array(await subtle.exportKey('spki', keyPair.publicKey));
+  // The uncompressed point starts with 0x04 followed by 64 bytes. SPKI for
+  // P-256 places it at the very end (length 65). Slice the last 65 bytes.
+  return spki.subarray(spki.length - 65);
+}
+
+async function sha256(bytes) {
+  return new Uint8Array(await subtle.digest('SHA-256', bytes));
+}
+
+// Sign with WebCrypto then convert raw r||s to DER per the assertion spec.
+async function signEcdsaDer(privateKey, message) {
+  const raw = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, message));
+  if (raw.length !== 64) throw new Error('expected raw P-256 sig of 64 bytes');
+  const r = raw.subarray(0, 32);
+  const s = raw.subarray(32, 64);
+  function intDer(buf) {
+    let i = 0;
+    while (i < buf.length - 1 && buf[i] === 0) i++;
+    let v = buf.subarray(i);
+    if (v[0] & 0x80) v = concat(Uint8Array.of(0), v);
+    return concat(Uint8Array.of(0x02, v.length), v);
+  }
+  const body = concat(intDer(r), intDer(s));
+  return concat(Uint8Array.of(0x30, body.length), body);
+}
+
+// In-memory KV that mimics the surface verifyAppAttestAssertion's helpers
+// touch. Same shape Cloudflare's KV namespace exposes.
+function makeTestKV() {
+  const store = new Map();
+  return {
+    async get(k) { return store.has(k) ? store.get(k) : null; },
+    async put(k, v, _opts) { store.set(k, v); },
+    async delete(k) { store.delete(k); },
+    _store: store,
+  };
+}
+
+// Build an env that satisfies the App Attest module's required fields. The
+// team ID is arbitrary — it just has to feed appAttestAppId so the rpIdHash
+// math is consistent across encoder + verifier.
+function makeAttestEnv({ kv, mode = 'development' } = {}) {
+  return {
+    QUOTA_KV: kv ?? makeTestKV(),
+    APP_ATTEST_TEAM_ID: 'TEST123456',
+    APP_ATTEST_BUNDLE_ID: 'com.drawevolve.app',
+    APP_ATTEST_ENV: mode,
+  };
+}
+
+// ---- pure helpers ----------------------------------------------------------
+
+test('bytesEqual is constant-time true on equal inputs and false on length mismatch', () => {
+  assert.equal(bytesEqual(Uint8Array.of(1, 2, 3), Uint8Array.of(1, 2, 3)), true);
+  assert.equal(bytesEqual(Uint8Array.of(1, 2, 3), Uint8Array.of(1, 2, 4)), false);
+  assert.equal(bytesEqual(Uint8Array.of(1, 2, 3), Uint8Array.of(1, 2, 3, 4)), false);
+});
+
+test('hex round-trips through bytesToHex / hexToBytes', () => {
+  const sample = Uint8Array.of(0xde, 0xad, 0xbe, 0xef, 0x00, 0x10, 0xff);
+  assert.equal(bytesToHex(sample), 'deadbeef0010ff');
+  assert.deepEqual(hexToBytes('deadbeef0010ff'), sample);
+});
+
+test('cborDecode parses a simple map of string→bytes round-trip', () => {
+  const payload = cborEncodeMap([
+    ['signature', cborEncodeBytes(Uint8Array.of(1, 2, 3, 4))],
+    ['authenticatorData', cborEncodeBytes(Uint8Array.of(9, 8, 7))],
+  ]);
+  const decoded = cborDecode(payload);
+  assert.deepEqual(decoded.signature, Uint8Array.of(1, 2, 3, 4));
+  assert.deepEqual(decoded.authenticatorData, Uint8Array.of(9, 8, 7));
+});
+
+test('cborDecode rejects trailing bytes', () => {
+  const valid = cborEncodeMap([['x', cborEncodeBytes(Uint8Array.of(1))]]);
+  const tampered = concat(valid, Uint8Array.of(0));
+  assert.throws(() => cborDecode(tampered), /trailing|truncated/);
+});
+
+test('ecdsaDerToRaw converts a known DER SEQUENCE to fixed-length r||s', () => {
+  // Hand-built: SEQUENCE { INTEGER 0x01, INTEGER 0x02 }
+  const der = Uint8Array.of(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02);
+  const raw = ecdsaDerToRaw(der, 32);
+  assert.equal(raw.length, 64);
+  // r and s should be left-padded with zeros to 32 bytes each
+  assert.equal(raw[31], 0x01);
+  assert.equal(raw[63], 0x02);
+});
+
+test('computeAppAttestClientDataHash matches a hand-derived value', async () => {
+  // The iOS client and Worker both compute SHA-256("METHOD:PATH:sha256-hex(body)").
+  // Replicate that here with WebCrypto and check the result byte-for-byte.
+  const body = new TextEncoder().encode('{"hello":"world"}');
+  const bodyHashHex = bytesToHex(await sha256(body));
+  const expected = await sha256(new TextEncoder().encode(`POST:/:${bodyHashHex}`));
+  const got = await computeAppAttestClientDataHash('POST', '/', body);
+  assert.deepEqual(got, expected);
+});
+
+// ---- assertion verification (E2E with a synthetic key) --------------------
+
+async function buildSyntheticAssertion({
+  keyPair, env, method = 'POST', path = '/', body = new Uint8Array(), counter = 1,
+}) {
+  // rpIdHash = SHA-256("<TEAM>.<BUNDLE>") — must match what the verifier
+  // computes from APP_ATTEST_TEAM_ID + APP_ATTEST_BUNDLE_ID.
+  const appId = `${env.APP_ATTEST_TEAM_ID}.${env.APP_ATTEST_BUNDLE_ID}`;
+  const rpIdHash = await sha256(new TextEncoder().encode(appId));
+  const flags = Uint8Array.of(0x40);                      // attested-credential-data bit set
+  const counterBE = Uint8Array.of(
+    (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff,
+  );
+  const authData = concat(rpIdHash, flags, counterBE);    // 32 + 1 + 4 = 37 bytes
+  const clientDataHash = await computeAppAttestClientDataHash(method, path, body);
+  const signedData = concat(authData, clientDataHash);
+  const signatureDer = await signEcdsaDer(keyPair.privateKey, signedData);
+  const cbor = cborEncodeMap([
+    ['signature', cborEncodeBytes(signatureDer)],
+    ['authenticatorData', cborEncodeBytes(authData)],
+  ]);
+  return Buffer.from(cbor).toString('base64');
+}
+
+test('verifyAppAttestAssertion accepts a valid synthetic assertion with monotonic counter', async () => {
+  const env = makeAttestEnv();
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const body = new TextEncoder().encode('{"feedback":"please"}');
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body, counter: 1 });
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', body);
+  const result = await verifyAppAttestAssertion({
+    assertionB64,
+    storedPubKey: pub,
+    storedCounter: 0,
+    expectedClientDataHash,
+    env,
+  });
+  assert.equal(result.newCounter, 1);
+});
+
+test('verifyAppAttestAssertion rejects a replayed counter', async () => {
+  const env = makeAttestEnv();
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const body = new TextEncoder().encode('{"x":1}');
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body, counter: 5 });
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', body);
+  await assert.rejects(
+    verifyAppAttestAssertion({ assertionB64, storedPubKey: pub, storedCounter: 5, expectedClientDataHash, env }),
+    /counter_replay/,
+  );
+});
+
+test('verifyAppAttestAssertion rejects a clientDataHash mismatch (tampered body)', async () => {
+  const env = makeAttestEnv();
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const signedBody = new TextEncoder().encode('original');
+  const tamperedBody = new TextEncoder().encode('TAMPERED');
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body: signedBody, counter: 1 });
+  // Verifier computes the hash from `tamperedBody`, which won't match what
+  // the device signed, so the ECDSA verify must fail.
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', tamperedBody);
+  await assert.rejects(
+    verifyAppAttestAssertion({ assertionB64, storedPubKey: pub, storedCounter: 0, expectedClientDataHash, env }),
+    /sig_invalid/,
+  );
+});
+
+test('verifyAppAttestAssertion rejects rpId mismatch (different team)', async () => {
+  const env = makeAttestEnv();
+  const otherEnv = { ...env, APP_ATTEST_TEAM_ID: 'OTHER12345' };
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const body = new TextEncoder().encode('{}');
+  // Assertion built for `env`'s team, verified under `otherEnv`'s team —
+  // rpIdHash should mismatch. ECDSA may still pass because the signed bytes
+  // include rpIdHash as part of authData, but the signature is over the
+  // attacker-built rpIdHash → the signature *will* verify, but the
+  // post-verify rpIdHash check rejects it.
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body, counter: 1 });
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', body);
+  await assert.rejects(
+    verifyAppAttestAssertion({
+      assertionB64, storedPubKey: pub, storedCounter: 0, expectedClientDataHash, env: otherEnv,
+    }),
+    /rpid_mismatch/,
+  );
+});
+
+// ---- challenge + key store -------------------------------------------------
+
+test('issueAppAttestChallenge writes a TTLed marker that consume can spend exactly once', async () => {
+  const kv = makeTestKV();
+  const env = makeAttestEnv({ kv });
+  const { challengeBytes } = await issueAppAttestChallenge(env);
+  assert.equal(challengeBytes.length, 32);
+  assert.equal(await consumeAppAttestChallenge(challengeBytes, env), true);
+  // Replay is rejected.
+  assert.equal(await consumeAppAttestChallenge(challengeBytes, env), false);
+});
+
+test('storeAttestedKey + getAttestedKey round-trip with env tag and zero counter', async () => {
+  const kv = makeTestKV();
+  const env = makeAttestEnv({ kv });
+  const fakePub = new Uint8Array(65); fakePub[0] = 0x04;
+  await storeAttestedKey('mykey', fakePub, env);
+  const loaded = await getAttestedKey('mykey', env);
+  assert.deepEqual(loaded.pub, fakePub);
+  assert.equal(loaded.counter, 0);
+  assert.equal(loaded.env, 'development');
+});
+
+test('updateAttestedKeyCounter persists the new counter for the next assertion', async () => {
+  const kv = makeTestKV();
+  const env = makeAttestEnv({ kv });
+  const fakePub = new Uint8Array(65); fakePub[0] = 0x04;
+  await storeAttestedKey('mykey', fakePub, env);
+  await updateAttestedKeyCounter('mykey', 42, env);
+  const loaded = await getAttestedKey('mykey', env);
+  assert.equal(loaded.counter, 42);
+});
+
+test('readAppAttestHeaders returns null when either header is missing', () => {
+  const both = new Request('https://x/', { headers: {
+    'X-Apple-AppAttest-KeyId': 'a', 'X-Apple-AppAttest-Assertion': 'b',
+  }});
+  assert.deepEqual(readAppAttestHeaders(both), { keyId: 'a', assertion: 'b' });
+  const onlyKey = new Request('https://x/', { headers: { 'X-Apple-AppAttest-KeyId': 'a' }});
+  assert.equal(readAppAttestHeaders(onlyKey), null);
+  const neither = new Request('https://x/', { headers: {} });
+  assert.equal(readAppAttestHeaders(neither), null);
 });
