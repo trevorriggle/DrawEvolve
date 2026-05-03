@@ -16,11 +16,13 @@ See: `cloudflare-worker/index.js` — `SHARED_SYSTEM_RULES`, `HISTORY_FRAMING_DE
 
 ---
 
-## Worker model is gpt-4o, with gpt-5.1 plumbing parked
+## Worker model is gpt-5.1
 
-`OPENAI_MODEL` is currently `'gpt-4o'`. A gpt-5.1 swap was attempted, returned 400, and was rolled back. `OPENAI_REASONING_EFFORT = 'none'` constant is parked in code but **not wired into the request body** (gpt-4o rejects the `reasoning` field). When the next reasoning-capable model attempt happens, restore `reasoning: { effort: OPENAI_REASONING_EFFORT }` to the request body alongside the model swap.
+`OPENAI_MODEL = 'gpt-5.1'` (`cloudflare-worker/index.js:1148`). The earlier swap attempt that returned 400 was diagnosed (flat `reasoning_effort` field, `max_completion_tokens` instead of `max_tokens`, value `'none'` not `'minimal'`) and the swap is now in production — see commits `9b4297e`, `7947a79`, `b982eaf`.
 
-Permanent error-body logging on non-ok responses is in place — any future swap failure will surface OpenAI's actual error message in `wrangler tail`.
+Cost constants in the Worker reflect gpt-5.1 pricing: `COST_PER_INPUT_TOKEN_USD = 0.63 / 1_000_000`, `COST_PER_OUTPUT_TOKEN_USD = 5.00 / 1_000_000` (`index.js:1178–1179`). If the model changes again, update both constants in the same commit as the model swap or the daily spend cap math will silently mis-account.
+
+Permanent error-body logging on non-ok OpenAI responses is in place — any future swap failure surfaces OpenAI's actual error message in `wrangler tail`.
 
 ---
 
