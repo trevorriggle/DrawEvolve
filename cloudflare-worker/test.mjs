@@ -43,6 +43,8 @@ import {
   persistCritique,
   REQUEST_STATUS,
   logRequest,
+  validateJWT,
+  _resetJwksCacheForTests,
 } from './index.js';
 
 const baseContext = {
@@ -1398,4 +1400,254 @@ test('selectVoice falls back when env is not configured', async () => {
   } finally {
     console.error = originalError;
   }
+});
+
+// =============================================================================
+// Phase 5a — validateJWT (ES256 / JWKS)
+// =============================================================================
+//
+// We generate a real ES256 keypair with Web Crypto and sign tokens for each
+// test case rather than hand-crafting a valid signature, so the verification
+// path runs end-to-end (kid lookup → importKey → subtle.verify → claim
+// checks). The fetcher is stubbed so no real network call leaves the box;
+// _resetJwksCacheForTests clears module-scope cache so each test gets a
+// clean slate.
+
+const TEST_JWT_ENV = {
+  SUPABASE_URL: 'https://test.supabase.co',
+  SUPABASE_JWT_ISSUER: 'https://test.supabase.co/auth/v1',
+};
+const TEST_KID = 'test-kid-1';
+const TEST_SUB = '00000000-0000-0000-0000-0000000000aa';
+
+function b64urlFromString(s) {
+  return Buffer.from(s, 'utf8').toString('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function b64urlFromBytes(bytes) {
+  return Buffer.from(bytes).toString('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+async function generateES256Keypair() {
+  return crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify'],
+  );
+}
+
+async function exportPublicJWK(publicKey, kid = TEST_KID) {
+  const jwk = await crypto.subtle.exportKey('jwk', publicKey);
+  // Strip private fields just in case (publicKey export shouldn't have them,
+  // but be paranoid). Add kid + alg the way Supabase publishes them.
+  return { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, kid, alg: 'ES256', use: 'sig' };
+}
+
+async function signES256JWT({ privateKey, kid = TEST_KID, header: headerOverride = {}, payload }) {
+  const header = { alg: 'ES256', typ: 'JWT', kid, ...headerOverride };
+  const headerB64 = b64urlFromString(JSON.stringify(header));
+  const payloadB64 = b64urlFromString(JSON.stringify(payload));
+  const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const sigBuf = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' }, privateKey, data,
+  );
+  return `${headerB64}.${payloadB64}.${b64urlFromBytes(new Uint8Array(sigBuf))}`;
+}
+
+function jwksFetcherFor(jwks) {
+  // Returns a fetcher that responds to the JWKS URL with the supplied keys
+  // and 404s anything else (so a misrouted call surfaces obviously).
+  return async (url) => {
+    if (typeof url === 'string' && url.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: jwks }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+}
+
+function basePayload(overrides = {}) {
+  // Default valid claims, expiring 1h after FIXED_NOW.
+  const nowSec = Math.floor(FIXED_NOW / 1000);
+  return {
+    iss: TEST_JWT_ENV.SUPABASE_JWT_ISSUER,
+    aud: 'authenticated',
+    sub: TEST_SUB,
+    exp: nowSec + 3600,
+    iat: nowSec,
+    role: 'authenticated',
+    app_metadata: { tier: 'free' },
+    ...overrides,
+  };
+}
+
+test('validateJWT accepts a valid token and returns the payload with sub', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({ privateKey, payload: basePayload() });
+
+  const result = await validateJWT(token, TEST_JWT_ENV, {
+    fetcher: jwksFetcherFor([jwk]),
+    nowSeconds: Math.floor(FIXED_NOW / 1000),
+  });
+
+  assert.equal(result.sub, TEST_SUB);
+  assert.equal(result.iss, TEST_JWT_ENV.SUPABASE_JWT_ISSUER);
+  assert.equal(result.aud, 'authenticated');
+  // app_metadata flows through so getUserTier downstream still works.
+  assert.equal(result.app_metadata?.tier, 'free');
+});
+
+test('validateJWT rejects an expired token', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const nowSec = Math.floor(FIXED_NOW / 1000);
+  // exp 1 second in the past relative to the injected clock.
+  const token = await signES256JWT({
+    privateKey,
+    payload: basePayload({ exp: nowSec - 1 }),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, { fetcher: jwksFetcherFor([jwk]), nowSeconds: nowSec }),
+    /expired/i,
+  );
+});
+
+test('validateJWT rejects a malformed token (not three parts)', async () => {
+  _resetJwksCacheForTests();
+  // Stub fetcher should never be hit — malformed token rejected before JWKS lookup.
+  let fetched = false;
+  const fetcher = async () => { fetched = true; return { ok: true, json: async () => ({ keys: [] }) }; };
+
+  await assert.rejects(
+    () => validateJWT('only.two', TEST_JWT_ENV, { fetcher }),
+    /malformed/i,
+  );
+  await assert.rejects(
+    () => validateJWT('a.b.c.d', TEST_JWT_ENV, { fetcher }),
+    /malformed/i,
+  );
+  assert.equal(fetched, false, 'malformed tokens must be rejected before JWKS fetch');
+});
+
+test('validateJWT rejects a missing token (null / undefined / empty / wrong type)', async () => {
+  _resetJwksCacheForTests();
+  const fetcher = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  for (const bad of [null, undefined, '', 12345, {}]) {
+    await assert.rejects(
+      () => validateJWT(bad, TEST_JWT_ENV, { fetcher }),
+      (err) => err instanceof Error,
+    );
+  }
+});
+
+test('validateJWT rejects a wrong-issuer token (signature valid, iss mismatched)', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({
+    privateKey,
+    payload: basePayload({ iss: 'https://attacker.example.com/auth/v1' }),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    /issuer/i,
+  );
+});
+
+// Defensive coverage — these aren't in the brief but they sit on the same
+// rejection path and a regression in any one would silently weaken auth.
+
+test('validateJWT rejects a token with a tampered signature', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({ privateKey, payload: basePayload() });
+  // Flip the last character of the signature; still base64url, but the
+  // verify must fail. (atob accepts the padding but the bytes are wrong.)
+  const flipped = token.slice(0, -1) + (token.slice(-1) === 'A' ? 'B' : 'A');
+
+  await assert.rejects(
+    () => validateJWT(flipped, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    (err) => err instanceof Error,
+  );
+});
+
+test('validateJWT rejects a token whose kid is not in the JWKS', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey, 'served-kid');
+  const token = await signES256JWT({
+    privateKey,
+    kid: 'not-served-kid',
+    payload: basePayload(),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    /kid/i,
+  );
+});
+
+test('validateJWT rejects a wrong-audience token', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  // 'service_role' is the obvious upgrade-attack — must never validate.
+  const token = await signES256JWT({
+    privateKey,
+    payload: basePayload({ aud: 'service_role' }),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    /audience/i,
+  );
+});
+
+test('validateJWT rejects a token with an unsupported alg (e.g. HS256 or none)', async () => {
+  _resetJwksCacheForTests();
+  // Hand-craft headers — no signing needed; the alg check fires before JWKS lookup.
+  const fetcher = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  for (const alg of ['HS256', 'none', 'RS256']) {
+    const headerB64 = b64urlFromString(JSON.stringify({ alg, typ: 'JWT', kid: TEST_KID }));
+    const payloadB64 = b64urlFromString(JSON.stringify(basePayload()));
+    // Signature segment doesn't matter; alg check trips first.
+    const fakeToken = `${headerB64}.${payloadB64}.AAAA`;
+    await assert.rejects(
+      () => validateJWT(fakeToken, TEST_JWT_ENV, { fetcher }),
+      /alg/i,
+      `should reject alg=${alg}`,
+    );
+  }
+});
+
+test('validateJWT rejects a header missing the kid claim', async () => {
+  _resetJwksCacheForTests();
+  const fetcher = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  const headerB64 = b64urlFromString(JSON.stringify({ alg: 'ES256', typ: 'JWT' }));
+  const payloadB64 = b64urlFromString(JSON.stringify(basePayload()));
+  const fakeToken = `${headerB64}.${payloadB64}.AAAA`;
+
+  await assert.rejects(
+    () => validateJWT(fakeToken, TEST_JWT_ENV, { fetcher }),
+    /kid/i,
+  );
 });
