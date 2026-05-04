@@ -57,6 +57,11 @@ struct DrawingCanvasView: View {
     // Image import (Photos picker)
     @State private var photoPickerItem: PhotosPickerItem?
 
+    // Image export (Photos save)
+    @State private var isSavingToPhotos = false
+    @State private var showPhotoSaveConfirmation = false
+    @State private var photoSaveError: String?
+
     // Critique history
     @State private var critiqueHistory: [CritiqueEntry] = []
 
@@ -334,6 +339,15 @@ struct DrawingCanvasView: View {
                                     .font(.system(size: 22))
                                     .frame(width: 44, height: 44)
                             }
+
+                            // Download composited image to Photos
+                            ToolButton(
+                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                                isSelected: false
+                            ) {
+                                Task { await downloadToPhotos() }
+                            }
+                            .disabled(isSavingToPhotos)
 
                             // Clear button
                             ToolButton(icon: "trash", isSelected: false) {
@@ -645,6 +659,18 @@ struct DrawingCanvasView: View {
         } message: {
             Text("Are you sure you want to clear the canvas? This cannot be undone.")
         }
+        .alert(
+            "Couldn't Save to Photos",
+            isPresented: Binding(
+                get: { photoSaveError != nil },
+                set: { if !$0 { photoSaveError = nil } }
+            ),
+            presenting: photoSaveError
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { err in
+            Text(err)
+        }
         .onChange(of: canvasState.currentTool) { _, _ in
             // When tool changes, commit any active selection
             if canvasState.selectionPixels != nil {
@@ -915,6 +941,27 @@ struct DrawingCanvasView: View {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 showSavedConfirmation = false
             }
+        }
+    }
+
+    @MainActor
+    private func downloadToPhotos() async {
+        guard !isSavingToPhotos else { return }
+        guard let image = canvasState.exportImage() else {
+            photoSaveError = "Couldn't render the drawing for export."
+            return
+        }
+        isSavingToPhotos = true
+        defer { isSavingToPhotos = false }
+        do {
+            try await PhotoLibrarySaver.save(image)
+            showPhotoSaveConfirmation = true
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                showPhotoSaveConfirmation = false
+            }
+        } catch {
+            photoSaveError = error.localizedDescription
         }
     }
 
