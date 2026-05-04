@@ -12,7 +12,10 @@ import UIKit
 
 class CanvasRenderer: NSObject {
     let device: MTLDevice // Public for GPU sync
-    private let commandQueue: MTLCommandQueue
+    // Long-lived per-device command queue. Exposed so callers (MTKView delegate)
+    // can reuse it instead of allocating a fresh queue per frame — a queue is
+    // meant to live for the device's lifetime.
+    let commandQueue: MTLCommandQueue
     private var brushPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
@@ -230,7 +233,8 @@ class CanvasRenderer: NSObject {
 
     /// Render a brush stroke to a texture
     /// Stroke coordinates are in screen space, need to be scaled to texture space
-    func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture, screenSize: CGSize) {
+    func renderStroke(_ stroke: BrushStroke, to texture: MTLTexture, screenSize: CGSize, completion: (() -> Void)? = nil) {
+        #if DEBUG
         print("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
         print("  Texture ID: \(ObjectIdentifier(texture))")
         print("  Screen size: \(screenSize.width)x\(screenSize.height)")
@@ -238,9 +242,11 @@ class CanvasRenderer: NSObject {
         print("  Tool: \(stroke.tool)")
         print("  Brush color: \(stroke.settings.color)")
         print("  Brush size: \(stroke.settings.size)")
+        #endif
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             print("CanvasRenderer: Failed to create command buffer")
+            completion?()
             return
         }
 
@@ -251,6 +257,7 @@ class CanvasRenderer: NSObject {
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             print("CanvasRenderer: Failed to create render encoder")
+            completion?()
             return
         }
 
@@ -259,11 +266,14 @@ class CanvasRenderer: NSObject {
         guard let pipelineState = pipeline else {
             print("CanvasRenderer: No pipeline state available")
             renderEncoder.endEncoding()
+            completion?()
             return
         }
 
         renderEncoder.setRenderPipelineState(pipelineState)
+        #if DEBUG
         print("CanvasRenderer: Pipeline set, rendering points...")
+        #endif
 
         // Prepare brush uniforms
         var uniforms = BrushUniforms(
@@ -276,8 +286,10 @@ class CanvasRenderer: NSObject {
         // CRITICAL FIX: Stroke points are already in document/texture coordinate space
         // The screenSize parameter is actually documentSize (which should equal texture size)
         // Points are already scaled correctly from screenToDocument(), so NO SCALING should be applied
+        #if DEBUG
         print("  Texture size: \(texture.width)x\(texture.height)")
         print("  Document size passed: \(screenSize.width)x\(screenSize.height)")
+        #endif
 
         // Document size and texture size should be identical (both are square canvas)
         if abs(screenSize.width - CGFloat(texture.width)) > 1.0 || abs(screenSize.height - CGFloat(texture.height)) > 1.0 {
@@ -322,10 +334,32 @@ class CanvasRenderer: NSObject {
         }
 
         renderEncoder.endEncoding()
-        commandBuffer.commit()
-        // Wait for completion so texture is readable for snapshots
-        commandBuffer.waitUntilCompleted()
-        print("CanvasRenderer: Stroke completed on GPU")
+
+        if let completion = completion {
+            // Async path: caller does its post-stroke work (snapshot, history,
+            // thumbnail) inside `completion`, which fires on main once the GPU
+            // pass is finished. Lets the touch loop / preview keep running
+            // instead of stalling on `waitUntilCompleted` after every commit.
+            commandBuffer.addCompletedHandler { _ in
+                DispatchQueue.main.async {
+                    #if DEBUG
+                    print("CanvasRenderer: Stroke completed on GPU (async)")
+                    #endif
+                    completion()
+                }
+            }
+            commandBuffer.commit()
+        } else {
+            // Sync fallback for callers that need the texture readable
+            // immediately on return. The async path above is preferred for
+            // hot-path stroke commits — that's why the touchesEnded handler
+            // passes a completion now.
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            #if DEBUG
+            print("CanvasRenderer: Stroke completed on GPU")
+            #endif
+        }
     }
 
     // Metal structure matching shader
@@ -1032,6 +1066,14 @@ class CanvasRenderer: NSObject {
     /// because the start point was out of bounds or already the fill color
     /// (caller should not show a HUD — completion is **not** invoked in that
     /// case).
+    // TODO(perf-followup): drive `floodFillKernel` (Shaders.metal) from this
+    // function. The kernel was rewritten to a real connected-component fill
+    // primitive but is not wired up yet. Wiring requires: (a) two R8 mask
+    // textures, (b) seeding the front mask at the click point, (c) iterating
+    // the kernel until convergence (jump-flood / fixed-iteration / atomic
+    // change-flag), (d) a final compositing pass that stamps `fillColor`
+    // wherever the mask is set, plus undo capture. Until that lands, the CPU
+    // path below remains the active flood-fill implementation.
     @discardableResult
     func floodFill(
         at point: CGPoint,
@@ -1040,7 +1082,9 @@ class CanvasRenderer: NSObject {
         screenSize: CGSize,
         completion: @escaping () -> Void
     ) -> Bool {
+        #if DEBUG
         print("CanvasRenderer: Flood fill at \(point) with color")
+        #endif
 
         // Scale coordinates from screen space to texture space
         let scaleX = CGFloat(texture.width) / screenSize.width
@@ -1103,7 +1147,9 @@ class CanvasRenderer: NSObject {
            abs(Int(targetG) - Int(fillG)) <= tolerance &&
            abs(Int(targetR) - Int(fillR)) <= tolerance &&
            abs(Int(targetA) - Int(fillA)) <= tolerance {
+            #if DEBUG
             print("Target and fill colors are the same, skipping fill")
+            #endif
             return false
         }
 
@@ -1158,7 +1204,9 @@ class CanvasRenderer: NSObject {
                 }
             }
 
+            #if DEBUG
             print("Filled \(fillCount) pixels")
+            #endif
 
             DispatchQueue.main.async {
                 data.withUnsafeBytes { ptr in
@@ -1173,7 +1221,9 @@ class CanvasRenderer: NSObject {
                         bytesPerRow: bytesPerRow
                     )
                 }
+                #if DEBUG
                 print("Flood fill complete")
+                #endif
                 completion()
             }
         }
@@ -1434,49 +1484,23 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // Read texture data
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
-        var pixelData = Data(count: dataSize)
-
-        pixelData.withUnsafeMutableBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
-                baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
-        }
-
-        // Clear pixels in the rect (set to transparent)
-        for py in y..<(y + h) {
-            for px in x..<(x + w) {
-                let idx = (py * width + px) * 4
-                guard idx + 3 < pixelData.count else { continue }
-                pixelData[idx] = 0     // B
-                pixelData[idx + 1] = 0 // G
-                pixelData[idx + 2] = 0 // R
-                pixelData[idx + 3] = 0 // A
-            }
-        }
-
-        // Write back to texture
-        pixelData.withUnsafeBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
+        // Region-local I/O: at 4096² a full-texture getBytes is 64 MiB on every
+        // selection commit. We only need to write zeros into the work
+        // rectangle, so allocate a buffer the size of the rect and skip the
+        // read entirely (we're overwriting every byte anyway).
+        let regionBytesPerRow = w * 4
+        let region = MTLRegion(
+            origin: MTLOrigin(x: x, y: y, z: 0),
+            size: MTLSize(width: w, height: h, depth: 1)
+        )
+        let zeros = [UInt8](repeating: 0, count: regionBytesPerRow * h)
+        zeros.withUnsafeBufferPointer { buf in
+            guard let baseAddress = buf.baseAddress else { return }
             texture.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
+                region: region,
                 mipmapLevel: 0,
                 withBytes: baseAddress,
-                bytesPerRow: bytesPerRow
+                bytesPerRow: regionBytesPerRow
             )
         }
 
@@ -1497,25 +1521,8 @@ class CanvasRenderer: NSObject {
         let scaleY = CGFloat(texture.height) / screenSize.height
         let scaledPath = path.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
 
-        // Read texture data
         let width = texture.width
         let height = texture.height
-        let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
-        var pixelData = Data(count: dataSize)
-
-        pixelData.withUnsafeMutableBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
-                baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
-        }
 
         // Use point-in-polygon algorithm to determine which pixels to clear
         func isPointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
@@ -1539,17 +1546,44 @@ class CanvasRenderer: NSObject {
         let maxX = min(width - 1, Int(ceil(scaledPath.map { $0.x }.max() ?? CGFloat(width))))
         let minY = max(0, Int(floor(scaledPath.map { $0.y }.min() ?? 0)))
         let maxY = min(height - 1, Int(ceil(scaledPath.map { $0.y }.max() ?? CGFloat(height))))
+        let regionW = maxX - minX + 1
+        let regionH = maxY - minY + 1
+        guard regionW > 0, regionH > 0 else {
+            print("Path bbox empty, nothing to clear")
+            return
+        }
+
+        // Region-local I/O: read only the path's bounding box rather than the
+        // whole texture (a 4096² lasso selection on a 4096² canvas was a
+        // 64 MiB read → 16× saving for typical selection sizes).
+        let regionBytesPerRow = regionW * 4
+        let region = MTLRegion(
+            origin: MTLOrigin(x: minX, y: minY, z: 0),
+            size: MTLSize(width: regionW, height: regionH, depth: 1)
+        )
+        var pixelData = Data(count: regionBytesPerRow * regionH)
+
+        pixelData.withUnsafeMutableBytes { ptr in
+            guard let baseAddress = ptr.baseAddress else { return }
+            texture.getBytes(
+                baseAddress,
+                bytesPerRow: regionBytesPerRow,
+                from: region,
+                mipmapLevel: 0
+            )
+        }
 
         // Clear pixels inside the path. Test at pixel CENTER (px+0.5, py+0.5)
         // so edge pixels that are mostly-inside get included — testing at the
         // corner drops thin edge slivers.
         var clearedCount = 0
-        for py in minY...maxY {
-            for px in minX...maxX {
+        for row in 0..<regionH {
+            let py = minY + row
+            for col in 0..<regionW {
+                let px = minX + col
                 let point = CGPoint(x: CGFloat(px) + 0.5, y: CGFloat(py) + 0.5)
                 if isPointInPolygon(point, polygon: scaledPath) {
-                    let idx = (py * width + px) * 4
-                    guard idx + 3 < pixelData.count else { continue }
+                    let idx = (row * regionW + col) * 4
                     pixelData[idx] = 0     // B
                     pixelData[idx + 1] = 0 // G
                     pixelData[idx + 2] = 0 // R
@@ -1559,17 +1593,14 @@ class CanvasRenderer: NSObject {
             }
         }
 
-        // Write back to texture
+        // Write back the region only.
         pixelData.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
+                region: region,
                 mipmapLevel: 0,
                 withBytes: baseAddress,
-                bytesPerRow: bytesPerRow
+                bytesPerRow: regionBytesPerRow
             )
         }
 
@@ -1596,41 +1627,25 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        // Read full texture data
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
-        var pixelData = Data(count: dataSize)
+        // Region-local read: pull only the selection rect, not the whole
+        // texture. Buffer is laid out exactly as the CGImage wants, so the
+        // intermediate full-texture → row-copy → selectionData step the
+        // previous version did is unnecessary.
+        let selectionBytesPerRow = w * 4
+        var selectionData = Data(count: selectionBytesPerRow * h)
+        let region = MTLRegion(
+            origin: MTLOrigin(x: x, y: y, z: 0),
+            size: MTLSize(width: w, height: h, depth: 1)
+        )
 
-        pixelData.withUnsafeMutableBytes { ptr in
+        selectionData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.getBytes(
                 baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
+                bytesPerRow: selectionBytesPerRow,
+                from: region,
                 mipmapLevel: 0
             )
-        }
-
-        // Extract the selected rectangle into a new buffer
-        let selectionBytesPerRow = w * 4
-        var selectionData = Data(count: selectionBytesPerRow * h)
-
-        selectionData.withUnsafeMutableBytes { selPtr in
-            pixelData.withUnsafeBytes { srcPtr in
-                guard let selBase = selPtr.baseAddress,
-                      let srcBase = srcPtr.baseAddress else { return }
-
-                for row in 0..<h {
-                    let srcOffset = ((y + row) * width + x) * 4
-                    let dstOffset = row * w * 4
-                    memcpy(selBase + dstOffset, srcBase + srcOffset, w * 4)
-                }
-            }
         }
 
         // Convert to UIImage
@@ -1694,22 +1709,23 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        // Read full texture data
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
-        var pixelData = Data(count: dataSize)
+        // Region-local read of the path's bounding box. The region buffer is
+        // already laid out as the output CGImage wants, so we mask in place
+        // (zero pixels outside the polygon) instead of allocating a separate
+        // selectionData buffer.
+        let selectionBytesPerRow = w * 4
+        var selectionData = Data(count: selectionBytesPerRow * h)
+        let region = MTLRegion(
+            origin: MTLOrigin(x: minX, y: minY, z: 0),
+            size: MTLSize(width: w, height: h, depth: 1)
+        )
 
-        pixelData.withUnsafeMutableBytes { ptr in
+        selectionData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.getBytes(
                 baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
+                bytesPerRow: selectionBytesPerRow,
+                from: region,
                 mipmapLevel: 0
             )
         }
@@ -1731,33 +1747,20 @@ class CanvasRenderer: NSObject {
             return inside
         }
 
-        // Extract pixels in bounding box with alpha mask
-        let selectionBytesPerRow = w * 4
-        var selectionData = Data(count: selectionBytesPerRow * h)
-
+        // Mask the region buffer in place: zero out pixels outside the path.
+        // Pixels inside stay untouched (already loaded from the texture).
         selectionData.withUnsafeMutableBytes { selPtr in
-            pixelData.withUnsafeBytes { srcPtr in
-                guard let selBase = selPtr.baseAddress,
-                      let srcBase = srcPtr.baseAddress else { return }
-
-                for row in 0..<h {
-                    for col in 0..<w {
-                        let texX = minX + col
-                        let texY = minY + row
-                        // Test pixel CENTER so edge pixels mostly inside the
-                        // polygon are included (matches clearPath).
-                        let point = CGPoint(x: CGFloat(texX) + 0.5, y: CGFloat(texY) + 0.5)
-
-                        let srcOffset = (texY * width + texX) * 4
+            guard let selBase = selPtr.baseAddress else { return }
+            for row in 0..<h {
+                for col in 0..<w {
+                    let texX = minX + col
+                    let texY = minY + row
+                    // Test pixel CENTER so edge pixels mostly inside the
+                    // polygon are included (matches clearPath).
+                    let point = CGPoint(x: CGFloat(texX) + 0.5, y: CGFloat(texY) + 0.5)
+                    if !isPointInPolygon(point, polygon: scaledPath) {
                         let dstOffset = (row * w + col) * 4
-
-                        if isPointInPolygon(point, polygon: scaledPath) {
-                            // Copy pixel if inside path
-                            memcpy(selBase + dstOffset, srcBase + srcOffset, 4)
-                        } else {
-                            // Set to transparent if outside path
-                            (selBase + dstOffset).storeBytes(of: UInt32(0), as: UInt32.self)
-                        }
+                        (selBase + dstOffset).storeBytes(of: UInt32(0), as: UInt32.self)
                     }
                 }
             }
@@ -1848,37 +1851,51 @@ class CanvasRenderer: NSObject {
         srcContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let srcData = srcContext.data else { return }
 
-        // Read texture, composite, write back.
+        // Region-local I/O: clamp the image's destination rect to texture bounds
+        // and operate only on that intersection. A 256² text run was a 64 MiB
+        // full-texture read+write at 4096²; the clamped region is ~256 KiB.
         let texWidth = texture.width
         let texHeight = texture.height
-        let texBytesPerRow = texWidth * 4
-        var texPixelData = Data(count: texBytesPerRow * texHeight)
+        let dstX = max(0, x)
+        let dstY = max(0, y)
+        let dstEndX = min(texWidth, x + w)
+        let dstEndY = min(texHeight, y + h)
+        let regionW = dstEndX - dstX
+        let regionH = dstEndY - dstY
+        guard regionW > 0, regionH > 0 else { return }
 
-        texPixelData.withUnsafeMutableBytes { ptr in
+        // Where in the source image the visible top-left corner lives. Equal
+        // to (max(0, -x), max(0, -y)) when the image hangs off the texture.
+        let imgStartCol = dstX - x
+        let imgStartRow = dstY - y
+
+        let regionBytesPerRow = regionW * 4
+        var regionData = Data(count: regionBytesPerRow * regionH)
+        let region = MTLRegion(
+            origin: MTLOrigin(x: dstX, y: dstY, z: 0),
+            size: MTLSize(width: regionW, height: regionH, depth: 1)
+        )
+
+        regionData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.getBytes(
                 baseAddress,
-                bytesPerRow: texBytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: texWidth, height: texHeight, depth: 1)
-                ),
+                bytesPerRow: regionBytesPerRow,
+                from: region,
                 mipmapLevel: 0
             )
         }
 
-        texPixelData.withUnsafeMutableBytes { texPtr in
-            guard let texBase = texPtr.baseAddress else { return }
+        regionData.withUnsafeMutableBytes { regionPtr in
+            guard let regionBase = regionPtr.baseAddress else { return }
             srcData.withMemoryRebound(to: UInt8.self, capacity: w * h * 4) { imgPtr in
-                for row in 0..<h {
-                    let texY = y + row
-                    guard texY >= 0, texY < texHeight else { continue }
-                    for col in 0..<w {
-                        let texX = x + col
-                        guard texX >= 0, texX < texWidth else { continue }
+                for row in 0..<regionH {
+                    let imgRow = imgStartRow + row
+                    for col in 0..<regionW {
+                        let imgCol = imgStartCol + col
 
-                        let imgOffset = (row * w + col) * 4
-                        let texOffset = (texY * texWidth + texX) * 4
+                        let imgOffset = (imgRow * w + imgCol) * 4
+                        let regionOffset = (row * regionW + col) * 4
 
                         // Both src and dst are PREMULTIPLIED BGRA8. Use premul
                         // Porter-Duff: out = src + dst * (1 - srcA). No extra
@@ -1893,10 +1910,10 @@ class CanvasRenderer: NSObject {
                         // masks outside the polygon).
                         if srcA == 0 { continue }
 
-                        let dstB = Int((texBase + texOffset).load(as: UInt8.self))
-                        let dstG = Int((texBase + texOffset + 1).load(as: UInt8.self))
-                        let dstR = Int((texBase + texOffset + 2).load(as: UInt8.self))
-                        let dstA = Int((texBase + texOffset + 3).load(as: UInt8.self))
+                        let dstB = Int((regionBase + regionOffset).load(as: UInt8.self))
+                        let dstG = Int((regionBase + regionOffset + 1).load(as: UInt8.self))
+                        let dstR = Int((regionBase + regionOffset + 2).load(as: UInt8.self))
+                        let dstA = Int((regionBase + regionOffset + 3).load(as: UInt8.self))
 
                         let invSrcA = 255 - srcA
                         // (dst * invSrcA + 127) / 255  → rounded integer divide
@@ -1905,25 +1922,22 @@ class CanvasRenderer: NSObject {
                         let outR = srcR + (dstR * invSrcA + 127) / 255
                         let outA = srcA + (dstA * invSrcA + 127) / 255
 
-                        (texBase + texOffset).storeBytes(of: UInt8(min(255, outB)), as: UInt8.self)
-                        (texBase + texOffset + 1).storeBytes(of: UInt8(min(255, outG)), as: UInt8.self)
-                        (texBase + texOffset + 2).storeBytes(of: UInt8(min(255, outR)), as: UInt8.self)
-                        (texBase + texOffset + 3).storeBytes(of: UInt8(min(255, outA)), as: UInt8.self)
+                        (regionBase + regionOffset).storeBytes(of: UInt8(min(255, outB)), as: UInt8.self)
+                        (regionBase + regionOffset + 1).storeBytes(of: UInt8(min(255, outG)), as: UInt8.self)
+                        (regionBase + regionOffset + 2).storeBytes(of: UInt8(min(255, outR)), as: UInt8.self)
+                        (regionBase + regionOffset + 3).storeBytes(of: UInt8(min(255, outA)), as: UInt8.self)
                     }
                 }
             }
         }
 
-        texPixelData.withUnsafeBytes { ptr in
+        regionData.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: texWidth, height: texHeight, depth: 1)
-                ),
+                region: region,
                 mipmapLevel: 0,
                 withBytes: baseAddress,
-                bytesPerRow: texBytesPerRow
+                bytesPerRow: regionBytesPerRow
             )
         }
     }
