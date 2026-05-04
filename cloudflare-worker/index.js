@@ -101,9 +101,16 @@ export {
   enforceRateLimits,
   recordSuccessfulCritique,
   DAILY_SPEND_CAP_USD,
+  ESTIMATED_REQUEST_COST_USD,
   computeRequestCost,
   getDailySpend,
   incrementDailySpend,
+  getUserTokensToday,
+  incrementUserTokensToday,
+  readDailySpendCapUsd,
+  readPerUserDailyTokenCap,
+  enforceCostCeilings,
+  recordRequestUsage,
 } from './middleware/rate-limit.js';
 
 export {

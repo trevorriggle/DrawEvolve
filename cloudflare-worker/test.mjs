@@ -25,9 +25,16 @@ import {
   resolvePresetId,
   DEFAULT_PRESET_ID,
   DAILY_SPEND_CAP_USD,
+  ESTIMATED_REQUEST_COST_USD,
   computeRequestCost,
   getDailySpend,
   incrementDailySpend,
+  getUserTokensToday,
+  incrementUserTokensToday,
+  readDailySpendCapUsd,
+  readPerUserDailyTokenCap,
+  enforceCostCeilings,
+  recordRequestUsage,
   validateContext,
   getUserTier,
   TIER_LIMITS,
@@ -592,8 +599,7 @@ test('incrementDailySpend adds to existing total and persists', async () => {
 });
 
 test('daily spend cap gating: at-or-above the cap blocks; below the cap allows', async () => {
-  // Validates the predicate the handler uses ("dailySpend >= DAILY_SPEND_CAP_USD")
-  // by exercising the helper that feeds it.
+  // Validates the helper predicate that feeds the cost-ceiling check.
   const { env, kv } = makeEnv();
   kv.setNow(FIXED_NOW);
   // Seed exactly at the cap.
@@ -605,6 +611,223 @@ test('daily spend cap gating: at-or-above the cap blocks; below the cap allows',
   await kv.put('daily_spend:2026-04-29', String(DAILY_SPEND_CAP_USD - 0.01), { expirationTtl: 48 * 3600 });
   const under = await getDailySpend(env, '2026-04-29');
   assert.ok(under < DAILY_SPEND_CAP_USD, 'below-cap reads as below the cap');
+});
+
+// =============================================================================
+// Cost ceilings — provider daily $ cap + per-user daily token cap
+// =============================================================================
+//
+// These are the launch-blocker hard caps that gate the OpenAI call. They run
+// AFTER tier rate limits, BEFORE the OpenAI call. Both fail-closed with 429
+// and a stable error code the iOS client surfaces as "Daily limit reached".
+
+test('readDailySpendCapUsd returns env override when set', () => {
+  assert.equal(readDailySpendCapUsd({ OPENAI_DAILY_SPEND_CAP_USD: '12.50' }), 12.50);
+  assert.equal(readDailySpendCapUsd({ OPENAI_DAILY_SPEND_CAP_USD: 7 }), 7);
+});
+
+test('readDailySpendCapUsd falls back to constant when env is missing or invalid', () => {
+  assert.equal(readDailySpendCapUsd({}), DAILY_SPEND_CAP_USD);
+  assert.equal(readDailySpendCapUsd({ OPENAI_DAILY_SPEND_CAP_USD: '' }), DAILY_SPEND_CAP_USD);
+  assert.equal(readDailySpendCapUsd({ OPENAI_DAILY_SPEND_CAP_USD: 'not-a-number' }), DAILY_SPEND_CAP_USD);
+  assert.equal(readDailySpendCapUsd({ OPENAI_DAILY_SPEND_CAP_USD: '0' }), DAILY_SPEND_CAP_USD);
+  assert.equal(readDailySpendCapUsd({ OPENAI_DAILY_SPEND_CAP_USD: '-1' }), DAILY_SPEND_CAP_USD);
+});
+
+test('readPerUserDailyTokenCap returns env value when set', () => {
+  assert.equal(readPerUserDailyTokenCap({ PER_USER_DAILY_TOKEN_CAP: '50000' }), 50000);
+  assert.equal(readPerUserDailyTokenCap({ PER_USER_DAILY_TOKEN_CAP: 12345 }), 12345);
+});
+
+test('readPerUserDailyTokenCap returns Infinity when unset or invalid', () => {
+  // No env-driven cap = no enforcement. wrangler.toml documents this as a
+  // launch-blocker that must be set explicitly in production.
+  assert.equal(readPerUserDailyTokenCap({}), Infinity);
+  assert.equal(readPerUserDailyTokenCap({ PER_USER_DAILY_TOKEN_CAP: '' }), Infinity);
+  assert.equal(readPerUserDailyTokenCap({ PER_USER_DAILY_TOKEN_CAP: 'nope' }), Infinity);
+  assert.equal(readPerUserDailyTokenCap({ PER_USER_DAILY_TOKEN_CAP: '0' }), Infinity);
+  assert.equal(readPerUserDailyTokenCap({ PER_USER_DAILY_TOKEN_CAP: '-50' }), Infinity);
+});
+
+test('getUserTokensToday returns 0 for missing key, parses stored integer', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 0);
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '4200', { expirationTtl: 48 * 3600 });
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 4200);
+});
+
+test('incrementUserTokensToday adds to existing total', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  await incrementUserTokensToday(env, FREE_USER, '2026-04-29', 1000);
+  await incrementUserTokensToday(env, FREE_USER, '2026-04-29', 500);
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 1500);
+});
+
+test('enforceCostCeilings: caps not yet hit → passes', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.OPENAI_DAILY_SPEND_CAP_USD = '5.00';
+  env.PER_USER_DAILY_TOKEN_CAP = '50000';
+  // Seed well below both caps.
+  await kv.put('daily_spend:2026-04-29', '1.00', { expirationTtl: 48 * 3600 });
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '10000', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, true);
+  assert.equal(decision.ctx.dayKey, '2026-04-29');
+});
+
+test('enforceCostCeilings: daily spend exactly at cap → next request fails', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.OPENAI_DAILY_SPEND_CAP_USD = '5.00';
+  // Seed exactly at the cap. Adding any estimate pushes it over.
+  await kv.put('daily_spend:2026-04-29', '5.00', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'daily_spend_cap_exceeded');
+  assert.match(decision.body.message, /daily limit reached/i);
+  assert.ok(decision.body.retryAfter > 0);
+});
+
+test('enforceCostCeilings: daily spend already exceeded → fails immediately', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.OPENAI_DAILY_SPEND_CAP_USD = '5.00';
+  await kv.put('daily_spend:2026-04-29', '99.99', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'daily_spend_cap_exceeded');
+});
+
+test('enforceCostCeilings: daily spend just below cap minus estimate → still passes', async () => {
+  // Boundary: a request can land if (current + ESTIMATED_REQUEST_COST_USD) <= cap.
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.OPENAI_DAILY_SPEND_CAP_USD = '5.00';
+  // Leave just enough headroom for the estimate.
+  const seed = (5.00 - ESTIMATED_REQUEST_COST_USD).toFixed(6);
+  await kv.put('daily_spend:2026-04-29', seed, { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, true);
+});
+
+test('enforceCostCeilings: per-user tokens exactly at cap → next request fails', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.PER_USER_DAILY_TOKEN_CAP = '50000';
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '50000', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'per_user_token_cap_exceeded');
+  assert.match(decision.body.message, /daily limit reached/i);
+  assert.ok(decision.body.retryAfter > 0);
+});
+
+test('enforceCostCeilings: per-user tokens already exceeded → fails immediately', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.PER_USER_DAILY_TOKEN_CAP = '50000';
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '999999', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.body.error, 'per_user_token_cap_exceeded');
+});
+
+test('enforceCostCeilings: per-user cap is per-user — one user over does not block another', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.PER_USER_DAILY_TOKEN_CAP = '50000';
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '50000', { expirationTtl: 48 * 3600 });
+
+  const blocked = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(blocked.ok, false);
+  const allowed = await enforceCostCeilings({ env, userId: PRO_USER, now: FIXED_NOW });
+  assert.equal(allowed.ok, true);
+});
+
+test('enforceCostCeilings: spend cap evaluated before token cap (deterministic priority)', async () => {
+  // When both caps would reject, the daily spend cap message wins. iOS treats
+  // them the same (both surface "Daily limit reached"), but a stable error code
+  // makes log filtering cleaner.
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.OPENAI_DAILY_SPEND_CAP_USD = '5.00';
+  env.PER_USER_DAILY_TOKEN_CAP = '50000';
+  await kv.put('daily_spend:2026-04-29', '99.99', { expirationTtl: 48 * 3600 });
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '999999', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.body.error, 'daily_spend_cap_exceeded');
+});
+
+test('enforceCostCeilings: per-user cap unset (env missing) → token cap not enforced', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // No PER_USER_DAILY_TOKEN_CAP set — cap is Infinity, no enforcement.
+  await kv.put(`user_tokens:${FREE_USER}:2026-04-29`, '10000000', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, true);
+});
+
+test('enforceCostCeilings: env override of spend cap is honored', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  env.OPENAI_DAILY_SPEND_CAP_USD = '1.00';   // tighter than the constant
+  await kv.put('daily_spend:2026-04-29', '0.999', { expirationTtl: 48 * 3600 });
+
+  // Below the lower env cap minus estimate? No — 0.999 + 0.005 > 1.00, so reject.
+  const decision = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.body.error, 'daily_spend_cap_exceeded');
+});
+
+test('recordRequestUsage increments per-user tokens by actual prompt+completion', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  await recordRequestUsage({
+    env,
+    userId: FREE_USER,
+    dayKey: '2026-04-29',
+    usage: { prompt_tokens: 800, completion_tokens: 350 },
+  });
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 1150);
+
+  // Subsequent call accumulates.
+  await recordRequestUsage({
+    env,
+    userId: FREE_USER,
+    dayKey: '2026-04-29',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+  });
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 1300);
+});
+
+test('recordRequestUsage tolerates missing/partial usage', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // No-op when usage is null.
+  await recordRequestUsage({ env, userId: FREE_USER, dayKey: '2026-04-29', usage: null });
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 0);
+  // Treats missing fields as 0.
+  await recordRequestUsage({
+    env,
+    userId: FREE_USER,
+    dayKey: '2026-04-29',
+    usage: { prompt_tokens: 200 },
+  });
+  assert.equal(await getUserTokensToday(env, FREE_USER, '2026-04-29'), 200);
 });
 
 // =============================================================================
