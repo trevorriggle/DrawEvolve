@@ -60,6 +60,12 @@ import {
   recordIdempotent,
   buildCritiqueEntry,
   persistCritique,
+  CRITIQUE_CATEGORIES,
+  SEVERITY_MIN,
+  SEVERITY_MAX,
+  classifyCritique,
+  CLASSIFIER_MODEL,
+  CLASSIFIER_VERSION,
   REQUEST_STATUS,
   logRequest,
   validateJWT,
@@ -3548,3 +3554,175 @@ test('buildCritiqueEntry stores null customPromptModifier when none is set', () 
   });
   assert.equal(entry.prompt_config.customPromptModifier, null);
 });
+
+// =============================================================================
+// My Evolution Phase 1 — critique classifier
+// =============================================================================
+
+const CLASSIFIER_ENV = { OPENAI_API_KEY: 'sk-test-classifier' };
+
+// Captures one OpenAI-shaped completion call. The classifier expects a
+// /v1/chat/completions response with choices[0].message.content as a JSON
+// string matching the json_schema response_format contract.
+function makeClassifierFetcher({ ok = true, status = 200, content = '', throwErr = null } = {}) {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    if (throwErr) throw throwErr;
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    return {
+      ok,
+      status,
+      async json() {
+        return { choices: [{ message: { content } }] };
+      },
+      async text() {
+        return content;
+      },
+    };
+  };
+  return { fetcher, calls };
+}
+
+function silentConsoleError(fn) {
+  const original = console.error;
+  console.error = () => {};
+  return Promise.resolve(fn()).finally(() => { console.error = original; });
+}
+
+test('CRITIQUE_CATEGORIES locks the canonical 8-bucket taxonomy', () => {
+  // The taxonomy is a contract between the classifier and the future
+  // Evolution endpoint. Locking it here catches accidental edits to the list.
+  assert.deepEqual(CRITIQUE_CATEGORIES, [
+    'anatomy',
+    'composition',
+    'value',
+    'color',
+    'line',
+    'perspective',
+    'subject_match',
+    'general',
+  ]);
+  assert.equal(SEVERITY_MIN, 1);
+  assert.equal(SEVERITY_MAX, 5);
+});
+
+test('CLASSIFIER_MODEL is gpt-5.1-mini (single line to swap if model changes)', () => {
+  assert.equal(CLASSIFIER_MODEL, 'gpt-5.1-mini');
+  assert.equal(CLASSIFIER_VERSION, 'v1');
+});
+
+test('classifyCritique returns parsed tags with classifier_version stamped on success', async () => {
+  const tags = {
+    primary_category: 'anatomy',
+    secondary_categories: ['line'],
+    severity: 3,
+    focus_area_text: 'Tighten the shoulder construction',
+    subject_inferred: 'standing figure',
+    acknowledged_progress: false,
+  };
+  const { fetcher, calls } = makeClassifierFetcher({ content: JSON.stringify(tags) });
+
+  const result = await classifyCritique({
+    feedback: '## Quick Take\nNice gesture.\n## Focus Area: Tighten the shoulder construction\n...',
+    env: CLASSIFIER_ENV,
+    fetcher,
+  });
+
+  assert.deepEqual(result, { ...tags, classifier_version: 'v1' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer sk-test-classifier');
+  // Body shape contract: model swap, deterministic params, json_schema strict.
+  assert.equal(calls[0].body.model, 'gpt-5.1-mini');
+  assert.equal(calls[0].body.temperature, 0);
+  assert.equal(calls[0].body.seed, 42);
+  assert.equal(calls[0].body.max_completion_tokens, 300);
+  assert.equal(calls[0].body.response_format.type, 'json_schema');
+  assert.equal(calls[0].body.response_format.json_schema.strict, true);
+  assert.deepEqual(calls[0].body.response_format.json_schema.schema.properties.primary_category.enum, CRITIQUE_CATEGORIES);
+  // Text-only — no image array on user content.
+  assert.equal(calls[0].body.messages.length, 2);
+  assert.equal(calls[0].body.messages[0].role, 'system');
+  assert.equal(calls[0].body.messages[1].role, 'user');
+  assert.equal(typeof calls[0].body.messages[1].content, 'string');
+});
+
+test('classifyCritique returns null on non-2xx OpenAI response', () => silentConsoleError(async () => {
+  const { fetcher } = makeClassifierFetcher({ ok: false, status: 500, content: 'upstream boom' });
+  const result = await classifyCritique({ feedback: 'critique body', env: CLASSIFIER_ENV, fetcher });
+  assert.equal(result, null);
+}));
+
+test('classifyCritique returns null on malformed JSON content', () => silentConsoleError(async () => {
+  const { fetcher } = makeClassifierFetcher({ content: '{not json' });
+  const result = await classifyCritique({ feedback: 'critique body', env: CLASSIFIER_ENV, fetcher });
+  assert.equal(result, null);
+}));
+
+test('classifyCritique returns null when fetcher throws', () => silentConsoleError(async () => {
+  const fetcher = async () => { throw new Error('network down'); };
+  const result = await classifyCritique({ feedback: 'critique body', env: CLASSIFIER_ENV, fetcher });
+  assert.equal(result, null);
+}));
+
+test('classifyCritique returns null when primary_category is outside the enum', () => silentConsoleError(async () => {
+  // Defense-in-depth: even if OpenAI ever returns an off-enum value (schema
+  // drift, provider hiccup), the classifier must reject it rather than write
+  // garbage into the JSONB column.
+  const bad = {
+    primary_category: 'mystery',
+    secondary_categories: [],
+    severity: 2,
+    focus_area_text: null,
+    subject_inferred: null,
+    acknowledged_progress: false,
+  };
+  const { fetcher } = makeClassifierFetcher({ content: JSON.stringify(bad) });
+  const result = await classifyCritique({ feedback: 'x', env: CLASSIFIER_ENV, fetcher });
+  assert.equal(result, null);
+}));
+
+test('classifyCritique returns null when severity is out of [1,5]', () => silentConsoleError(async () => {
+  const bad = {
+    primary_category: 'anatomy',
+    secondary_categories: [],
+    severity: 7,
+    focus_area_text: null,
+    subject_inferred: null,
+    acknowledged_progress: false,
+  };
+  const { fetcher } = makeClassifierFetcher({ content: JSON.stringify(bad) });
+  const result = await classifyCritique({ feedback: 'x', env: CLASSIFIER_ENV, fetcher });
+  assert.equal(result, null);
+}));
+
+test('classifyCritique returns null when secondary_categories duplicates primary', () => silentConsoleError(async () => {
+  // The taxonomy contract: secondaries are *additional* mentions. A duplicate
+  // would skew per-category trend counts, so reject rather than dedup silently.
+  const bad = {
+    primary_category: 'anatomy',
+    secondary_categories: ['anatomy'],
+    severity: 3,
+    focus_area_text: null,
+    subject_inferred: null,
+    acknowledged_progress: false,
+  };
+  const { fetcher } = makeClassifierFetcher({ content: JSON.stringify(bad) });
+  const result = await classifyCritique({ feedback: 'x', env: CLASSIFIER_ENV, fetcher });
+  assert.equal(result, null);
+}));
+
+test('classifyCritique returns null when env has no OPENAI_API_KEY', () => silentConsoleError(async () => {
+  const { fetcher, calls } = makeClassifierFetcher({ content: '{}' });
+  const result = await classifyCritique({ feedback: 'x', env: {}, fetcher });
+  assert.equal(result, null);
+  // Must short-circuit without any network call.
+  assert.equal(calls.length, 0);
+}));
+
+test('classifyCritique tolerates empty/non-string feedback by returning null without a call', () => silentConsoleError(async () => {
+  const { fetcher, calls } = makeClassifierFetcher({ content: '{}' });
+  assert.equal(await classifyCritique({ feedback: '', env: CLASSIFIER_ENV, fetcher }), null);
+  assert.equal(await classifyCritique({ feedback: null, env: CLASSIFIER_ENV, fetcher }), null);
+  assert.equal(calls.length, 0);
+}));

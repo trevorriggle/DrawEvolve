@@ -201,3 +201,16 @@ export {
   handleGetProfileByUsername,
   handleProfileSearch,
 } from './routes/profiles.js';
+
+export {
+  CRITIQUE_CATEGORIES,
+  SEVERITY_MIN,
+  SEVERITY_MAX,
+} from './lib/taxonomy.js';
+
+export {
+  classifyCritique,
+  CLASSIFIER_MODEL,
+  CLASSIFIER_VERSION,
+  CLASSIFIER_SYSTEM_PROMPT,
+} from './lib/classifier.js';
