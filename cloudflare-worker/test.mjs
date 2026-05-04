@@ -43,7 +43,23 @@ import {
   persistCritique,
   REQUEST_STATUS,
   logRequest,
+  validateJWT,
+  _resetJwksCacheForTests,
+  bytesEqual,
+  bytesToHex,
+  hexToBytes,
+  cborDecode,
+  ecdsaDerToRaw,
+  computeAppAttestClientDataHash,
+  verifyAppAttestAssertion,
+  issueAppAttestChallenge,
+  consumeAppAttestChallenge,
+  storeAttestedKey,
+  getAttestedKey,
+  updateAttestedKeyCounter,
+  readAppAttestHeaders,
 } from './index.js';
+import handler from './index.js';
 
 const baseContext = {
   skillLevel: 'Intermediate',
@@ -1397,5 +1413,892 @@ test('selectVoice falls back when env is not configured', async () => {
     assert.equal(result, VOICE_STUDIO_MENTOR);
   } finally {
     console.error = originalError;
+  }
+});
+
+// =============================================================================
+// Phase 5a — validateJWT (ES256 / JWKS)
+// =============================================================================
+//
+// We generate a real ES256 keypair with Web Crypto and sign tokens for each
+// test case rather than hand-crafting a valid signature, so the verification
+// path runs end-to-end (kid lookup → importKey → subtle.verify → claim
+// checks). The fetcher is stubbed so no real network call leaves the box;
+// _resetJwksCacheForTests clears module-scope cache so each test gets a
+// clean slate.
+
+const TEST_JWT_ENV = {
+  SUPABASE_URL: 'https://test.supabase.co',
+  SUPABASE_JWT_ISSUER: 'https://test.supabase.co/auth/v1',
+};
+const TEST_KID = 'test-kid-1';
+const TEST_SUB = '00000000-0000-0000-0000-0000000000aa';
+
+function b64urlFromString(s) {
+  return Buffer.from(s, 'utf8').toString('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function b64urlFromBytes(bytes) {
+  return Buffer.from(bytes).toString('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+async function generateES256Keypair() {
+  return crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify'],
+  );
+}
+
+async function exportPublicJWK(publicKey, kid = TEST_KID) {
+  const jwk = await crypto.subtle.exportKey('jwk', publicKey);
+  // Strip private fields just in case (publicKey export shouldn't have them,
+  // but be paranoid). Add kid + alg the way Supabase publishes them.
+  return { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, kid, alg: 'ES256', use: 'sig' };
+}
+
+async function signES256JWT({ privateKey, kid = TEST_KID, header: headerOverride = {}, payload }) {
+  const header = { alg: 'ES256', typ: 'JWT', kid, ...headerOverride };
+  const headerB64 = b64urlFromString(JSON.stringify(header));
+  const payloadB64 = b64urlFromString(JSON.stringify(payload));
+  const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const sigBuf = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' }, privateKey, data,
+  );
+  return `${headerB64}.${payloadB64}.${b64urlFromBytes(new Uint8Array(sigBuf))}`;
+}
+
+function jwksFetcherFor(jwks) {
+  // Returns a fetcher that responds to the JWKS URL with the supplied keys
+  // and 404s anything else (so a misrouted call surfaces obviously).
+  return async (url) => {
+    if (typeof url === 'string' && url.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: jwks }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+}
+
+function basePayload(overrides = {}) {
+  // Default valid claims, expiring 1h after FIXED_NOW.
+  const nowSec = Math.floor(FIXED_NOW / 1000);
+  return {
+    iss: TEST_JWT_ENV.SUPABASE_JWT_ISSUER,
+    aud: 'authenticated',
+    sub: TEST_SUB,
+    exp: nowSec + 3600,
+    iat: nowSec,
+    role: 'authenticated',
+    app_metadata: { tier: 'free' },
+    ...overrides,
+  };
+}
+
+test('validateJWT accepts a valid token and returns the payload with sub', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({ privateKey, payload: basePayload() });
+
+  const result = await validateJWT(token, TEST_JWT_ENV, {
+    fetcher: jwksFetcherFor([jwk]),
+    nowSeconds: Math.floor(FIXED_NOW / 1000),
+  });
+
+  assert.equal(result.sub, TEST_SUB);
+  assert.equal(result.iss, TEST_JWT_ENV.SUPABASE_JWT_ISSUER);
+  assert.equal(result.aud, 'authenticated');
+  // app_metadata flows through so getUserTier downstream still works.
+  assert.equal(result.app_metadata?.tier, 'free');
+});
+
+test('validateJWT rejects an expired token', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const nowSec = Math.floor(FIXED_NOW / 1000);
+  // exp 1 second in the past relative to the injected clock.
+  const token = await signES256JWT({
+    privateKey,
+    payload: basePayload({ exp: nowSec - 1 }),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, { fetcher: jwksFetcherFor([jwk]), nowSeconds: nowSec }),
+    /expired/i,
+  );
+});
+
+test('validateJWT rejects a malformed token (not three parts)', async () => {
+  _resetJwksCacheForTests();
+  // Stub fetcher should never be hit — malformed token rejected before JWKS lookup.
+  let fetched = false;
+  const fetcher = async () => { fetched = true; return { ok: true, json: async () => ({ keys: [] }) }; };
+
+  await assert.rejects(
+    () => validateJWT('only.two', TEST_JWT_ENV, { fetcher }),
+    /malformed/i,
+  );
+  await assert.rejects(
+    () => validateJWT('a.b.c.d', TEST_JWT_ENV, { fetcher }),
+    /malformed/i,
+  );
+  assert.equal(fetched, false, 'malformed tokens must be rejected before JWKS fetch');
+});
+
+test('validateJWT rejects a missing token (null / undefined / empty / wrong type)', async () => {
+  _resetJwksCacheForTests();
+  const fetcher = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  for (const bad of [null, undefined, '', 12345, {}]) {
+    await assert.rejects(
+      () => validateJWT(bad, TEST_JWT_ENV, { fetcher }),
+      (err) => err instanceof Error,
+    );
+  }
+});
+
+test('validateJWT rejects a wrong-issuer token (signature valid, iss mismatched)', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({
+    privateKey,
+    payload: basePayload({ iss: 'https://attacker.example.com/auth/v1' }),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    /issuer/i,
+  );
+});
+
+test('validateJWT rejects a token with a tampered signature', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({ privateKey, payload: basePayload() });
+  // Flip a character ~10 chars from the end of the signature. The very last
+  // base64url char encodes the unused trailing padding bits of a 64-byte
+  // ES256 sig, so flipping it leaves the decoded bytes unchanged. A flip
+  // 10 chars in is squarely inside the signature's middle bytes.
+  const flipped = token.slice(0, -10)
+    + (token[token.length - 10] === 'A' ? 'B' : 'A')
+    + token.slice(-9);
+
+  await assert.rejects(
+    () => validateJWT(flipped, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    (err) => err instanceof Error,
+  );
+});
+
+test('validateJWT rejects a token whose kid is not in the JWKS', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey, 'served-kid');
+  const token = await signES256JWT({
+    privateKey,
+    kid: 'not-served-kid',
+    payload: basePayload(),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    /kid/i,
+  );
+});
+
+test('validateJWT rejects a wrong-audience token', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  // 'service_role' is the obvious upgrade-attack — must never validate.
+  const token = await signES256JWT({
+    privateKey,
+    payload: basePayload({ aud: 'service_role' }),
+  });
+
+  await assert.rejects(
+    () => validateJWT(token, TEST_JWT_ENV, {
+      fetcher: jwksFetcherFor([jwk]),
+      nowSeconds: Math.floor(FIXED_NOW / 1000),
+    }),
+    /audience/i,
+  );
+});
+
+test('validateJWT rejects a token with an unsupported alg (e.g. HS256 or none)', async () => {
+  _resetJwksCacheForTests();
+  // Hand-craft headers — no signing needed; the alg check fires before JWKS lookup.
+  const fetcher = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  for (const alg of ['HS256', 'none', 'RS256']) {
+    const headerB64 = b64urlFromString(JSON.stringify({ alg, typ: 'JWT', kid: TEST_KID }));
+    const payloadB64 = b64urlFromString(JSON.stringify(basePayload()));
+    // Signature segment doesn't matter; alg check trips first.
+    const fakeToken = `${headerB64}.${payloadB64}.AAAA`;
+    await assert.rejects(
+      () => validateJWT(fakeToken, TEST_JWT_ENV, { fetcher }),
+      /alg/i,
+      `should reject alg=${alg}`,
+    );
+  }
+});
+
+test('validateJWT rejects a header missing the kid claim', async () => {
+  _resetJwksCacheForTests();
+  const fetcher = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  const headerB64 = b64urlFromString(JSON.stringify({ alg: 'ES256', typ: 'JWT' }));
+  const payloadB64 = b64urlFromString(JSON.stringify(basePayload()));
+  const fakeToken = `${headerB64}.${payloadB64}.AAAA`;
+
+  await assert.rejects(
+    () => validateJWT(fakeToken, TEST_JWT_ENV, { fetcher }),
+    /kid/i,
+  );
+});
+
+test('_resetJwksCacheForTests clears module-scope cache between tests', async () => {
+  // First fetch primes the cache.
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const token = await signES256JWT({ privateKey, payload: basePayload() });
+
+  let firstFetcherCalls = 0;
+  const firstFetcher = async (url) => {
+    firstFetcherCalls++;
+    if (typeof url === 'string' && url.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await validateJWT(token, TEST_JWT_ENV, {
+    fetcher: firstFetcher,
+    nowSeconds: Math.floor(FIXED_NOW / 1000),
+  });
+  assert.equal(firstFetcherCalls, 1, 'first call should hit fetcher');
+
+  // Second call without reset must reuse the cache (fetcher untouched).
+  let secondFetcherCalls = 0;
+  const secondFetcher = async () => { secondFetcherCalls++; return { ok: false, status: 500 }; };
+  await validateJWT(token, TEST_JWT_ENV, {
+    fetcher: secondFetcher,
+    nowSeconds: Math.floor(FIXED_NOW / 1000),
+  });
+  assert.equal(secondFetcherCalls, 0, 'cached call should not hit fetcher');
+
+  // After reset, third call must hit the fetcher again.
+  _resetJwksCacheForTests();
+  let thirdFetcherCalls = 0;
+  const thirdFetcher = async (url) => {
+    thirdFetcherCalls++;
+    if (typeof url === 'string' && url.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await validateJWT(token, TEST_JWT_ENV, {
+    fetcher: thirdFetcher,
+    nowSeconds: Math.floor(FIXED_NOW / 1000),
+  });
+  assert.equal(thirdFetcherCalls, 1, 'reset should force a re-fetch');
+});
+
+// =============================================================================
+// Phase 5f — App Attest
+// =============================================================================
+//
+// Two layers of test:
+//  - Pure functions (CBOR, ASN.1, byte helpers, clientDataHash) on hand-built
+//    inputs.
+//  - Assertion verification end-to-end with a synthetic P-256 keypair: build
+//    a CBOR-encoded "assertion," hand it to verifyAppAttestAssertion, expect
+//    success; replay with the same counter, expect failure; tamper one byte,
+//    expect failure. We can't test attestation E2E without a real Apple
+//    device, but the assertion path is the one that runs on every request.
+
+import { webcrypto } from 'node:crypto';
+const subtle = webcrypto.subtle;
+
+// ---- minimal CBOR encoder for tests ---------------------------------------
+// Just enough to build assertion-shaped maps with byte-string values.
+
+function cborEncodeUint(n) {
+  if (n < 24) return Uint8Array.of(n);
+  if (n < 0x100) return Uint8Array.of(24, n);
+  if (n < 0x10000) return Uint8Array.of(25, n >> 8, n & 0xff);
+  if (n < 0x100000000) return Uint8Array.of(26, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+  throw new Error('cborEncodeUint > 2^32 not supported in test helper');
+}
+function cborTagLen(major, length) {
+  const lenBytes = cborEncodeUint(length);
+  const head = (major << 5) | (lenBytes[0] & 0x1f);
+  return Uint8Array.of(head, ...lenBytes.subarray(1));
+}
+function cborEncodeBytes(bytes) {
+  return concat(cborTagLen(2, bytes.length), bytes);
+}
+function cborEncodeText(str) {
+  const enc = new TextEncoder().encode(str);
+  return concat(cborTagLen(3, enc.length), enc);
+}
+function cborEncodeMap(entries) {
+  let body = new Uint8Array(0);
+  for (const [k, v] of entries) body = concat(body, cborEncodeText(k), v);
+  return concat(cborTagLen(5, entries.length), body);
+}
+function concat(...arrs) {
+  let total = 0;
+  for (const a of arrs) total += a.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrs) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+// Convert WebCrypto's spki-export to the raw uncompressed point. SPKI for
+// P-256 ECDSA always ends with the BIT STRING value, which starts with an
+// "unused bits" byte (0x00) and then 0x04 || X(32) || Y(32). Slice the last
+// 65 bytes of the export.
+async function p256RawPubKey(keyPair) {
+  const spki = new Uint8Array(await subtle.exportKey('spki', keyPair.publicKey));
+  return spki.subarray(spki.length - 65);
+}
+
+async function sha256(bytes) {
+  return new Uint8Array(await subtle.digest('SHA-256', bytes));
+}
+
+// Sign with WebCrypto then convert raw r||s to DER per the assertion spec.
+async function signEcdsaDer(privateKey, message) {
+  const raw = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, message));
+  if (raw.length !== 64) throw new Error('expected raw P-256 sig of 64 bytes');
+  const r = raw.subarray(0, 32);
+  const s = raw.subarray(32, 64);
+  function intDer(buf) {
+    let i = 0;
+    while (i < buf.length - 1 && buf[i] === 0) i++;
+    let v = buf.subarray(i);
+    if (v[0] & 0x80) v = concat(Uint8Array.of(0), v);
+    return concat(Uint8Array.of(0x02, v.length), v);
+  }
+  const body = concat(intDer(r), intDer(s));
+  return concat(Uint8Array.of(0x30, body.length), body);
+}
+
+// In-memory KV that mimics the surface verifyAppAttestAssertion's helpers
+// touch. Same shape Cloudflare's KV namespace exposes.
+function makeTestKV() {
+  const store = new Map();
+  return {
+    async get(k) { return store.has(k) ? store.get(k) : null; },
+    async put(k, v, _opts) { store.set(k, v); },
+    async delete(k) { store.delete(k); },
+    _store: store,
+  };
+}
+
+// Build an env that satisfies the App Attest module's required fields. The
+// team ID is arbitrary — it just has to feed appAttestAppId so the rpIdHash
+// math is consistent across encoder + verifier.
+function makeAttestEnv({ kv, mode = 'development' } = {}) {
+  return {
+    QUOTA_KV: kv ?? makeTestKV(),
+    APP_ATTEST_TEAM_ID: 'TEST123456',
+    APP_ATTEST_BUNDLE_ID: 'com.drawevolve.app',
+    APP_ATTEST_ENV: mode,
+  };
+}
+
+// ---- pure helpers ----------------------------------------------------------
+
+test('bytesEqual is constant-time true on equal inputs and false on length mismatch', () => {
+  assert.equal(bytesEqual(Uint8Array.of(1, 2, 3), Uint8Array.of(1, 2, 3)), true);
+  assert.equal(bytesEqual(Uint8Array.of(1, 2, 3), Uint8Array.of(1, 2, 4)), false);
+  assert.equal(bytesEqual(Uint8Array.of(1, 2, 3), Uint8Array.of(1, 2, 3, 4)), false);
+});
+
+test('hex round-trips through bytesToHex / hexToBytes', () => {
+  const sample = Uint8Array.of(0xde, 0xad, 0xbe, 0xef, 0x00, 0x10, 0xff);
+  assert.equal(bytesToHex(sample), 'deadbeef0010ff');
+  assert.deepEqual(hexToBytes('deadbeef0010ff'), sample);
+});
+
+test('cborDecode parses a simple map of string→bytes round-trip', () => {
+  const payload = cborEncodeMap([
+    ['signature', cborEncodeBytes(Uint8Array.of(1, 2, 3, 4))],
+    ['authenticatorData', cborEncodeBytes(Uint8Array.of(9, 8, 7))],
+  ]);
+  const decoded = cborDecode(payload);
+  assert.deepEqual(decoded.signature, Uint8Array.of(1, 2, 3, 4));
+  assert.deepEqual(decoded.authenticatorData, Uint8Array.of(9, 8, 7));
+});
+
+test('cborDecode rejects trailing bytes', () => {
+  const valid = cborEncodeMap([['x', cborEncodeBytes(Uint8Array.of(1))]]);
+  const tampered = concat(valid, Uint8Array.of(0));
+  assert.throws(() => cborDecode(tampered), /trailing|truncated/);
+});
+
+test('ecdsaDerToRaw converts a known DER SEQUENCE to fixed-length r||s', () => {
+  // Hand-built: SEQUENCE { INTEGER 0x01, INTEGER 0x02 }
+  const der = Uint8Array.of(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02);
+  const raw = ecdsaDerToRaw(der, 32);
+  assert.equal(raw.length, 64);
+  // r and s should be left-padded with zeros to 32 bytes each
+  assert.equal(raw[31], 0x01);
+  assert.equal(raw[63], 0x02);
+});
+
+test('computeAppAttestClientDataHash matches a hand-derived value', async () => {
+  // The iOS client and Worker both compute SHA-256("METHOD:PATH:sha256-hex(body)").
+  // Replicate that here with WebCrypto and check the result byte-for-byte.
+  const body = new TextEncoder().encode('{"hello":"world"}');
+  const bodyHashHex = bytesToHex(await sha256(body));
+  const expected = await sha256(new TextEncoder().encode(`POST:/:${bodyHashHex}`));
+  const got = await computeAppAttestClientDataHash('POST', '/', body);
+  assert.deepEqual(got, expected);
+});
+
+// ---- assertion verification (E2E with a synthetic key) --------------------
+
+async function buildSyntheticAssertion({
+  keyPair, env, method = 'POST', path = '/', body = new Uint8Array(), counter = 1,
+}) {
+  // rpIdHash = SHA-256("<TEAM>.<BUNDLE>") — must match what the verifier
+  // computes from APP_ATTEST_TEAM_ID + APP_ATTEST_BUNDLE_ID.
+  const appId = `${env.APP_ATTEST_TEAM_ID}.${env.APP_ATTEST_BUNDLE_ID}`;
+  const rpIdHash = await sha256(new TextEncoder().encode(appId));
+  const flags = Uint8Array.of(0x40);                      // attested-credential-data bit set
+  const counterBE = Uint8Array.of(
+    (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff,
+  );
+  const authData = concat(rpIdHash, flags, counterBE);    // 32 + 1 + 4 = 37 bytes
+  const clientDataHash = await computeAppAttestClientDataHash(method, path, body);
+  const signedData = concat(authData, clientDataHash);
+  const signatureDer = await signEcdsaDer(keyPair.privateKey, signedData);
+  const cbor = cborEncodeMap([
+    ['signature', cborEncodeBytes(signatureDer)],
+    ['authenticatorData', cborEncodeBytes(authData)],
+  ]);
+  return Buffer.from(cbor).toString('base64');
+}
+
+test('verifyAppAttestAssertion accepts a valid synthetic assertion with monotonic counter', async () => {
+  const env = makeAttestEnv();
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const body = new TextEncoder().encode('{"feedback":"please"}');
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body, counter: 1 });
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', body);
+  const result = await verifyAppAttestAssertion({
+    assertionB64,
+    storedPubKey: pub,
+    storedCounter: 0,
+    expectedClientDataHash,
+    env,
+  });
+  assert.equal(result.newCounter, 1);
+});
+
+test('verifyAppAttestAssertion rejects a replayed counter', async () => {
+  const env = makeAttestEnv();
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const body = new TextEncoder().encode('{"x":1}');
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body, counter: 5 });
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', body);
+  await assert.rejects(
+    verifyAppAttestAssertion({ assertionB64, storedPubKey: pub, storedCounter: 5, expectedClientDataHash, env }),
+    /counter_replay/,
+  );
+});
+
+test('verifyAppAttestAssertion rejects a clientDataHash mismatch (tampered body)', async () => {
+  const env = makeAttestEnv();
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const signedBody = new TextEncoder().encode('original');
+  const tamperedBody = new TextEncoder().encode('TAMPERED');
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body: signedBody, counter: 1 });
+  // Verifier computes the hash from `tamperedBody`, which won't match what
+  // the device signed, so the ECDSA verify must fail.
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', tamperedBody);
+  await assert.rejects(
+    verifyAppAttestAssertion({ assertionB64, storedPubKey: pub, storedCounter: 0, expectedClientDataHash, env }),
+    /sig_invalid/,
+  );
+});
+
+test('verifyAppAttestAssertion rejects rpId mismatch (different team)', async () => {
+  const env = makeAttestEnv();
+  const otherEnv = { ...env, APP_ATTEST_TEAM_ID: 'OTHER12345' };
+  const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = await p256RawPubKey(keyPair);
+  const body = new TextEncoder().encode('{}');
+  // Assertion built for `env`'s team, verified under `otherEnv`'s team.
+  const assertionB64 = await buildSyntheticAssertion({ keyPair, env, body, counter: 1 });
+  const expectedClientDataHash = await computeAppAttestClientDataHash('POST', '/', body);
+  await assert.rejects(
+    verifyAppAttestAssertion({
+      assertionB64, storedPubKey: pub, storedCounter: 0, expectedClientDataHash, env: otherEnv,
+    }),
+    /rpid_mismatch/,
+  );
+});
+
+// ---- challenge + key store -------------------------------------------------
+
+test('issueAppAttestChallenge writes a TTLed marker that consume can spend exactly once', async () => {
+  const kv = makeTestKV();
+  const env = makeAttestEnv({ kv });
+  const { challengeBytes } = await issueAppAttestChallenge(env);
+  assert.equal(challengeBytes.length, 32);
+  assert.equal(await consumeAppAttestChallenge(challengeBytes, env), true);
+  // Replay is rejected.
+  assert.equal(await consumeAppAttestChallenge(challengeBytes, env), false);
+});
+
+test('storeAttestedKey + getAttestedKey round-trip with env tag and zero counter', async () => {
+  const kv = makeTestKV();
+  const env = makeAttestEnv({ kv });
+  const fakePub = new Uint8Array(65); fakePub[0] = 0x04;
+  await storeAttestedKey('mykey', fakePub, env);
+  const loaded = await getAttestedKey('mykey', env);
+  assert.deepEqual(loaded.pub, fakePub);
+  assert.equal(loaded.counter, 0);
+  assert.equal(loaded.env, 'development');
+});
+
+test('updateAttestedKeyCounter persists the new counter for the next assertion', async () => {
+  const kv = makeTestKV();
+  const env = makeAttestEnv({ kv });
+  const fakePub = new Uint8Array(65); fakePub[0] = 0x04;
+  await storeAttestedKey('mykey', fakePub, env);
+  await updateAttestedKeyCounter('mykey', 42, env);
+  const loaded = await getAttestedKey('mykey', env);
+  assert.equal(loaded.counter, 42);
+});
+
+test('readAppAttestHeaders returns null when either header is missing', () => {
+  const both = new Request('https://x/', { headers: {
+    'X-Apple-AppAttest-KeyId': 'a', 'X-Apple-AppAttest-Assertion': 'b',
+  }});
+  assert.deepEqual(readAppAttestHeaders(both), { keyId: 'a', assertion: 'b' });
+  const onlyKey = new Request('https://x/', { headers: { 'X-Apple-AppAttest-KeyId': 'a' }});
+  assert.equal(readAppAttestHeaders(onlyKey), null);
+  const neither = new Request('https://x/', { headers: {} });
+  assert.equal(readAppAttestHeaders(neither), null);
+});
+
+// =============================================================================
+// Integration — JWT + App Attest gate composition in handleFeedback
+// =============================================================================
+//
+// These four tests exercise the gate ordering in routes/feedback.js end-to-
+// end: build a real Request (signed JWT, real assertion bytes), override
+// globalThis.fetch to mock JWKS + ownership + OpenAI + RPC, seed an
+// in-memory KV with a real attested key, and call handler.fetch. The point
+// is to verify gate composition + status codes, not to re-test individual
+// gate primitives (those have their own unit tests above).
+
+const INTEGRATION_DRAWING_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const INTEGRATION_CLIENT_REQUEST_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+// handleFeedback uses real Date.now() for JWT expiry — it doesn't take an
+// nowSeconds opt at the call site. So integration-test JWTs must be signed
+// against wall-clock time, not FIXED_NOW.
+function realNowBasePayload(overrides = {}) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  return {
+    iss: TEST_JWT_ENV.SUPABASE_JWT_ISSUER,
+    aud: 'authenticated',
+    sub: TEST_SUB,
+    exp: nowSec + 3600,
+    iat: nowSec,
+    role: 'authenticated',
+    app_metadata: { tier: 'free' },
+    ...overrides,
+  };
+}
+
+function jpegBase64() {
+  // Smallest JPEG that survives validateImagePayload's magic-byte check.
+  const buf = Buffer.from([0xff, 0xd8, 0xff, 0xe0, ...new Array(64).fill(0)]);
+  return buf.toString('base64');
+}
+
+// Build an env + ctx + globalThis.fetch override that satisfies the entire
+// handleFeedback flow up through SUCCESS. Returns { env, ctx, restore } —
+// caller MUST invoke restore() in finally to put globalThis.fetch back.
+async function setupHappyPathHandlerEnv({ jwksKey }) {
+  const kv = makeTestKV();
+  // Store a record under the daily-spend key shape so getDailySpend doesn't
+  // explode (it tolerates missing keys, but explicit zero is harmless and
+  // keeps the test future-proof if the helper grows expectations).
+  await kv.put(`daily_spend:${utcDayKey(FIXED_NOW)}`, '0');
+  // Now pin Date.now() inside the test mocks (we can't override it globally
+  // without disrupting other tests, but each fetch handler that returns a
+  // value can use FIXED_NOW). The validateJWT call inside handleFeedback
+  // uses real Date.now() — so we sign the JWT with real-now exp instead.
+  const env = {
+    ...TEST_JWT_ENV,
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    OPENAI_API_KEY: 'test-openai-key',
+    QUOTA_KV: kv,
+    APP_ATTEST_TEAM_ID: 'TEST123456',
+    APP_ATTEST_BUNDLE_ID: 'com.drawevolve.app',
+    APP_ATTEST_ENV: 'development',
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwksKey] }) };
+    }
+    if (u.includes('/rest/v1/drawings') && u.includes('select=id')) {
+      // Ownership query — return a row so the user "owns" the drawing.
+      return { ok: true, json: async () => ([{ id: INTEGRATION_DRAWING_ID }]) };
+    }
+    if (u.includes('/rest/v1/drawings') && u.includes('select=critique_history')) {
+      return { ok: true, json: async () => ([{ critique_history: [], preset_id: DEFAULT_PRESET_ID }]) };
+    }
+    if (u.includes('api.openai.com/v1/chat/completions')) {
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: 'A solid critique.' } }],
+          usage: { prompt_tokens: 100, completion_tokens: 50 },
+        }),
+        text: async () => '',
+      };
+    }
+    if (u.includes('/rest/v1/rpc/append_critique')) {
+      return { ok: true, json: async () => ({}) };
+    }
+    if (u.includes('/rest/v1/feedback_requests')) {
+      return { ok: true, json: async () => ({}) };
+    }
+    // Unrecognized — return a benign success so fire-and-forget calls don't
+    // throw and pollute test output.
+    return { ok: true, json: async () => ({}), text: async () => '' };
+  };
+
+  const ctx = {
+    waitUntil: (p) => { Promise.resolve(p).catch(() => {}); },
+  };
+
+  return { env, ctx, kv, restore: () => { globalThis.fetch = originalFetch; } };
+}
+
+async function buildIntegrationRequest({
+  jwt,
+  assertionB64 = null,
+  keyId = null,
+  bodyOverride = null,
+}) {
+  const body = bodyOverride ?? {
+    image: jpegBase64(),
+    context: { ...baseContext },
+    drawingId: INTEGRATION_DRAWING_ID,
+    client_request_id: INTEGRATION_CLIENT_REQUEST_ID,
+  };
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(body));
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${jwt}`,
+  };
+  if (keyId) headers['X-Apple-AppAttest-KeyId'] = keyId;
+  if (assertionB64) headers['X-Apple-AppAttest-Assertion'] = assertionB64;
+  return new Request('https://drawevolve-backend.test/', {
+    method: 'POST',
+    headers,
+    body: bodyBytes,
+  });
+}
+
+test('integration: invalid JWT (with or without App Attest headers) → 401', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupHappyPathHandlerEnv({ jwksKey: jwk });
+  try {
+    // Case A: malformed token, no attest headers.
+    const req1 = await buildIntegrationRequest({ jwt: 'not.a.valid.jwt' });
+    const res1 = await handler.fetch(req1, env, ctx);
+    assert.equal(res1.status, 401, 'malformed JWT must 401 even without attest headers');
+
+    // Case B: malformed token, with attest headers — JWT gate should still
+    // reject FIRST (cheap check), so attest validity is irrelevant.
+    const req2 = await buildIntegrationRequest({
+      jwt: 'still.bad.jwt',
+      keyId: 'whatever',
+      assertionB64: 'whatever',
+    });
+    const res2 = await handler.fetch(req2, env, ctx);
+    assert.equal(res2.status, 401, 'JWT gate runs first; bad JWT 401s regardless of attest');
+
+    // Case C: valid signature but wrong issuer — still 401, attest never reached.
+    const wrongIssuerJwt = await signES256JWT({
+      privateKey,
+      payload: realNowBasePayload({ iss: 'https://attacker.example/auth/v1' }),
+    });
+    const req3 = await buildIntegrationRequest({ jwt: wrongIssuerJwt });
+    const res3 = await handler.fetch(req3, env, ctx);
+    assert.equal(res3.status, 401);
+  } finally {
+    restore();
+  }
+});
+
+test('integration: valid JWT + missing/invalid App Attest assertion → 401 with attest_* code', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupHappyPathHandlerEnv({ jwksKey: jwk });
+  try {
+    const validJwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+
+    // Case A: valid JWT, no attest headers at all → attest_headers_missing.
+    const req1 = await buildIntegrationRequest({ jwt: validJwt });
+    const res1 = await handler.fetch(req1, env, ctx);
+    assert.equal(res1.status, 401, 'missing attest headers → 401');
+    const body1 = await res1.json();
+    assert.equal(body1.error, 'attest_headers_missing');
+
+    // Case B: valid JWT, attest headers set but the keyId isn't registered →
+    // attest_key_unknown.
+    const req2 = await buildIntegrationRequest({
+      jwt: validJwt,
+      keyId: 'unregistered-key',
+      assertionB64: 'AAAA',
+    });
+    const res2 = await handler.fetch(req2, env, ctx);
+    assert.equal(res2.status, 401);
+    const body2 = await res2.json();
+    assert.equal(body2.error, 'attest_key_unknown');
+
+    // Case C: valid JWT, registered key, but assertion bytes are garbage →
+    // attest_assertion_invalid.
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'registered-key-1';
+    await storeAttestedKey(keyId, pub, env);
+    const req3 = await buildIntegrationRequest({
+      jwt: validJwt,
+      keyId,
+      assertionB64: Buffer.from('not a valid cbor assertion').toString('base64'),
+    });
+    const res3 = await handler.fetch(req3, env, ctx);
+    assert.equal(res3.status, 401);
+    const body3 = await res3.json();
+    assert.equal(body3.error, 'attest_assertion_invalid');
+  } finally {
+    restore();
+  }
+});
+
+test('integration: valid JWT + valid App Attest assertion → 200 (both gates pass, full flow succeeds)', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupHappyPathHandlerEnv({ jwksKey: jwk });
+  try {
+    const validJwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+
+    // Register a real attest key + build a real assertion against the body
+    // we're about to send. Both gates must pass for this to reach the
+    // critique flow's 200 path.
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'happy-path-key';
+    await storeAttestedKey(keyId, pub, env);
+
+    const body = {
+      image: jpegBase64(),
+      context: { ...baseContext },
+      drawingId: INTEGRATION_DRAWING_ID,
+      client_request_id: INTEGRATION_CLIENT_REQUEST_ID,
+    };
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(body));
+    const assertionB64 = await buildSyntheticAssertion({
+      keyPair, env, method: 'POST', path: '/', body: bodyBytes, counter: 1,
+    });
+
+    const req = new Request('https://drawevolve-backend.test/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validJwt}`,
+        'X-Apple-AppAttest-KeyId': keyId,
+        'X-Apple-AppAttest-Assertion': assertionB64,
+      },
+      body: bodyBytes,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200, 'JWT + attest both pass; full flow returns 200');
+    const respBody = await res.json();
+    assert.equal(respBody.feedback, 'A solid critique.');
+    assert.ok(respBody.critique_entry, 'response should include the persisted critique entry');
+  } finally {
+    restore();
+  }
+});
+
+test('integration: valid JWT + valid attest, but env mismatch on stored key → 401 attest_env_mismatch', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupHappyPathHandlerEnv({ jwksKey: jwk });
+  try {
+    const validJwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'prod-key-on-dev-worker';
+
+    // Store the key under the production env tag, then send the request
+    // through a development-tagged worker. The attest gate's env-mismatch
+    // check must fire before signature verification.
+    const prodEnv = { ...env, APP_ATTEST_ENV: 'production' };
+    await storeAttestedKey(keyId, pub, prodEnv);
+
+    const body = {
+      image: jpegBase64(),
+      context: { ...baseContext },
+      drawingId: INTEGRATION_DRAWING_ID,
+      client_request_id: INTEGRATION_CLIENT_REQUEST_ID,
+    };
+    const bodyBytes = new TextEncoder().encode(JSON.stringify(body));
+    const assertionB64 = await buildSyntheticAssertion({
+      keyPair, env, method: 'POST', path: '/', body: bodyBytes, counter: 1,
+    });
+
+    const req = new Request('https://drawevolve-backend.test/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${validJwt}`,
+        'X-Apple-AppAttest-KeyId': keyId,
+        'X-Apple-AppAttest-Assertion': assertionB64,
+      },
+      body: bodyBytes,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 401);
+    const respBody = await res.json();
+    assert.equal(respBody.error, 'attest_env_mismatch');
+  } finally {
+    restore();
   }
 });

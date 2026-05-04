@@ -153,3 +153,105 @@ wrangler secret put OPENAI_API_KEY
 
 **Worker deployed but returns errors**
 Check Cloudflare dashboard → Workers → Logs to see errors
+
+## Phase 5f manual steps (App Attest device verification)
+
+App Attest layers on top of Supabase JWT auth. JWT proves who the user is;
+App Attest proves the request comes from a real DrawEvolve install on a real
+Apple device. **Both must pass for any protected request.**
+
+### iOS-side prerequisites
+
+1. **Xcode capability** — In Signing & Capabilities for the DrawEvolve target,
+   add **App Attest**. This puts
+   `com.apple.developer.devicecheck.appattest-environment` in the entitlements
+   plist (already added in this branch with value `development`).
+2. **Provisioning profile** — Apple Developer Portal → Identifiers → your
+   App ID → enable **App Attest**. Regenerate the provisioning profile if
+   Xcode has already cached an older one.
+3. **Environment string** — `DrawEvolve/DrawEvolve/DrawEvolve.entitlements`:
+   - `development` for local builds + TestFlight
+   - `production` for App Store builds
+   The string selects which Apple endpoints `DCAppAttestService` talks to and
+   which AAGUID the resulting attestation carries — the Worker checks both.
+4. **No simulator** — App Attest requires real Apple hardware. The simulator
+   reports `DCAppAttestService.shared.isSupported == false`. Test on a device.
+
+### Worker-side prerequisites
+
+The Worker reuses the existing `QUOTA_KV` namespace for App Attest storage —
+no new binding required. Three new vars must be set in `wrangler.toml`'s
+`[vars]` block before deploy:
+
+| Var | Value |
+|---|---|
+| `APP_ATTEST_TEAM_ID` | Your 10-character Apple Team ID (e.g. `ABCDE12345`) |
+| `APP_ATTEST_BUNDLE_ID` | iOS bundle identifier (default `com.drawevolve.app`) |
+| `APP_ATTEST_ENV` | `development` or `production` — must match the iOS entitlement value |
+
+`APP_ATTEST_TEAM_ID + "." + APP_ATTEST_BUNDLE_ID` is hashed into the rpId
+that the Worker checks on every request — a mismatch with the iOS app ID
+will reject every assertion with `assert_rpid_mismatch`.
+
+### One-time: pin the Apple App Attest Root CA public key
+
+`/attest/register` fail-closes with `attest_root_not_pinned` (HTTP 500) until
+the operator pastes the Apple App Attest Root CA's uncompressed P-384 public
+key into `middleware/app-attest.js`'s `APPLE_ATTEST_ROOT_PUBKEY_HEX` constant.
+This lives as a source constant on purpose — bundling it with the worker code
+ensures a deploy can never accidentally pair the wrong root with the wrong
+worker version.
+
+To extract it:
+
+1. Download `Apple_App_Attestation_Root_CA.pem` from
+   <https://www.apple.com/certificateauthority/>.
+2. Confirm SHA-256 fingerprint matches what Apple publishes on that page
+   (cross-check before pasting).
+3. Extract the EC public key as an uncompressed point (`04` || X(48) || Y(48),
+   97 bytes / 194 hex chars):
+   ```bash
+   openssl x509 -in Apple_App_Attestation_Root_CA.pem -noout -pubkey \
+     | openssl ec -pubin -outform DER 2>/dev/null \
+     | tail -c 97 \
+     | xxd -p -c 0
+   ```
+4. Paste the resulting hex string (no `0x`, no whitespace) into
+   `APPLE_ATTEST_ROOT_PUBKEY_HEX` and redeploy.
+
+Until this step is done, the Worker is intentionally unable to register any
+new device.
+
+### Endpoints
+
+- `POST /attest/challenge` — returns `{ challenge: <base64-32-bytes> }`. No
+  auth required; rate-limited only by Cloudflare's per-IP defaults at this
+  level. Stored under `attest_chal:<base64url>` in QUOTA_KV with 5-min TTL.
+- `POST /attest/register` — body `{ keyId, attestation, challenge }`. Verifies
+  the attestation per Apple's spec (cert chain → root, nonce extension,
+  rpIdHash, AAGUID, credId), then stores `{ pub, counter: 0, env }` under
+  `attest_key:<keyId>` with 30-day TTL.
+- All other paths (the existing critique endpoint) — require both a valid
+  Supabase JWT *and* `X-Apple-AppAttest-KeyId` + `X-Apple-AppAttest-Assertion`
+  headers. Rejection codes the iOS client uses to decide what to do:
+  - `attest_headers_missing` → wipe local cache, re-register
+  - `attest_key_unknown` → server has no record of this key (KV TTL expired
+    or never registered) → wipe local cache, re-register
+  - `attest_env_mismatch` → dev key seen by prod Worker (or vice versa) — fix
+    the entitlement env, re-register
+  - `attest_assertion_invalid` → bad signature, replay, or rpId mismatch
+
+### Troubleshooting
+
+**`attest_root_not_pinned` (500)** — see "pin the Apple App Attest Root CA"
+above. The Worker won't accept any registration until this is done.
+
+**`attest_assertion_invalid` on every request** — most often
+`APP_ATTEST_TEAM_ID` or `APP_ATTEST_BUNDLE_ID` doesn't match the iOS app's
+team/bundle. Check both sides.
+
+**`attest_headers_missing` after a fresh install** — usually means
+`AppAttestManager` failed to register silently and the iOS app shipped the
+critique request anyway. Check Crashlytics for `App Attest` errors.
+
+**Simulator builds get `notSupported`** — expected. Use a physical device.

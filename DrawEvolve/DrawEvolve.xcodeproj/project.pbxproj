@@ -45,6 +45,7 @@
 		DE000044 /* Config.plist in Resources */ = {isa = PBXBuildFile; fileRef = DE300003 /* Config.plist */; };
 		DE000045 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100045 /* SettingsView.swift */; };
 		DE000046 /* PhotoLibrarySaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100046 /* PhotoLibrarySaver.swift */; };
+		DE000047 /* AppAttestManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100047 /* AppAttestManager.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -89,6 +90,7 @@
 		DE100043 /* AuthGateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthGateView.swift; sourceTree = "<group>"; };
 		DE100045 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		DE100046 /* PhotoLibrarySaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibrarySaver.swift; sourceTree = "<group>"; };
+		DE100047 /* AppAttestManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAttestManager.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -194,6 +196,7 @@
 				DE100041 /* SupabaseManager.swift */,
 				DE100042 /* AuthManager.swift */,
 				DE100046 /* PhotoLibrarySaver.swift */,
+				DE100047 /* AppAttestManager.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -346,6 +349,7 @@
 				DE000043 /* AuthGateView.swift in Sources */,
 				DE000045 /* SettingsView.swift in Sources */,
 				DE000046 /* PhotoLibrarySaver.swift in Sources */,
+				DE000047 /* AppAttestManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

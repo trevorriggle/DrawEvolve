@@ -154,11 +154,33 @@ actor OpenAIManager {
             throw OpenAIError.invalidResponse
         }
 
+        // App Attest device verification (additive — sits next to JWT, doesn't
+        // replace it). Headers are bound to (METHOD, PATH, sha256(jsonData)),
+        // so re-serializing or appending bytes after this call would break
+        // server-side verification. Don't mutate jsonData past this point.
+        let attestHeaders: [String: String]
+        do {
+            attestHeaders = try await AppAttestManager.shared.attestedHeaders(
+                method: "POST",
+                path: url.path.isEmpty ? "/" : url.path,
+                body: jsonData
+            )
+        } catch {
+            CrashReporter.shared.logError(
+                error,
+                context: "OpenAIManager.requestFeedback - App Attest header generation failed"
+            )
+            throw OpenAIError.serverError("Couldn't verify this device. \(error.localizedDescription)")
+        }
+
         // Call our backend
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        for (name, value) in attestHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
         request.httpBody = jsonData
 
         let (data, response) = try await URLSession.shared.data(for: request)

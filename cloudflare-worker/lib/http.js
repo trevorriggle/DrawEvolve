@@ -9,7 +9,7 @@
 export const CORS_HEADERS = {
   'Access-Control-Allow-Origin': 'https://drawevolve.com',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Apple-AppAttest-KeyId, X-Apple-AppAttest-Assertion',
 };
 
 export function jsonResponse(body, status = 200, extraHeaders = {}) {
