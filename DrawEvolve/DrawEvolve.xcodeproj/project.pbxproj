@@ -46,6 +46,10 @@
 		DE000045 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100045 /* SettingsView.swift */; };
 		DE000046 /* PhotoLibrarySaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100046 /* PhotoLibrarySaver.swift */; };
 		DE000047 /* AppAttestManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100047 /* AppAttestManager.swift */; };
+		DE000048 /* CustomPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100048 /* CustomPrompt.swift */; };
+		DE000049 /* CustomPromptManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100049 /* CustomPromptManager.swift */; };
+		DE000050 /* PromptEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100050 /* PromptEditView.swift */; };
+		DE000051 /* PromptListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100051 /* PromptListView.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -91,6 +95,10 @@
 		DE100045 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		DE100046 /* PhotoLibrarySaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibrarySaver.swift; sourceTree = "<group>"; };
 		DE100047 /* AppAttestManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAttestManager.swift; sourceTree = "<group>"; };
+		DE100048 /* CustomPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomPrompt.swift; sourceTree = "<group>"; };
+		DE100049 /* CustomPromptManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomPromptManager.swift; sourceTree = "<group>"; };
+		DE100050 /* PromptEditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptEditView.swift; sourceTree = "<group>"; };
+		DE100051 /* PromptListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptListView.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -155,6 +163,8 @@
 				DE100035 /* BetaTransparencyPopup.swift */,
 				DE100012 /* OnboardingPopup.swift */,
 				DE100003 /* PromptInputView.swift */,
+				DE100050 /* PromptEditView.swift */,
+				DE100051 /* PromptListView.swift */,
 				DE100004 /* DrawingCanvasView.swift */,
 				DE100017 /* MetalCanvasView.swift */,
 				DE100018 /* ColorPicker.swift */,
@@ -179,6 +189,7 @@
 				DE100014 /* DrawingTool.swift */,
 				DE100025 /* Drawing.swift */,
 				DE100032 /* CritiqueHistory.swift */,
+				DE100048 /* CustomPrompt.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -197,6 +208,7 @@
 				DE100042 /* AuthManager.swift */,
 				DE100046 /* PhotoLibrarySaver.swift */,
 				DE100047 /* AppAttestManager.swift */,
+				DE100049 /* CustomPromptManager.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -350,6 +362,10 @@
 				DE000045 /* SettingsView.swift in Sources */,
 				DE000046 /* PhotoLibrarySaver.swift in Sources */,
 				DE000047 /* AppAttestManager.swift in Sources */,
+				DE000048 /* CustomPrompt.swift in Sources */,
+				DE000049 /* CustomPromptManager.swift in Sources */,
+				DE000050 /* PromptEditView.swift in Sources */,
+				DE000051 /* PromptListView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
