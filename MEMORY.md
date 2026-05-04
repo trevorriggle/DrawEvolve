@@ -49,6 +49,23 @@ iOS-side, App Attest only works on real hardware (`DCAppAttestService.shared.isS
 
 ---
 
+## Social — Phase A (profiles foundation) is landed
+
+As of 2026-05-04, social Phase A per `ONLINEIMPLEMENTATIONPLANS.md` §11 is in: `supabase/migrations/0006_profiles.sql` + `cloudflare-worker/routes/profiles.js`. **Migration is `0006`, not `0008`** — the planning doc's `0008` was defensive renumbering against a collision that didn't materialize. Future social migrations continue sequentially (custom prompts extension would be `0007`, posts `0008`, etc.).
+
+What's now available server-side:
+
+- `public.profiles` table (one row per `auth.users`, auto-created via after-insert trigger).
+- Worker is the sole writer. iOS reads through the Worker (Q8 default), not direct PostgREST.
+- Endpoints: `GET /v1/me`, `PATCH /v1/profiles/me`, `POST /v1/profiles/me/avatar`, `GET /v1/profiles/:username`, `GET /v1/profiles/search`. All gated by JWT + App Attest.
+- `avatars` bucket: public-read, write-RLS keyed off `storage.foldername(name)[1] = auth.uid()::text`.
+
+Resolved planning questions (defaults baked in):
+- **Q1 / Q2:** username is auto-generated at signup (`user_<8 hex>`) and renamable exactly once. The lock is `profiles.username_set_at` — non-null = immutable. The Worker stamps it on the first PATCH that includes a username; subsequent username PATCHes return `409 username_immutable`. Adding `username_set_at` is a small extension to the §2.1 schema; without it the gate would have to regex-detect the auto-generated form, which collides with legitimate user_xxxxxxxx handles.
+- **Q4:** `GET /v1/profiles/:username` resolves `is_searchable=false` profiles by exact handle (search hides them). 404 only when `is_public=false` and the requester isn't the owner — surfaced as not-found rather than 403 so private accounts don't reveal their existence via differential status codes.
+- **Q8:** Worker-brokered reads, not direct Supabase REST from iOS.
+
+iOS work for Phase B (profile editing UI, ProfileView, username one-time-set gate UX) is the next sprint and intentionally not in the Phase A PR. The backend already supports everything Phase B needs.
 ## Custom prompts are bounded knobs, not freeform text
 
 As of 2026-05-04, the user-authoring surface for custom prompts is **bounded enums only** — `focus`, `tone`, `depth`, and a multi-select `techniques`. Each value maps to a curated server-side fragment in `cloudflare-worker/lib/prompt.js` (`FOCUS_FRAGMENTS`, `TONE_FRAGMENTS`, `DEPTH_FRAGMENTS`, `TECHNIQUE_FRAGMENTS`). The user picks knobs; the Worker writes the words.
