@@ -340,8 +340,13 @@ final class CloudDrawingStorageManager: ObservableObject {
         errorMessage = nil
 
         guard let index = drawings.firstIndex(where: { $0.id == id }) else {
+            // The in-memory `drawings` array can be replaced wholesale by
+            // fetchDrawings() in narrow timing windows (e.g. gallery refresh
+            // races an in-flight cloud upload). Surfacing an explicit error
+            // lets the caller decide how to recover instead of silently
+            // dropping the save.
             print("❌ updateDrawing: drawing \(id) not in memory")
-            return
+            throw DrawingStorageError.drawingNotFound
         }
 
         var drawing = drawings[index]
@@ -955,6 +960,7 @@ enum DrawingStorageError: LocalizedError {
     case saveFailed
     case fetchFailed
     case cloudSyncFailed
+    case drawingNotFound
 
     var errorDescription: String? {
         switch self {
@@ -966,6 +972,8 @@ enum DrawingStorageError: LocalizedError {
             return "Failed to fetch drawings"
         case .cloudSyncFailed:
             return "Couldn't sync drawing to cloud — try again in a moment"
+        case .drawingNotFound:
+            return "Couldn't find that drawing to update — try refreshing the gallery"
         }
     }
 }

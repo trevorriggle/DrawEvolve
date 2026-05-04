@@ -9,7 +9,7 @@ import Foundation
 
 /// Holds the user's pre-drawing questionnaire responses
 struct DrawingContext: Codable {
-    var skillLevel: String = "Beginner"
+    var skillLevel: String = "Intermediate"
     var subject: String = ""
     var style: String = ""
     var artists: String = ""
@@ -22,7 +22,7 @@ struct DrawingContext: Codable {
     }
 
     init(
-        skillLevel: String = "Beginner",
+        skillLevel: String = "Intermediate",
         subject: String = "",
         style: String = "",
         artists: String = "",
@@ -48,7 +48,7 @@ struct DrawingContext: Codable {
     // becomes its declared default and the whole drawing still loads.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        skillLevel        = try container.decodeIfPresent(String.self, forKey: .skillLevel)        ?? "Beginner"
+        skillLevel        = try container.decodeIfPresent(String.self, forKey: .skillLevel)        ?? "Intermediate"
         subject           = try container.decodeIfPresent(String.self, forKey: .subject)           ?? ""
         style             = try container.decodeIfPresent(String.self, forKey: .style)             ?? ""
         artists           = try container.decodeIfPresent(String.self, forKey: .artists)           ?? ""
