@@ -240,8 +240,12 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure textures exist (only runs once)
             ensureLayerTextures()
 
-            guard let commandQueue = device.makeCommandQueue(),
-                  let commandBuffer = commandQueue.makeCommandBuffer(),
+            // Reuse the renderer's long-lived command queue instead of
+            // allocating a new MTLCommandQueue per frame. A queue is meant to
+            // live for the device's lifetime; allocating one each draw was
+            // pure overhead on every tool, every frame.
+            guard let drawCommandQueue = renderer?.commandQueue,
+                  let commandBuffer = drawCommandQueue.makeCommandBuffer(),
                   let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
                 return
             }
@@ -1092,39 +1096,38 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("WARNING: Failed to capture before snapshot")
                 }
 
-                // Render the stroke (stroke points are in document/texture space already)
-                renderer.renderStroke(stroke, to: texture, screenSize: documentSize)
-                print("Stroke committed successfully - texture should now contain the stroke")
-
-                // Capture snapshot AFTER rendering stroke (GPU is done now)
-                print("Capturing AFTER snapshot...")
-                let afterSnapshot = renderer.captureSnapshot(of: texture)
-                if afterSnapshot == nil {
-                    print("WARNING: Failed to capture after snapshot")
-                }
-
-                // Record in history for undo/redo (on main actor)
-                if let before = beforeSnapshot, let after = afterSnapshot {
-                    // Use canvasState to record history if available
-                    if let canvasState = canvasState {
-                        let layerId = layer.id
-                        Task { @MainActor in
-                            canvasState.historyManager.record(.stroke(
-                                layerId: layerId,
-                                beforeSnapshot: before,
-                                afterSnapshot: after
-                            ))
-                            print("Recorded stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
-                        }
-                    }
-                }
-
-                // Update thumbnail for layer panel preview (async, don't block drawing)
                 let currentLayerIndex = selectedLayerIndex
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
-                        DispatchQueue.main.async {
-                            self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                let layerId = layer.id
+                let capturedCanvasState = canvasState
+
+                // Async stroke commit: GPU pass runs without blocking the main
+                // thread on `waitUntilCompleted`. The completion fires on main
+                // once the GPU is done — that's the safe point to take the
+                // AFTER snapshot, record undo, and kick off the thumbnail.
+                renderer.renderStroke(stroke, to: texture, screenSize: documentSize) { [weak self] in
+                    print("Stroke committed successfully - texture should now contain the stroke")
+
+                    print("Capturing AFTER snapshot...")
+                    let afterSnapshot = renderer.captureSnapshot(of: texture)
+                    if afterSnapshot == nil {
+                        print("WARNING: Failed to capture after snapshot")
+                    }
+
+                    if let before = beforeSnapshot, let after = afterSnapshot,
+                       let canvasState = capturedCanvasState {
+                        canvasState.historyManager.record(.stroke(
+                            layerId: layerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                        print("Recorded stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
+                    }
+
+                    DispatchQueue.global(qos: .utility).async {
+                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                            DispatchQueue.main.async {
+                                self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                            }
                         }
                     }
                 }
@@ -1418,29 +1421,27 @@ struct MetalCanvasView: UIViewRepresentable {
                 return nil
             }
 
-            // Read pixel data from texture
-            let width = texture.width
-            let bytesPerRow = width * 4  // BGRA format, 1 byte per channel
-            var pixelData = Data(count: bytesPerRow)
-
+            // Read just the 1×1 pixel we need. The previous version asked for
+            // a full row (`width × 1`, ~16 KiB on a 4096-wide texture) when
+            // we only consume 4 bytes — same Metal call, single-pixel region.
+            var pixelData = [UInt8](repeating: 0, count: 4)
             let region = MTLRegion(
-                origin: MTLOrigin(x: 0, y: y, z: 0),
-                size: MTLSize(width: width, height: 1, depth: 1)
+                origin: MTLOrigin(x: x, y: y, z: 0),
+                size: MTLSize(width: 1, height: 1, depth: 1)
             )
 
-            pixelData.withUnsafeMutableBytes { ptr in
-                guard let baseAddress = ptr.baseAddress else { return }
-                texture.getBytes(baseAddress, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
+            pixelData.withUnsafeMutableBufferPointer { buf in
+                guard let baseAddress = buf.baseAddress else { return }
+                texture.getBytes(baseAddress, bytesPerRow: 4, from: region, mipmapLevel: 0)
             }
 
             // Extract BGRA color components (Metal uses BGRA format).
             // Stored values are premultiplied by alpha (per the brush fragment
             // shader), so divide RGB by alpha to recover the visible color.
-            let pixelIndex = x * 4
-            let bp = CGFloat(pixelData[pixelIndex])     / 255.0
-            let gp = CGFloat(pixelData[pixelIndex + 1]) / 255.0
-            let rp = CGFloat(pixelData[pixelIndex + 2]) / 255.0
-            let a  = CGFloat(pixelData[pixelIndex + 3]) / 255.0
+            let bp = CGFloat(pixelData[0]) / 255.0
+            let gp = CGFloat(pixelData[1]) / 255.0
+            let rp = CGFloat(pixelData[2]) / 255.0
+            let a  = CGFloat(pixelData[3]) / 255.0
 
             // Bail on transparent pixels — picking "nothing" should be a no-op,
             // not silently set the brush to fully transparent black.

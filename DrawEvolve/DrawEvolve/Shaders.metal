@@ -404,25 +404,65 @@ fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
 
 // MARK: - Effect Shaders
 
-// Compute shader for paint bucket flood fill
-kernel void floodFillKernel(texture2d<float, access::read> inputTexture [[texture(0)]],
-                            texture2d<float, access::write> outputTexture [[texture(1)]],
-                            constant float4 &fillColor [[buffer(0)]],
-                            constant float4 &targetColor [[buffer(1)]],
-                            constant float &tolerance [[buffer(2)]],
+// One iteration pass of a connected-component (flood) fill.
+//
+// The caller seeds `frontMask` with 1.0 at the start pixel and 0.0 everywhere
+// else, dispatches this kernel over the canvas, swaps `frontMask`/`backMask`,
+// and repeats until convergence (no new pixels added on a pass). On each
+// pass, for every grid pixel:
+//
+//   1. If the pixel is already marked in `frontMask`, carry the bit forward
+//      to `backMask`.
+//   2. Otherwise, if the source-texture pixel matches `targetColor` within
+//      `tolerance` AND any 4-connected neighbor is already marked in
+//      `frontMask`, mark this pixel in `backMask`.
+//   3. Otherwise, write 0 — the pixel is unreachable from the seed under
+//      the current mask front.
+//
+// After convergence the caller stamps `fillColor` into the canvas wherever
+// the final mask is set, in a separate compositing pass.
+//
+// This replaces the prior color-replace kernel, which marked every pixel
+// matching `targetColor` regardless of whether it was connected to the seed.
+// That behavior is a global threshold replace, not a flood fill — visually
+// it'd bleed the bucket across disconnected regions of the same color.
+//
+// NOTE: not yet wired up. The CPU `floodFill` in CanvasRenderer is still
+// the active code path. See the TODO at its top for follow-up work to
+// drive this kernel from Swift (mask textures, iteration loop, final blit).
+kernel void floodFillKernel(texture2d<float, access::read>  inputTexture [[texture(0)]],
+                            texture2d<float, access::read>  frontMask    [[texture(1)]],
+                            texture2d<float, access::write> backMask     [[texture(2)]],
+                            constant float4 &targetColor [[buffer(0)]],
+                            constant float  &tolerance   [[buffer(1)]],
                             uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= outputTexture.get_width() || gid.y >= outputTexture.get_height()) {
+    const uint w = inputTexture.get_width();
+    const uint h = inputTexture.get_height();
+    if (gid.x >= w || gid.y >= h) {
         return;
     }
 
-    float4 pixelColor = inputTexture.read(gid);
-
-    // Check if pixel color matches target color within tolerance
-    float diff = distance(pixelColor.rgb, targetColor.rgb);
-
-    if (diff <= tolerance) {
-        outputTexture.write(fillColor, gid);
-    } else {
-        outputTexture.write(pixelColor, gid);
+    // Already part of the fill — carry forward.
+    float front = frontMask.read(gid).r;
+    if (front > 0.5) {
+        backMask.write(float4(1.0, 0.0, 0.0, 1.0), gid);
+        return;
     }
+
+    // Color must match the target within tolerance to be reachable.
+    float4 px = inputTexture.read(gid);
+    if (distance(px.rgb, targetColor.rgb) > tolerance) {
+        backMask.write(float4(0.0, 0.0, 0.0, 1.0), gid);
+        return;
+    }
+
+    // 4-connected neighbor check — propagation, not a global match. This is
+    // what makes the kernel a real flood fill instead of a threshold replace.
+    bool neighborMarked = false;
+    if (gid.x > 0     && frontMask.read(uint2(gid.x - 1, gid.y)).r > 0.5) neighborMarked = true;
+    if (gid.x + 1 < w && frontMask.read(uint2(gid.x + 1, gid.y)).r > 0.5) neighborMarked = true;
+    if (gid.y > 0     && frontMask.read(uint2(gid.x, gid.y - 1)).r > 0.5) neighborMarked = true;
+    if (gid.y + 1 < h && frontMask.read(uint2(gid.x, gid.y + 1)).r > 0.5) neighborMarked = true;
+
+    backMask.write(float4(neighborMarked ? 1.0 : 0.0, 0.0, 0.0, 1.0), gid);
 }
