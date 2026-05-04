@@ -52,6 +52,7 @@ import {
   checkIdempotency,
   recordIdempotent,
 } from '../middleware/idempotency.js';
+import { classifyCritique } from '../lib/classifier.js';
 import { jsonResponse, unauthorized } from '../lib/http.js';
 
 // =============================================================================
@@ -750,6 +751,15 @@ export async function handleFeedback(request, env, ctx) {
       now,
       presetId: resolvedPresetId,
     });
+
+    // My Evolution Phase 1 — classify the critique into structured tags for
+    // future trend analysis. Synchronous (must complete before persistCritique
+    // so tags ride along in the same row append), but never blocking: the
+    // classifier swallows all failures and returns null, and we attach null
+    // to entry.tags in that case. classifier_version on the tag object lets
+    // future analytics queries gate on schema generation.
+    entry.tags = await classifyCritique({ feedback, env });
+
     let persisted = true;
     try {
       await persistCritique({ env, drawingId: drawingIdLower, entry });
