@@ -11,7 +11,10 @@ import Metal
 
 /// Represents a single drawing layer
 class DrawingLayer: Identifiable, ObservableObject {
-    let id = UUID()
+    // Stable across saves so the layered manifest can round-trip cleanly
+    // (ONLINELAYERSTORE.md §3.1). New in-session layers default to a fresh
+    // UUID; loaders pass the manifest's layer id so the next save reuses it.
+    let id: UUID
     @Published var name: String
     @Published var opacity: Float
     @Published var isVisible: Bool
@@ -28,12 +31,14 @@ class DrawingLayer: Identifiable, ObservableObject {
     private(set) var cachedImage: UIImage?
 
     init(
+        id: UUID = UUID(),
         name: String,
         opacity: Float = 1.0,
         isVisible: Bool = true,
         isLocked: Bool = false,
         blendMode: BlendMode = .normal
     ) {
+        self.id = id
         self.name = name
         self.opacity = opacity
         self.isVisible = isVisible

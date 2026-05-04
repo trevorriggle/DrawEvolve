@@ -87,3 +87,13 @@ Cloud paths for layered drawings are `<user>/<drawing_id>/{manifest.json,layer-N
 The iOS canvas-side wiring (`DrawingLayer.id` refactor, `CanvasStateManager.loadLayered`, on-device cache reload from `Documents/DrawEvolveCache/layers/<id>/`) is the next sprint and intentionally not in this PR. The cloud sync layer creates the `layers/<id>/` local cache directory and writes to it for upload resumability — sprint 2 is the one that wires it into the canvas reload path.
 
 Side note: the social Phase A merge into main (3faf369) introduced two unrelated parser breakages — an orphan `if (method !== 'POST') {` in `cloudflare-worker/index.js` and a missing `});` in `cloudflare-worker/test.mjs`. Both are fixed in the same PR as the layered cloud sync because `npm test` couldn't even parse before.
+
+---
+
+## Layered drawing storage — iOS edges landed (load path)
+
+As of 2026-05-04, the iOS-side load half of layered storage is in. `DrawingLayer.id` is now a constructor argument with `UUID()` default (per `ONLINELAYERSTORE.md` §3.1) so the manifest's stable layer IDs round-trip — without that change every load would re-randomize IDs and the next save would write to fresh `layer-N.png` paths instead of reusing the manifest's. `CanvasStateManager.loadLayered(_:)` reconstructs the layer stack from a `LayeredDrawingPayload`, materializing each PNG into an MTLTexture via `CanvasRenderer.makeTexture(from:)`, returning a `LayeredLoadResult` discriminator so the canvas chrome can surface integrity / size-mismatch / format-too-new toasts. `DrawingCanvasView.loadExistingDrawing` tries `loadLayeredDrawing` first and falls back to `loadFullImage` only when the storage manager reports no manifest (legacy drawings keep working untouched).
+
+Save-side producer (canvas → `LayeredDrawingPayload`) is **not** in this PR — it requires reading each MTLTexture back to PNG bytes, which is renderer-side work that didn't fall out naturally from the load wiring. Marked with `TODO(layered-save):` in `DrawingCanvasView.saveDrawing`. Until that lands, edited layered drawings round-trip *into* the canvas via `loadLayered` but get re-flattened on save (acceptable while load is the user-visible win — legacy drawings haven't been re-saved as layered yet anyway, so this only affects user testing of the upgrade path).
+
+Tier enforcement on load (§6.4) is exposed as `CanvasStateManager.isOverLayerCap(_:)` — a read-only check the save UI can gate on. There's no iOS user-tier system yet, so the actual save-button block is wired in whenever subscription tier lands.

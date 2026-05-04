@@ -837,10 +837,50 @@ struct DrawingCanvasView: View {
         critiqueHistory = drawing.critiqueHistory
         print("  - Critique history: \(critiqueHistory.count) entries")
 
-        // Async-load the image bytes from the cloud-aware storage manager
-        // (disk cache → signed URL fallback) and wait for the renderer to be
-        // ready before pushing it onto the canvas.
+        // Async-load the drawing from the cloud-aware storage manager.
+        // ONLINELAYERSTORE.md §6.1: prefer the layered path; if the storage
+        // manager reports no manifest (legacy flat drawing), fall back to
+        // loadFullImage. The renderer must exist before we touch textures.
         Task {
+            // Wait for the renderer to be initialized before loading layered
+            // textures (loadLayered builds MTLTextures and needs it ready).
+            var attempts = 0
+            while canvasState.renderer == nil && attempts < 10 {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                attempts += 1
+            }
+            guard canvasState.renderer != nil else {
+                print("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
+                return
+            }
+
+            // Try layered first. nil means "legacy / no manifest" — fall through.
+            let layered: LayeredDrawingPayload?
+            do {
+                layered = try await storageManager.loadLayeredDrawing(for: drawing.id)
+            } catch {
+                print("⚠️ loadLayeredDrawing threw \(error.localizedDescription) — falling back to flat composite")
+                layered = nil
+            }
+
+            if let payload = layered {
+                await MainActor.run {
+                    let result = canvasState.loadLayered(payload)
+                    switch result {
+                    case .loaded:
+                        print("✅ Successfully loaded layered drawing (\(payload.layerPNGs.count) layers)")
+                    case .loadedWithIntegrityWarning(let missing):
+                        print("⚠️ Loaded layered drawing with \(missing.count) damaged layer(s): ordinals \(missing) replaced with empty layers")
+                    case .loadedWithSizeMismatch(let w, let h):
+                        print("⚠️ Loaded layered drawing at saved document size \(w)×\(h); current canvas size differs")
+                    case .formatTooNew(let saved, let supported):
+                        print("❌ Layered manifest version \(saved) is newer than supported \(supported); please update")
+                    }
+                }
+                return
+            }
+
+            // Legacy flat fallback — load the composite JPEG into a single layer.
             let imageData: Data?
             do {
                 imageData = try await storageManager.loadFullImage(for: drawing.id)
@@ -855,19 +895,9 @@ struct DrawingCanvasView: View {
             }
             print("  - UIImage loaded: \(uiImage.size), \(bytes.count) bytes")
 
-            var attempts = 0
-            while canvasState.renderer == nil && attempts < 10 {
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-                attempts += 1
-            }
-
             await MainActor.run {
-                if canvasState.renderer != nil {
-                    canvasState.loadImage(uiImage)
-                    print("✅ Successfully loaded existing drawing image onto canvas")
-                } else {
-                    print("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
-                }
+                canvasState.loadImage(uiImage)
+                print("✅ Successfully loaded existing drawing image onto canvas")
             }
         }
     }
@@ -885,6 +915,15 @@ struct DrawingCanvasView: View {
         print("  - Current Drawing ID: \(currentDrawingID?.uuidString ?? "nil (new drawing)")")
         print("  - Is editing existing: \(isEditingExisting)")
 
+        // TODO(layered-save): build a LayeredDrawingPayload from canvasState.layers
+        // (read each MTLTexture back to PNG bytes, populate manifest entries with
+        // each layer's stable id/name/opacity/visible/locked/blendMode) and call
+        // storageManager.saveLayeredDrawing / updateLayeredDrawing. The cloud
+        // sync sprint already accepts this payload; the producer is the
+        // remaining piece. Until that lands the save path stays flat-only —
+        // edited layered drawings round-trip *into* the canvas via loadLayered
+        // but get re-flattened on save (acceptable while load is the user-
+        // visible win). Tracked as a follow-up sprint.
         guard let image = canvasState.exportImage(),
               let imageData = image.pngData() else {
             print("❌ ERROR: Failed to export image")
