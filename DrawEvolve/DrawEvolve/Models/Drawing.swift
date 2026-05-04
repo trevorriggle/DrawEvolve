@@ -9,6 +9,12 @@
 //  accessor for gallery cells, async loadFullImage for the detail/canvas
 //  views).
 //
+//  Layered drawings (migration 0010, ONLINELAYERSTORE.md): the row may
+//  also carry `manifestPath` pointing at `<user>/<id>/manifest.json`. A
+//  drawing is "layered" iff `manifestPath != nil`. `storagePath` becomes
+//  optional at the schema level but in our writer we always also upload
+//  a composite, so `storagePath` is set on every row this client writes.
+//
 //  Codable is used both for the local metadata cache (Documents/
 //  DrawEvolveCache/metadata/<id>.json) and for PostgREST round-trips
 //  with the `drawings` table — column names and field names line up via
@@ -21,12 +27,19 @@ struct Drawing: Codable, Identifiable {
     let id: UUID
     let userId: UUID
     var title: String
-    var storagePath: String        // "<user_id>/<id>.jpg" — Supabase Storage key
+    var storagePath: String?       // "<user_id>/<id>.jpg" (legacy) or "<user_id>/<id>/composite.jpg" (layered).
     let createdAt: Date
     var updatedAt: Date
     var feedback: String?          // Most recent feedback summary
     var context: DrawingContext?
     var critiqueHistory: [CritiqueEntry]
+
+    // Layered storage (migration 0010, ONLINELAYERSTORE.md §5.2).
+    var manifestPath: String?      // "<user>/<id>/manifest.json"; nil = legacy flat
+    var formatVersion: Int?        // manifest schema version when this row was written
+    var layerCount: Int?
+    var totalBytes: Int64?         // sum of layer + composite + thumb bytes
+    var version: Int               // optimistic-concurrency token (server bumps on UPDATE)
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -38,6 +51,11 @@ struct Drawing: Codable, Identifiable {
         case feedback
         case context
         case critiqueHistory = "critique_history"
+        case manifestPath = "manifest_path"
+        case formatVersion = "format_version"
+        case layerCount = "layer_count"
+        case totalBytes = "total_bytes"
+        case version
     }
 
     init(from decoder: Decoder) throws {
@@ -51,12 +69,19 @@ struct Drawing: Codable, Identifiable {
         // written by pre-fix builds: they get auto-corrected the moment
         // they're hydrated, so subsequent uploads/downloads/deletes use the
         // RLS-compatible lowercase path without a manual cache flush.
-        storagePath = try container.decode(String.self, forKey: .storagePath).lowercased()
+        storagePath = try container.decodeIfPresent(String.self, forKey: .storagePath)?.lowercased()
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         feedback = try container.decodeIfPresent(String.self, forKey: .feedback)
         context = try container.decodeIfPresent(DrawingContext.self, forKey: .context)
         critiqueHistory = try container.decodeIfPresent([CritiqueEntry].self, forKey: .critiqueHistory) ?? []
+        manifestPath = try container.decodeIfPresent(String.self, forKey: .manifestPath)?.lowercased()
+        formatVersion = try container.decodeIfPresent(Int.self, forKey: .formatVersion)
+        layerCount = try container.decodeIfPresent(Int.self, forKey: .layerCount)
+        totalBytes = try container.decodeIfPresent(Int64.self, forKey: .totalBytes)
+        // Pre-0010 cached rows have no `version`; default to 1 so optimistic-
+        // concurrency comparisons against fresh server rows still make sense.
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
     }
 
     func encode(to encoder: Encoder) throws {
@@ -71,24 +96,34 @@ struct Drawing: Codable, Identifiable {
         try container.encode(id.uuidString.lowercased(), forKey: .id)
         try container.encode(userId.uuidString.lowercased(), forKey: .userId)
         try container.encode(title, forKey: .title)
-        try container.encode(storagePath, forKey: .storagePath)
+        try container.encodeIfPresent(storagePath, forKey: .storagePath)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(feedback, forKey: .feedback)
         try container.encodeIfPresent(context, forKey: .context)
         try container.encode(critiqueHistory, forKey: .critiqueHistory)
+        try container.encodeIfPresent(manifestPath, forKey: .manifestPath)
+        try container.encodeIfPresent(formatVersion, forKey: .formatVersion)
+        try container.encodeIfPresent(layerCount, forKey: .layerCount)
+        try container.encodeIfPresent(totalBytes, forKey: .totalBytes)
+        try container.encode(version, forKey: .version)
     }
 
     init(
         id: UUID,
         userId: UUID,
         title: String,
-        storagePath: String,
+        storagePath: String?,
         createdAt: Date,
         updatedAt: Date,
         feedback: String? = nil,
         context: DrawingContext? = nil,
-        critiqueHistory: [CritiqueEntry] = []
+        critiqueHistory: [CritiqueEntry] = [],
+        manifestPath: String? = nil,
+        formatVersion: Int? = nil,
+        layerCount: Int? = nil,
+        totalBytes: Int64? = nil,
+        version: Int = 1
     ) {
         self.id = id
         self.userId = userId
@@ -99,7 +134,16 @@ struct Drawing: Codable, Identifiable {
         self.feedback = feedback
         self.context = context
         self.critiqueHistory = critiqueHistory
+        self.manifestPath = manifestPath
+        self.formatVersion = formatVersion
+        self.layerCount = layerCount
+        self.totalBytes = totalBytes
+        self.version = version
     }
+
+    /// True iff this drawing has a layered representation (manifest + per-layer PNGs)
+    /// available in cloud Storage. Legacy drawings only have a flat composite.
+    var isLayered: Bool { manifestPath != nil }
 }
 
 // MARK: - Cloud upsert payload (Phase 5d)
@@ -111,6 +155,13 @@ struct Drawing: Codable, Identifiable {
 /// save. The column has a `default '[]'::jsonb` in the schema, so omitting
 /// it on INSERT initializes it correctly; omitting it on UPDATE leaves the
 /// existing value alone, which is exactly what we want.
+///
+/// The optimistic-concurrency `version` column is also omitted: the
+/// `bump_drawing_version` trigger increments it server-side on UPDATE, and
+/// passing a value would either no-op (trigger overrides) or, if a future
+/// version of the trigger respects client values, race with concurrent saves.
+/// Conflict-detection is wired by adding a `where version = N` predicate at
+/// the upsert call site, not by sending `version` in the body.
 struct DrawingUpsertPayload: Encodable {
     let drawing: Drawing
 
@@ -123,7 +174,11 @@ struct DrawingUpsertPayload: Encodable {
         case updatedAt = "updated_at"
         case feedback
         case context
-        // critiqueHistory deliberately omitted — see doc comment above.
+        case manifestPath = "manifest_path"
+        case formatVersion = "format_version"
+        case layerCount = "layer_count"
+        case totalBytes = "total_bytes"
+        // critiqueHistory + version deliberately omitted — see doc comment above.
     }
 
     func encode(to encoder: Encoder) throws {
@@ -131,10 +186,14 @@ struct DrawingUpsertPayload: Encodable {
         try container.encode(drawing.id.uuidString.lowercased(), forKey: .id)
         try container.encode(drawing.userId.uuidString.lowercased(), forKey: .userId)
         try container.encode(drawing.title, forKey: .title)
-        try container.encode(drawing.storagePath, forKey: .storagePath)
+        try container.encodeIfPresent(drawing.storagePath, forKey: .storagePath)
         try container.encode(drawing.createdAt, forKey: .createdAt)
         try container.encode(drawing.updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(drawing.feedback, forKey: .feedback)
         try container.encodeIfPresent(drawing.context, forKey: .context)
+        try container.encodeIfPresent(drawing.manifestPath, forKey: .manifestPath)
+        try container.encodeIfPresent(drawing.formatVersion, forKey: .formatVersion)
+        try container.encodeIfPresent(drawing.layerCount, forKey: .layerCount)
+        try container.encodeIfPresent(drawing.totalBytes, forKey: .totalBytes)
     }
 }

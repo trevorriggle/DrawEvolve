@@ -75,3 +75,15 @@ As of 2026-05-04, the user-authoring surface for custom prompts is **bounded enu
 `PROMPT_TEMPLATE_VERSION` (currently 1) gates the curated fragments. When fragments change in ways that shift critique behavior, bump the constant and add a corresponding `prompt_template_versions` row when that table lands. `custom_prompts.template_version` records the version each row was authored against; the request path always renders fragments from the *current* version, so old rows keep working — they just produce slightly-different critiques after a bump (which is the design).
 
 CRUD lives at `/v1/prompts/me`, `/v1/prompts`, `/v1/prompts/:id` (GET/PATCH/DELETE). Same JWT + App Attest gates as `/`.
+
+---
+
+## Layered drawing storage — cloud sync layer landed
+
+As of 2026-05-04, the cloud + schema half of the layered-drawing design (`ONLINELAYERSTORE.md`) is in: migration `0010_layered_drawings.sql` adds `manifest_path / format_version / layer_count / total_bytes / version` to `public.drawings`, drops NOT NULL on `storage_path`, adds the `drawings_path_present` CHECK, and ships a `bump_drawing_version` trigger for optimistic concurrency. Swift side: new `LayeredDrawingPayload` (manifest + per-layer PNGs + composite/thumb), and `CloudDrawingStorageManager` gains `saveLayeredDrawing` / `updateLayeredDrawing` / `loadLayeredDrawing` plus a resumable layered upload pipeline (layers parallel → composite + thumb parallel → manifest LAST → row upsert → best-effort legacy cleanup).
+
+Cloud paths for layered drawings are `<user>/<drawing_id>/{manifest.json,layer-N.png,thumb.jpg,composite.jpg}`. Legacy flat drawings keep `<user>/<id>.jpg` + `<user>/<id>_thumb.jpg`. The loader treats `manifest_path is not null` as the discriminator. The Worker's AI-feedback flow is unchanged because every layered save also uploads `composite.jpg` and points `storage_path` at it.
+
+The iOS canvas-side wiring (`DrawingLayer.id` refactor, `CanvasStateManager.loadLayered`, on-device cache reload from `Documents/DrawEvolveCache/layers/<id>/`) is the next sprint and intentionally not in this PR. The cloud sync layer creates the `layers/<id>/` local cache directory and writes to it for upload resumability — sprint 2 is the one that wires it into the canvas reload path.
+
+Side note: the social Phase A merge into main (3faf369) introduced two unrelated parser breakages — an orphan `if (method !== 'POST') {` in `cloudflare-worker/index.js` and a missing `});` in `cloudflare-worker/test.mjs`. Both are fixed in the same PR as the layered cloud sync because `npm test` couldn't even parse before.

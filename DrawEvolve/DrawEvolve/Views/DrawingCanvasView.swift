@@ -822,7 +822,7 @@ struct DrawingCanvasView: View {
         print("DrawingCanvasView: Loading existing drawing")
         print("  - Drawing ID: \(drawing.id)")
         print("  - Title: \(drawing.title)")
-        print("  - Storage path: \(drawing.storagePath)")
+        print("  - Storage path: \(drawing.storagePath ?? "<layered/manifest-only>")")
 
         // Load feedback if exists (but keep panel collapsed - user can tap sparkles to view)
         if let feedback = drawing.feedback {
