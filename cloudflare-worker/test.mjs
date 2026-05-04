@@ -66,6 +66,19 @@ import {
   classifyCritique,
   CLASSIFIER_MODEL,
   CLASSIFIER_VERSION,
+  flattenCritiques,
+  selectWindow,
+  determineStatus,
+  aggregateCategories,
+  computeStreak,
+  buildEvolutionResponse,
+  SOLID_FOUNDATION_CEILING,
+  MEANINGFUL_DELTA,
+  MIN_DATA_POINTS,
+  PRIMARY_WEIGHT,
+  SECONDARY_WEIGHT,
+  DEFAULT_WINDOW_CRITIQUES,
+  DEFAULT_WINDOW_DAYS,
   REQUEST_STATUS,
   logRequest,
   validateJWT,
@@ -3726,3 +3739,399 @@ test('classifyCritique tolerates empty/non-string feedback by returning null wit
   assert.equal(await classifyCritique({ feedback: null, env: CLASSIFIER_ENV, fetcher }), null);
   assert.equal(calls.length, 0);
 }));
+
+// =============================================================================
+// My Evolution Phase 2 — aggregation + status + streak + windowing
+// =============================================================================
+//
+// All 15 cases from the Phase 2 spec. Pure-function tests drive
+// buildEvolutionResponse / aggregateCategories / determineStatus /
+// computeStreak directly; no Supabase mocking — at this level of the
+// stack, drawings are just plain objects.
+
+function evoTaggedCritique({ primary, secondaries = [], severity, createdAt }) {
+  // Mirrors what buildCritiqueEntry writes plus the Phase 1 classifier's
+  // tags object. Override per-test via the call args.
+  return {
+    sequence_number: 1,
+    content: 'sample',
+    prompt_config: { tier: 'free', includeHistoryCount: 2, styleModifier: null },
+    prompt_token_count: 0,
+    completion_token_count: 0,
+    created_at: createdAt,
+    tags: {
+      primary_category: primary,
+      secondary_categories: secondaries,
+      severity,
+      focus_area_text: null,
+      subject_inferred: null,
+      acknowledged_progress: false,
+      classifier_version: 'v1',
+    },
+  };
+}
+
+function evoDrawing(critiques, { id = 'd1', updatedAt, createdAt } = {}) {
+  return {
+    id,
+    created_at: createdAt ?? '2026-04-01T00:00:00.000Z',
+    updated_at: updatedAt ?? '2026-04-30T00:00:00.000Z',
+    critique_history: critiques,
+  };
+}
+
+const EVO_DEFAULT_WINDOW = {
+  windowCritiques: DEFAULT_WINDOW_CRITIQUES,
+  windowDays: DEFAULT_WINDOW_DAYS,
+};
+
+// -----------------------------------------------------------------------------
+// Aggregation cases (1-10)
+// -----------------------------------------------------------------------------
+
+// Case 1
+test('evolution: empty input → empty categories, empty warming_up, zero counts', () => {
+  const out = buildEvolutionResponse([], { ...EVO_DEFAULT_WINDOW, now: Date.now() });
+  assert.deepEqual(out.categories, []);
+  assert.deepEqual(out.warming_up, []);
+  assert.equal(out.window.critique_count, 0);
+  assert.equal(out.window.earliest_at, null);
+  assert.equal(out.window.latest_at, null);
+  assert.equal(out.window.span_days, 0);
+  assert.equal(out.streak.drawings_total, 0);
+  assert.equal(out.streak.critiques_total, 0);
+  assert.equal(out.streak.drawings_this_week, 0);
+  assert.equal(out.streak.drawings_this_month, 0);
+  assert.equal(out.classifier_version, CLASSIFIER_VERSION);
+});
+
+// Case 2
+test('evolution: single anatomy primary severity 4 → series [4], data_points 1, warming_up', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const drawing = evoDrawing([
+    evoTaggedCritique({ primary: 'anatomy', severity: 4, createdAt: '2026-04-30T00:00:00.000Z' }),
+  ]);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  assert.deepEqual(out.categories, []);
+  assert.deepEqual(out.warming_up, [{ id: 'anatomy', data_points: 1, needed: MIN_DATA_POINTS }]);
+  // Sanity: even though it's in warming_up, the entry counted in the window.
+  assert.equal(out.window.critique_count, 1);
+});
+
+// Case 3
+test('evolution: 6 anatomy primaries declining 5,5,4,3,2,1 → status improving', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const severities = [5, 5, 4, 3, 2, 1];
+  const critiques = severities.map((sev, i) => evoTaggedCritique({
+    primary: 'anatomy', severity: sev,
+    // Oldest first chronologically by spacing each one a day apart.
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  const cat = out.categories.find((c) => c.id === 'anatomy');
+  assert.ok(cat, 'anatomy category must be present');
+  assert.deepEqual(cat.series, [5, 5, 4, 3, 2, 1]);
+  assert.equal(cat.data_points, 6);
+  assert.equal(cat.current_value, 1);
+  assert.equal(cat.status, 'improving');
+});
+
+// Case 4
+test('evolution: 6 anatomy primaries rising 1,2,3,4,5,5 → status current_focus', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const severities = [1, 2, 3, 4, 5, 5];
+  const critiques = severities.map((sev, i) => evoTaggedCritique({
+    primary: 'anatomy', severity: sev,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  const cat = out.categories.find((c) => c.id === 'anatomy');
+  assert.equal(cat.status, 'current_focus');
+});
+
+// Case 5
+test('evolution: 6 perspective primaries all severity 1 → status solid_foundation', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const critiques = [1, 1, 1, 1, 1, 1].map((sev, i) => evoTaggedCritique({
+    primary: 'perspective', severity: sev,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  const cat = out.categories.find((c) => c.id === 'perspective');
+  assert.equal(cat.status, 'solid_foundation');
+});
+
+// Case 6
+test('evolution: 6 value primaries all severity 3 (no trend) → status steady', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const critiques = [3, 3, 3, 3, 3, 3].map((sev, i) => evoTaggedCritique({
+    primary: 'value', severity: sev,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  const cat = out.categories.find((c) => c.id === 'value');
+  assert.equal(cat.status, 'steady');
+});
+
+// Case 7
+test('evolution: mixed primary + secondary tagging produces correctly weighted series', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  // Anatomy appears as primary in 5 entries (sev 4 → 4) and as secondary in
+  // 1 entry (sev 4 with composition primary → 4 * 0.5 = 2). Chronological
+  // order verifies the secondary's half-weight slots into position 2 rather
+  // than being grouped or reweighted.
+  const entries = [
+    { primary: 'anatomy', secondaries: [], severity: 4 },
+    { primary: 'anatomy', secondaries: [], severity: 4 },
+    { primary: 'composition', secondaries: ['anatomy'], severity: 4 },
+    { primary: 'anatomy', secondaries: [], severity: 4 },
+    { primary: 'anatomy', secondaries: [], severity: 4 },
+    { primary: 'anatomy', secondaries: [], severity: 4 },
+  ];
+  const critiques = entries.map((e, i) => evoTaggedCritique({
+    primary: e.primary,
+    secondaries: e.secondaries,
+    severity: e.severity,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  const cat = out.categories.find((c) => c.id === 'anatomy');
+  assert.equal(cat.data_points, 6);
+  assert.deepEqual(cat.series, [4, 4, 2, 4, 4, 4]);
+  assert.equal(cat.current_value, 4);
+  // Sanity: PRIMARY_WEIGHT and SECONDARY_WEIGHT remain the load-bearing values.
+  assert.equal(PRIMARY_WEIGHT, 1.0);
+  assert.equal(SECONDARY_WEIGHT, 0.5);
+});
+
+// Case 8
+test('evolution: subject_match is included in categories output, not filtered', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  // 5 entries → exactly meets MIN_DATA_POINTS, so subject_match should
+  // render in `categories` rather than `warming_up`. The future UI
+  // decides whether to render it; the endpoint must not editorialize.
+  const critiques = [3, 3, 3, 3, 3].map((sev, i) => evoTaggedCritique({
+    primary: 'subject_match', severity: sev,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  const cat = out.categories.find((c) => c.id === 'subject_match');
+  assert.ok(cat, 'subject_match must appear in categories list');
+  assert.equal(cat.data_points, 5);
+  assert.equal(out.warming_up.find((w) => w.id === 'subject_match'), undefined);
+});
+
+// Case 9
+test('evolution: pre-Phase-1 entries (no tags field) are skipped silently', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const tagged = [3, 3, 3, 3, 3].map((sev, i) => evoTaggedCritique({
+    primary: 'value', severity: sev,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const untagged = {
+    sequence_number: 0,
+    content: 'pre-phase-1 critique',
+    prompt_config: { tier: 'free', includeHistoryCount: 2, styleModifier: null },
+    prompt_token_count: 0,
+    completion_token_count: 0,
+    created_at: '2026-03-01T00:00:00.000Z',
+    // tags field intentionally absent
+  };
+  const drawing = evoDrawing([untagged, ...tagged]);
+  const out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  assert.equal(out.window.critique_count, 5);
+  // Lifetime critiques_total still reflects the raw row count regardless
+  // of tagging — it's a streak/motivation stat, not a windowing stat.
+  assert.equal(out.streak.critiques_total, 6);
+});
+
+// Case 10
+test('evolution: malformed tags are skipped silently (no throw)', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const valid = [3, 3, 3, 3, 3].map((sev, i) => evoTaggedCritique({
+    primary: 'value', severity: sev,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const bad = [
+    // Missing severity
+    {
+      sequence_number: 1, content: 'x',
+      prompt_config: {}, prompt_token_count: 0, completion_token_count: 0,
+      created_at: '2026-04-01T00:00:00.000Z',
+      tags: {
+        primary_category: 'anatomy', secondary_categories: [],
+        focus_area_text: null, subject_inferred: null,
+        acknowledged_progress: false, classifier_version: 'v1',
+      },
+    },
+    // Severity out of range
+    {
+      sequence_number: 2, content: 'x',
+      prompt_config: {}, prompt_token_count: 0, completion_token_count: 0,
+      created_at: '2026-04-02T00:00:00.000Z',
+      tags: {
+        primary_category: 'anatomy', secondary_categories: [], severity: 7,
+        focus_area_text: null, subject_inferred: null,
+        acknowledged_progress: false, classifier_version: 'v1',
+      },
+    },
+    // primary_category not in enum
+    {
+      sequence_number: 3, content: 'x',
+      prompt_config: {}, prompt_token_count: 0, completion_token_count: 0,
+      created_at: '2026-04-03T00:00:00.000Z',
+      tags: {
+        primary_category: 'not_a_real_category', secondary_categories: [],
+        severity: 3, focus_area_text: null, subject_inferred: null,
+        acknowledged_progress: false, classifier_version: 'v1',
+      },
+    },
+  ];
+  const drawing = evoDrawing([...bad, ...valid]);
+  // Must not throw, even with malformed rows mixed in.
+  let out;
+  assert.doesNotThrow(() => {
+    out = buildEvolutionResponse([drawing], { ...EVO_DEFAULT_WINDOW, now });
+  });
+  assert.equal(out.window.critique_count, 5);
+  const cat = out.categories.find((c) => c.id === 'value');
+  assert.equal(cat.data_points, 5);
+});
+
+// -----------------------------------------------------------------------------
+// Window selection cases (11-13)
+// -----------------------------------------------------------------------------
+
+// Case 11
+test('evolution: window_critiques cap wins when 90-day window has fewer entries', () => {
+  // Spec test 11: window_critiques=20, window_days=90, user has 50 critiques
+  // over 200 days → 20 most recent. Constructed so set A (last 20) > set B
+  // (last 90 days) — proves the count cap wins against a smaller time window.
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  // 35 critiques aged 100-200 days (older than the 90-day cutoff).
+  const older = Array.from({ length: 35 }, (_, i) => evoTaggedCritique({
+    primary: 'anatomy', severity: 3,
+    createdAt: new Date(now - (200 - i * 3) * day).toISOString(),
+  }));
+  // 15 critiques in last 30 days.
+  const newer = Array.from({ length: 15 }, (_, i) => evoTaggedCritique({
+    primary: 'anatomy', severity: 3,
+    createdAt: new Date(now - (30 - i) * day).toISOString(),
+  }));
+  const drawing = evoDrawing([...older, ...newer]);
+  const out = buildEvolutionResponse([drawing],
+    { windowCritiques: 20, windowDays: 90, now });
+  // Set A = 20 most recent (15 newer + 5 most-recent of older, all within
+  // ~110 days). Set B = 15 (only the 15 newer, within 90 days). 20 > 15 →
+  // count cap wins; window contains 20 entries.
+  assert.equal(out.window.critique_count, 20);
+});
+
+// Case 12
+test('evolution: with 5 recent critiques both windows agree → all 5 included', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  // 5 critiques in last 60 days. Set A = 5 (only 5 exist, < cap of 20).
+  // Set B = 5 (all within 90 days). Either window yields 5 → result is 5.
+  const critiques = Array.from({ length: 5 }, (_, i) => evoTaggedCritique({
+    primary: 'anatomy', severity: 3,
+    createdAt: new Date(now - (60 - i * 10) * day).toISOString(),
+  }));
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing],
+    { windowCritiques: 20, windowDays: 90, now });
+  assert.equal(out.window.critique_count, 5);
+  // Exactly 5 entries → meets MIN_DATA_POINTS, so anatomy renders in
+  // categories rather than warming_up.
+  assert.deepEqual(out.warming_up, []);
+  const cat = out.categories.find((c) => c.id === 'anatomy');
+  assert.ok(cat, 'anatomy must appear in categories');
+  assert.equal(cat.data_points, 5);
+});
+
+// Case 13
+test('evolution: 2 critiques in last day → both included, still warming_up', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const critiques = [
+    evoTaggedCritique({
+      primary: 'anatomy', severity: 3,
+      createdAt: new Date(now - 60_000).toISOString(),
+    }),
+    evoTaggedCritique({
+      primary: 'anatomy', severity: 3,
+      createdAt: new Date(now - 3_600_000).toISOString(),
+    }),
+  ];
+  const drawing = evoDrawing(critiques);
+  const out = buildEvolutionResponse([drawing],
+    { windowCritiques: 20, windowDays: 90, now });
+  assert.equal(out.window.critique_count, 2);
+  assert.deepEqual(out.categories, []);
+  assert.deepEqual(out.warming_up, [
+    { id: 'anatomy', data_points: 2, needed: MIN_DATA_POINTS },
+  ]);
+});
+
+// -----------------------------------------------------------------------------
+// Streak counters (14-15)
+// -----------------------------------------------------------------------------
+
+// Case 14
+test('evolution: drawings_this_week counts drawings updated within last 7 days', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const drawings = [
+    evoDrawing([], { id: 'a', updatedAt: new Date(now - 1 * day).toISOString() }),
+    evoDrawing([], { id: 'b', updatedAt: new Date(now - 5 * day).toISOString() }),
+    evoDrawing([], { id: 'c', updatedAt: new Date(now - 8 * day).toISOString() }),
+    evoDrawing([], { id: 'd', updatedAt: new Date(now - 25 * day).toISOString() }),
+  ];
+  const out = buildEvolutionResponse(drawings, { ...EVO_DEFAULT_WINDOW, now });
+  assert.equal(out.streak.drawings_this_week, 2);
+  assert.equal(out.streak.drawings_total, 4);
+});
+
+// Case 15
+test('evolution: drawings_this_month counts drawings updated within last 30 days (rolling)', () => {
+  const now = Date.parse('2026-05-01T00:00:00.000Z');
+  const day = 86400000;
+  const drawings = [
+    evoDrawing([], { id: 'a', updatedAt: new Date(now - 1 * day).toISOString() }),
+    evoDrawing([], { id: 'b', updatedAt: new Date(now - 15 * day).toISOString() }),
+    evoDrawing([], { id: 'c', updatedAt: new Date(now - 25 * day).toISOString() }),
+    evoDrawing([], { id: 'd', updatedAt: new Date(now - 31 * day).toISOString() }),
+    evoDrawing([], { id: 'e', updatedAt: new Date(now - 60 * day).toISOString() }),
+  ];
+  const out = buildEvolutionResponse(drawings, { ...EVO_DEFAULT_WINDOW, now });
+  // 30-day window is rolling, not calendar-month: includes day 25, excludes
+  // day 31. Spec lock to prevent a future "month-to-date" regression.
+  assert.equal(out.streak.drawings_this_month, 3);
+});
+
+// -----------------------------------------------------------------------------
+// Threshold constants — locked alongside the status logic that depends on them
+// -----------------------------------------------------------------------------
+
+test('evolution: status threshold constants match spec', () => {
+  // These two values shape the emotional tone of every category card the
+  // future UI renders; they're locked here so a bump is an explicit choice
+  // rather than an accidental drift.
+  assert.equal(SOLID_FOUNDATION_CEILING, 1.5);
+  assert.equal(MEANINGFUL_DELTA, 0.75);
+  assert.equal(MIN_DATA_POINTS, 5);
+});
