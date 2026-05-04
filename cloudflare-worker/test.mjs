@@ -3245,6 +3245,9 @@ test('GET /v1/profiles/search returns 429 when the per-user search rate limit is
   } finally {
     restore();
   }
+});
+
+// =============================================================================
 // Custom prompts (product-level) — bounded-knob parameters
 // =============================================================================
 //

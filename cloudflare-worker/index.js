@@ -67,8 +67,6 @@ export default {
       return handleGetProfileByUsername(request, env, ctx, decodeURIComponent(tail));
     }
 
-    if (method !== 'POST') {
-
     // /v1/prompts/* dispatches all methods to handlePrompts; that route
     // owns its own method gating and 405s.
     if (pathname === '/v1/prompts'

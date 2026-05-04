@@ -37,6 +37,7 @@
 //
 
 import Combine
+import CryptoKit
 import Foundation
 import Network
 import Supabase
@@ -98,9 +99,15 @@ final class CloudDrawingStorageManager: ObservableObject {
     private var thumbnailsDir: URL { cacheRoot.appendingPathComponent("thumbnails", isDirectory: true) }
     private var imagesDir:     URL { cacheRoot.appendingPathComponent("images",     isDirectory: true) }
     private var pendingDir:    URL { cacheRoot.appendingPathComponent("pending",    isDirectory: true) }
+    /// Per-drawing layered artifact root (ONLINELAYERSTORE.md §4). One subdir
+    /// per drawing: `layers/<drawing_id>/{manifest.json, layer-N.png, composite.jpg}`.
+    /// This directory backs both upload-resumability (the upload retry reads
+    /// bytes from here) and on-device offline reads. The next-sprint canvas
+    /// reload path (loadLayered) will read the same files.
+    private var layersDir:     URL { cacheRoot.appendingPathComponent("layers",     isDirectory: true) }
 
     private init() {
-        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir] {
+        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir, layersDir] {
             try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         setupAuthObservation()
@@ -363,6 +370,255 @@ final class CloudDrawingStorageManager: ObservableObject {
         enqueueUpload(for: drawing)
     }
 
+    // MARK: - Layered save / update / load (ONLINELAYERSTORE.md)
+
+    /// Persist a brand-new layered drawing locally and queue a layered cloud
+    /// upload (manifest + per-layer PNGs + composite + thumb). Mirrors the
+    /// shape of `saveDrawing` but takes a `LayeredDrawingPayload` produced by
+    /// the canvas (next sprint) rather than a single flattened JPEG.
+    ///
+    /// Resumability: bytes are persisted under
+    /// `Documents/DrawEvolveCache/layers/<id>/` before the upload task is
+    /// kicked off, so a mid-upload app death simply replays from the same
+    /// bytes the next launch.
+    func saveLayeredDrawing(
+        title: String,
+        payload: LayeredDrawingPayload,
+        feedback: String? = nil,
+        context: DrawingContext? = nil,
+        critiqueHistory: [CritiqueEntry] = []
+    ) async throws -> Drawing {
+        isLoading = true
+        defer { isLoading = false }
+        errorMessage = nil
+
+        guard let userID = AuthManager.shared.currentUserID else {
+            throw DrawingStorageError.notAuthenticated
+        }
+
+        let drawingID = UUID()
+        let normalized = normalizeManifestForUpload(
+            payload: payload,
+            drawingID: drawingID,
+            userID: userID
+        )
+
+        let manifestPath = layeredManifestStoragePath(userID: userID, drawingID: drawingID)
+        let compositePath = normalized.compositeJPEG != nil
+            ? layeredCompositeStoragePath(userID: userID, drawingID: drawingID)
+            : nil
+        let now = Date()
+
+        let drawing = Drawing(
+            id: drawingID,
+            userId: userID,
+            title: title,
+            // Preserve a flat-style storage_path pointing at the composite when
+            // present so legacy readers (and the Worker AI-feedback flow)
+            // continue to find a flat image without knowing about manifests.
+            storagePath: compositePath,
+            createdAt: now,
+            updatedAt: now,
+            feedback: feedback,
+            context: context,
+            critiqueHistory: critiqueHistory,
+            manifestPath: manifestPath,
+            formatVersion: normalized.manifest.formatVersion,
+            layerCount: normalized.layerPNGs.count,
+            totalBytes: layeredTotalBytes(normalized),
+            version: 1
+        )
+
+        try writeLayeredArtifactsLocally(drawingID: drawingID, payload: normalized)
+        try writeLayeredThumbnailLocally(drawingID: drawingID, jpeg: normalized.thumbnailJPEG)
+        writeMetadataToCache(drawing)
+        drawings.insert(drawing, at: 0)
+        print("💾 Saved layered drawing locally: \(drawingID) '\(title)' (\(normalized.layerPNGs.count) layers)")
+
+        enqueueLayeredUpload(for: drawing, payload: normalized, legacy: nil)
+        return drawing
+    }
+
+    /// Update an existing drawing with a new layered payload. If the existing
+    /// row is legacy (flat-only), this is the legacy → layered upgrade path
+    /// described in ONLINELAYERSTORE.md §8.2: storage_path is rewritten to the
+    /// new composite location and the old flat objects are best-effort
+    /// deleted on successful upload.
+    func updateLayeredDrawing(
+        id: UUID,
+        title: String? = nil,
+        payload: LayeredDrawingPayload,
+        feedback: String? = nil,
+        context: DrawingContext? = nil,
+        critiqueHistory: [CritiqueEntry]? = nil
+    ) async throws {
+        isLoading = true
+        defer { isLoading = false }
+        errorMessage = nil
+
+        guard let index = drawings.firstIndex(where: { $0.id == id }) else {
+            print("❌ updateLayeredDrawing: drawing \(id) not in memory")
+            throw DrawingStorageError.drawingNotFound
+        }
+
+        var drawing = drawings[index]
+        let wasLegacy = !drawing.isLayered
+        let userID = drawing.userId
+        let normalized = normalizeManifestForUpload(
+            payload: payload,
+            drawingID: drawing.id,
+            userID: userID
+        )
+
+        let manifestPath = layeredManifestStoragePath(userID: userID, drawingID: drawing.id)
+        let compositePath = normalized.compositeJPEG != nil
+            ? layeredCompositeStoragePath(userID: userID, drawingID: drawing.id)
+            : nil
+
+        // Capture legacy paths *before* mutating drawing.storagePath so the
+        // upload pipeline can clean them up after the row upsert succeeds.
+        let legacyComposite = wasLegacy ? drawing.storagePath : nil
+        let legacyThumbnail = wasLegacy
+            ? legacyThumbnailStoragePath(userID: userID, drawingID: drawing.id)
+            : nil
+        let legacyCleanup: LayeredLegacyCleanup? = (legacyComposite != nil || legacyThumbnail != nil)
+            ? LayeredLegacyCleanup(compositePath: legacyComposite, thumbnailPath: legacyThumbnail)
+            : nil
+
+        if let title { drawing.title = title }
+        if let feedback { drawing.feedback = feedback }
+        if let context { drawing.context = context }
+        if let critiqueHistory { drawing.critiqueHistory = critiqueHistory }
+        drawing.storagePath = compositePath
+        drawing.manifestPath = manifestPath
+        drawing.formatVersion = normalized.manifest.formatVersion
+        drawing.layerCount = normalized.layerPNGs.count
+        drawing.totalBytes = layeredTotalBytes(normalized)
+        drawing.updatedAt = Date()
+
+        try writeLayeredArtifactsLocally(drawingID: drawing.id, payload: normalized)
+        try writeLayeredThumbnailLocally(drawingID: drawing.id, jpeg: normalized.thumbnailJPEG)
+        writeMetadataToCache(drawing)
+
+        // If we just upgraded from legacy → layered, drop the legacy local
+        // composite copy (the layered subdir's composite.jpg supersedes it).
+        // The cloud-side legacy objects are deleted by the upload pipeline
+        // after row_upserted = true so a failed upload leaves them reachable.
+        if wasLegacy {
+            let legacyImageURL = imagesDir.appendingPathComponent("\(id.uuidString).jpg")
+            try? fileManager.removeItem(at: legacyImageURL)
+        }
+
+        drawings[index] = drawing
+        print("💾 Updated layered drawing locally: \(id) '\(drawing.title)' (\(normalized.layerPNGs.count) layers)")
+
+        enqueueLayeredUpload(for: drawing, payload: normalized, legacy: legacyCleanup)
+    }
+
+    /// Returns nil when the drawing is legacy / has no manifest. Caller falls
+    /// back to `loadFullImage(for:)` to render the flat composite.
+    ///
+    /// Hits the local layered cache first (per-drawing subdir under
+    /// `layers/<id>/`), then signed-URL downloads any missing pieces and
+    /// caches them. Per-layer SHA256 is verified against the manifest; a
+    /// mismatch surfaces as `DrawingStorageError.layerIntegrity` for v1 —
+    /// the next-sprint canvas reload path can soften this to "swap in an
+    /// empty layer" UX (see ONLINELAYERSTORE.md §6.3).
+    func loadLayeredDrawing(for id: UUID) async throws -> LayeredDrawingPayload? {
+        guard let drawing = drawings.first(where: { $0.id == id }) else { return nil }
+        guard drawing.isLayered else { return nil }
+
+        let userID = drawing.userId
+        let drawingID = drawing.id
+        let layerCount = drawing.layerCount ?? 0
+        let layerDir = localLayersDir(forDrawingID: drawingID)
+
+        // Try local cache first. If everything reads cleanly the network
+        // never wakes up — important for offline editing.
+        if let local = readLayeredArtifactsLocally(drawingID: drawingID, expectedLayerCount: layerCount) {
+            return local
+        }
+
+        #if DEBUG
+        if AuthManager.shared.isDebugBypassed {
+            // Bypass user has no cloud session; if it's not on disk, it's gone.
+            return nil
+        }
+        #endif
+
+        guard let client = SupabaseManager.shared.client else { return nil }
+
+        // Pull manifest from cloud, then layers in parallel.
+        let manifestPath = drawing.manifestPath
+            ?? layeredManifestStoragePath(userID: userID, drawingID: drawingID)
+        let manifestData: Data
+        do {
+            let signed = try await client.storage
+                .from(storageBucketID)
+                .createSignedURL(path: manifestPath, expiresIn: signedURLTTLSeconds)
+            let (data, _) = try await URLSession.shared.data(from: signed)
+            manifestData = data
+        } catch {
+            print("☁️ loadLayeredDrawing manifest fetch failed for \(drawingID): \(error.localizedDescription)")
+            return nil
+        }
+
+        let manifest: LayeredDrawingManifest
+        do {
+            manifest = try JSONDecoder().decode(LayeredDrawingManifest.self, from: manifestData)
+        } catch {
+            // A decode failure may signal a format-version bump older clients
+            // can't read; surface as nil so the canvas can show the
+            // "please update" UX (sprint 2 wires the messaging).
+            print("☁️ loadLayeredDrawing manifest decode failed for \(drawingID): \(error.localizedDescription)")
+            return nil
+        }
+
+        try? fileManager.createDirectory(at: layerDir, withIntermediateDirectories: true)
+        let manifestURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.manifest)
+        try? manifestData.write(to: manifestURL)
+
+        // Download layers in parallel. Maintain ordinal ordering on the
+        // result array so the caller can index by ordinal.
+        let bucketID = self.storageBucketID
+        let ttl = self.signedURLTTLSeconds
+        let rootPath = layeredRootStoragePath(userID: userID, drawingID: drawingID)
+        var layerData: [Data?] = Array(repeating: nil, count: manifest.layers.count)
+        try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            for (idx, layer) in manifest.layers.enumerated() {
+                let layerCloudPath = "\(rootPath)/\(layer.asset)"
+                group.addTask {
+                    let signed = try await client.storage
+                        .from(bucketID)
+                        .createSignedURL(path: layerCloudPath, expiresIn: ttl)
+                    let (data, _) = try await URLSession.shared.data(from: signed)
+                    return (idx, data)
+                }
+            }
+            for try await (idx, data) in group {
+                layerData[idx] = data
+            }
+        }
+
+        for (idx, layer) in manifest.layers.enumerated() {
+            guard let bytes = layerData[idx] else {
+                throw DrawingStorageError.layerIntegrity
+            }
+            let actualHash = sha256Hex(bytes)
+            if !layer.assetSha256.isEmpty, actualHash != layer.assetSha256.lowercased() {
+                throw DrawingStorageError.layerIntegrity
+            }
+            try? bytes.write(to: layerDir.appendingPathComponent(layer.asset))
+        }
+
+        return LayeredDrawingPayload(
+            manifest: manifest,
+            layerPNGs: layerData.compactMap { $0 },
+            compositeJPEG: nil,
+            thumbnailJPEG: nil
+        )
+    }
+
     // MARK: - Delete
 
     func deleteDrawing(id: UUID) async throws {
@@ -400,10 +656,33 @@ final class CloudDrawingStorageManager: ObservableObject {
                 .execute()
             _ = try? await client.storage
                 .from(storageBucketID)
-                .remove(paths: [drawing.storagePath, thumbnailStoragePath(for: drawing)])
+                .remove(paths: cloudObjectPaths(for: drawing))
         } catch {
             print("☁️ deleteDrawing cloud delete failed (kept local delete): \(error.localizedDescription)")
         }
+    }
+
+    /// Every Storage object that belongs to `drawing`. Used by deletes (and by
+    /// the legacy → layered re-save flow when wiping the old flat objects).
+    /// Includes both the legacy flat paths and any layered siblings; passing
+    /// extra paths is harmless — Supabase Storage's remove ignores misses.
+    private func cloudObjectPaths(for drawing: Drawing) -> [String] {
+        var paths: [String] = []
+        if let storagePath = drawing.storagePath { paths.append(storagePath) }
+        paths.append(thumbnailStoragePath(for: drawing))
+        if drawing.isLayered {
+            // Manifest + per-layer PNGs.
+            paths.append(layeredManifestStoragePath(userID: drawing.userId, drawingID: drawing.id))
+            let layerCount = drawing.layerCount ?? 0
+            for ordinal in 0..<layerCount {
+                paths.append(layeredLayerStoragePath(
+                    userID: drawing.userId,
+                    drawingID: drawing.id,
+                    ordinal: ordinal
+                ))
+            }
+        }
+        return paths
     }
 
     // MARK: - Local cache wipe (Phase 6 — sign out / post-delete)
@@ -423,9 +702,9 @@ final class CloudDrawingStorageManager: ObservableObject {
         thumbnailCache.removeAll()
         pendingUploadCount = 0
 
-        // Wipe contents of the four cache subdirs but leave the directories
+        // Wipe contents of the cache subdirs but leave the directories
         // in place — they're recreated lazily on first use otherwise.
-        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir] {
+        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir, layersDir] {
             let urls = (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for url in urls { try? fileManager.removeItem(at: url) }
         }
@@ -448,7 +727,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         thumbnailCache.removeAll()
 
         // Wipe local cache contents (but keep the directories).
-        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir] {
+        for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir, layersDir] {
             let urls = (try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for url in urls { try? fileManager.removeItem(at: url) }
         }
@@ -468,7 +747,7 @@ final class CloudDrawingStorageManager: ObservableObject {
                     .execute()
                 _ = try? await client.storage
                     .from(storageBucketID)
-                    .remove(paths: [drawing.storagePath, thumbnailStoragePath(for: drawing)])
+                    .remove(paths: cloudObjectPaths(for: drawing))
             } catch {
                 print("☁️ clearAllDrawings cloud delete failed for \(drawing.id): \(error.localizedDescription)")
             }
@@ -513,7 +792,18 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// Loads the full-size image: disk cache first, then signed URL from Storage.
     /// Returns nil if the image truly can't be located (bypass user with no local
     /// copy, or offline + cache miss).
+    ///
+    /// For layered drawings the "full image" is the composite.jpg sibling — the
+    /// flat fallback used by AI feedback and any view that doesn't yet know
+    /// how to render layers. Per-layer reads go through `loadLayeredDrawing`.
     func loadFullImage(for id: UUID) async throws -> Data? {
+        // Layered drawings cache composite.jpg under the layered subdir.
+        let layeredCompositeURL = localLayersDir(forDrawingID: id)
+            .appendingPathComponent(LayeredDrawingFilenames.composite)
+        if let cached = try? Data(contentsOf: layeredCompositeURL) {
+            return cached
+        }
+
         let url = imagesDir.appendingPathComponent("\(id.uuidString).jpg")
         if let cached = try? Data(contentsOf: url) {
             return cached
@@ -529,13 +819,24 @@ final class CloudDrawingStorageManager: ObservableObject {
         #endif
 
         guard let client = SupabaseManager.shared.client else { return nil }
+        guard let storagePath = drawing.storagePath else {
+            // Manifest-only drawing without a composite. loadLayeredDrawing is
+            // the right entrypoint; no flat fallback exists.
+            return nil
+        }
 
         do {
             let signed = try await client.storage
                 .from(storageBucketID)
-                .createSignedURL(path: drawing.storagePath, expiresIn: signedURLTTLSeconds)
+                .createSignedURL(path: storagePath, expiresIn: signedURLTTLSeconds)
             let (data, _) = try await URLSession.shared.data(from: signed)
-            try? data.write(to: url)
+            // Cache to whichever directory matches the drawing's representation.
+            let cacheURL = drawing.isLayered ? layeredCompositeURL : url
+            try? fileManager.createDirectory(
+                at: cacheURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? data.write(to: cacheURL)
             return data
         } catch {
             print("☁️ loadFullImage failed for \(id): \(error.localizedDescription)")
@@ -581,6 +882,9 @@ final class CloudDrawingStorageManager: ObservableObject {
         for dir in [thumbnailsDir, imagesDir] {
             try? fileManager.removeItem(at: dir.appendingPathComponent("\(idStr).jpg"))
         }
+        // Layered per-drawing subdirectory holds manifest + layer PNGs +
+        // composite cache; one removeItem on the directory cleans them all.
+        try? fileManager.removeItem(at: localLayersDir(forDrawingID: id))
     }
 
     private func jpegData(from imageData: Data, quality: CGFloat) -> Data? {
@@ -643,6 +947,20 @@ final class CloudDrawingStorageManager: ObservableObject {
         }
         if Task.isCancelled { return }
 
+        // Dispatch on the pending entry's kind. Entries written before the
+        // layered-storage feature have no `kind` field and decode as .flat,
+        // which preserves the existing behavior for in-flight retries
+        // crossing the upgrade boundary.
+        let entry = readPendingEntry(id: id)
+        switch entry?.kind ?? .flat {
+        case .flat:
+            await attemptFlatUpload(forDrawingID: id)
+        case .layered:
+            await attemptLayeredUpload(forDrawingID: id)
+        }
+    }
+
+    private func attemptFlatUpload(forDrawingID id: UUID) async {
         guard let drawing = drawings.first(where: { $0.id == id }) else {
             // Local copy gone (deleted) — cancel any pending entry too.
             removePendingEntry(id: id)
@@ -653,6 +971,16 @@ final class CloudDrawingStorageManager: ObservableObject {
 
         guard let client = SupabaseManager.shared.client else {
             scheduleBackoff(for: id, attempts: 1)
+            return
+        }
+
+        guard let storagePath = drawing.storagePath else {
+            // A flat-mode pending entry against a drawing that lost its flat
+            // path is unrecoverable. Drop the entry; the layered path (if any)
+            // will be retried via its own pending entry.
+            removePendingEntry(id: id)
+            pendingUploadCount = countPendingEntriesForCurrentUser()
+            activeUploadTasks[id] = nil
             return
         }
 
@@ -671,7 +999,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             try await client.storage
                 .from(storageBucketID)
                 .upload(
-                    path: drawing.storagePath,
+                    path: storagePath,
                     file: imageData,
                     options: FileOptions(contentType: "image/jpeg", upsert: true)
                 )
@@ -703,6 +1031,343 @@ final class CloudDrawingStorageManager: ObservableObject {
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
+    }
+
+    // MARK: - Layered upload pipeline
+
+    /// Captures the legacy (pre-layered) Storage paths to clean up after a
+    /// successful upgrade upload. Persisted into the pending entry so a
+    /// retry across launches still knows what to delete.
+    private struct LayeredLegacyCleanup {
+        let compositePath: String?
+        let thumbnailPath: String?
+    }
+
+    private func enqueueLayeredUpload(
+        for drawing: Drawing,
+        payload: LayeredDrawingPayload,
+        legacy: LayeredLegacyCleanup?
+    ) {
+        #if DEBUG
+        if drawing.userId == AuthManager.debugBypassUserID { return }
+        #endif
+
+        let userID = drawing.userId
+        let manifestPath = drawing.manifestPath
+            ?? layeredManifestStoragePath(userID: userID, drawingID: drawing.id)
+        let compositePath = payload.compositeJPEG != nil
+            ? layeredCompositeStoragePath(userID: userID, drawingID: drawing.id)
+            : nil
+        let thumbPath = layeredThumbnailStoragePath(userID: userID, drawingID: drawing.id)
+
+        let entry = PendingUpload(
+            drawingID: drawing.id,
+            userID: userID,
+            storagePath: nil,
+            createdAt: Date(),
+            attemptCount: 0,
+            lastAttemptAt: nil,
+            kind: .layered,
+            layerCount: payload.layerPNGs.count,
+            uploadedLayers: [],
+            uploadedComposite: false,
+            uploadedThumb: false,
+            uploadedManifest: false,
+            rowUpserted: false,
+            manifestPath: manifestPath,
+            compositePath: compositePath,
+            thumbPath: thumbPath,
+            legacyCompositePath: legacy?.compositePath,
+            legacyThumbnailPath: legacy?.thumbnailPath
+        )
+        writePendingEntry(entry)
+        pendingUploadCount = countPendingEntriesForCurrentUser()
+
+        activeUploadTasks[drawing.id]?.cancel()
+        activeUploadTasks[drawing.id] = Task { [weak self] in
+            await self?.attemptUpload(forDrawingID: drawing.id)
+        }
+    }
+
+    private func attemptLayeredUpload(forDrawingID id: UUID) async {
+        guard var entry = readPendingEntry(id: id), entry.kind == .layered else {
+            // Disappeared or was rewritten as flat — nothing to do here.
+            activeUploadTasks[id] = nil
+            return
+        }
+        guard let drawing = drawings.first(where: { $0.id == id }) else {
+            removePendingEntry(id: id)
+            pendingUploadCount = countPendingEntriesForCurrentUser()
+            activeUploadTasks[id] = nil
+            return
+        }
+
+        guard let client = SupabaseManager.shared.client else {
+            scheduleBackoff(for: id, attempts: 1)
+            return
+        }
+
+        let layerDir = localLayersDir(forDrawingID: id)
+        let manifestURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.manifest)
+        guard let manifestData = try? Data(contentsOf: manifestURL) else {
+            // Local manifest missing — we can't upload without it. Drop the
+            // pending entry so the queue doesn't spin forever.
+            removePendingEntry(id: id)
+            pendingUploadCount = countPendingEntriesForCurrentUser()
+            activeUploadTasks[id] = nil
+            return
+        }
+
+        let layerCount = entry.layerCount ?? 0
+        var uploadedLayers = Set(entry.uploadedLayers ?? [])
+        let bucketID = self.storageBucketID
+
+        do {
+            // Step 1: layers in parallel, skipping ordinals already done.
+            try await withThrowingTaskGroup(of: Int.self) { group in
+                for ordinal in 0..<layerCount where !uploadedLayers.contains(ordinal) {
+                    let cloudPath = layeredLayerStoragePath(
+                        userID: drawing.userId,
+                        drawingID: id,
+                        ordinal: ordinal
+                    )
+                    let fileURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.layer(ordinal: ordinal))
+                    guard let bytes = try? Data(contentsOf: fileURL) else {
+                        // Local PNG missing — abort; without bytes there's
+                        // nothing to retry. Caller surfaces the failure.
+                        throw DrawingStorageError.saveFailed
+                    }
+                    group.addTask {
+                        try await client.storage
+                            .from(bucketID)
+                            .upload(
+                                path: cloudPath,
+                                file: bytes,
+                                options: FileOptions(contentType: "image/png", upsert: true)
+                            )
+                        return ordinal
+                    }
+                }
+                for try await ordinal in group {
+                    uploadedLayers.insert(ordinal)
+                }
+            }
+            entry.uploadedLayers = Array(uploadedLayers).sorted()
+            updatePendingEntry(entry)
+
+            // Step 2: composite + thumb in parallel.
+            try await withThrowingTaskGroup(of: String.self) { group in
+                if entry.uploadedComposite != true, let compositePath = entry.compositePath {
+                    let url = layerDir.appendingPathComponent(LayeredDrawingFilenames.composite)
+                    if let bytes = try? Data(contentsOf: url) {
+                        group.addTask {
+                            try await client.storage
+                                .from(bucketID)
+                                .upload(
+                                    path: compositePath,
+                                    file: bytes,
+                                    options: FileOptions(contentType: "image/jpeg", upsert: true)
+                                )
+                            return "composite"
+                        }
+                    } else {
+                        // No local composite to upload; mark the step done so
+                        // the pipeline can advance — the manifest's composite
+                        // pointer will end up dangling but the row is still
+                        // valid (composite is optional per §5.5).
+                        entry.uploadedComposite = true
+                    }
+                }
+                if entry.uploadedThumb != true, let thumbPath = entry.thumbPath {
+                    let url = thumbnailsDir.appendingPathComponent("\(id.uuidString).jpg")
+                    if let bytes = try? Data(contentsOf: url) {
+                        group.addTask {
+                            try await client.storage
+                                .from(bucketID)
+                                .upload(
+                                    path: thumbPath,
+                                    file: bytes,
+                                    options: FileOptions(contentType: "image/jpeg", upsert: true)
+                                )
+                            return "thumb"
+                        }
+                    } else {
+                        entry.uploadedThumb = true
+                    }
+                }
+                for try await step in group {
+                    switch step {
+                    case "composite": entry.uploadedComposite = true
+                    case "thumb":     entry.uploadedThumb = true
+                    default: break
+                    }
+                }
+            }
+            updatePendingEntry(entry)
+
+            // Step 3: manifest LAST, so a partial upload can never publish a
+            // pointer to layers the cloud doesn't have yet.
+            if entry.uploadedManifest != true, let manifestPath = entry.manifestPath {
+                try await client.storage
+                    .from(bucketID)
+                    .upload(
+                        path: manifestPath,
+                        file: manifestData,
+                        options: FileOptions(contentType: "application/json", upsert: true)
+                    )
+                entry.uploadedManifest = true
+                updatePendingEntry(entry)
+            }
+
+            // Step 4: row upsert. Same omit-critique-history payload as the
+            // flat path; the new manifest_path / format_version / layer_count
+            // / total_bytes columns get included automatically.
+            if entry.rowUpserted != true {
+                try await client
+                    .from("drawings")
+                    .upsert(DrawingUpsertPayload(drawing: drawing))
+                    .execute()
+                entry.rowUpserted = true
+                updatePendingEntry(entry)
+            }
+
+            // Step 5: best-effort legacy cleanup. After this point the row +
+            // all layered objects are durable; the legacy flat objects are
+            // safe to delete. Failures here are logged and ignored — leaving
+            // an orphan in storage is far better than re-uploading on retry.
+            var legacyPaths: [String] = []
+            if let p = entry.legacyCompositePath { legacyPaths.append(p) }
+            if let p = entry.legacyThumbnailPath { legacyPaths.append(p) }
+            if !legacyPaths.isEmpty {
+                _ = try? await client.storage
+                    .from(bucketID)
+                    .remove(paths: legacyPaths)
+            }
+
+            removePendingEntry(id: id)
+            nextRetryAt[id] = nil
+            activeUploadTasks[id] = nil
+            pendingUploadCount = countPendingEntriesForCurrentUser()
+            print("☁️ Uploaded layered \(drawing.id) '\(drawing.title)' (\(layerCount) layers)")
+        } catch {
+            // Persist whatever we got done so the next retry resumes correctly.
+            updatePendingEntry(entry)
+            print("☁️ Layered upload failed for \(drawing.id) — keeping pending: \(error.localizedDescription)")
+            let attempts = (incrementPendingAttempts(id: id) ?? 1)
+            scheduleBackoff(for: id, attempts: attempts)
+            activeUploadTasks[id] = nil
+        }
+    }
+
+    // MARK: - Layered local cache helpers
+
+    /// Build a manifest with deterministic asset names and sha256 hashes from
+    /// the caller's inputs. The caller doesn't have to compute those — this
+    /// is the canonical place where wire-format manifest fields are filled.
+    private func normalizeManifestForUpload(
+        payload: LayeredDrawingPayload,
+        drawingID: UUID,
+        userID: UUID
+    ) -> LayeredDrawingPayload {
+        var manifest = payload.manifest
+        manifest.formatVersion = max(manifest.formatVersion, 1)
+        manifest.drawingId = drawingID.uuidString.lowercased()
+        manifest.thumbnail = LayeredDrawingFilenames.thumbnail
+        manifest.composite = payload.compositeJPEG != nil ? LayeredDrawingFilenames.composite : nil
+
+        // Re-key layers by ordinal so the cloud filenames + manifest agree.
+        var rewritten: [LayeredDrawingManifest.Layer] = []
+        for (idx, var layer) in manifest.layers.enumerated() {
+            layer.ordinal = idx
+            layer.asset = LayeredDrawingFilenames.layer(ordinal: idx)
+            // Recompute hash from the actual bytes — caller-provided hashes
+            // are advisory and may be stale across edits.
+            if idx < payload.layerPNGs.count {
+                layer.assetSha256 = sha256Hex(payload.layerPNGs[idx])
+            } else {
+                layer.assetSha256 = ""
+            }
+            rewritten.append(layer)
+        }
+        manifest.layers = rewritten
+        return LayeredDrawingPayload(
+            manifest: manifest,
+            layerPNGs: payload.layerPNGs,
+            compositeJPEG: payload.compositeJPEG,
+            thumbnailJPEG: payload.thumbnailJPEG
+        )
+    }
+
+    private func writeLayeredArtifactsLocally(drawingID: UUID, payload: LayeredDrawingPayload) throws {
+        let dir = localLayersDir(forDrawingID: drawingID)
+        try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        for (idx, png) in payload.layerPNGs.enumerated() {
+            let url = dir.appendingPathComponent(LayeredDrawingFilenames.layer(ordinal: idx))
+            try png.write(to: url)
+        }
+        if let composite = payload.compositeJPEG {
+            try composite.write(to: dir.appendingPathComponent(LayeredDrawingFilenames.composite))
+        }
+        let manifestData = try JSONEncoder().encode(payload.manifest)
+        try manifestData.write(to: dir.appendingPathComponent(LayeredDrawingFilenames.manifest))
+    }
+
+    /// Persist the thumbnail at the same `thumbnails/<id>.jpg` path the
+    /// gallery already reads from (ONLINELAYERSTORE.md §4 — gallery code
+    /// does not change).
+    private func writeLayeredThumbnailLocally(drawingID: UUID, jpeg: Data?) throws {
+        guard let jpeg else { return }
+        let url = thumbnailsDir.appendingPathComponent("\(drawingID.uuidString).jpg")
+        try jpeg.write(to: url)
+        thumbnailCache[drawingID] = jpeg
+    }
+
+    private func readLayeredArtifactsLocally(drawingID: UUID, expectedLayerCount: Int) -> LayeredDrawingPayload? {
+        let dir = localLayersDir(forDrawingID: drawingID)
+        let manifestURL = dir.appendingPathComponent(LayeredDrawingFilenames.manifest)
+        guard let manifestData = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(LayeredDrawingManifest.self, from: manifestData),
+              manifest.layers.count == expectedLayerCount || expectedLayerCount == 0 else {
+            return nil
+        }
+
+        var layerPNGs: [Data] = []
+        for layer in manifest.layers {
+            let url = dir.appendingPathComponent(layer.asset)
+            guard let bytes = try? Data(contentsOf: url) else { return nil }
+            if !layer.assetSha256.isEmpty {
+                let actual = sha256Hex(bytes)
+                if actual != layer.assetSha256.lowercased() { return nil }
+            }
+            layerPNGs.append(bytes)
+        }
+
+        let compositeURL = dir.appendingPathComponent(LayeredDrawingFilenames.composite)
+        let compositeBytes = try? Data(contentsOf: compositeURL)
+
+        let thumbURL = thumbnailsDir.appendingPathComponent("\(drawingID.uuidString).jpg")
+        let thumbBytes = try? Data(contentsOf: thumbURL)
+
+        return LayeredDrawingPayload(
+            manifest: manifest,
+            layerPNGs: layerPNGs,
+            compositeJPEG: compositeBytes,
+            thumbnailJPEG: thumbBytes
+        )
+    }
+
+    private func layeredTotalBytes(_ payload: LayeredDrawingPayload) -> Int64 {
+        var total: Int64 = 0
+        for png in payload.layerPNGs { total += Int64(png.count) }
+        if let composite = payload.compositeJPEG { total += Int64(composite.count) }
+        if let thumb = payload.thumbnailJPEG { total += Int64(thumb.count) }
+        return total
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func retryPendingUploads() async {
@@ -765,6 +1430,19 @@ final class CloudDrawingStorageManager: ObservableObject {
         return entry.attemptCount
     }
 
+    private func readPendingEntry(id: UUID) -> PendingUpload? {
+        let url = pendingDir.appendingPathComponent("\(id.uuidString).json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? Self.makeDecoder().decode(PendingUpload.self, from: data)
+    }
+
+    /// Persist a mutated pending entry — used by the layered upload pipeline
+    /// to record progress between resumable steps. The flat upload path uses
+    /// `incrementPendingAttempts` instead and never calls this.
+    private func updatePendingEntry(_ entry: PendingUpload) {
+        writePendingEntry(entry)
+    }
+
     private func countPendingEntriesForCurrentUser() -> Int {
         guard let activeUserID = currentEffectiveUserID() else { return 0 }
         return readPendingEntries().filter { $0.userID == activeUserID }.count
@@ -778,7 +1456,46 @@ final class CloudDrawingStorageManager: ObservableObject {
 
     private func thumbnailStoragePath(for drawing: Drawing) -> String {
         // Lowercase to match auth.uid()::text in RLS — see the UUID extension below.
-        "\(drawing.userId.lowercaseUUIDString)/\(drawing.id.lowercaseUUIDString)_thumb.jpg"
+        // Layered drawings store the thumbnail inside the per-drawing subdir
+        // (`<user>/<id>/thumb.jpg`); legacy/flat drawings keep the original
+        // `<user>/<id>_thumb.jpg` so existing rows stay reachable without a
+        // bucket migration.
+        if drawing.isLayered {
+            return layeredThumbnailStoragePath(userID: drawing.userId, drawingID: drawing.id)
+        }
+        return "\(drawing.userId.lowercaseUUIDString)/\(drawing.id.lowercaseUUIDString)_thumb.jpg"
+    }
+
+    private func legacyThumbnailStoragePath(userID: UUID, drawingID: UUID) -> String {
+        "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString)_thumb.jpg"
+    }
+
+    private func legacyCompositeStoragePath(userID: UUID, drawingID: UUID) -> String {
+        "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString).jpg"
+    }
+
+    private func layeredRootStoragePath(userID: UUID, drawingID: UUID) -> String {
+        "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString)"
+    }
+
+    private func layeredManifestStoragePath(userID: UUID, drawingID: UUID) -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.manifest)"
+    }
+
+    private func layeredCompositeStoragePath(userID: UUID, drawingID: UUID) -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.composite)"
+    }
+
+    private func layeredThumbnailStoragePath(userID: UUID, drawingID: UUID) -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.thumbnail)"
+    }
+
+    private func layeredLayerStoragePath(userID: UUID, drawingID: UUID, ordinal: Int) -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.layer(ordinal: ordinal))"
+    }
+
+    private func localLayersDir(forDrawingID id: UUID) -> URL {
+        layersDir.appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
     }
 
     // MARK: - Codable helpers
@@ -906,13 +1623,52 @@ extension UUID {
 
 // MARK: - Pending upload entry
 
+/// Single struct, two modes (flat vs. layered). The discriminator is `kind`,
+/// which defaults to .flat when absent so pending entries written before the
+/// layered-storage feature decode + retry through the existing flat path.
+///
+/// The layered fields all default to nil / sensible empties so a flat entry
+/// round-trips losslessly and so we can extend the schema later without yet
+/// another version field.
 private struct PendingUpload: Codable {
+    enum Kind: String, Codable {
+        case flat
+        case layered
+    }
+
     let drawingID: UUID
     let userID: UUID
-    let storagePath: String
     let createdAt: Date
     var attemptCount: Int = 0
     var lastAttemptAt: Date?
+
+    /// nil ≡ .flat (pre-layered entries on disk).
+    var kind: Kind?
+
+    // ---- Flat-mode fields ----
+    /// Cloud path of the JPEG. Required for flat uploads, ignored for layered.
+    var storagePath: String?
+
+    // ---- Layered-mode fields (ONLINELAYERSTORE.md §5.4) ----
+    /// Total layer count for this drawing. Used to know which ordinals still
+    /// need uploading.
+    var layerCount: Int?
+    /// Ordinals already uploaded successfully (so the retry skips them).
+    var uploadedLayers: [Int]?
+    var uploadedComposite: Bool?
+    var uploadedThumb: Bool?
+    var uploadedManifest: Bool?
+    var rowUpserted: Bool?
+    /// Cloud paths the layered upload pipeline targets. Captured in the
+    /// pending entry so the retry doesn't re-derive them and risk drift if
+    /// the path-builders change underneath it.
+    var manifestPath: String?
+    var compositePath: String?
+    var thumbPath: String?
+    /// Legacy (pre-layered) Storage objects to delete after a successful
+    /// upgrade upload. nil for fresh layered drawings.
+    var legacyCompositePath: String?
+    var legacyThumbnailPath: String?
 
     enum CodingKeys: String, CodingKey {
         case drawingID = "drawing_id"
@@ -921,15 +1677,39 @@ private struct PendingUpload: Codable {
         case createdAt = "created_at"
         case attemptCount = "attempt_count"
         case lastAttemptAt = "last_attempt_at"
+        case kind
+        case layerCount = "layer_count"
+        case uploadedLayers = "uploaded_layers"
+        case uploadedComposite = "uploaded_composite"
+        case uploadedThumb = "uploaded_thumb"
+        case uploadedManifest = "uploaded_manifest"
+        case rowUpserted = "row_upserted"
+        case manifestPath = "manifest_path"
+        case compositePath = "composite_path"
+        case thumbPath = "thumb_path"
+        case legacyCompositePath = "legacy_composite_path"
+        case legacyThumbnailPath = "legacy_thumbnail_path"
     }
 
     init(
         drawingID: UUID,
         userID: UUID,
-        storagePath: String,
+        storagePath: String?,
         createdAt: Date,
         attemptCount: Int = 0,
-        lastAttemptAt: Date? = nil
+        lastAttemptAt: Date? = nil,
+        kind: Kind? = nil,
+        layerCount: Int? = nil,
+        uploadedLayers: [Int]? = nil,
+        uploadedComposite: Bool? = nil,
+        uploadedThumb: Bool? = nil,
+        uploadedManifest: Bool? = nil,
+        rowUpserted: Bool? = nil,
+        manifestPath: String? = nil,
+        compositePath: String? = nil,
+        thumbPath: String? = nil,
+        legacyCompositePath: String? = nil,
+        legacyThumbnailPath: String? = nil
     ) {
         self.drawingID = drawingID
         self.userID = userID
@@ -937,6 +1717,18 @@ private struct PendingUpload: Codable {
         self.createdAt = createdAt
         self.attemptCount = attemptCount
         self.lastAttemptAt = lastAttemptAt
+        self.kind = kind
+        self.layerCount = layerCount
+        self.uploadedLayers = uploadedLayers
+        self.uploadedComposite = uploadedComposite
+        self.uploadedThumb = uploadedThumb
+        self.uploadedManifest = uploadedManifest
+        self.rowUpserted = rowUpserted
+        self.manifestPath = manifestPath
+        self.compositePath = compositePath
+        self.thumbPath = thumbPath
+        self.legacyCompositePath = legacyCompositePath
+        self.legacyThumbnailPath = legacyThumbnailPath
     }
 
     init(from decoder: Decoder) throws {
@@ -946,10 +1738,22 @@ private struct PendingUpload: Codable {
         // Normalize on read — see the matching note in Drawing.init(from:).
         // Pending entries written by pre-fix builds carry uppercase paths;
         // lowercasing here means retry attempts use the RLS-compatible form.
-        storagePath = try container.decode(String.self, forKey: .storagePath).lowercased()
+        storagePath = try container.decodeIfPresent(String.self, forKey: .storagePath)?.lowercased()
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         attemptCount = try container.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
         lastAttemptAt = try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt)
+        kind = try container.decodeIfPresent(Kind.self, forKey: .kind)
+        layerCount = try container.decodeIfPresent(Int.self, forKey: .layerCount)
+        uploadedLayers = try container.decodeIfPresent([Int].self, forKey: .uploadedLayers)
+        uploadedComposite = try container.decodeIfPresent(Bool.self, forKey: .uploadedComposite)
+        uploadedThumb = try container.decodeIfPresent(Bool.self, forKey: .uploadedThumb)
+        uploadedManifest = try container.decodeIfPresent(Bool.self, forKey: .uploadedManifest)
+        rowUpserted = try container.decodeIfPresent(Bool.self, forKey: .rowUpserted)
+        manifestPath = try container.decodeIfPresent(String.self, forKey: .manifestPath)?.lowercased()
+        compositePath = try container.decodeIfPresent(String.self, forKey: .compositePath)?.lowercased()
+        thumbPath = try container.decodeIfPresent(String.self, forKey: .thumbPath)?.lowercased()
+        legacyCompositePath = try container.decodeIfPresent(String.self, forKey: .legacyCompositePath)?.lowercased()
+        legacyThumbnailPath = try container.decodeIfPresent(String.self, forKey: .legacyThumbnailPath)?.lowercased()
     }
 }
 
@@ -961,6 +1765,7 @@ enum DrawingStorageError: LocalizedError {
     case fetchFailed
     case cloudSyncFailed
     case drawingNotFound
+    case layerIntegrity
 
     var errorDescription: String? {
         switch self {
@@ -974,6 +1779,8 @@ enum DrawingStorageError: LocalizedError {
             return "Couldn't sync drawing to cloud — try again in a moment"
         case .drawingNotFound:
             return "Couldn't find that drawing to update — try refreshing the gallery"
+        case .layerIntegrity:
+            return "Couldn't verify a layer's contents — try opening the drawing again"
         }
     }
 }

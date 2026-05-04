@@ -50,6 +50,7 @@
 		DE000049 /* CustomPromptManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100049 /* CustomPromptManager.swift */; };
 		DE000050 /* PromptEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100050 /* PromptEditView.swift */; };
 		DE000051 /* PromptListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100051 /* PromptListView.swift */; };
+		DE000052 /* LayeredDrawingPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100052 /* LayeredDrawingPayload.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -99,6 +100,7 @@
 		DE100049 /* CustomPromptManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CustomPromptManager.swift; sourceTree = "<group>"; };
 		DE100050 /* PromptEditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptEditView.swift; sourceTree = "<group>"; };
 		DE100051 /* PromptListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptListView.swift; sourceTree = "<group>"; };
+		DE100052 /* LayeredDrawingPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayeredDrawingPayload.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -190,6 +192,7 @@
 				DE100025 /* Drawing.swift */,
 				DE100032 /* CritiqueHistory.swift */,
 				DE100048 /* CustomPrompt.swift */,
+				DE100052 /* LayeredDrawingPayload.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -366,6 +369,7 @@
 				DE000049 /* CustomPromptManager.swift in Sources */,
 				DE000050 /* PromptEditView.swift in Sources */,
 				DE000051 /* PromptListView.swift in Sources */,
+				DE000052 /* LayeredDrawingPayload.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
