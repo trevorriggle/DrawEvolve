@@ -20,6 +20,7 @@ import {
   assembleSystemPrompt,
   resolvePresetId,
   selectVoice,
+  selectCustomPromptParameters,
   isValidPresetId,
   DEFAULT_PRESET_ID,
 } from '../lib/prompt.js';
@@ -276,6 +277,11 @@ export function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usa
       tier,
       includeHistoryCount: config.includeHistoryCount,
       styleModifier: config.styleModifier ?? null,
+      // Snapshot the bounded-knob parameters used for THIS critique. Stored
+      // even when empty so the schema is uniform across rows. Preserves
+      // reproducibility: a later edit to the user's custom_prompts row
+      // doesn't retroactively change what produced an old critique.
+      customPromptModifier: config.customPromptModifier ?? null,
     },
     prompt_token_count: usage?.prompt_tokens ?? 0,
     completion_token_count: usage?.completion_tokens ?? 0,
@@ -650,7 +656,16 @@ export async function handleFeedback(request, env, ctx) {
     // with it. selectVoice falls back to VOICE_STUDIO_MENTOR on any
     // failure with a console.error log; the user always gets a critique.
     const voice = await selectVoice(resolvedPresetId, userId, env);
-    const config = { ...baseConfig, systemPrompt: assembleSystemPrompt(voice) };
+    // Bounded-knob custom-prompt parameters (focus, tone, depth, techniques)
+    // ride alongside the voice. Empty for hardcoded preset_ids and for
+    // legacy custom_prompts rows that still use freeform body. Rendered
+    // by buildSystemPrompt as a "PROMPT CUSTOMIZATION" section.
+    const customPromptModifier = await selectCustomPromptParameters(resolvedPresetId, userId, env);
+    const config = {
+      ...baseConfig,
+      systemPrompt: assembleSystemPrompt(voice),
+      customPromptModifier,
+    };
 
     const systemPrompt = buildSystemPrompt(config, context ?? {});
     const userContent = buildUserMessage(config, history, image);

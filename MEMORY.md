@@ -66,3 +66,12 @@ Resolved planning questions (defaults baked in):
 - **Q8:** Worker-brokered reads, not direct Supabase REST from iOS.
 
 iOS work for Phase B (profile editing UI, ProfileView, username one-time-set gate UX) is the next sprint and intentionally not in the Phase A PR. The backend already supports everything Phase B needs.
+## Custom prompts are bounded knobs, not freeform text
+
+As of 2026-05-04, the user-authoring surface for custom prompts is **bounded enums only** — `focus`, `tone`, `depth`, and a multi-select `techniques`. Each value maps to a curated server-side fragment in `cloudflare-worker/lib/prompt.js` (`FOCUS_FRAGMENTS`, `TONE_FRAGMENTS`, `DEPTH_FRAGMENTS`, `TECHNIQUE_FRAGMENTS`). The user picks knobs; the Worker writes the words.
+
+**Never expose a freeform "write your own system prompt" field.** Doing so re-introduces the `styleModifier` prompt-injection footgun the audit in `CUSTOMPROMPTSPLAN.md` §2.3 flagged. The legacy `custom_prompts.body` column from migration 0005 is now nullable (migration 0009) and is *not* writable through `/v1/prompts/*`; rows authored through the new product surface carry `parameters` only.
+
+`PROMPT_TEMPLATE_VERSION` (currently 1) gates the curated fragments. When fragments change in ways that shift critique behavior, bump the constant and add a corresponding `prompt_template_versions` row when that table lands. `custom_prompts.template_version` records the version each row was authored against; the request path always renders fragments from the *current* version, so old rows keep working — they just produce slightly-different critiques after a bump (which is the design).
+
+CRUD lives at `/v1/prompts/me`, `/v1/prompts`, `/v1/prompts/:id` (GET/PATCH/DELETE). Same JWT + App Attest gates as `/`.
