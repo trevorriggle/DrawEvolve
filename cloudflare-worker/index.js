@@ -8,6 +8,7 @@
 // routes/feedback.js. /attest/challenge and /attest/register are unauth'd
 // device registration endpoints — they intentionally run BEFORE the JWT
 // gate so first-launch registration works without a session token.
+// /v1/* are the social/profile endpoints (Phase A — profiles foundation).
 //
 // The named re-exports at the bottom of this file preserve the historical
 // import surface for test.mjs (and any future tooling that imports from
@@ -17,6 +18,13 @@
 import { handleFeedback } from './routes/feedback.js';
 import { handleAttestChallenge } from './routes/attest/challenge.js';
 import { handleAttestRegister } from './routes/attest/register.js';
+import {
+  handleGetMe,
+  handlePatchMe,
+  handleAvatarUpload,
+  handleGetProfileByUsername,
+  handleProfileSearch,
+} from './routes/profiles.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 export default {
@@ -24,10 +32,38 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
-    if (request.method !== 'POST') {
+    const pathname = new URL(request.url).pathname;
+    const method = request.method;
+
+    // Profile routes (Phase A). `/v1/profiles/search` is matched before the
+    // dynamic `/v1/profiles/:username` so the literal "search" path doesn't
+    // resolve as a username lookup.
+    if (method === 'GET' && pathname === '/v1/me') {
+      return handleGetMe(request, env, ctx);
+    }
+    if (method === 'PATCH' && pathname === '/v1/profiles/me') {
+      return handlePatchMe(request, env, ctx);
+    }
+    if (method === 'POST' && pathname === '/v1/profiles/me/avatar') {
+      return handleAvatarUpload(request, env, ctx);
+    }
+    if (method === 'GET' && pathname === '/v1/profiles/search') {
+      return handleProfileSearch(request, env, ctx);
+    }
+    if (method === 'GET' && pathname.startsWith('/v1/profiles/')) {
+      const tail = pathname.slice('/v1/profiles/'.length);
+      // Reject extra path segments (e.g. /v1/profiles/foo/bar) — only the
+      // bare username form is supported here. Followers / following list
+      // routes will be added in a later phase.
+      if (tail.length === 0 || tail.includes('/')) {
+        return jsonResponse({ error: 'Not found' }, 404);
+      }
+      return handleGetProfileByUsername(request, env, ctx, decodeURIComponent(tail));
+    }
+
+    if (method !== 'POST') {
       return jsonResponse({ error: 'Method not allowed' }, 405);
     }
-    const pathname = new URL(request.url).pathname;
     if (pathname === '/') return handleFeedback(request, env, ctx);
     if (pathname === '/attest/challenge') return handleAttestChallenge(request, env, ctx);
     if (pathname === '/attest/register') return handleAttestRegister(request, env, ctx);
@@ -130,3 +166,16 @@ export {
   REQUEST_STATUS,
   logRequest,
 } from './routes/feedback.js';
+
+export {
+  requireAuth,
+  fetchProfileByUserId,
+  fetchProfileByUsername,
+  patchProfile,
+  enforceSearchRateLimit,
+  handleGetMe,
+  handlePatchMe,
+  handleAvatarUpload,
+  handleGetProfileByUsername,
+  handleProfileSearch,
+} from './routes/profiles.js';

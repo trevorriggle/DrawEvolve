@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import {
+  fetchProfileByUserId,
+  fetchProfileByUsername,
+  patchProfile,
+  enforceSearchRateLimit,
   BASE_SYSTEM_PROMPT,
   VOICE_STUDIO_MENTOR,
   VOICE_THE_CRIT,
@@ -2521,6 +2525,715 @@ test('integration: valid JWT + valid attest, but env mismatch on stored key → 
     assert.equal(res.status, 401);
     const respBody = await res.json();
     assert.equal(respBody.error, 'attest_env_mismatch');
+  } finally {
+    restore();
+  }
+});
+
+// =============================================================================
+// Phase A — profiles foundation
+// =============================================================================
+//
+// Unit tests for the helpers in routes/profiles.js (rate limit + REST
+// wrappers) and integration tests for the five Phase A endpoints. The
+// integration tests reuse the JWT + App Attest scaffolding from the
+// feedback integration block above.
+
+test('enforceSearchRateLimit allows requests under the cap and rejects at the cap', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const userId = FREE_USER;
+
+  // 60 attempts in the window — at the cap.
+  const first = await enforceSearchRateLimit({ env, userId, now: FIXED_NOW });
+  assert.equal(first.ok, true);
+
+  // Pre-seed the KV at the cap and check the next attempt rejects.
+  const stamps = Array.from({ length: 60 }, (_, i) => FIXED_NOW - 1000 - i * 10);
+  await kv.put(`searchlimit:${userId}`, JSON.stringify(stamps), { expirationTtl: 120 });
+
+  const decision = await enforceSearchRateLimit({ env, userId, now: FIXED_NOW });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.limit, 60);
+  assert.equal(decision.used, 60);
+  assert.ok(decision.retryAfter >= 1 && decision.retryAfter <= 60);
+});
+
+test('enforceSearchRateLimit recovers once stamps fall outside the 60s window', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const userId = FREE_USER;
+  // 60 stamps but all are 90s old — outside the rolling 60s window.
+  const stamps = Array.from({ length: 60 }, (_, i) => FIXED_NOW - 90_000 - i * 10);
+  await kv.put(`searchlimit:${userId}`, JSON.stringify(stamps), { expirationTtl: 120 });
+
+  const decision = await enforceSearchRateLimit({ env, userId, now: FIXED_NOW });
+  assert.equal(decision.ok, true);
+});
+
+test('enforceSearchRateLimit treats malformed KV state as empty', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  await kv.put(`searchlimit:${FREE_USER}`, 'not-json', { expirationTtl: 120 });
+  const decision = await enforceSearchRateLimit({ env, userId: FREE_USER, now: FIXED_NOW });
+  assert.equal(decision.ok, true);
+});
+
+test('fetchProfileByUserId returns the row from PostgREST, or null when no match', async () => {
+  const env = {
+    SUPABASE_URL: 'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'sr-key',
+  };
+  let capturedUrl = null;
+  const fetcher = async (url) => {
+    capturedUrl = String(url);
+    return { ok: true, json: async () => ([{ user_id: TEST_SUB, username: 'alice', display_name: 'Alice', is_public: true }]) };
+  };
+  const row = await fetchProfileByUserId(env, TEST_SUB, fetcher);
+  assert.equal(row.username, 'alice');
+  assert.match(capturedUrl, /\/rest\/v1\/profiles/);
+  assert.match(capturedUrl, new RegExp(`user_id=eq\\.${TEST_SUB}`));
+
+  const empty = async () => ({ ok: true, json: async () => [] });
+  assert.equal(await fetchProfileByUserId(env, TEST_SUB, empty), null);
+});
+
+test('fetchProfileByUsername strips username_set_at from public lookup shape', async () => {
+  const env = {
+    SUPABASE_URL: 'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'sr-key',
+  };
+  let capturedUrl = null;
+  const fetcher = async (url) => {
+    capturedUrl = String(url);
+    return { ok: true, json: async () => ([{ user_id: TEST_SUB, username: 'alice', display_name: 'Alice', is_public: true, is_searchable: true, follower_count: 0, following_count: 0, post_count: 0, created_at: '2026-05-01T00:00:00Z' }]) };
+  };
+  const row = await fetchProfileByUsername(env, 'alice', fetcher);
+  assert.equal(row.username, 'alice');
+  // Internal column must not be in the select list — guards against a future
+  // edit accidentally exposing username_set_at on public profile reads.
+  assert.ok(!/username_set_at/.test(capturedUrl), 'username_set_at must not appear in select for public lookups');
+});
+
+test('patchProfile maps a 409 response to an error with code=username_taken', async () => {
+  const env = {
+    SUPABASE_URL: 'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'sr-key',
+  };
+  const fetcher = async () => ({ ok: false, status: 409, text: async () => 'duplicate key' });
+  await assert.rejects(
+    () => patchProfile(env, TEST_SUB, { username: 'taken' }, fetcher),
+    (err) => err.code === 'username_taken',
+  );
+});
+
+// =============================================================================
+// Profiles integration tests
+// =============================================================================
+
+const PROFILE_HANDLE = 'alice';
+
+// In-memory profile state shared across mocked Supabase calls inside a single
+// test. The fake-fetcher reads/writes this to mimic enough of PostgREST for
+// the route handler to drive its end-to-end flow without a real Supabase.
+function makeProfileState(seed = {}) {
+  return {
+    user_id: TEST_SUB,
+    username: 'user_00000000',
+    display_name: 'Alice',
+    bio: null,
+    avatar_path: null,
+    is_public: true,
+    is_searchable: true,
+    follower_count: 0,
+    following_count: 0,
+    post_count: 0,
+    created_at: '2026-05-01T00:00:00Z',
+    username_set_at: null,
+    ...seed,
+  };
+}
+
+// Build env + ctx + globalThis.fetch override for profile integration tests.
+// The fetcher mocks JWKS, the profiles table (read + patch + insert), the
+// search query, and the storage signed-upload endpoint. Tests can pass
+// `profileSeed` to start with a non-default row, and `searchResults` to
+// stub the search query response.
+async function setupProfileEnv({ jwksKey, profileSeed = {}, searchResults = null, signedUploadResponse = null, conflictOnPatch = false } = {}) {
+  const kv = makeTestKV();
+  const env = {
+    ...TEST_JWT_ENV,
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    QUOTA_KV: kv,
+    APP_ATTEST_TEAM_ID: 'TEST123456',
+    APP_ATTEST_BUNDLE_ID: 'com.drawevolve.app',
+    APP_ATTEST_ENV: 'development',
+  };
+
+  const state = { profile: makeProfileState(profileSeed), patches: [] };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (u.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwksKey] }) };
+    }
+    // Profile read by user_id.
+    if (u.includes('/rest/v1/profiles') && u.includes('user_id=eq.') && method === 'GET') {
+      return { ok: true, json: async () => (state.profile ? [state.profile] : []) };
+    }
+    // Profile read by username.
+    if (u.includes('/rest/v1/profiles') && u.includes('username=eq.') && method === 'GET') {
+      const m = u.match(/username=eq\.([^&]+)/);
+      const requested = decodeURIComponent(m?.[1] ?? '').toLowerCase();
+      if (state.profile && state.profile.username.toLowerCase() === requested) {
+        return { ok: true, json: async () => [state.profile] };
+      }
+      return { ok: true, json: async () => [] };
+    }
+    // Profile search.
+    if (u.includes('/rest/v1/profiles') && u.includes('or=(') && method === 'GET') {
+      const rows = searchResults ?? [];
+      return { ok: true, json: async () => rows };
+    }
+    // Profile insert (lazy-create on first GET /v1/me).
+    if (u.endsWith('/rest/v1/profiles') && method === 'POST') {
+      const body = init.body ? JSON.parse(init.body) : {};
+      state.profile = makeProfileState(body);
+      return { ok: true, json: async () => [state.profile] };
+    }
+    // Profile patch.
+    if (u.includes('/rest/v1/profiles') && method === 'PATCH') {
+      if (conflictOnPatch) {
+        return { ok: false, status: 409, text: async () => 'duplicate key' };
+      }
+      const patch = init.body ? JSON.parse(init.body) : {};
+      state.patches.push(patch);
+      state.profile = { ...state.profile, ...patch };
+      return { ok: true, json: async () => [state.profile] };
+    }
+    // Storage signed upload URL.
+    if (u.includes('/storage/v1/object/upload/sign/avatars/')) {
+      if (signedUploadResponse) return signedUploadResponse;
+      return {
+        ok: true,
+        json: async () => ({
+          url: `/object/upload/sign/avatars/${TEST_SUB}/avatar.jpg`,
+          token: 'signed-upload-token-xyz',
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}), text: async () => '' };
+  };
+
+  const ctx = { waitUntil: (p) => { Promise.resolve(p).catch(() => {}); } };
+  return {
+    env,
+    ctx,
+    state,
+    restore: () => { globalThis.fetch = originalFetch; },
+  };
+}
+
+async function buildAuthedRequest({
+  method,
+  path,
+  jwt,
+  keyPair,
+  attestKeyId,
+  body = null,
+}) {
+  const url = `https://drawevolve-backend.test${path}`;
+  const bodyBytes = body ? new TextEncoder().encode(JSON.stringify(body)) : new Uint8Array(0);
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${jwt}`,
+  };
+  // App Attest must always be present — every Phase A route requires it.
+  if (keyPair && attestKeyId) {
+    const env = { APP_ATTEST_TEAM_ID: 'TEST123456', APP_ATTEST_BUNDLE_ID: 'com.drawevolve.app' };
+    const pathOnly = new URL(url).pathname || '/';
+    const assertionB64 = await buildSyntheticAssertion({
+      keyPair, env, method, path: pathOnly, body: bodyBytes, counter: 1,
+    });
+    headers['X-Apple-AppAttest-KeyId'] = attestKeyId;
+    headers['X-Apple-AppAttest-Assertion'] = assertionB64;
+  }
+  return new Request(url, {
+    method,
+    headers,
+    body: method === 'GET' || method === 'HEAD' ? undefined : bodyBytes,
+  });
+}
+
+test('GET /v1/me with no Authorization header → 401', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey: _pk, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/me', { method: 'GET' });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 401);
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/me with invalid JWT → 401, never reaches App Attest', async () => {
+  _resetJwksCacheForTests();
+  const { publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/me', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer not.a.real.jwt' },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 401);
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/me valid JWT but missing App Attest headers → 401 attest_headers_missing', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const req = new Request('https://drawevolve-backend.test/v1/me', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${jwt}` },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).error, 'attest_headers_missing');
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/me happy path → 200 returns profile + tier + username_set flag', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'me-key';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: '/v1/me', jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.profile.user_id, TEST_SUB);
+    assert.equal(body.tier, 'free');
+    assert.equal(body.username_set, false, 'auto-generated username has username_set_at = null');
+    // username_set_at must NOT leak into the response shape.
+    assert.equal(body.profile.username_set_at, undefined);
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me updates display_name + bio and reflects new values', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore, state } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'patch-key';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'PATCH',
+      path: '/v1/profiles/me',
+      jwt,
+      keyPair,
+      attestKeyId: keyId,
+      body: { display_name: 'Alice Renamed', bio: 'Painter, mostly oils.' },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.profile.display_name, 'Alice Renamed');
+    assert.equal(body.profile.bio, 'Painter, mostly oils.');
+    // The patch payload must NOT have included username (only changed fields).
+    assert.ok(!('username' in (state.patches[0] ?? {})));
+    assert.ok(!('username_set_at' in (state.patches[0] ?? {})));
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me rejects display_name over 50 chars with invalid_display_name', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'patch-len';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'PATCH', path: '/v1/profiles/me', jwt, keyPair, attestKeyId: keyId,
+      body: { display_name: 'a'.repeat(51) },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'invalid_display_name');
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me first username set succeeds and stamps username_set_at', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore, state } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'patch-username';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'PATCH', path: '/v1/profiles/me', jwt, keyPair, attestKeyId: keyId,
+      body: { username: 'alice_paints' },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.profile.username, 'alice_paints');
+    // The patch payload must include username_set_at — that's the lock.
+    assert.ok('username_set_at' in state.patches[0], 'first username set must stamp username_set_at');
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me second username change → 409 username_immutable', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  // Seed the row as if username has already been set once.
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    profileSeed: { username: 'alice_paints', username_set_at: '2026-05-02T00:00:00Z' },
+  });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'second-username';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'PATCH', path: '/v1/profiles/me', jwt, keyPair, attestKeyId: keyId,
+      body: { username: 'alice2' },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).error, 'username_immutable');
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me with malformed username → 400 invalid_username_format', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'bad-username';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'PATCH', path: '/v1/profiles/me', jwt, keyPair, attestKeyId: keyId,
+      body: { username: 'has spaces' },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'invalid_username_format');
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me when username already taken → 409 username_taken', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    conflictOnPatch: true,
+  });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'conflict-username';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'PATCH', path: '/v1/profiles/me', jwt, keyPair, attestKeyId: keyId,
+      body: { username: 'alice' },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).error, 'username_taken');
+  } finally {
+    restore();
+  }
+});
+
+test('PATCH /v1/profiles/me rejects avatar_path that points outside the requester’s folder', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'cross-user-avatar';
+    await storeAttestedKey(keyId, pub, env);
+
+    // Path under a different user's folder. Even if Storage RLS would block
+    // the upload itself, the Worker must reject the metadata stamp so iOS
+    // can't claim a victim's avatar by stamping the path on its own profile.
+    const otherUser = '00000000-0000-0000-0000-000000000099';
+    const req = await buildAuthedRequest({
+      method: 'PATCH', path: '/v1/profiles/me', jwt, keyPair, attestKeyId: keyId,
+      body: { avatar_path: `${otherUser}/avatar.jpg` },
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'invalid_avatar_path');
+  } finally {
+    restore();
+  }
+});
+
+test('POST /v1/profiles/me/avatar returns a Supabase signed upload URL + token', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'avatar-key';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'POST', path: '/v1/profiles/me/avatar', jwt, keyPair, attestKeyId: keyId,
+      body: {},
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.bucket, 'avatars');
+    assert.equal(body.path, `${TEST_SUB}/avatar.jpg`);
+    assert.equal(body.token, 'signed-upload-token-xyz');
+    assert.match(body.uploadUrl, /\/storage\/v1\//);
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/profiles/:username resolves a public profile by exact handle', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    profileSeed: { username: PROFILE_HANDLE, is_public: true },
+  });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'lookup-key';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: `/v1/profiles/${PROFILE_HANDLE}`, jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.profile.username, PROFILE_HANDLE);
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/profiles/:username resolves an unsearchable but public profile (Q4 default)', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    profileSeed: { username: 'shy_user', is_public: true, is_searchable: false },
+  });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'unsearchable-lookup';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: '/v1/profiles/shy_user', jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    // Direct lookup works even though search would hide this profile.
+    assert.equal(res.status, 200);
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/profiles/:username 404s a private profile owned by someone else', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  // Profile is owned by a DIFFERENT user (not TEST_SUB) and is_public=false.
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    profileSeed: {
+      user_id: '00000000-0000-0000-0000-0000000000bb',
+      username: 'private_alice',
+      is_public: false,
+    },
+  });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'private-lookup';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: '/v1/profiles/private_alice', jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 404);
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/profiles/search returns paginated results and a next cursor', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const fullPage = Array.from({ length: 20 }, (_, i) => ({
+    user_id: `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`,
+    username: `user${i}`,
+    display_name: `User ${i}`,
+    avatar_path: null,
+    follower_count: 100 - i,
+  }));
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    searchResults: fullPage,
+  });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'search-key';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: '/v1/profiles/search?q=user', jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.results.length, 20);
+    assert.equal(body.cursor, '20', 'full page implies a next cursor');
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/profiles/search rejects empty q with 400 invalid_query', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({ jwksKey: jwk });
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'empty-q';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: '/v1/profiles/search?q=', jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'invalid_query');
+  } finally {
+    restore();
+  }
+});
+
+test('GET /v1/profiles/search returns 429 when the per-user search rate limit is full', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env, ctx, restore } = await setupProfileEnv({
+    jwksKey: jwk,
+    searchResults: [],
+  });
+  try {
+    // Pre-populate the search rate-limit KV at exactly the cap so the next
+    // request rejects without depending on real-time behavior.
+    const stamps = Array.from({ length: 60 }, (_, i) => Date.now() - 1000 - i * 10);
+    await env.QUOTA_KV.put(`searchlimit:${TEST_SUB}`, JSON.stringify(stamps), { expirationTtl: 120 });
+
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const keyPair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const pub = await p256RawPubKey(keyPair);
+    const keyId = 'rate-search';
+    await storeAttestedKey(keyId, pub, env);
+
+    const req = await buildAuthedRequest({
+      method: 'GET', path: '/v1/profiles/search?q=alice', jwt, keyPair, attestKeyId: keyId,
+    });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 429);
+    const body = await res.json();
+    assert.equal(body.error, 'search_rate_limited');
+    assert.ok(body.retryAfter > 0);
+    assert.ok(res.headers.get('Retry-After'));
   } finally {
     restore();
   }

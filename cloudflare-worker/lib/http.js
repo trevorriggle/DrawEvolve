@@ -8,7 +8,7 @@
 
 export const CORS_HEADERS = {
   'Access-Control-Allow-Origin': 'https://drawevolve.com',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Apple-AppAttest-KeyId, X-Apple-AppAttest-Assertion',
 };
 
