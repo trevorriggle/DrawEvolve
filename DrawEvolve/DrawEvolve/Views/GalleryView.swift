@@ -257,6 +257,28 @@ struct GalleryView: View {
             } footer: {
                 Text("This voice is used for every Get Feedback request. You can switch any time.")
             }
+
+            // Bounded-knobs custom prompts. Tapping the row pushes
+            // PromptListView, which is the authoring surface for
+            // focus/tone/depth/technique knobs (CUSTOMPROMPTSPLAN.md).
+            Section {
+                NavigationLink {
+                    PromptListView()
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "wand.and.stars")
+                            .foregroundColor(.accentColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Saved prompts")
+                                .font(.headline)
+                                .foregroundColor(.primary)
+                            Text("Tune focus, tone, depth, and techniques")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
         }
         .listStyle(.insetGrouped)
     }

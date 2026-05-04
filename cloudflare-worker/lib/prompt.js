@@ -201,6 +201,16 @@ export function buildSystemPrompt(config, context) {
   if (config.styleModifier) {
     sections.push(`ADDITIONAL STYLE GUIDANCE (per user preference):\n${config.styleModifier}`);
   }
+  // Per-prompt knob modifiers come AFTER styleModifier so that drawing-/
+  // prompt-specific guidance gets the late-in-prompt weighting. The label
+  // is distinct from the Pro-only "ADDITIONAL STYLE GUIDANCE" section so
+  // they coexist cleanly when both are set.
+  if (config.customPromptModifier) {
+    const rendered = renderCustomPromptModifier(config.customPromptModifier);
+    if (rendered) {
+      sections.push(`PROMPT CUSTOMIZATION (per saved prompt):\n${rendered}`);
+    }
+  }
   return sections.join('\n\n');
 }
 
@@ -400,12 +410,240 @@ export async function selectVoice(presetId, userId, env, fetcher = fetch) {
     const rows = await res.json();
     const body = rows?.[0]?.body;
     if (typeof body !== 'string' || body.length === 0) {
-      console.error('[selectVoice] custom_prompts row missing body', { uuid });
+      // Bounded-knob custom prompts have no `body` (parameters live in a
+      // separate column). Falling back to studio_mentor here is correct —
+      // the parameter modifiers are loaded separately via
+      // selectCustomPromptParameters and applied at the end of the system
+      // prompt. selectVoice's job is the BASE voice; the knobs ride on top.
       return VOICE_STUDIO_MENTOR;
     }
     return body;
   } catch (err) {
     console.error('[selectVoice] threw', err?.message);
     return VOICE_STUDIO_MENTOR;
+  }
+}
+
+// =============================================================================
+// Bounded prompt-customization knobs
+// =============================================================================
+//
+// Product-level custom prompts are *parameter sets*, not free-text bodies.
+// The user picks values from closed enums; the Worker maps each value to a
+// curated server-side fragment and assembles the modifier section. This is
+// a security boundary: a free-text editor would re-introduce the prompt-
+// injection footgun the styleModifier audit (CUSTOMPROMPTSPLAN.md §2.3)
+// flagged. The user picks knobs; the Worker writes the words.
+//
+// Schema (custom_prompts.parameters jsonb):
+//   {
+//     focus: <FOCUS enum> | undefined,
+//     tone: <TONE enum> | undefined,
+//     depth: <DEPTH enum> | undefined,
+//     techniques: Array<TECHNIQUE enum> | undefined  // multi-select, deduped
+//   }
+//
+// Any field may be omitted. Unknown keys are silently dropped during
+// validation so future client versions can add knobs without breaking
+// older Workers (forward-compat: validate-and-narrow, not validate-and-reject).
+// Order of fragments in the rendered section is FIXED (focus → tone → depth →
+// technique) so the same parameters always produce the same output.
+//
+// PROMPT_TEMPLATE_VERSION is bumped when the curated fragments change in
+// ways that could shift critique behavior. Custom prompts persist their
+// authored-against version in custom_prompts.template_version so the UI
+// can later surface drift; the Worker always renders the *current* fragments.
+
+export const PROMPT_TEMPLATE_VERSION = 1;
+
+export const FOCUS_OPTIONS = Object.freeze([
+  'anatomy',
+  'composition',
+  'color',
+  'lighting',
+  'line_work',
+  'value',
+  'perspective',
+  'general',
+]);
+
+export const TONE_OPTIONS = Object.freeze([
+  'encouraging',
+  'balanced',
+  'rigorous',
+  'blunt',
+]);
+
+export const DEPTH_OPTIONS = Object.freeze([
+  'brief',
+  'standard',
+  'deep_dive',
+]);
+
+export const TECHNIQUE_OPTIONS = Object.freeze([
+  'digital',
+  'traditional',
+  'observational',
+  'gestural',
+  'studied',
+  'imagination',
+]);
+
+const FOCUS_FRAGMENTS = Object.freeze({
+  anatomy:     'When picking the Focus Area, weight anatomy and figure proportion above other categories. If the drawing has anatomy issues, those go first.',
+  composition: 'When picking the Focus Area, weight composition (placement, balance, focal hierarchy, edge of frame) above other categories.',
+  color:       'When picking the Focus Area, weight color choices (temperature, harmony, saturation control) above other categories.',
+  lighting:    'When picking the Focus Area, weight lighting and form modeling (light direction, value structure across forms, cast vs form shadow) above other categories.',
+  line_work:   'When picking the Focus Area, weight line economy, line weight variation, and edge control above other categories.',
+  value:       'When picking the Focus Area, weight value structure and tonal contrast (full value range, value grouping, atmospheric depth) above other categories.',
+  perspective: 'When picking the Focus Area, weight perspective and spatial construction above other categories.',
+  general:     'Pick the most impactful Focus Area regardless of category — do not bias toward any single area.',
+});
+
+const TONE_FRAGMENTS = Object.freeze({
+  encouraging: 'Lean encouraging. Lead with what is working before naming the Focus Area, and frame the Focus Area as a next step rather than a deficit. Honest critique still wins over false praise — never invent strengths that are not present.',
+  balanced:    'Stay balanced. Honest assessment delivered with measured warmth. Default critique posture.',
+  rigorous:    'Be rigorous. Hold the student to a high technical standard for their stated skill level. Name issues precisely, in the language of the elements and principles, without softening.',
+  blunt:       'Be blunt. No hedging, no padded reassurance, no "I see what you were going for." Critique the work directly. Bluntness is service to the student, not aggression — never demean the person.',
+});
+
+const DEPTH_FRAGMENTS = Object.freeze({
+  brief:     'Stay tight — aim for ~250 words total. Sacrifice secondary observations for clarity on the Focus Area. Keep What\'s Working to a single sentence.',
+  standard:  'Use the default ~700 word target for the response.',
+  deep_dive: 'Go deep on the Focus Area — aim for ~1100 words. Spend the additional length on the Focus Area: explain mechanism, show what to look for, give 2–3 concrete Try This steps instead of 1.',
+});
+
+const TECHNIQUE_FRAGMENTS = Object.freeze({
+  digital:       'Frame Try This steps in digital terms when relevant — layers, blending modes, opacity, brushes, transforms, references on a side layer.',
+  traditional:   'Frame Try This steps in traditional-media terms when relevant — graphite grades, charcoal sticks, ink, paint, paper tooth, erasers as drawing tools.',
+  observational: 'Bias Try This toward observational exercises — life drawing, photo references, drawing from the subject in front of the student.',
+  gestural:      'Bias Try This toward gestural / quick-study exercises — 30-second to 5-minute studies, prioritizing flow and structure over finish.',
+  studied:       'Bias Try This toward longer, careful studies — block-in, measurement, value mapping, deliberate finish over multiple sessions.',
+  imagination:   'Bias Try This toward construction / imaginative drawing — building forms in 3D from primitives, drawing from understanding rather than direct reference.',
+});
+
+/**
+ * Returns the validated parameters object on success, or { error } on
+ * failure. Unknown keys and unknown enum values are dropped silently
+ * (forward-compat with future knobs) — the only hard rejections are wrong
+ * *types* (e.g. techniques as a non-array, focus as a number). Defaults
+ * are NOT injected: a missing knob means "use the base voice's behavior,"
+ * not "use the default fragment." This keeps stored rows minimal and lets
+ * future fragment edits not silently mutate every saved prompt.
+ */
+export function validatePromptParameters(input) {
+  if (input === null || input === undefined) return { value: {} };
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { error: 'parameters must be an object' };
+  }
+  const out = {};
+  if ('focus' in input) {
+    if (typeof input.focus !== 'string') return { error: 'focus must be a string' };
+    if (FOCUS_OPTIONS.includes(input.focus)) out.focus = input.focus;
+  }
+  if ('tone' in input) {
+    if (typeof input.tone !== 'string') return { error: 'tone must be a string' };
+    if (TONE_OPTIONS.includes(input.tone)) out.tone = input.tone;
+  }
+  if ('depth' in input) {
+    if (typeof input.depth !== 'string') return { error: 'depth must be a string' };
+    if (DEPTH_OPTIONS.includes(input.depth)) out.depth = input.depth;
+  }
+  if ('techniques' in input) {
+    if (!Array.isArray(input.techniques)) return { error: 'techniques must be an array' };
+    if (input.techniques.length > TECHNIQUE_OPTIONS.length) {
+      return { error: 'techniques has more entries than known options' };
+    }
+    const seen = new Set();
+    for (const t of input.techniques) {
+      if (typeof t !== 'string') return { error: 'techniques entries must be strings' };
+      if (TECHNIQUE_OPTIONS.includes(t)) seen.add(t);
+    }
+    if (seen.size > 0) out.techniques = [...seen];
+  }
+  return { value: out };
+}
+
+/**
+ * Renders the parameters object as the body of a "PROMPT CUSTOMIZATION"
+ * section. Returns null when no fragments would render — the caller uses
+ * that to omit the section header entirely (an empty section in the prompt
+ * costs tokens for no value). Order is FIXED: focus → tone → depth →
+ * technique. Stable order means the same parameters always produce the
+ * same prompt, which keeps the OpenAI seed effective.
+ */
+export function renderCustomPromptModifier(parameters) {
+  if (!parameters || typeof parameters !== 'object') return null;
+  const lines = [];
+  if (parameters.focus && FOCUS_FRAGMENTS[parameters.focus]) {
+    lines.push(`- ${FOCUS_FRAGMENTS[parameters.focus]}`);
+  }
+  if (parameters.tone && TONE_FRAGMENTS[parameters.tone]) {
+    lines.push(`- ${TONE_FRAGMENTS[parameters.tone]}`);
+  }
+  if (parameters.depth && DEPTH_FRAGMENTS[parameters.depth]) {
+    lines.push(`- ${DEPTH_FRAGMENTS[parameters.depth]}`);
+  }
+  if (Array.isArray(parameters.techniques) && parameters.techniques.length > 0) {
+    // Re-order against TECHNIQUE_OPTIONS so two semantically-equal arrays
+    // (e.g. ['digital','gestural'] vs ['gestural','digital']) render the
+    // same line ordering.
+    const ordered = TECHNIQUE_OPTIONS.filter((t) => parameters.techniques.includes(t));
+    for (const t of ordered) {
+      if (TECHNIQUE_FRAGMENTS[t]) lines.push(`- ${TECHNIQUE_FRAGMENTS[t]}`);
+    }
+  }
+  if (lines.length === 0) return null;
+  return lines.join('\n');
+}
+
+/**
+ * Fetches the parameters jsonb for a custom:<uuid> preset. Returns:
+ *   - {} for any non-custom preset (hardcoded preset_ids never carry
+ *     parameters; the four built-in voices are full prompts in their own right)
+ *   - the parameters object for a found custom_prompts row
+ *   - {} on any failure (env missing, fetch non-ok, row missing) with a
+ *     console.error log — same graceful-degradation posture as selectVoice
+ *
+ * Defense-in-depth re-filters by user_id even though resolvePresetId
+ * already verified ownership earlier in the request path. fetcher is
+ * dependency-injected for tests.
+ */
+export async function selectCustomPromptParameters(presetId, userId, env, fetcher = fetch) {
+  if (typeof presetId !== 'string' || !presetId.startsWith(CUSTOM_PROMPT_PREFIX)) {
+    return {};
+  }
+  const uuid = presetId.slice(CUSTOM_PROMPT_PREFIX_LEN);
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('[selectCustomPromptParameters] env not configured; returning empty params');
+    return {};
+  }
+  try {
+    const url = `${env.SUPABASE_URL}/rest/v1/custom_prompts`
+      + `?id=eq.${encodeURIComponent(uuid)}`
+      + `&user_id=eq.${encodeURIComponent(userId)}`
+      + `&select=parameters&limit=1`;
+    const res = await fetcher(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        Accept: 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.error('[selectCustomPromptParameters] non-ok', res.status);
+      return {};
+    }
+    const rows = await res.json();
+    const params = rows?.[0]?.parameters;
+    if (!params || typeof params !== 'object') return {};
+    // Re-validate on read in case stored rows were written by a future
+    // Worker version that recognized knobs we don't. validate-and-narrow
+    // means an unknown enum value never reaches the prompt.
+    const { value } = validatePromptParameters(params);
+    return value ?? {};
+  } catch (err) {
+    console.error('[selectCustomPromptParameters] threw', err?.message);
+    return {};
   }
 }
