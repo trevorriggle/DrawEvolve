@@ -40,10 +40,11 @@ import {
   recordSuccessfulCritique,
   sha256Hex,
   utcDayKey,
-  getDailySpend,
   incrementDailySpend,
   computeRequestCost,
-  DAILY_SPEND_CAP_USD,
+  enforceCostCeilings,
+  recordRequestUsage,
+  ESTIMATED_REQUEST_COST_USD,
 } from '../middleware/rate-limit.js';
 import {
   isValidClientRequestId,
@@ -654,26 +655,25 @@ export async function handleFeedback(request, env, ctx) {
     const systemPrompt = buildSystemPrompt(config, context ?? {});
     const userContent = buildUserMessage(config, history, image);
 
-    // Pre-flight: enforce the global daily spend cap. Fail-closed before we
-    // hit OpenAI's dashboard limit so the failure mode is a graceful 503
-    // rather than scattered 429/500s from OpenAI itself. Read-modify-write
-    // via KV; small undercounts under high concurrency are acceptable for
-    // a hard ceiling at TestFlight scale.
-    const todayKey = utcDayKey(now);
-    const dailySpend = await getDailySpend(env, todayKey);
-    if (dailySpend >= DAILY_SPEND_CAP_USD) {
-      console.error('[spend-cap] daily limit hit', {
-        spent: dailySpend.toFixed(4),
-        cap: DAILY_SPEND_CAP_USD,
-        dayKey: todayKey,
+    // Pre-flight cost ceilings — both fail-closed with 429 and a stable
+    // error code the iOS client surfaces as "Daily limit reached, try again
+    // tomorrow." Run AFTER tier rate limits, BEFORE the OpenAI call. These
+    // are absolute provider/user spend caps; the tier-based per-minute /
+    // per-day quotas above are independent soft rate limits.
+    const ceilingDecision = await enforceCostCeilings({ env, userId, now });
+    if (!ceilingDecision.ok) {
+      console.error('[cost-ceiling] hit', {
+        error: ceilingDecision.body.error,
+        userId,
       });
       ctx.waitUntil(logRequest({
         env, status: REQUEST_STATUS.QUOTA_EXCEEDED, userId, drawingId: drawingIdLower, ipHash,
       }));
-      return jsonResponse({
-        error: 'Service temporarily unavailable due to daily limit. Please try again tomorrow.',
-      }, 503);
+      return jsonResponse(ceilingDecision.body, ceilingDecision.status, {
+        'Retry-After': String(ceilingDecision.body.retryAfter),
+      });
     }
+    const todayKey = ceilingDecision.ctx.dayKey;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -779,6 +779,15 @@ export async function handleFeedback(request, env, ctx) {
     const requestCost = computeRequestCost(data.usage);
     incrementDailySpend(env, todayKey, requestCost).catch((err) =>
       console.error('[spend-cap] incrementDailySpend failed', err?.message),
+    );
+
+    // Per-user daily token cap — record actual usage post-flight so the
+    // next pre-flight check sees this request's consumption. Pre-flight
+    // intentionally doesn't estimate tokens (no reliable estimator without
+    // the model in the loop), so the user's first over-cap request lands;
+    // their next one is rejected. Fire-and-forget.
+    recordRequestUsage({ env, userId, dayKey: todayKey, usage: data.usage }).catch((err) =>
+      console.error('[cost-ceiling] recordRequestUsage failed', err?.message),
     );
 
     // Phase 5d — idempotency cache. Stores the body we're about to return so

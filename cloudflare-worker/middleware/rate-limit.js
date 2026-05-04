@@ -221,15 +221,37 @@ export async function recordSuccessfulCritique({ env, ctx, now }) {
 }
 
 // =============================================================================
-// Daily spend ceiling (provider-level cost circuit breaker)
+// Cost ceilings (launch-blocker hard caps)
 // =============================================================================
 //
-// Hard provider-level daily spend ceiling enforced at the Worker before any
-// OpenAI call. Fail-closes with 503 once exceeded, until UTC midnight rolls
-// the day key over. Sized for TestFlight; revisit upward as user volume grows.
-// This is a HARD ceiling, not a per-user limit — see TIER_LIMITS for those.
+// Two independent fail-closed ceilings sit in front of the OpenAI call,
+// AFTER tier rate limits. They run on every critique request:
+//
+//   1. Provider daily spend cap — caps cumulative estimated USD spend per
+//      UTC day across ALL users. Reads OPENAI_DAILY_SPEND_CAP_USD env var,
+//      falls back to DAILY_SPEND_CAP_USD constant. Tracked under
+//      `daily_spend:<YYYY-MM-DD>`. On breach: 429 daily_spend_cap_exceeded.
+//
+//   2. Per-user daily token cap — caps cumulative input+output tokens per
+//      (user, UTC day). Reads PER_USER_DAILY_TOKEN_CAP env var; if unset,
+//      no cap is enforced. Tracked under `user_tokens:<user_id>:<YYYY-MM-DD>`.
+//      Pre-flight reject when at-or-above; post-flight increment by actual
+//      tokens from the OpenAI usage block. On breach: 429
+//      per_user_token_cap_exceeded.
+//
+// Both reset implicitly at UTC midnight (new day = new key). Both are
+// independent of TIER_LIMITS — the tier-based per-minute / per-day quotas
+// stay in place as soft rate limits; these are absolute spend/abuse caps.
 
 export const DAILY_SPEND_CAP_USD = 5.00;
+
+// Pre-flight cost estimate added to the running daily spend total before the
+// cap comparison. Conservative — sized to cover the worst-typical gpt-5.1
+// critique cost from RATELIMITSPLAN.md §1.5 (~$0.0043) plus headroom. The
+// catastrophic high-detail-vision case ($0.0108) under-counts here, but that
+// path isn't shipped today and the ceiling is a hard circuit breaker, not a
+// precise meter — actual cost is recorded post-flight via incrementDailySpend.
+export const ESTIMATED_REQUEST_COST_USD = 0.005;
 
 // Approximate per-token rates for cost computation. Kept as a flat pair
 // because we run on a single model at a time. When OPENAI_MODEL changes,
@@ -241,6 +263,30 @@ export function computeRequestCost(usage) {
   const inputTokens = usage?.prompt_tokens ?? 0;
   const outputTokens = usage?.completion_tokens ?? 0;
   return inputTokens * COST_PER_INPUT_TOKEN_USD + outputTokens * COST_PER_OUTPUT_TOKEN_USD;
+}
+
+/**
+ * Resolve the active daily spend cap. Env override wins; missing/invalid
+ * values fall back to the compiled-in DAILY_SPEND_CAP_USD constant so a
+ * misconfigured deploy still has a ceiling.
+ */
+export function readDailySpendCapUsd(env) {
+  const raw = env?.OPENAI_DAILY_SPEND_CAP_USD;
+  if (raw === undefined || raw === null || raw === '') return DAILY_SPEND_CAP_USD;
+  const parsed = typeof raw === 'number' ? raw : parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DAILY_SPEND_CAP_USD;
+}
+
+/**
+ * Resolve the active per-user daily token cap. Returns Infinity (no cap)
+ * when unset or unparseable — operators must explicitly opt in by setting
+ * PER_USER_DAILY_TOKEN_CAP. Documented as a launch-blocker in wrangler.toml.
+ */
+export function readPerUserDailyTokenCap(env) {
+  const raw = env?.PER_USER_DAILY_TOKEN_CAP;
+  if (raw === undefined || raw === null || raw === '') return Infinity;
+  const parsed = typeof raw === 'number' ? raw : parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Infinity;
 }
 
 export async function getDailySpend(env, dayKey) {
@@ -260,4 +306,84 @@ export async function incrementDailySpend(env, dayKey, amountUsd) {
   const next = current + amountUsd;
   await env.QUOTA_KV.put(`daily_spend:${dayKey}`, String(next), { expirationTtl: 48 * 3600 });
   return next;
+}
+
+export async function getUserTokensToday(env, userId, dayKey) {
+  if (!env?.QUOTA_KV) return 0;
+  const raw = await env.QUOTA_KV.get(`user_tokens:${userId}:${dayKey}`);
+  const parsed = parseInt(raw ?? '0', 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export async function incrementUserTokensToday(env, userId, dayKey, tokens) {
+  if (!env?.QUOTA_KV) return tokens;
+  const safe = Math.max(0, Math.floor(Number(tokens) || 0));
+  const current = await getUserTokensToday(env, userId, dayKey);
+  const next = current + safe;
+  await env.QUOTA_KV.put(`user_tokens:${userId}:${dayKey}`, String(next), { expirationTtl: 48 * 3600 });
+  return next;
+}
+
+/**
+ * Pre-flight cost ceilings. Runs after JWT + App Attest + tier rate limits,
+ * before the OpenAI call. Returns a rejection decision (status + body) on
+ * breach, or { ok: true, ctx: { dayKey } } on pass.
+ *
+ * Daily spend cap: rejects when (current spend + estimated request cost) >
+ * cap. The estimate is the buffer that prevents N concurrent isolates from
+ * all reading the same sub-cap value and racing past the ceiling.
+ *
+ * Per-user token cap: rejects when current token count is at-or-above the
+ * cap. No estimated-token charge — a user who's just barely under the cap
+ * still gets to make one request, which then records its actual usage and
+ * pushes them over. Acceptable: the next request is rejected.
+ */
+export async function enforceCostCeilings({ env, userId, now }) {
+  const dayKey = utcDayKey(now);
+  const dailyCap = readDailySpendCapUsd(env);
+  const userTokenCap = readPerUserDailyTokenCap(env);
+  const retryAfter = secondsUntilNextUtcMidnight(now);
+
+  const dailySpend = await getDailySpend(env, dayKey);
+  if (dailySpend + ESTIMATED_REQUEST_COST_USD > dailyCap) {
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'daily_spend_cap_exceeded',
+        retryAfter,
+        message: 'Daily limit reached, try again tomorrow.',
+      },
+    };
+  }
+
+  if (Number.isFinite(userTokenCap)) {
+    const currentTokens = await getUserTokensToday(env, userId, dayKey);
+    if (currentTokens >= userTokenCap) {
+      return {
+        ok: false,
+        status: 429,
+        body: {
+          error: 'per_user_token_cap_exceeded',
+          retryAfter,
+          message: 'Daily limit reached, try again tomorrow.',
+        },
+      };
+    }
+  }
+
+  return { ok: true, ctx: { dayKey } };
+}
+
+/**
+ * Post-flight: increment the per-user daily token counter by the actual
+ * usage from the OpenAI response. Fire-and-forget by callers — a failure
+ * here doesn't block the user's response.
+ */
+export async function recordRequestUsage({ env, userId, dayKey, usage }) {
+  if (!usage) return;
+  const tokens = (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+  if (tokens > 0) {
+    await incrementUserTokensToday(env, userId, dayKey, tokens);
+  }
 }

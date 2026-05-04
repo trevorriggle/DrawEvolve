@@ -32,6 +32,25 @@ compatibility_date = "2024-01-01"
 binding = "QUOTA_KV"
 id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 
+# Cost ceilings — launch-blocker hard caps that gate the OpenAI call.
+# These run AFTER JWT + App Attest + tier rate limits; they're absolute
+# spend/abuse circuit breakers, independent of TIER_LIMITS.
+#
+# Set both via plain `[vars]` entries (not secrets — these are operational
+# knobs, not credentials). Missing OPENAI_DAILY_SPEND_CAP_USD falls back to
+# the compiled-in $5.00 default; missing PER_USER_DAILY_TOKEN_CAP disables
+# that ceiling entirely (no per-user enforcement). Both must be explicitly
+# set in production.
+#
+# Recommended starting values (revisit as user volume / model cost change):
+#   OPENAI_DAILY_SPEND_CAP_USD = "5.00"      # global $/day across all users
+#   PER_USER_DAILY_TOKEN_CAP   = "50000"     # input + output tokens per user/day
+#
+# On breach:
+#   spend cap   → HTTP 429 { error: "daily_spend_cap_exceeded" }
+#   token cap   → HTTP 429 { error: "per_user_token_cap_exceeded" }
+# Both reset implicitly at UTC midnight (new day = new KV key).
+
 # Phase 5f — App Attest. APP_ATTEST_TEAM_ID and APP_ATTEST_BUNDLE_ID feed
 # the rpId hash we check against authenticatorData on every request — must
 # match the iOS bundle/team that signed the device's keys. APP_ATTEST_ENV
