@@ -26,6 +26,7 @@ import {
   handleProfileSearch,
 } from './routes/profiles.js';
 import { handlePrompts } from './routes/prompts.js';
+import { handleEvolution } from './routes/evolution.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 // Methods allowed on the legacy POST-only routes (/, /attest/*). The new
@@ -46,6 +47,9 @@ export default {
     // resolve as a username lookup.
     if (method === 'GET' && pathname === '/v1/me') {
       return handleGetMe(request, env, ctx);
+    }
+    if (method === 'GET' && pathname === '/v1/me/evolution') {
+      return handleEvolution(request, env, ctx);
     }
     if (method === 'PATCH' && pathname === '/v1/profiles/me') {
       return handlePatchMe(request, env, ctx);
@@ -214,3 +218,27 @@ export {
   CLASSIFIER_VERSION,
   CLASSIFIER_SYSTEM_PROMPT,
 } from './lib/classifier.js';
+
+export {
+  flattenCritiques,
+  selectWindow,
+  determineStatus,
+  aggregateCategories,
+  computeStreak,
+  SOLID_FOUNDATION_CEILING,
+  MEANINGFUL_DELTA,
+  MIN_DATA_POINTS,
+  PRIMARY_WEIGHT,
+  SECONDARY_WEIGHT,
+  MAX_AGGREGATION_ENTRIES,
+  DEFAULT_WINDOW_CRITIQUES,
+  MAX_WINDOW_CRITIQUES,
+  DEFAULT_WINDOW_DAYS,
+  MAX_WINDOW_DAYS,
+} from './lib/evolution-aggregation.js';
+
+export {
+  handleEvolution,
+  buildEvolutionResponse,
+  fetchUserDrawings,
+} from './routes/evolution.js';
