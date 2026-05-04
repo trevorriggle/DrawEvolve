@@ -406,6 +406,138 @@ class CanvasStateManager: ObservableObject {
         }
     }
 
+    // MARK: - Layered load (ONLINELAYERSTORE.md §6)
+
+    /// Outcome of `loadLayered` — most are non-fatal "we still loaded the
+    /// drawing, but…" surfaces that the canvas chrome can show as toasts.
+    /// `formatTooNew` is the only hard failure: we refuse to truncate a
+    /// future-format manifest to a single layer.
+    enum LayeredLoadResult: Equatable {
+        case loaded
+        case loadedWithIntegrityWarning(missingOrdinals: [Int])
+        case loadedWithSizeMismatch(savedWidth: Int, savedHeight: Int)
+        case formatTooNew(savedVersion: Int, supportedVersion: Int)
+    }
+
+    /// Highest manifest format version this build can consume. Bump in lockstep
+    /// with any breaking change to the manifest schema (ONLINELAYERSTORE.md §6.3).
+    static let supportedManifestVersion = 1
+
+    /// Reconstruct the canvas from a layered payload.
+    ///
+    /// Mirrors `loadImage(_:)` but reads the manifest + per-layer PNG bytes
+    /// instead of a single flat image. Per ONLINELAYERSTORE.md §6.2:
+    ///   1. Wipe the layer stack without re-adding the default layer.
+    ///   2. Walk manifest entries in ordinal order, instantiating each
+    ///      `DrawingLayer` with the manifest's stable id + flags.
+    ///   3. Materialize each layer's texture from `renderer.makeTexture(from:)`.
+    ///   4. Select the top layer, mark hasLoadedExistingImage, clear history.
+    ///
+    /// Sanity checks (§6.3):
+    ///   - format_version > supported → returns `.formatTooNew`, layers untouched.
+    ///   - per-layer bytes nil OR sha mismatch → insert an empty layer at that
+    ///     ordinal so subsequent layers don't collapse upward; returns
+    ///     `.loadedWithIntegrityWarning(missingOrdinals: …)`.
+    ///   - document size != current `documentSize` → load anyway at saved
+    ///     size; returns `.loadedWithSizeMismatch`. (We don't resample.)
+    ///
+    /// Tier enforcement (§6.4): we don't silently drop layers when the user
+    /// is over their cap. Use `isOverLayerCap(_:)` to gate the save UI.
+    @discardableResult
+    func loadLayered(_ payload: LayeredDrawingPayload) -> LayeredLoadResult {
+        guard let renderer = renderer else {
+            print("ERROR: Cannot load layered drawing - renderer not available")
+            return .loaded
+        }
+
+        let manifest = payload.manifest
+
+        if manifest.formatVersion > Self.supportedManifestVersion {
+            print("⚠️ Layered manifest format_version \(manifest.formatVersion) > supported \(Self.supportedManifestVersion); refusing to load")
+            return .formatTooNew(
+                savedVersion: manifest.formatVersion,
+                supportedVersion: Self.supportedManifestVersion
+            )
+        }
+
+        // Clear without auto-adding the default layer (stock clearCanvas does).
+        layers.removeAll()
+        clearSelection()
+
+        // Walk in ordinal order — manifest may not already be sorted.
+        let ordered = manifest.layers.sorted { $0.ordinal < $1.ordinal }
+        var missingOrdinals: [Int] = []
+
+        for entry in ordered {
+            let blend = BlendMode(rawValue: entry.blendMode) ?? .normal
+            let layerID = UUID(uuidString: entry.id) ?? UUID()
+            let layer = DrawingLayer(
+                id: layerID,
+                name: entry.name,
+                opacity: entry.opacity,
+                isVisible: entry.visible,
+                isLocked: entry.locked,
+                blendMode: blend
+            )
+
+            // The payload's layerPNGs is a parallel array indexed by the
+            // manifest's order; storage manager guarantees that contract.
+            let pngIndex = manifest.layers.firstIndex(where: { $0.ordinal == entry.ordinal }) ?? entry.ordinal
+            let pngData: Data? = (pngIndex >= 0 && pngIndex < payload.layerPNGs.count)
+                ? payload.layerPNGs[pngIndex]
+                : nil
+
+            var texture: MTLTexture? = nil
+            if let bytes = pngData, let image = UIImage(data: bytes) {
+                texture = renderer.makeTexture(from: image)
+            }
+
+            if texture == nil {
+                // Sha-mismatched / missing / undecodable bytes: insert an empty
+                // layer at this ordinal so the rest of the stack keeps its
+                // shape. Caller's toast tells the user something's off.
+                missingOrdinals.append(entry.ordinal)
+                texture = renderer.createLayerTexture()
+            }
+
+            layer.texture = texture
+            layers.append(layer)
+        }
+
+        // Empty manifest is a corrupt save — restore default to avoid a
+        // canvas with zero layers (which the renderer can't handle).
+        if layers.isEmpty {
+            addLayer()
+        } else {
+            selectedLayerIndex = layers.count - 1
+        }
+
+        hasLoadedExistingImage = true
+        historyManager.clear()
+
+        // Document-size sanity check is informational — we don't resample.
+        let saved = CGSize(width: manifest.document.width, height: manifest.document.height)
+        let current = documentSize
+        let sizeChanged = abs(saved.width - current.width) > 0.5
+            || abs(saved.height - current.height) > 0.5
+
+        if !missingOrdinals.isEmpty {
+            return .loadedWithIntegrityWarning(missingOrdinals: missingOrdinals)
+        }
+        if sizeChanged {
+            return .loadedWithSizeMismatch(savedWidth: Int(saved.width), savedHeight: Int(saved.height))
+        }
+        return .loaded
+    }
+
+    /// True when the current layer count exceeds the supplied per-tier cap.
+    /// Caller (e.g. the save button) gates writes while this is true so a
+    /// downgraded user can't push an over-cap manifest. Loading itself never
+    /// drops layers (ONLINELAYERSTORE.md §6.4).
+    func isOverLayerCap(_ cap: Int) -> Bool {
+        layers.count > cap
+    }
+
     /// Import a photo onto a brand-new layer, sized aspect-fit and centered
     /// on the document. The user can reposition with the Move tool.
     /// (Corner scale/rotate handles are deferred — see audit doc.)
