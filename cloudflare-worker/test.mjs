@@ -37,6 +37,14 @@ import {
   recordRequestUsage,
   validateContext,
   getUserTier,
+  PROMPT_TEMPLATE_VERSION,
+  FOCUS_OPTIONS,
+  TONE_OPTIONS,
+  DEPTH_OPTIONS,
+  TECHNIQUE_OPTIONS,
+  validatePromptParameters,
+  renderCustomPromptModifier,
+  selectCustomPromptParameters,
   TIER_LIMITS,
   IP_HOURLY_CAP,
   ANOMALY_MULTIPLIER,
@@ -2524,4 +2532,306 @@ test('integration: valid JWT + valid attest, but env mismatch on stored key → 
   } finally {
     restore();
   }
+});
+
+// =============================================================================
+// Custom prompts (product-level) — bounded-knob parameters
+// =============================================================================
+//
+// Voice content is locked behind the four hardcoded preset_ids. The custom-
+// prompts product surface only writes BOUNDED enum knobs (focus / tone /
+// depth / techniques). validatePromptParameters / renderCustomPromptModifier /
+// selectCustomPromptParameters cover that pipeline end-to-end. The product-
+// level guarantee is "every fragment that lands in the prompt was authored
+// by us, not by the user."
+
+test('PROMPT_TEMPLATE_VERSION is a positive integer', () => {
+  assert.equal(typeof PROMPT_TEMPLATE_VERSION, 'number');
+  assert.ok(Number.isInteger(PROMPT_TEMPLATE_VERSION));
+  assert.ok(PROMPT_TEMPLATE_VERSION >= 1);
+});
+
+test('option enums have the expected values and no overlap', () => {
+  // Lock-in: changing this list is a template-version bump (see
+  // PROMPT_TEMPLATE_VERSION). The iOS UI's enum case lists must match
+  // these values verbatim.
+  assert.deepEqual([...FOCUS_OPTIONS], [
+    'anatomy', 'composition', 'color', 'lighting',
+    'line_work', 'value', 'perspective', 'general',
+  ]);
+  assert.deepEqual([...TONE_OPTIONS], ['encouraging', 'balanced', 'rigorous', 'blunt']);
+  assert.deepEqual([...DEPTH_OPTIONS], ['brief', 'standard', 'deep_dive']);
+  assert.deepEqual([...TECHNIQUE_OPTIONS], [
+    'digital', 'traditional', 'observational', 'gestural', 'studied', 'imagination',
+  ]);
+});
+
+test('validatePromptParameters returns empty object for null/undefined input', () => {
+  assert.deepEqual(validatePromptParameters(null), { value: {} });
+  assert.deepEqual(validatePromptParameters(undefined), { value: {} });
+});
+
+test('validatePromptParameters accepts every documented enum value', () => {
+  // Every individual option must validate when supplied alone. Catches a
+  // typo in either FRAGMENT key or OPTIONS array.
+  for (const focus of FOCUS_OPTIONS) {
+    const r = validatePromptParameters({ focus });
+    assert.equal(r.value.focus, focus, `focus '${focus}' should pass`);
+  }
+  for (const tone of TONE_OPTIONS) {
+    const r = validatePromptParameters({ tone });
+    assert.equal(r.value.tone, tone, `tone '${tone}' should pass`);
+  }
+  for (const depth of DEPTH_OPTIONS) {
+    const r = validatePromptParameters({ depth });
+    assert.equal(r.value.depth, depth, `depth '${depth}' should pass`);
+  }
+  for (const t of TECHNIQUE_OPTIONS) {
+    const r = validatePromptParameters({ techniques: [t] });
+    assert.deepEqual(r.value.techniques, [t], `technique '${t}' should pass`);
+  }
+});
+
+test('validatePromptParameters silently drops unknown enum values (forward-compat)', () => {
+  // A future Worker that recognizes 'experimental_focus' could write that
+  // value into a row; an older Worker reading it must not crash. Drop, don't
+  // reject — same posture for unknown techniques.
+  assert.deepEqual(validatePromptParameters({ focus: 'experimental_focus' }).value, {});
+  assert.deepEqual(validatePromptParameters({ tone: 'haiku' }).value, {});
+  assert.deepEqual(
+    validatePromptParameters({ techniques: ['digital', 'unknown', 'gestural'] }).value,
+    { techniques: ['digital', 'gestural'] },
+  );
+});
+
+test('validatePromptParameters silently drops unknown top-level keys', () => {
+  // Same forward-compat reason. Unknown KEYS may be future knobs; an older
+  // Worker should narrow to what it understands.
+  assert.deepEqual(
+    validatePromptParameters({ focus: 'anatomy', futureKnob: 'value' }).value,
+    { focus: 'anatomy' },
+  );
+});
+
+test('validatePromptParameters rejects wrong types', () => {
+  assert.equal(validatePromptParameters('not an object').error, 'parameters must be an object');
+  assert.equal(validatePromptParameters([]).error, 'parameters must be an object');
+  assert.equal(validatePromptParameters({ focus: 12 }).error, 'focus must be a string');
+  assert.equal(validatePromptParameters({ tone: null }).error, 'tone must be a string');
+  assert.equal(validatePromptParameters({ techniques: 'digital' }).error, 'techniques must be an array');
+  assert.equal(
+    validatePromptParameters({ techniques: ['digital', 7] }).error,
+    'techniques entries must be strings',
+  );
+});
+
+test('validatePromptParameters dedupes techniques', () => {
+  const r = validatePromptParameters({ techniques: ['digital', 'digital', 'gestural'] });
+  assert.deepEqual(r.value.techniques.sort(), ['digital', 'gestural']);
+});
+
+test('validatePromptParameters rejects techniques arrays larger than the option list', () => {
+  // Defense against a payload that smuggles a giant array of unknown
+  // strings. Validation processes each entry, so cap by length first.
+  const tooMany = new Array(TECHNIQUE_OPTIONS.length + 1).fill('digital');
+  assert.match(validatePromptParameters({ techniques: tooMany }).error, /more entries/);
+});
+
+test('renderCustomPromptModifier returns null when nothing is set', () => {
+  assert.equal(renderCustomPromptModifier({}), null);
+  assert.equal(renderCustomPromptModifier(null), null);
+  assert.equal(renderCustomPromptModifier(undefined), null);
+  // Unknown values that survived storage but not validation: still render
+  // null because none map to a fragment.
+  assert.equal(renderCustomPromptModifier({ focus: 'unknown' }), null);
+});
+
+test('renderCustomPromptModifier emits the focus fragment for each enum value', () => {
+  for (const focus of FOCUS_OPTIONS) {
+    const out = renderCustomPromptModifier({ focus });
+    assert.ok(typeof out === 'string' && out.length > 0, `focus '${focus}' should render`);
+    assert.match(out, /^- /, 'fragments are rendered as a bullet list');
+  }
+});
+
+test('renderCustomPromptModifier orders sections focus → tone → depth → techniques', () => {
+  // Stable ordering means the same parameters produce the same prompt,
+  // which keeps the OpenAI seed effective for replays.
+  const out = renderCustomPromptModifier({
+    focus: 'composition',
+    tone: 'blunt',
+    depth: 'deep_dive',
+    techniques: ['digital', 'gestural'],
+  });
+  const lines = out.split('\n');
+  // Order: 1 focus + 1 tone + 1 depth + 2 techniques = 5 lines.
+  assert.equal(lines.length, 5);
+  assert.match(lines[0], /Focus Area, weight composition/);
+  assert.match(lines[1], /blunt/i);
+  assert.match(lines[2], /Go deep on the Focus Area/);
+  // Technique lines preserve TECHNIQUE_OPTIONS order, not input order.
+  assert.match(lines[3], /digital/);
+  assert.match(lines[4], /gestural/);
+});
+
+test('renderCustomPromptModifier ignores input technique order (stable output)', () => {
+  // ['gestural', 'digital'] and ['digital', 'gestural'] must produce
+  // identical strings. Otherwise the same saved prompt would render
+  // differently across two clients ordering the array differently.
+  const a = renderCustomPromptModifier({ techniques: ['gestural', 'digital'] });
+  const b = renderCustomPromptModifier({ techniques: ['digital', 'gestural'] });
+  assert.equal(a, b);
+});
+
+test('buildSystemPrompt emits PROMPT CUSTOMIZATION when customPromptModifier is set', () => {
+  const config = {
+    ...DEFAULT_FREE_CONFIG,
+    customPromptModifier: { focus: 'anatomy', tone: 'rigorous' },
+  };
+  const prompt = buildSystemPrompt(config, baseContext);
+  assert.match(prompt, /PROMPT CUSTOMIZATION \(per saved prompt\):/);
+  assert.match(prompt, /weight anatomy/);
+  assert.match(prompt, /Be rigorous/);
+});
+
+test('buildSystemPrompt omits PROMPT CUSTOMIZATION when modifier is empty/null', () => {
+  const config = { ...DEFAULT_FREE_CONFIG, customPromptModifier: {} };
+  const prompt = buildSystemPrompt(config, baseContext);
+  assert.ok(!prompt.includes('PROMPT CUSTOMIZATION'));
+
+  const configNull = { ...DEFAULT_FREE_CONFIG, customPromptModifier: null };
+  const promptNull = buildSystemPrompt(configNull, baseContext);
+  assert.ok(!promptNull.includes('PROMPT CUSTOMIZATION'));
+});
+
+test('buildSystemPrompt orders styleModifier before PROMPT CUSTOMIZATION (specificity wins)', () => {
+  // The Pro styleModifier is a global per-user preference; the customization
+  // section is per-prompt. Per-prompt should come last so its late-in-prompt
+  // weighting beats the global preference when they conflict.
+  const config = {
+    ...DEFAULT_PRO_CONFIG,
+    styleModifier: 'Always reference Sargent.',
+    customPromptModifier: { tone: 'blunt' },
+  };
+  const prompt = buildSystemPrompt(config, baseContext);
+  const styleIdx = prompt.indexOf('ADDITIONAL STYLE GUIDANCE');
+  const customIdx = prompt.indexOf('PROMPT CUSTOMIZATION');
+  assert.ok(styleIdx > 0);
+  assert.ok(customIdx > styleIdx, 'PROMPT CUSTOMIZATION should follow ADDITIONAL STYLE GUIDANCE');
+});
+
+test('selectCustomPromptParameters returns {} for hardcoded preset IDs (no DB hit)', async () => {
+  let called = false;
+  const fetcher = async () => { called = true; return { ok: true, json: async () => [] }; };
+  for (const id of ['studio_mentor', 'the_crit', 'fundamentals_coach', 'renaissance_master']) {
+    const result = await selectCustomPromptParameters(id, FREE_USER, TEST_SUPABASE, fetcher);
+    assert.deepEqual(result, {});
+  }
+  assert.equal(called, false, 'no fetch should happen for hardcoded preset IDs');
+});
+
+test('selectCustomPromptParameters fetches and validates the parameters jsonb', async () => {
+  const customId = 'custom:550e8400-e29b-41d4-a716-446655440000';
+  let captured;
+  const fetcher = async (url) => {
+    captured = url;
+    return {
+      ok: true,
+      json: async () => [{
+        parameters: { focus: 'composition', tone: 'balanced', techniques: ['digital'] },
+      }],
+    };
+  };
+  const result = await selectCustomPromptParameters(customId, FREE_USER, TEST_SUPABASE, fetcher);
+  assert.deepEqual(result, {
+    focus: 'composition',
+    tone: 'balanced',
+    techniques: ['digital'],
+  });
+  // Defense-in-depth: user_id filter present on the SELECT.
+  assert.match(captured, /custom_prompts/);
+  assert.match(captured, /id=eq\.550e8400/);
+  assert.match(captured, new RegExp(`user_id=eq\\.${FREE_USER}`));
+  assert.match(captured, /select=parameters/);
+});
+
+test('selectCustomPromptParameters drops unknown enum values from stored rows (validate-on-read)', async () => {
+  // Forward-compat: a future Worker version might persist a knob this
+  // version doesn't recognize. Reading it must narrow, not crash.
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => [{
+      parameters: { focus: 'experimental', tone: 'rigorous' },
+    }],
+  });
+  const result = await selectCustomPromptParameters(
+    'custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, TEST_SUPABASE, fetcher,
+  );
+  assert.deepEqual(result, { tone: 'rigorous' });
+});
+
+test('selectCustomPromptParameters returns {} on PostgREST non-ok', async () => {
+  const errorCalls = [];
+  const originalError = console.error;
+  console.error = (...args) => { errorCalls.push(args); };
+  try {
+    const fetcher = async () => ({ ok: false, status: 503 });
+    const result = await selectCustomPromptParameters(
+      'custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, TEST_SUPABASE, fetcher,
+    );
+    assert.deepEqual(result, {});
+    assert.equal(errorCalls.length, 1, 'error should be logged for observability');
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('selectCustomPromptParameters returns {} when env is not configured', async () => {
+  const errorCalls = [];
+  const originalError = console.error;
+  console.error = (...args) => { errorCalls.push(args); };
+  try {
+    let called = false;
+    const fetcher = async () => { called = true; return { ok: true, json: async () => [] }; };
+    const result = await selectCustomPromptParameters(
+      'custom:550e8400-e29b-41d4-a716-446655440000', FREE_USER, {}, fetcher,
+    );
+    assert.deepEqual(result, {});
+    assert.equal(called, false, 'fetcher should not be called when env is missing');
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('buildCritiqueEntry snapshots customPromptModifier in prompt_config', () => {
+  // Old critiques must be reproducible. Editing a custom_prompts row later
+  // must not change what produced an existing critique entry.
+  const config = {
+    ...selectConfig('free', null),
+    customPromptModifier: { focus: 'anatomy' },
+  };
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config,
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+    presetId: 'custom:550e8400-e29b-41d4-a716-446655440000',
+  });
+  assert.deepEqual(entry.prompt_config.customPromptModifier, { focus: 'anatomy' });
+});
+
+test('buildCritiqueEntry stores null customPromptModifier when none is set', () => {
+  // Uniform schema: every row has the field, simplifying analytics queries.
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config: selectConfig('free', null),
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+    presetId: 'studio_mentor',
+  });
+  assert.equal(entry.prompt_config.customPromptModifier, null);
 });

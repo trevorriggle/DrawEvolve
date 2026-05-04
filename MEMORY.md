@@ -46,3 +46,15 @@ Phase 5f wires Apple App Attest as a second factor alongside Supabase JWT. JWT p
 `APPLE_ATTEST_ROOT_PUBKEY_HEX` in `cloudflare-worker/middleware/app-attest.js` is intentionally empty. `/attest/register` fail-closes with HTTP 500 `attest_root_not_pinned` until the operator pastes the Apple App Attest Root CA's uncompressed P-384 public key (extraction recipe is in `cloudflare-worker/DEPLOYMENT.md` — Phase 5f section). This is a deliberate gate: a deploy that forgot the root pin would otherwise silently accept forged attestations. The pubkey lives as a source constant — not a wrangler env var — so a deploy can never accidentally pair the wrong root with the wrong worker version.
 
 iOS-side, App Attest only works on real hardware (`DCAppAttestService.shared.isSupported == false` on the simulator). Test on device, not in the simulator.
+
+---
+
+## Custom prompts are bounded knobs, not freeform text
+
+As of 2026-05-04, the user-authoring surface for custom prompts is **bounded enums only** — `focus`, `tone`, `depth`, and a multi-select `techniques`. Each value maps to a curated server-side fragment in `cloudflare-worker/lib/prompt.js` (`FOCUS_FRAGMENTS`, `TONE_FRAGMENTS`, `DEPTH_FRAGMENTS`, `TECHNIQUE_FRAGMENTS`). The user picks knobs; the Worker writes the words.
+
+**Never expose a freeform "write your own system prompt" field.** Doing so re-introduces the `styleModifier` prompt-injection footgun the audit in `CUSTOMPROMPTSPLAN.md` §2.3 flagged. The legacy `custom_prompts.body` column from migration 0005 is now nullable (migration 0009) and is *not* writable through `/v1/prompts/*`; rows authored through the new product surface carry `parameters` only.
+
+`PROMPT_TEMPLATE_VERSION` (currently 1) gates the curated fragments. When fragments change in ways that shift critique behavior, bump the constant and add a corresponding `prompt_template_versions` row when that table lands. `custom_prompts.template_version` records the version each row was authored against; the request path always renders fragments from the *current* version, so old rows keep working — they just produce slightly-different critiques after a bump (which is the design).
+
+CRUD lives at `/v1/prompts/me`, `/v1/prompts`, `/v1/prompts/:id` (GET/PATCH/DELETE). Same JWT + App Attest gates as `/`.

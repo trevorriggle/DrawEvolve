@@ -17,17 +17,32 @@
 import { handleFeedback } from './routes/feedback.js';
 import { handleAttestChallenge } from './routes/attest/challenge.js';
 import { handleAttestRegister } from './routes/attest/register.js';
+import { handlePrompts } from './routes/prompts.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
+
+// Methods allowed on the legacy POST-only routes (/, /attest/*). The new
+// /v1/prompts/* routes accept GET / POST / PATCH / DELETE — those route
+// matches happen before this gate.
+const POST_ONLY_PATHS = new Set(['/', '/attest/challenge', '/attest/register']);
 
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
-    if (request.method !== 'POST') {
+    const pathname = new URL(request.url).pathname;
+
+    // /v1/prompts/* dispatches all methods to handlePrompts; that route
+    // owns its own method gating and 405s.
+    if (pathname === '/v1/prompts'
+        || pathname === '/v1/prompts/me'
+        || /^\/v1\/prompts\/[^/]+$/.test(pathname)) {
+      return handlePrompts(request, env, ctx);
+    }
+
+    if (POST_ONLY_PATHS.has(pathname) && request.method !== 'POST') {
       return jsonResponse({ error: 'Method not allowed' }, 405);
     }
-    const pathname = new URL(request.url).pathname;
     if (pathname === '/') return handleFeedback(request, env, ctx);
     if (pathname === '/attest/challenge') return handleAttestChallenge(request, env, ctx);
     if (pathname === '/attest/register') return handleAttestRegister(request, env, ctx);
@@ -64,6 +79,14 @@ export {
   VALID_PRESET_IDS,
   DEFAULT_PRESET_ID,
   CUSTOM_PROMPT_PREFIX,
+  PROMPT_TEMPLATE_VERSION,
+  FOCUS_OPTIONS,
+  TONE_OPTIONS,
+  DEPTH_OPTIONS,
+  TECHNIQUE_OPTIONS,
+  validatePromptParameters,
+  renderCustomPromptModifier,
+  selectCustomPromptParameters,
 } from './lib/prompt.js';
 
 export {
