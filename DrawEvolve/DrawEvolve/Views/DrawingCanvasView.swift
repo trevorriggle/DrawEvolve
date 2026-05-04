@@ -915,23 +915,19 @@ struct DrawingCanvasView: View {
         print("  - Current Drawing ID: \(currentDrawingID?.uuidString ?? "nil (new drawing)")")
         print("  - Is editing existing: \(isEditingExisting)")
 
-        // TODO(layered-save): build a LayeredDrawingPayload from canvasState.layers
-        // (read each MTLTexture back to PNG bytes, populate manifest entries with
-        // each layer's stable id/name/opacity/visible/locked/blendMode) and call
-        // storageManager.saveLayeredDrawing / updateLayeredDrawing. The cloud
-        // sync sprint already accepts this payload; the producer is the
-        // remaining piece. Until that lands the save path stays flat-only —
-        // edited layered drawings round-trip *into* the canvas via loadLayered
-        // but get re-flattened on save (acceptable while load is the user-
-        // visible win). Tracked as a follow-up sprint.
-        guard let image = canvasState.exportImage(),
-              let imageData = image.pngData() else {
-            print("❌ ERROR: Failed to export image")
+        // Layered save path (ONLINELAYERSTORE.md §3, §8.2). The producer reads
+        // every layer's MTLTexture back as a lossless RGBA PNG and bundles the
+        // composite JPEG + thumbnail JPEG; the storage manager handles
+        // ordinal/sha rewriting and the legacy → layered upgrade for drawings
+        // that started life as a flat composite.
+        let payloadDrawingID = currentDrawingID ?? UUID()
+        guard let payload = canvasState.exportLayeredPayload(drawingID: payloadDrawingID) else {
+            print("❌ ERROR: Failed to build layered payload from canvas state")
             isSaving = false
             return
         }
 
-        print("  - Image exported: \(imageData.count) bytes")
+        print("  - Layered payload built: \(payload.layerPNGs.count) layer PNG(s), composite=\(payload.compositeJPEG?.count ?? 0) bytes, thumb=\(payload.thumbnailJPEG?.count ?? 0) bytes")
 
         var didSucceed = false
         do {
@@ -941,10 +937,10 @@ struct DrawingCanvasView: View {
                 // The storage manager used to synthesize a new CritiqueEntry on every
                 // save-with-feedback, which duplicated the list indefinitely.
                 print("  - Updating existing drawing with ID: \(drawingID)")
-                try await storageManager.updateDrawing(
+                try await storageManager.updateLayeredDrawing(
                     id: drawingID,
                     title: drawingTitle,
-                    imageData: imageData,
+                    payload: payload,
                     feedback: canvasState.feedback,
                     context: context,
                     critiqueHistory: critiqueHistory
@@ -954,9 +950,9 @@ struct DrawingCanvasView: View {
                 // Create new drawing. Include any critique entries the user already
                 // accumulated in this session before the first save.
                 print("  - Creating new drawing")
-                let savedDrawing = try await storageManager.saveDrawing(
+                let savedDrawing = try await storageManager.saveLayeredDrawing(
                     title: drawingTitle,
-                    imageData: imageData,
+                    payload: payload,
                     feedback: canvasState.feedback,
                     context: context,
                     critiqueHistory: critiqueHistory
@@ -1054,17 +1050,21 @@ struct DrawingCanvasView: View {
             return id
         }
 
-        guard let image = canvasState.exportImage(),
-              let imageData = image.pngData() else {
+        // Auto-save uses the layered path so the Worker's composite read and
+        // the user's next manual save both find a layered row. The
+        // composite.jpg sibling that saveLayeredDrawing writes is what the
+        // Worker pulls via storage_path — the AI-feedback contract is
+        // unchanged (ONLINELAYERSTORE.md §5.5).
+        guard let payload = canvasState.exportLayeredPayload(drawingID: UUID()) else {
             throw OpenAIError.imageEncodingFailed
         }
 
         let title = Self.defaultSketchTitle(for: Date())
         if drawingTitle.isEmpty { drawingTitle = title }
 
-        let saved = try await storageManager.saveDrawing(
+        let saved = try await storageManager.saveLayeredDrawing(
             title: title,
-            imageData: imageData,
+            payload: payload,
             feedback: canvasState.feedback,
             context: context,
             critiqueHistory: critiqueHistory

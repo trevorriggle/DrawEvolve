@@ -473,6 +473,14 @@ class CanvasRenderer: NSObject {
         return UIImage(cgImage: cgImage)
     }
 
+    /// Lossless PNG bytes of a layer texture, alpha preserved.
+    /// Used by the layered save flow (ONLINELAYERSTORE.md §3) to serialize
+    /// each `DrawingLayer.texture` independently. Full-texture readback;
+    /// see PERF_ISSUES.md item on `getBytes` cost.
+    func layerPNGData(of texture: MTLTexture) -> Data? {
+        textureToUIImage(texture)?.pngData()
+    }
+
     /// Generate a thumbnail preview from a layer texture
     func generateThumbnail(from texture: MTLTexture, size: CGSize) -> UIImage? {
         // Create a smaller texture for the thumbnail

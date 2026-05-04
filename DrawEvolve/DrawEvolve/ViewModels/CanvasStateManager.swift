@@ -538,6 +538,106 @@ class CanvasStateManager: ObservableObject {
         layers.count > cap
     }
 
+    /// Build a `LayeredDrawingPayload` from the live layer stack so the save
+    /// flow can call `saveLayeredDrawing` / `updateLayeredDrawing` instead of
+    /// the legacy flat-image path. Per ONLINELAYERSTORE.md §3:
+    ///   - each layer is read back as a lossless RGBA PNG via the renderer;
+    ///   - opacity, visibility, locked, blendMode, stable id, and stack order
+    ///     round-trip through the manifest;
+    ///   - the composite JPEG (white-backed) keeps the AI-feedback / Worker
+    ///     contract unchanged and seeds the gallery thumbnail.
+    ///
+    /// Returns nil only when no layer texture could be read back at all.
+    /// Per-layer readback failures are logged and that ordinal is dropped —
+    /// `normalizeManifestForUpload` will renumber the survivors so the
+    /// uploaded manifest stays consistent.
+    ///
+    /// `drawingID` is advisory: storage manager rewrites
+    /// `manifest.drawing_id` and per-layer asset paths in
+    /// `normalizeManifestForUpload`. Pass the row id for updates and any
+    /// fresh UUID for new saves.
+    func exportLayeredPayload(drawingID: UUID) -> LayeredDrawingPayload? {
+        guard let renderer = renderer, !layers.isEmpty else { return nil }
+
+        var layerPNGs: [Data] = []
+        var manifestLayers: [LayeredDrawingManifest.Layer] = []
+
+        for (idx, layer) in layers.enumerated() {
+            // Lazy-init: a layer the user added but never drew on arrives
+            // with .texture == nil (texture creation runs on the next Metal
+            // draw cycle). Materialize an empty layer texture so we still
+            // preserve the slot in the manifest.
+            let tex = layer.texture ?? renderer.createLayerTexture()
+            guard let texture = tex,
+                  let png = renderer.layerPNGData(of: texture) else {
+                print("⚠️ exportLayeredPayload: failed to read layer \(idx) '\(layer.name)' — dropping from save")
+                continue
+            }
+            layerPNGs.append(png)
+
+            manifestLayers.append(LayeredDrawingManifest.Layer(
+                ordinal: idx,
+                id: layer.id.uuidString.lowercased(),
+                name: layer.name,
+                opacity: layer.opacity,
+                visible: layer.isVisible,
+                locked: layer.isLocked,
+                blendMode: layer.blendMode.rawValue,
+                asset: LayeredDrawingFilenames.layer(ordinal: idx),
+                assetSha256: "",
+                bbox: nil
+            ))
+        }
+
+        guard !layerPNGs.isEmpty else {
+            print("❌ exportLayeredPayload: every layer readback failed")
+            return nil
+        }
+
+        let composite = exportImage()
+        let compositeJPEG = composite?.jpegData(compressionQuality: 0.9)
+        let thumbnailJPEG = composite.flatMap { layeredThumbnailJPEG(from: $0) }
+
+        let manifest = LayeredDrawingManifest(
+            formatVersion: Self.supportedManifestVersion,
+            drawingId: drawingID.uuidString.lowercased(),
+            document: .init(
+                width: Int(documentSize.width.rounded()),
+                height: Int(documentSize.height.rounded()),
+                colorSpace: "srgb",
+                pixelFormat: "rgba8_premultiplied"
+            ),
+            layers: manifestLayers,
+            thumbnail: LayeredDrawingFilenames.thumbnail,
+            composite: compositeJPEG != nil ? LayeredDrawingFilenames.composite : nil
+        )
+
+        return LayeredDrawingPayload(
+            manifest: manifest,
+            layerPNGs: layerPNGs,
+            compositeJPEG: compositeJPEG,
+            thumbnailJPEG: thumbnailJPEG
+        )
+    }
+
+    /// Aspect-fit JPEG thumbnail at scale 1.0 so 1 UIImage point = 1 backing
+    /// pixel (matches the gallery's existing 256-pt thumbnail size and
+    /// ONLINELAYERSTORE.md §7.4).
+    private func layeredThumbnailJPEG(from image: UIImage, maxDim: CGFloat = 256, quality: CGFloat = 0.8) -> Data? {
+        let largest = max(image.size.width, image.size.height)
+        guard largest > maxDim else {
+            return image.jpegData(compressionQuality: quality)
+        }
+        let scale = maxDim / largest
+        let newSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = true
+        let r = UIGraphicsImageRenderer(size: newSize, format: format)
+        let resized = r.image { _ in image.draw(in: CGRect(origin: .zero, size: newSize)) }
+        return resized.jpegData(compressionQuality: quality)
+    }
+
     /// Import a photo onto a brand-new layer, sized aspect-fit and centered
     /// on the document. The user can reposition with the Move tool.
     /// (Corner scale/rotate handles are deferred — see audit doc.)

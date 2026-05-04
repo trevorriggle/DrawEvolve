@@ -97,3 +97,13 @@ As of 2026-05-04, the iOS-side load half of layered storage is in. `DrawingLayer
 Save-side producer (canvas → `LayeredDrawingPayload`) is **not** in this PR — it requires reading each MTLTexture back to PNG bytes, which is renderer-side work that didn't fall out naturally from the load wiring. Marked with `TODO(layered-save):` in `DrawingCanvasView.saveDrawing`. Until that lands, edited layered drawings round-trip *into* the canvas via `loadLayered` but get re-flattened on save (acceptable while load is the user-visible win — legacy drawings haven't been re-saved as layered yet anyway, so this only affects user testing of the upgrade path).
 
 Tier enforcement on load (§6.4) is exposed as `CanvasStateManager.isOverLayerCap(_:)` — a read-only check the save UI can gate on. There's no iOS user-tier system yet, so the actual save-button block is wired in whenever subscription tier lands.
+
+---
+
+## Layered drawing storage — save-side producer landed (end-to-end)
+
+As of 2026-05-04, the save half of layered storage is in. `CanvasStateManager.exportLayeredPayload(drawingID:)` reads each `DrawingLayer.texture` back as a lossless RGBA PNG via a new public `CanvasRenderer.layerPNGData(of:)` (thin wrapper over the existing `textureToUIImage`), assembles the manifest with each layer's stable id / opacity / visibility / locked / blendMode / ordinal, and bundles a JPEG composite + 256-pt thumbnail for the gallery and the AI-feedback contract. `DrawingCanvasView.saveDrawing` and `ensureDrawingPersistedToCloud` both call `saveLayeredDrawing` / `updateLayeredDrawing` instead of the legacy flat methods. Layered storage is now end-to-end: drawings save layered, load layered, and round-trip without flattening.
+
+Per-layer readback uses a full `MTLTexture.getBytes` — same shape as the existing composite export, so no new perf debt versus today, but multiplied by N layers. The PERF_ISSUES.md item on full-texture `getBytes` covers this; tighter regional reads are deferred. Empty / never-drawn-on layers (texture lazily nil at save time) are rescued via `renderer.createLayerTexture()` so the manifest preserves the slot.
+
+Legacy flat-only drawings auto-upgrade on next save through `updateLayeredDrawing`'s `wasLegacy` branch — old `images/<id>.jpg` is dropped locally and the legacy cloud objects are best-effort deleted by the upload pipeline after the row upsert succeeds (per `ONLINELAYERSTORE.md` §8.2). The legacy `saveDrawing` / `updateDrawing` methods on `CloudDrawingStorageManager` remain in place but are no longer called from the iOS app — kept for now as a future-proof rollback lever rather than removed in the same PR as the wiring.
