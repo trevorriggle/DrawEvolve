@@ -29,6 +29,13 @@ import {
   getUserTier,
 } from '../middleware/auth.js';
 import {
+  readAppAttestHeaders,
+  getAttestedKey,
+  computeAppAttestClientDataHash,
+  verifyAppAttestAssertion,
+  updateAttestedKeyCounter,
+} from '../middleware/app-attest.js';
+import {
   enforceRateLimits,
   recordSuccessfulCritique,
   sha256Hex,
@@ -433,6 +440,9 @@ export async function handleFeedback(request, env, ctx) {
   const ipHash = await sha256Hex(ip || 'unknown');
 
   // Phase 5a — auth gate. Anything other than a valid Supabase JWT → 401.
+  // Runs FIRST, before App Attest: JWT proves who the user is and is the
+  // cheapest gate (module-cached JWKS). App Attest is a separate, equally
+  // load-bearing gate that runs second below — both must pass.
   const token = request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ?? null;
   let payload;
   try {
@@ -444,14 +454,78 @@ export async function handleFeedback(request, env, ctx) {
     ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, ipHash }));
     return unauthorized();
   }
-  const userId = payload.sub; // Supabase auth.uid() is always lowercase.
+  // Supabase auth.uid() is always lowercase. App Attest produces a separate
+  // device identifier extracted at its own gate; downstream code (rate limits,
+  // billing, request scoping) treats user identity and device identity as
+  // distinct keys, not a composite.
+  const userId = payload.sub;
 
   let drawingIdLower = null; // available to the catch block once parsed
   try {
-    const body = await request.json().catch(() => null);
+    // Phase 5f — read raw bytes so we can both (a) compute the App Attest
+    // clientDataHash over the exact bytes the client signed and (b) parse
+    // them as JSON for the existing critique flow. request.json() consumes
+    // the body, so we must do it ourselves.
+    const rawBody = new Uint8Array(await request.arrayBuffer());
+    let body = null;
+    try { body = JSON.parse(new TextDecoder().decode(rawBody)); }
+    catch { body = null; }
     if (!body || typeof body !== 'object') {
       ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, ipHash }));
       return jsonResponse({ error: 'Invalid request body' }, 400);
+    }
+
+    // Phase 5f — App Attest assertion gate. Runs after JWT (so we know
+    // who's calling) and after body parse (so the hash is over the exact
+    // bytes the client signed) but before all other validation (so
+    // unattested devices can't probe other endpoint behavior). Failures
+    // return 401 with a stable error code — clients use the code to decide
+    // whether to wipe their cached keyId and re-register.
+    const attestHeaders = readAppAttestHeaders(request);
+    if (!attestHeaders) {
+      console.log('[attest] missing headers from authed user', userId);
+      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+      return jsonResponse({ error: 'attest_headers_missing' }, 401);
+    }
+    const stored = await getAttestedKey(attestHeaders.keyId, env);
+    if (!stored) {
+      // Either the device never registered, or its TTL expired in KV.
+      // A distinct code lets the client wipe + re-register without
+      // confusing this with a JWT failure.
+      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+      return jsonResponse({ error: 'attest_key_unknown' }, 401);
+    }
+    // Production env keys must not be accepted in development (or vice
+    // versa) — they're cryptographically distinguishable via AAGUID at
+    // registration, but cross-env replay is still worth gating here.
+    const expectedEnv = env.APP_ATTEST_ENV === 'production' ? 'production' : 'development';
+    if (stored.env !== expectedEnv) {
+      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+      return jsonResponse({ error: 'attest_env_mismatch' }, 401);
+    }
+    const expectedClientDataHash = await computeAppAttestClientDataHash(
+      request.method,
+      new URL(request.url).pathname || '/',
+      rawBody,
+    );
+    try {
+      const { newCounter } = await verifyAppAttestAssertion({
+        assertionB64: attestHeaders.assertion,
+        storedPubKey: stored.pub,
+        storedCounter: stored.counter,
+        expectedClientDataHash,
+        env,
+      });
+      // Fire-and-forget the counter update so a KV blip doesn't block the
+      // user. A counter that fails to persist just means the next request
+      // will see the same storedCounter — assertion verification still
+      // requires newCounter > storedCounter, so the worst case is a one-
+      // request replay window which the IP/user rate limits already bound.
+      ctx.waitUntil(updateAttestedKeyCounter(attestHeaders.keyId, newCounter, env));
+    } catch (err) {
+      console.log('[attest] assertion failed', err?.message);
+      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+      return jsonResponse({ error: 'attest_assertion_invalid' }, 401);
     }
 
     const { image, context, drawingId, client_request_id: clientRequestIdRaw } = body;

@@ -1,12 +1,13 @@
 // DrawEvolve Worker — top-level router.
 //
 // Per-route logic lives under routes/. Shared primitives live under
-// middleware/ (auth, rate-limit, idempotency) and lib/ (prompt assembly,
-// HTTP scaffolding, Supabase REST helper).
+// middleware/ (auth, rate-limit, idempotency, app-attest) and lib/ (prompt
+// assembly, HTTP scaffolding, Supabase REST helper).
 //
 // The legacy single endpoint (POST /) is the AI critique flow handled by
-// routes/feedback.js. Future routes (custom prompts, social, credits) get
-// dispatched here.
+// routes/feedback.js. /attest/challenge and /attest/register are unauth'd
+// device registration endpoints — they intentionally run BEFORE the JWT
+// gate so first-launch registration works without a session token.
 //
 // The named re-exports at the bottom of this file preserve the historical
 // import surface for test.mjs (and any future tooling that imports from
@@ -14,6 +15,8 @@
 // add it here.
 
 import { handleFeedback } from './routes/feedback.js';
+import { handleAttestChallenge } from './routes/attest/challenge.js';
+import { handleAttestRegister } from './routes/attest/register.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 export default {
@@ -21,10 +24,14 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
-    if (request.method === 'POST' && new URL(request.url).pathname === '/') {
-      return handleFeedback(request, env, ctx);
+    if (request.method !== 'POST') {
+      return jsonResponse({ error: 'Method not allowed' }, 405);
     }
-    return jsonResponse({ error: 'Method not allowed' }, 405);
+    const pathname = new URL(request.url).pathname;
+    if (pathname === '/') return handleFeedback(request, env, ctx);
+    if (pathname === '/attest/challenge') return handleAttestChallenge(request, env, ctx);
+    if (pathname === '/attest/register') return handleAttestRegister(request, env, ctx);
+    return jsonResponse({ error: 'Not found' }, 404);
   },
 };
 
@@ -60,9 +67,28 @@ export {
 } from './lib/prompt.js';
 
 export {
+  validateJWT,
   validateWorkerConfig,
   getUserTier,
+  _resetJwksCacheForTests,
 } from './middleware/auth.js';
+
+export {
+  bytesEqual,
+  bytesToHex,
+  hexToBytes,
+  cborDecode,
+  ecdsaDerToRaw,
+  computeAppAttestClientDataHash,
+  verifyAppAttestAttestation,
+  verifyAppAttestAssertion,
+  issueAppAttestChallenge,
+  consumeAppAttestChallenge,
+  storeAttestedKey,
+  getAttestedKey,
+  updateAttestedKeyCounter,
+  readAppAttestHeaders,
+} from './middleware/app-attest.js';
 
 export {
   TIER_LIMITS,

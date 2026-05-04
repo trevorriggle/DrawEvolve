@@ -36,3 +36,13 @@ Permanent error-body logging on non-ok OpenAI responses is in place — any futu
 - `authandratelimitingandsecurity.md` — auth + rate-limiting + security implementation notes.
 - `PERF_ISSUES.md` — performance issues queue.
 - `PIPELINE_FEATURES.md` — feature pipeline.
+
+---
+
+## App Attest is layered on top of JWT, not a replacement
+
+Phase 5f wires Apple App Attest as a second factor alongside Supabase JWT. JWT proves who the user is; App Attest proves the request comes from a real DrawEvolve install on a real Apple device. **Both must pass** for any protected request — the worker rejects with a stable `attest_*` error code when only JWT validates.
+
+`APPLE_ATTEST_ROOT_PUBKEY_HEX` in `cloudflare-worker/middleware/app-attest.js` is intentionally empty. `/attest/register` fail-closes with HTTP 500 `attest_root_not_pinned` until the operator pastes the Apple App Attest Root CA's uncompressed P-384 public key (extraction recipe is in `cloudflare-worker/DEPLOYMENT.md` — Phase 5f section). This is a deliberate gate: a deploy that forgot the root pin would otherwise silently accept forged attestations. The pubkey lives as a source constant — not a wrangler env var — so a deploy can never accidentally pair the wrong root with the wrong worker version.
+
+iOS-side, App Attest only works on real hardware (`DCAppAttestService.shared.isSupported == false` on the simulator). Test on device, not in the simulator.

@@ -6,5 +6,11 @@
 	<array>
 		<string>Default</string>
 	</array>
+	<!-- App Attest. Use "development" for debug/TestFlight builds; flip to
+	     "production" before App Store submission. The string here selects
+	     which Apple endpoints DCAppAttestService talks to and which AAGUID
+	     the resulting attestation carries — the Worker checks both. -->
+	<key>com.apple.developer.devicecheck.appattest-environment</key>
+	<string>development</string>
 </dict>
 </plist>
