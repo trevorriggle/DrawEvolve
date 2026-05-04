@@ -308,7 +308,7 @@ Optionally also add (small, cheap, useful):
 Migration sketch (not run):
 
 ```sql
--- supabase/migrations/0006_layered_drawings.sql
+-- supabase/migrations/0007_layered_drawings.sql
 alter table public.drawings
     add column if not exists manifest_path text,
     add column if not exists format_version int,

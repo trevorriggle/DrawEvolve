@@ -37,7 +37,7 @@ This plan **extends** the existing stack — it does not redesign auth, identity
 
 The single most important addition. Everything else depends on it.
 
-**Schema** (new migration `0006_profiles.sql`):
+**Schema** (new migration `0008_profiles.sql`):
 
 ```sql
 create table public.profiles (
@@ -698,7 +698,7 @@ For deep-linking to a profile or post, decide:
 Ordered by dependency. Each phase is shippable and testable.
 
 **Phase A — Foundations (no user-visible change)**
-- Migration `0006_profiles.sql` + auto-create trigger.
+- Migration `0008_profiles.sql` + auto-create trigger.
 - `avatars` bucket.
 - Worker: `GET /v1/me`, `PATCH /v1/profiles/me`, avatar upload.
 - iOS: backfill auto-create check in `AuthManager`.
@@ -709,29 +709,29 @@ Ordered by dependency. Each phase is shippable and testable.
 - New `ProfileView` (read-only, your own profile only).
 
 **Phase C — Posts (public + unlisted only)**
-- Migration `0007_posts.sql` + `posts` bucket.
+- Migration `0009_posts.sql` + `posts` bucket.
 - Worker: `POST /v1/posts`, `DELETE /v1/posts/:id`, `GET /v1/posts/:id`.
 - iOS: `PublishSheet`, `PostDetailView`, "Publish" entry from `DrawingDetailView`.
 - Soft-delete + 30-day Storage purge job.
 
 **Phase D — Reactions (binary like only at this stage)**
-- Migration `0008_reactions.sql` + counts trigger.
+- Migration `0010_reactions.sql` + counts trigger.
 - Worker: `POST /v1/posts/:id/reactions`, delete, registry-config with `kind='like'` only.
 - iOS: heart button on `PostDetailView`.
 
 **Phase E — Comments**
-- Migration `0009_comments.sql`.
+- Migration `0011_comments.sql`.
 - Worker: comment CRUD endpoints.
 - iOS: `CommentComposerView`, comments in `PostDetailView`.
 
 **Phase F — Follows + feeds + search**
-- Migration `0010_follows.sql` + counts triggers.
-- Migration `0011_blocks_and_reports.sql` (block list + report endpoint — required before this phase ships).
+- Migration `0012_follows.sql` + counts triggers.
+- Migration `0013_blocks_and_reports.sql` (block list + report endpoint — required before this phase ships).
 - Worker: follow CRUD, feed endpoints, search endpoint, report endpoint.
 - iOS: `FeedView`, `SearchView`, `ProfileView` (others'), `FollowListView`.
 
 **Phase G — Notifications inbox (MVP)**
-- Migration `0012_notifications.sql` + Worker writes from B/D/E/F.
+- Migration `0014_notifications.sql` + Worker writes from B/D/E/F.
 - iOS: simple unread-count badge + inbox view.
 - No push yet.
 
