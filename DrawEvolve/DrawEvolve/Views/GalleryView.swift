@@ -84,8 +84,7 @@ struct GalleryView: View {
                     case .prompts:
                         myPromptsView
                     case .evolution:
-                        // TODO: Implement My Evolution. Placeholder for visual scaffolding.
-                        comingSoonView(icon: "chart.line.uptrend.xyaxis", title: "My Evolution")
+                        EvolutionView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

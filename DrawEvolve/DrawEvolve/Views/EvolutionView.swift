@@ -2,18 +2,26 @@
 //  EvolutionView.swift
 //  DrawEvolve
 //
-//  My Evolution dashboard. Reachable from the chart icon in the canvas
-//  chrome (DrawingCanvasView). Loads GET /v1/me/evolution on appear,
-//  supports pull-to-refresh, switches between four state-specific layouts.
+//  My Evolution dashboard. Lives as the body of the "My Evolution" tab in
+//  GalleryView (sibling to "My Drawings" and "My Prompts"). Loads
+//  GET /v1/me/evolution on appear, supports pull-to-refresh, switches
+//  between four state-specific layouts.
+//
+//  Embeds inside GalleryView's NavigationStack — does NOT wrap itself in a
+//  NavigationView/Stack. The tab strip in GalleryView is the visual title;
+//  no .navigationTitle here on purpose. The example-state CTA's dismiss()
+//  walks up to the gallery presentation context (a fullScreenCover from
+//  DrawingCanvasView), which is the right behavior — closes the gallery
+//  and returns to the canvas so the user can start drawing.
 //
 //  ───────────────────────────────────────────────────────────────────────
 //  MANUAL SMOKE TESTS — run after each significant change to this surface
 //  ───────────────────────────────────────────────────────────────────────
-//  1. Build to iPad. Tap the chart icon in the canvas chrome.
-//  2. Confirm sheet opens, loading spinner appears, then content loads.
+//  1. Build to iPad. Open the gallery, tap the "My Evolution" tab.
+//  2. Confirm loading spinner appears, then content loads.
 //  3. With 0 critiques: example state. example_artist_label banner reads as
 //     a label (not a hero), chart populated, CTA button visible. Tap CTA →
-//     sheet dismisses.
+//     gallery dismisses back to canvas.
 //  4. With 1-2 critiques: early state. summary_text is the headline. No
 //     chart. Warming-up may or may not appear.
 //  5. With 3-9 critiques: growing state. summary_text as subhead. Chart
@@ -23,6 +31,8 @@
 //     code handles it gracefully if it ever returns).
 //  7. With network off: error state. Tap "Try again" — confirms retry path.
 //  8. Pull-to-refresh from any loaded state — confirm reload.
+//  9. Switch to another tab and back — confirm re-load fires (.task is
+//     bound to the tab body lifetime, so each tab visit refreshes data).
 //
 
 import SwiftUI
@@ -32,18 +42,9 @@ struct EvolutionView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationView {
-            content
-                .navigationTitle("My Evolution")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Done") { dismiss() }
-                    }
-                }
-                .task { await viewModel.load() }
-                .refreshable { await viewModel.load() }
-        }
+        content
+            .task { await viewModel.load() }
+            .refreshable { await viewModel.load() }
     }
 
     @ViewBuilder
@@ -87,5 +88,5 @@ struct EvolutionView: View {
 }
 
 #Preview {
-    EvolutionView()
+    NavigationStack { EvolutionView() }
 }
