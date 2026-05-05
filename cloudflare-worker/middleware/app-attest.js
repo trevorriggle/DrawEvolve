@@ -58,7 +58,7 @@ const APP_ATTEST_AAGUID_PROD = (() => {
 // This lives as a source constant (NOT a wrangler env var) on purpose: the
 // root pubkey is bundled with worker code so a deploy can never accidentally
 // pair a worker version with the wrong root.
-const APPLE_ATTEST_ROOT_PUBKEY_HEX = '';
+const APPLE_ATTEST_ROOT_PUBKEY_HEX = '044531e198b5b4ec04da1502045704ed4f877272d76135b26116cfc88b615d0a000719ba69858dfe77caa3b839e020ddd656141404702831e43f70b88fd6c394b608ea2bd6ae61e9f598c12f46af52937266e57f14eb61fec530f7144f53812e35';
 
 // ---- byte / encoding helpers ----------------------------------------------
 
