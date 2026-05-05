@@ -58,6 +58,12 @@ struct MetalCanvasView: UIViewRepresentable {
     var canvasState: CanvasStateManager? // For sharing renderer/screen size
     var onTextRequest: ((CGPoint) -> Void)? // Callback for text tool
 
+    /// Global symmetry / mirror config. Plain reference (not @ObservedObject)
+    /// — the touch handlers read `symmetry.mode` per-stamp; we don't need
+    /// SwiftUI re-evaluations of MetalCanvasView when the mode flips. Same
+    /// pattern as `canvasState`.
+    var symmetry: SymmetryConfig
+
     func makeUIView(context: Context) -> MTKView {
         let metalView = TouchEnabledMTKView()
 
@@ -127,7 +133,8 @@ struct MetalCanvasView: UIViewRepresentable {
             brushSettings: $brushSettings,
             selectedLayerIndex: $selectedLayerIndex,
             canvasState: canvasState,
-            onTextRequest: onTextRequest
+            onTextRequest: onTextRequest,
+            symmetry: symmetry
         )
     }
 
@@ -149,6 +156,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var lassoPath: [CGPoint] = [] // For lasso selection
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
+        private let symmetry: SymmetryConfig
         private var isDraggingSelection = false // Track if we're dragging a selection
         private var selectionDragStart: CGPoint? // Where the drag started (doc space)
         // Screen-space start of a rectangle-marquee drag. We store the SCREEN
@@ -167,7 +175,8 @@ struct MetalCanvasView: UIViewRepresentable {
             brushSettings: Binding<BrushSettings>,
             selectedLayerIndex: Binding<Int>,
             canvasState: CanvasStateManager?,
-            onTextRequest: ((CGPoint) -> Void)?
+            onTextRequest: ((CGPoint) -> Void)?,
+            symmetry: SymmetryConfig
         ) {
             _layers = layers
             _currentTool = currentTool
@@ -175,6 +184,7 @@ struct MetalCanvasView: UIViewRepresentable {
             _selectedLayerIndex = selectedLayerIndex
             self.canvasState = canvasState
             self.onTextRequest = onTextRequest
+            self.symmetry = symmetry
 
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
         }
@@ -702,8 +712,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 timestamp: timestamp
             )
 
+            // Symmetry: mirror the initial stamp too. A single tap (no drag)
+            // should still produce mirrored stamps. `lastPoint` stays at the
+            // original location only — the spacing-interpolation chain in
+            // touchesMoved follows the user's actual finger/pencil path; the
+            // mirrors piggyback per stamp without participating in the chain.
+            let symmetryDocSize = MainActor.assumeIsolated {
+                canvasState?.documentSize ?? .zero
+            }
+            let initialMirrors = mirroredPoints([point], in: symmetryDocSize, mode: symmetry.mode)
+            let initialPoints = [point] + initialMirrors
+
             currentStroke = BrushStroke(
-                points: [point],
+                points: initialPoints,
                 settings: brushSettings,
                 tool: currentTool,
                 layerId: layers[selectedLayerIndex].id
@@ -711,7 +732,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             lastPoint = location
             lastTimestamp = timestamp
-            print("Created stroke with 1 point")
+            print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -810,6 +831,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // the committed stamps are displayed via the compositor
                 // (which re-applies the transform) they end up screen-aligned.
                 // Line is rotation-invariant so it stays in doc space.
+                let originals: [BrushStroke.StrokePoint]
                 if let canvasState = canvasState,
                    let startScreen = shapeStartScreen,
                    (currentTool == .rectangle || currentTool == .circle) {
@@ -824,7 +846,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         pressure: endPressure,
                         timestamp: touch.timestamp
                     )
-                    stroke.points = screenPoints.map { sp in
+                    originals = screenPoints.map { sp in
                         BrushStroke.StrokePoint(
                             location: canvasState.screenToDocument(sp.location),
                             pressure: sp.pressure,
@@ -832,7 +854,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         )
                     }
                 } else {
-                    stroke.points = generateShapePoints(
+                    originals = generateShapePoints(
                         from: startPoint,
                         to: latestLocation,
                         tool: currentTool,
@@ -840,6 +862,16 @@ struct MetalCanvasView: UIViewRepresentable {
                         timestamp: touch.timestamp
                     )
                 }
+                // Symmetry: shape stroke.points are wholesale-replaced on
+                // every touchesMoved (the current shape is regenerated as
+                // the user drags). Pass the SAME mirroredPoints function
+                // that the brush/eraser path uses — guaranteed identical
+                // mirror rules — and replace with originals + mirrors.
+                let docSize = MainActor.assumeIsolated {
+                    canvasState?.documentSize ?? .zero
+                }
+                let mirrors = mirroredPoints(originals, in: docSize, mode: symmetry.mode)
+                stroke.points = originals + mirrors
                 currentStroke = stroke
             } else {
                 // Regular brush/eraser: iterate every coalesced sample so Apple Pencil
@@ -860,6 +892,13 @@ struct MetalCanvasView: UIViewRepresentable {
 
                         if distance > spacing {
                             let steps = Int(ceil(distance / spacing))
+                            // Track the index where this batch's originals
+                            // begin so we can slice them out for mirroring
+                            // after the inner loop. Mirrors are appended as
+                            // a single batch AFTER the originals so the
+                            // inner loop's `previousPressure` read keeps
+                            // chaining off the original side, not a mirror.
+                            let originalsStartIndex = stroke.points.count
                             for i in 1...steps {
                                 let t = CGFloat(i) / CGFloat(steps)
                                 let interpLocation = CGPoint(
@@ -885,6 +924,21 @@ struct MetalCanvasView: UIViewRepresentable {
                                     pressure: interpPressure.isFinite ? interpPressure : 1.0,
                                     timestamp: sampleTimestamp
                                 ))
+                            }
+                            // Symmetry: mirror the originals we just
+                            // appended (this batch only, not the whole
+                            // stroke). When mode == .off this is a no-op.
+                            // Mid-stroke mode change applies to NEW stamps
+                            // only — earlier stamps stay where they were
+                            // (per spec, by natural property of this
+                            // batch-based integration).
+                            if symmetry.mode != .off {
+                                let docSize = MainActor.assumeIsolated {
+                                    canvasState?.documentSize ?? .zero
+                                }
+                                let originalsBatch = Array(stroke.points[originalsStartIndex..<stroke.points.count])
+                                let mirrors = mirroredPoints(originalsBatch, in: docSize, mode: symmetry.mode)
+                                stroke.points.append(contentsOf: mirrors)
                             }
                             // Only advance lastPoint AFTER stamps are
                             // committed. Updating it on every sample
@@ -1163,6 +1217,133 @@ struct MetalCanvasView: UIViewRepresentable {
                     canvasState.previewLassoPath = nil
                 }
             }
+        }
+
+        // MARK: - Symmetry mirroring
+        //
+        // Single source of truth used by BOTH the brush/eraser path
+        // (touchesMoved per-stamp batches) and the shape path
+        // (generateShapePoints results). Returns ONLY the mirrored copies —
+        // callers already have the originals. Empty when symmetry is off
+        // or in radial mode (radial lands in C3).
+
+        /// Reflect a list of stroke points according to the current symmetry
+        /// mode. Caller passes in the originals; we return the mirror set
+        /// (excluding the originals). Doc-space input/output: mirror axes
+        /// run through the center of the document, which means under canvas
+        /// rotation the axes rotate with the canvas for free — the touch
+        /// handlers already work in doc space (`screenToDocument` is
+        /// rotation-aware).
+        private func mirroredPoints(_ points: [BrushStroke.StrokePoint],
+                                    in docSize: CGSize,
+                                    mode: SymmetryConfig.Mode) -> [BrushStroke.StrokePoint] {
+            guard !points.isEmpty,
+                  docSize.width > 0,
+                  docSize.height > 0 else { return [] }
+            switch mode {
+            case .off:
+                return []
+            case .axis(let cfg):
+                return axisMirroredPoints(points, in: docSize, config: cfg)
+            case .radial(let sections):
+                return radialMirroredPoints(points, in: docSize, sections: sections)
+            }
+        }
+
+        /// Pure axis reflection. Produces 1, 1, or 3 mirror copies per
+        /// original depending on which axes are active:
+        ///   - Y-axis only:   (x, y) → (W − x, y)
+        ///   - X-axis only:   (x, y) → (x, H − y)
+        ///   - Both axes:     above two PLUS the diagonal (W − x, H − y)
+        /// Empty input or both-flags-false yields []. Pressure and
+        /// timestamp copy through unchanged — mirrors share the same
+        /// dynamics as their originals.
+        private func axisMirroredPoints(_ points: [BrushStroke.StrokePoint],
+                                        in docSize: CGSize,
+                                        config: SymmetryConfig.AxisConfig) -> [BrushStroke.StrokePoint] {
+            guard config.yAxis || config.xAxis else { return [] }
+            let W = docSize.width
+            let H = docSize.height
+            var result: [BrushStroke.StrokePoint] = []
+            // Reserve up to 3 mirror copies per point so the array doesn't
+            // realloc during a long stroke append.
+            result.reserveCapacity(points.count * 3)
+
+            if config.yAxis {
+                for p in points {
+                    result.append(BrushStroke.StrokePoint(
+                        location: CGPoint(x: W - p.location.x, y: p.location.y),
+                        pressure: p.pressure,
+                        timestamp: p.timestamp
+                    ))
+                }
+            }
+            if config.xAxis {
+                for p in points {
+                    result.append(BrushStroke.StrokePoint(
+                        location: CGPoint(x: p.location.x, y: H - p.location.y),
+                        pressure: p.pressure,
+                        timestamp: p.timestamp
+                    ))
+                }
+            }
+            if config.yAxis && config.xAxis {
+                for p in points {
+                    result.append(BrushStroke.StrokePoint(
+                        location: CGPoint(x: W - p.location.x, y: H - p.location.y),
+                        pressure: p.pressure,
+                        timestamp: p.timestamp
+                    ))
+                }
+            }
+            return result
+        }
+
+        /// Pure rotation around the canvas center. For each original
+        /// stamp, produces `sections - 1` additional stamps at angles
+        /// 2π·k/N for k ∈ 1..<N around (W/2, H/2). No reflection
+        /// (kaleidoscope is explicitly out of v1 spec).
+        ///
+        /// Math (per locked spec, do not reorder):
+        ///   rotated_x = cx + (x − cx)·cos(θ) − (y − cy)·sin(θ)
+        ///   rotated_y = cy + (x − cx)·sin(θ) + (y − cy)·cos(θ)
+        ///
+        /// Edge cases:
+        /// - sections < 2 returns [] (1 section is a no-op; spec lower
+        ///   bound is 2). The picker's stepper is also clamped to 2…16.
+        /// - A stamp landing exactly on the center point produces
+        ///   `sections - 1` copies all at the center. Visually identical
+        ///   to a single stamp; not a crash, no special handling needed.
+        /// - Trig precision at N=16 is well within float tolerance —
+        ///   ~1 ULP per cos/sin call, invisible at canvas pixel scale.
+        private func radialMirroredPoints(_ points: [BrushStroke.StrokePoint],
+                                          in docSize: CGSize,
+                                          sections: Int) -> [BrushStroke.StrokePoint] {
+            guard sections >= 2, !points.isEmpty else { return [] }
+            let cx = docSize.width / 2
+            let cy = docSize.height / 2
+
+            var result: [BrushStroke.StrokePoint] = []
+            result.reserveCapacity(points.count * (sections - 1))
+
+            // k = 1..<sections; k = 0 is the original (caller already has it).
+            for k in 1..<sections {
+                let theta = 2.0 * Double.pi * Double(k) / Double(sections)
+                let cosT = CGFloat(cos(theta))
+                let sinT = CGFloat(sin(theta))
+                for p in points {
+                    let dx = p.location.x - cx
+                    let dy = p.location.y - cy
+                    let rotatedX = cx + dx * cosT - dy * sinT
+                    let rotatedY = cy + dx * sinT + dy * cosT
+                    result.append(BrushStroke.StrokePoint(
+                        location: CGPoint(x: rotatedX, y: rotatedY),
+                        pressure: p.pressure,
+                        timestamp: p.timestamp
+                    ))
+                }
+            }
+            return result
         }
 
         // MARK: - Shape Generation

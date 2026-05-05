@@ -30,6 +30,12 @@ struct DrawingCanvasView: View {
     @State private var showColorPicker = false
     @State private var showLayerPanel = false
     @State private var showBrushSettings = false
+    @State private var showSymmetrySettings = false
+
+    // Global symmetry / mirror state. Owned by the canvas view so it
+    // outlives any single tool selection — symmetry is a persistent mode,
+    // not a per-tool toggle. Hydrates from UserDefaults on init.
+    @StateObject private var symmetry = SymmetryConfig()
 
     // Text tool
     @State private var showTextInput = false
@@ -81,7 +87,8 @@ struct DrawingCanvasView: View {
                     textInputLocation = location
                     textToRender = ""
                     showTextInput = true
-                }
+                },
+                symmetry: symmetry
             )
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
@@ -206,6 +213,17 @@ struct DrawingCanvasView: View {
                     .allowsHitTesting(false)
                     .ignoresSafeArea()
             }
+
+            // Symmetry guides — dashed reference lines for the active
+            // mirror mode. Static (not animated; marching ants is for
+            // selection feedback, guides are persistent). Coordinate
+            // pattern matches MarchingAntsPath: doc-space endpoints
+            // mapped through canvasState.documentToScreen so the guides
+            // rotate / zoom / pan with the canvas. allowsHitTesting(false)
+            // is baked into the overlay; ignoresSafeArea handled here so
+            // the canvas's full-bleed layout matches.
+            SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
+                .ignoresSafeArea()
 
             // Free-transform handles for the active floating selection
             // (rect/lasso/import). Sits above the marching ants overlays so
@@ -371,6 +389,17 @@ struct DrawingCanvasView: View {
                             // Layers
                             ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
                                 showLayerPanel.toggle()
+                            }
+
+                            // Symmetry / mirror sub-nav. Selection state on the
+                            // button reflects EITHER the sheet being open OR the
+                            // mode being active, so the user can tell at a glance
+                            // whether symmetry is on without opening the sheet.
+                            ToolButton(
+                                icon: "square.split.2x1",
+                                isSelected: showSymmetrySettings || symmetry.mode != .off
+                            ) {
+                                showSymmetrySettings.toggle()
                             }
 
                             // Dark mode toggle
@@ -607,6 +636,20 @@ struct DrawingCanvasView: View {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") {
                                 showBrushSettings = false
+                            }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showSymmetrySettings) {
+            NavigationView {
+                SymmetrySettingsView(symmetry: symmetry)
+                    .navigationTitle("Symmetry")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showSymmetrySettings = false
                             }
                         }
                     }
