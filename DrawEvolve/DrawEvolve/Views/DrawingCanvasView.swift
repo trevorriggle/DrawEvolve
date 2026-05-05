@@ -421,6 +421,30 @@ struct DrawingCanvasView: View {
                             }
                             .disabled(!canvasState.historyManager.canRedo)
 
+                            // Canvas flip — display-only mirrors around the
+                            // viewport center. Layer textures unchanged. Used
+                            // by artists to spot proportion errors the eye
+                            // gets used to. isSelected reflects active flip
+                            // state so the user can tell at a glance whether
+                            // a flip is on without having to mentally check
+                            // "is this canvas mirrored?" — same pattern as
+                            // the Symmetry button.
+                            ToolButton(
+                                icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                                isSelected: canvasState.flipHorizontal
+                            ) {
+                                canvasState.toggleFlipHorizontal()
+                            }
+                            .help("Flip canvas horizontally")
+
+                            ToolButton(
+                                icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                                isSelected: canvasState.flipVertical
+                            ) {
+                                canvasState.toggleFlipVertical()
+                            }
+                            .help("Flip canvas vertically")
+
                             // Canvas Transform Controls
                             // Rotate L/R buttons removed Apr 16 — pinch-rotate
                             // covers the same case on device and these were
@@ -428,8 +452,12 @@ struct DrawingCanvasView: View {
                             ToolButton(icon: "viewfinder", isSelected: false) {
                                 canvasState.resetAllTransforms()
                             }
-                            .help("Reset zoom, pan, and rotation")
-                            .disabled(canvasState.zoomScale == 1.0 && canvasState.panOffset == .zero && canvasState.canvasRotation == .zero)
+                            .help("Reset zoom, pan, rotation, and flips")
+                            .disabled(canvasState.zoomScale == 1.0
+                                      && canvasState.panOffset == .zero
+                                      && canvasState.canvasRotation == .zero
+                                      && !canvasState.flipHorizontal
+                                      && !canvasState.flipVertical)
 
                             // AI Feedback button
                             ToolButton(icon: "sparkles", isSelected: showFeedback) {

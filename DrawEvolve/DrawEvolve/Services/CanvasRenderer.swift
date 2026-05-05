@@ -536,12 +536,15 @@ class CanvasRenderer: NSObject {
         zoomScale: Float = 1.0,
         panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
         canvasRotation: Float = 0.0,
-        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0),
+        flipState: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
         guard let tex = whiteTexture else { return }
         renderTextureToScreen(tex, to: renderEncoder, opacity: 1.0,
                               zoomScale: zoomScale, panOffset: panOffset,
-                              canvasRotation: canvasRotation, viewportSize: viewportSize)
+                              canvasRotation: canvasRotation,
+                              viewportSize: viewportSize,
+                              flipState: flipState)
     }
 
     func renderTextureToScreen(
@@ -551,7 +554,8 @@ class CanvasRenderer: NSObject {
         zoomScale: Float = 1.0,
         panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
         canvasRotation: Float = 0.0,
-        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0),
+        flipState: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
         // Always use the transform pipeline for consistency
         // Pass identity transform when zoom/pan/rotation is not active
@@ -578,6 +582,11 @@ class CanvasRenderer: NSObject {
         var canvas = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
         renderEncoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
 
+        // Pass flip state (each component 0 or 1) to shader. Buffer index 3
+        // matches quadVertexShaderWithTransform's signature in Shaders.metal.
+        var flip = flipState
+        renderEncoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 3)
+
         // Draw fullscreen quad (6 vertices for 2 triangles)
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
@@ -603,7 +612,8 @@ class CanvasRenderer: NSObject {
         zoomScale: Float = 1.0,
         panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
         canvasRotation: Float = 0.0,
-        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0)
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0),
+        flipState: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
         guard let pipelineState = floatingTexturePipelineState else {
             print("ERROR: Floating texture pipeline state not available")
@@ -631,6 +641,10 @@ class CanvasRenderer: NSObject {
 
         var rot = rotation
         renderEncoder.setVertexBytes(&rot, length: MemoryLayout<Float>.stride, index: 4)
+
+        // Buffer index 5 — matches quadVertexShaderForRect's signature.
+        var flip = flipState
+        renderEncoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 5)
 
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
@@ -698,6 +712,14 @@ class CanvasRenderer: NSObject {
 
         var rot = rotation
         encoder.setVertexBytes(&rot, length: MemoryLayout<Float>.stride, index: 4)
+
+        // Flip is identity here — we're baking into the layer texture in
+        // canvas-space, where the user's display flip doesn't apply.
+        // Layer textures are unaffected by the display flip; only the
+        // per-frame screen composite mirrors. Passing zero ensures the
+        // shader's required buffer slot is bound.
+        var flip = SIMD2<Float>(0, 0)
+        encoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 5)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
@@ -940,7 +962,9 @@ class CanvasRenderer: NSObject {
         drawableSize: CGSize,
         zoomScale: CGFloat = 1.0,
         panOffset: CGPoint = .zero,
-        canvasRotation: Double = 0.0
+        canvasRotation: Double = 0.0,
+        flipHorizontal: Bool = false,
+        flipVertical: Bool = false
     ) {
         // The eraser pipeline zeroes out destination alpha, which on the drawable
         // would erase the composited image itself. Instead, render the eraser
@@ -1027,6 +1051,14 @@ class CanvasRenderer: NSObject {
             // Translate to viewport center, apply pan
             x = rotatedX + centerX + panOffset.x
             y = rotatedY + centerY + panOffset.y
+
+            // Flip in screen frame, applied LAST. MUST stay in sync with
+            // CanvasStateManager.documentToScreen and the shader's
+            // quadVertexShaderWithTransform — all three apply flip as the
+            // very last positioning step before NDC conversion. If you
+            // change the flip rule in one place, change it in all three.
+            if flipHorizontal { x = 2 * centerX - x }
+            if flipVertical   { y = 2 * centerY - y }
 
             return SIMD2<Float>(Float(x), Float(y))
         }

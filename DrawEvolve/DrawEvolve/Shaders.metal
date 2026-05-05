@@ -104,7 +104,8 @@ vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
 vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
                                                 constant float4 *transform [[buffer(0)]],    // [zoom, panX, panY, rotation]
                                                 constant float2 *viewportSize [[buffer(1)]],
-                                                constant float2 *canvasSize [[buffer(2)]]) {  // Unused now; kept for ABI stability
+                                                constant float2 *canvasSize [[buffer(2)]],   // Unused now; kept for ABI stability
+                                                constant float2 *flipState [[buffer(3)]]) {   // [flipH, flipV] each 0 or 1
     VertexOut out;
 
     // Generate full-screen quad
@@ -162,6 +163,18 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     // follows the finger vertically. (Bug 2c.)
     screenPos += float2(pan.x, -pan.y);
 
+    // Canvas flip — applied LAST in screen space (mirror around viewport
+    // center). Pairs with CanvasStateManager.documentToScreen which
+    // applies the same flip last in the CPU-side forward chain, so
+    // SwiftUI overlays (symmetry guides, marching ants, transform
+    // handles) and Metal-rendered layers agree on flipped positions.
+    // Pan/rotate gesture handlers in CanvasStateManager compensate for
+    // flip so input still feels natural; zoom commutes with the
+    // mirror and needs no compensation.
+    float2 flipFlags = flipState[0];
+    if (flipFlags.x > 0.5) screenPos.x = viewport.x - screenPos.x;
+    if (flipFlags.y > 0.5) screenPos.y = viewport.y - screenPos.y;
+
     // Back to NDC
     finalPos = (screenPos / viewport) * 2.0 - 1.0;
 
@@ -188,7 +201,8 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
                                           constant float2 *viewportSize [[buffer(1)]],
                                           constant float2 *canvasSize [[buffer(2)]],
                                           constant float4 *docRect [[buffer(3)]],
-                                          constant float  *selectionRotation [[buffer(4)]]) {
+                                          constant float  *selectionRotation [[buffer(4)]],
+                                          constant float2 *flipState [[buffer(5)]]) {
     VertexOut out;
 
     // Unit quad in [0,1]² — texCoord follows the same parameterization so
@@ -249,6 +263,14 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
 
     float2 pan = float2(transform[0][1], transform[0][2]);
     screenPos += float2(pan.x, -pan.y);
+
+    // Canvas flip — applied LAST in screen space, matching the layer
+    // shader and CanvasStateManager.documentToScreen. Floating selections
+    // and imported-image drag previews flip alongside the rest of the
+    // canvas so the user's drag continues to track the finger.
+    float2 flipFlags = flipState[0];
+    if (flipFlags.x > 0.5) screenPos.x = viewport.x - screenPos.x;
+    if (flipFlags.y > 0.5) screenPos.y = viewport.y - screenPos.y;
 
     float2 finalPos = (screenPos / viewport) * 2.0 - 1.0;
 
