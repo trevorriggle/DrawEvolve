@@ -1245,11 +1245,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 return []
             case .axis(let cfg):
                 return axisMirroredPoints(points, in: docSize, config: cfg)
-            case .radial:
-                // C3 implements radial. Returning [] here means the picker
-                // can switch to Radial mid-stroke without crashing — strokes
-                // just behave as if symmetry is off until C3 lands.
-                return []
+            case .radial(let sections):
+                return radialMirroredPoints(points, in: docSize, sections: sections)
             }
         }
 
@@ -1294,6 +1291,53 @@ struct MetalCanvasView: UIViewRepresentable {
                 for p in points {
                     result.append(BrushStroke.StrokePoint(
                         location: CGPoint(x: W - p.location.x, y: H - p.location.y),
+                        pressure: p.pressure,
+                        timestamp: p.timestamp
+                    ))
+                }
+            }
+            return result
+        }
+
+        /// Pure rotation around the canvas center. For each original
+        /// stamp, produces `sections - 1` additional stamps at angles
+        /// 2π·k/N for k ∈ 1..<N around (W/2, H/2). No reflection
+        /// (kaleidoscope is explicitly out of v1 spec).
+        ///
+        /// Math (per locked spec, do not reorder):
+        ///   rotated_x = cx + (x − cx)·cos(θ) − (y − cy)·sin(θ)
+        ///   rotated_y = cy + (x − cx)·sin(θ) + (y − cy)·cos(θ)
+        ///
+        /// Edge cases:
+        /// - sections < 2 returns [] (1 section is a no-op; spec lower
+        ///   bound is 2). The picker's stepper is also clamped to 2…16.
+        /// - A stamp landing exactly on the center point produces
+        ///   `sections - 1` copies all at the center. Visually identical
+        ///   to a single stamp; not a crash, no special handling needed.
+        /// - Trig precision at N=16 is well within float tolerance —
+        ///   ~1 ULP per cos/sin call, invisible at canvas pixel scale.
+        private func radialMirroredPoints(_ points: [BrushStroke.StrokePoint],
+                                          in docSize: CGSize,
+                                          sections: Int) -> [BrushStroke.StrokePoint] {
+            guard sections >= 2, !points.isEmpty else { return [] }
+            let cx = docSize.width / 2
+            let cy = docSize.height / 2
+
+            var result: [BrushStroke.StrokePoint] = []
+            result.reserveCapacity(points.count * (sections - 1))
+
+            // k = 1..<sections; k = 0 is the original (caller already has it).
+            for k in 1..<sections {
+                let theta = 2.0 * Double.pi * Double(k) / Double(sections)
+                let cosT = CGFloat(cos(theta))
+                let sinT = CGFloat(sin(theta))
+                for p in points {
+                    let dx = p.location.x - cx
+                    let dy = p.location.y - cy
+                    let rotatedX = cx + dx * cosT - dy * sinT
+                    let rotatedY = cy + dx * sinT + dy * cosT
+                    result.append(BrushStroke.StrokePoint(
+                        location: CGPoint(x: rotatedX, y: rotatedY),
                         pressure: p.pressure,
                         timestamp: p.timestamp
                     ))
