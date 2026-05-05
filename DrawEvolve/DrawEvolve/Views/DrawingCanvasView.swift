@@ -87,7 +87,8 @@ struct DrawingCanvasView: View {
                     textInputLocation = location
                     textToRender = ""
                     showTextInput = true
-                }
+                },
+                symmetry: symmetry
             )
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
