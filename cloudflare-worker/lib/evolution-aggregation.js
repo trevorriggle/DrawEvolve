@@ -37,11 +37,21 @@ export const MEANINGFUL_DELTA = 0.75;
 // Other constants
 // =============================================================================
 
-// Categories below this many data points show up in `warming_up` instead of
-// `categories` — too few points to render a trend honestly. Status
-// determination also requires this minimum (callers below the floor get
-// status = null, which never reaches the response).
-export const MIN_DATA_POINTS = 5;
+// Threshold for when a category has enough data to render a trend honestly
+// (vs. landing in `warming_up`). State-dependent as of Phase 2.5: a "mature"
+// user (10+ critiques) needs the full 5-point floor; a "growing" user (3-9
+// critiques) sees categories at 2+ data points so the chart isn't empty for
+// most of their first month. Same series data either way — the threshold
+// only decides which array a category lands in (and whether status gets
+// computed for it).
+export const MIN_DATA_POINTS_MATURE = 5;
+export const MIN_DATA_POINTS_GROWING = 2;
+
+// Back-compat alias. External callers (and the existing test that locks the
+// constant) reference MIN_DATA_POINTS by its original name; keep it pointed
+// at the mature threshold so the old default behavior is preserved when no
+// state is in play.
+export const MIN_DATA_POINTS = MIN_DATA_POINTS_MATURE;
 
 // Severity-weighted point values: a category mentioned as primary counts
 // fully, as secondary counts half. Reflects the stronger signal of being
@@ -144,9 +154,14 @@ export function selectWindow(entries, { windowCritiques, windowDays, now }) {
  * data_points = series.length. Returns one of the four status strings, or
  * null when below the data threshold (caller should route those to
  * warming_up instead).
+ *
+ * `threshold` defaults to MIN_DATA_POINTS_MATURE so existing call sites
+ * (and tests) that don't pass it keep the original 5-point floor. Phase
+ * 2.5 callers pass MIN_DATA_POINTS_GROWING (2) when the user is in
+ * "growing" state.
  */
-export function determineStatus(series) {
-  if (!Array.isArray(series) || series.length < MIN_DATA_POINTS) return null;
+export function determineStatus(series, threshold = MIN_DATA_POINTS_MATURE) {
+  if (!Array.isArray(series) || series.length < threshold) return null;
   const half = Math.floor(series.length / 2);
   const firstAvg = mean(series.slice(0, half));
   const secondAvg = mean(series.slice(half));
@@ -162,15 +177,22 @@ export function determineStatus(series) {
  * windowEntries should be the result of selectWindow (newest-first; this
  * function reorders internally).
  *
+ * `threshold` (Phase 2.5) decides where categories land:
+ *   - data_points >= threshold → `categories` (with status computed)
+ *   - data_points <  threshold → `warming_up` (with `needed: threshold`)
+ * Defaults to MIN_DATA_POINTS_MATURE so existing call sites keep the
+ * original 5-point behavior. Pass MIN_DATA_POINTS_GROWING for the lowered
+ * "growing"-state floor.
+ *
  * Returns { categories, warmingUp, window }:
  *   - categories: { id, data_points, current_value, series, status } for
- *     each category with data_points >= MIN_DATA_POINTS, sorted by
- *     data_points DESC then id ASC for deterministic output.
+ *     each category with data_points >= threshold, sorted by data_points
+ *     DESC then id ASC for deterministic output.
  *   - warmingUp:  { id, data_points, needed } for categories below the
  *     threshold (data_points > 0).
  *   - window:     { critique_count, earliest_at, latest_at, span_days }.
  */
-export function aggregateCategories(windowEntries) {
+export function aggregateCategories(windowEntries, { threshold = MIN_DATA_POINTS_MATURE } = {}) {
   if (!Array.isArray(windowEntries) || windowEntries.length === 0) {
     return {
       categories: [],
@@ -203,16 +225,16 @@ export function aggregateCategories(windowEntries) {
   for (const [id, series] of buckets) {
     const dp = series.length;
     if (dp === 0) continue;
-    if (dp >= MIN_DATA_POINTS) {
+    if (dp >= threshold) {
       categories.push({
         id,
         data_points: dp,
         current_value: series[series.length - 1],
         series,
-        status: determineStatus(series),
+        status: determineStatus(series, threshold),
       });
     } else {
-      warmingUp.push({ id, data_points: dp, needed: MIN_DATA_POINTS });
+      warmingUp.push({ id, data_points: dp, needed: threshold });
     }
   }
 
@@ -275,3 +297,216 @@ export function computeStreak(drawings, { now }) {
     drawings_total: drawings.length,
   };
 }
+
+// =============================================================================
+// Phase 2.5 — state derivation, summary text, example payload
+// =============================================================================
+//
+// The Phase 2 endpoint shape works once a user has accumulated 10+ tagged
+// critiques, but is barely useful before that. Phase 2.5 layers four
+// additional concerns on top of the pure aggregation:
+//
+//   1. A `state` discriminator the iOS UI keys off ("example" / "early" /
+//      "growing" / "mature"). Derived from streak.critiques_total — pure
+//      function so tests can drive every boundary without a fixture.
+//   2. A state-dependent threshold (MIN_DATA_POINTS_GROWING vs
+//      MIN_DATA_POINTS_MATURE) so growing users see categories in the chart
+//      sooner. Plumbed through aggregateCategories above.
+//   3. A `summary_text` string composed from real aggregation data when the
+//      user is "early" or "growing". Plain template, no AI call.
+//   4. A hardcoded EXAMPLE_PAYLOAD substituted into the response when the
+//      user has zero tagged critiques, so the iOS Evolution tab shows
+//      something illustrative on first launch instead of an empty chart.
+//
+// All four pieces are pure functions / constants. Orchestration (deciding
+// which to invoke) lives in routes/evolution.js.
+
+/**
+ * Map lifetime tagged-critique count to a state string. Boundary
+ * inclusivity is locked: 0 → example, 1-2 → early, 3-9 → growing,
+ * 10+ → mature. Implemented as explicit branches rather than a lookup
+ * table because the rule is short and the boundaries are load-bearing.
+ *
+ * Negative or non-finite inputs are coerced to "example" defensively
+ * (they shouldn't happen — computeStreak only returns non-negative
+ * integers — but a stray NaN reaching the iOS UI would render as an
+ * uncovered state).
+ */
+export function deriveState(critiquesTotal) {
+  if (!Number.isFinite(critiquesTotal) || critiquesTotal <= 0) return 'example';
+  if (critiquesTotal <= 2) return 'early';
+  if (critiquesTotal <= 9) return 'growing';
+  return 'mature';
+}
+
+// =============================================================================
+// Summary text composition
+// =============================================================================
+
+// Templates parked at module scope so future tuning is a one-line change.
+// Variables: {N} = critiques_total, {N_PHRASE} = "critique" | "2 critiques",
+// {CATEGORIES} = rendered category list, {TOP} = top category id (lowercase),
+// {CAT_CAP} = category id with first letter uppercased.
+const EARLY_PREFIX_1 = 'Your last critique covered ';
+const EARLY_PREFIX_N = 'Your last {N} critiques covered ';
+const EARLY_SUFFIX = '. Trends start filling in around 3 critiques.';
+
+const GROWING_HEAD = 'Across your last {N} critiques, the most-mentioned theme is {TOP}.';
+const GROWING_FOCUS_TAIL = ' {CAT_CAP} is your current focus.';
+const GROWING_IMPROVING_TAIL = ' {CAT_CAP} is improving.';
+const GROWING_EMPTY = 'Across your last {N} critiques, no consistent theme yet.';
+
+const SUMMARY_MAX_CHARS = 200;
+
+function capitalizeId(id) {
+  if (typeof id !== 'string' || id.length === 0) return id;
+  return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/**
+ * Render a list of category ids in human form. 1 → "anatomy"; 2 →
+ * "anatomy and composition"; 3+ → Oxford-comma form. Pure helper, no
+ * truncation; the caller decides whether the full list fits the cap.
+ */
+function renderCategoryList(ids) {
+  if (ids.length === 0) return '';
+  if (ids.length === 1) return ids[0];
+  if (ids.length === 2) return `${ids[0]} and ${ids[1]}`;
+  return `${ids.slice(0, -1).join(', ')}, and ${ids[ids.length - 1]}`;
+}
+
+/**
+ * Compose the early-state summary, falling back to a "and N others"
+ * shortened form if the full list would push the result past
+ * SUMMARY_MAX_CHARS. Returns the final string (always under the cap).
+ */
+function composeEarlySummary(critiquesTotal, sortedIds) {
+  const prefix = critiquesTotal === 1
+    ? EARLY_PREFIX_1
+    : EARLY_PREFIX_N.replace('{N}', String(critiquesTotal));
+  const fullList = renderCategoryList(sortedIds);
+  const fullText = `${prefix}${fullList}${EARLY_SUFFIX}`;
+  if (fullText.length <= SUMMARY_MAX_CHARS) return fullText;
+  // Defensive truncation: keep the first two ids verbatim, replace the
+  // rest with "and N others". With 8 taxonomy categories total and
+  // 1-2 critiques contributing at most ~6 distinct ids, this branch is
+  // unlikely to fire in practice — but the cap is a hard contract.
+  const remaining = sortedIds.length - 2;
+  const truncated = remaining > 0
+    ? `${sortedIds[0]}, ${sortedIds[1]}, and ${remaining} others`
+    : renderCategoryList(sortedIds);
+  return `${prefix}${truncated}${EARLY_SUFFIX}`;
+}
+
+/**
+ * Compose the growing-state summary. Picks the first category in
+ * sorted-by-data_points order with status === "current_focus" for the
+ * second sentence; falls back to the first "improving"; omits the
+ * second sentence otherwise. Falls back to GROWING_EMPTY if categories
+ * is empty (defensive — unlikely with threshold 2).
+ */
+function composeGrowingSummary(critiquesTotal, categories) {
+  if (categories.length === 0) {
+    return GROWING_EMPTY.replace('{N}', String(critiquesTotal));
+  }
+  const top = categories[0].id;
+  const head = GROWING_HEAD
+    .replace('{N}', String(critiquesTotal))
+    .replace('{TOP}', top);
+  const focus = categories.find((c) => c.status === 'current_focus');
+  const improving = focus ? null : categories.find((c) => c.status === 'improving');
+  let tail = '';
+  if (focus) tail = GROWING_FOCUS_TAIL.replace('{CAT_CAP}', capitalizeId(focus.id));
+  else if (improving) tail = GROWING_IMPROVING_TAIL.replace('{CAT_CAP}', capitalizeId(improving.id));
+  const full = `${head}${tail}`;
+  // Cap defensively. Head + tail with the longest taxonomy id
+  // ("subject_match" → "Subject_match") tops out well under 200 chars,
+  // but if a future taxonomy bump pushes it over, drop the tail.
+  if (full.length <= SUMMARY_MAX_CHARS) return full;
+  return head;
+}
+
+/**
+ * Compose plain-language summary text for the iOS Evolution tab.
+ * Returns a string for "early" and "growing" states, returns null for
+ * "mature" and "example" (caller should omit the field from the
+ * response when null).
+ *
+ * Pure function — no I/O, no AI call. The category data passed in is
+ * the pre-substitution real-user data (so even when the route ends up
+ * emptying categories/warming_up for "early" state, the summary text
+ * still reflects what the user has actually been working on).
+ */
+export function composeSummaryText(state, categories, warmingUp, streak) {
+  if (state !== 'early' && state !== 'growing') return null;
+  const critiquesTotal = streak?.critiques_total ?? 0;
+
+  if (state === 'early') {
+    // Combine categories + warming_up — at threshold 5 (the default this
+    // route runs at before state is known), 1-2 critiques produce only
+    // warming_up entries, but we want the summary to list every category
+    // touched regardless of which array it's in.
+    const merged = [...(categories ?? []), ...(warmingUp ?? [])];
+    merged.sort((a, b) =>
+      b.data_points - a.data_points || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const ids = merged.map((c) => c.id);
+    return composeEarlySummary(critiquesTotal, ids);
+  }
+
+  // state === 'growing'
+  return composeGrowingSummary(critiquesTotal, categories ?? []);
+}
+
+// =============================================================================
+// Example payload — substituted into the response when state === "example"
+// =============================================================================
+//
+// Represents a believable artist after ~25 critiques. The series numbers are
+// chosen so each declared status is what the production determineStatus
+// function would compute from the series (firstAvg / secondAvg / delta vs.
+// SOLID_FOUNDATION_CEILING and MEANINGFUL_DELTA). Verified by hand against
+// the same math the real aggregator uses; if those constants change, the
+// status fields here may need recomputing.
+//
+// Sorted by data_points DESC, matching the deterministic order
+// aggregateCategories produces for real users — the iOS UI shouldn't have
+// to special-case ordering for the example.
+
+export const EXAMPLE_PAYLOAD = {
+  example_artist_label:
+    'Example: this is what your evolution looks like after about 25 critiques. Yours will keep growing from here.',
+  categories: [
+    {
+      id: 'anatomy',
+      data_points: 8,
+      series: [4, 4.5, 3.5, 4, 3, 2.5, 2, 2],
+      current_value: 2,
+      status: 'improving',
+    },
+    {
+      id: 'composition',
+      data_points: 7,
+      series: [2, 2.5, 3, 2.5, 3.5, 4, 4],
+      current_value: 4,
+      status: 'current_focus',
+    },
+    {
+      id: 'value',
+      data_points: 6,
+      series: [3, 2.5, 3, 3.5, 3, 2.5],
+      current_value: 2.5,
+      status: 'steady',
+    },
+    {
+      id: 'perspective',
+      data_points: 5,
+      series: [1, 1.5, 1, 1, 1.5],
+      current_value: 1.5,
+      status: 'solid_foundation',
+    },
+  ],
+  warming_up: [
+    { id: 'color', data_points: 3, needed: 5 },
+    { id: 'line', data_points: 2, needed: 5 },
+  ],
+};

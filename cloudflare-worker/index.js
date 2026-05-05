@@ -225,9 +225,14 @@ export {
   determineStatus,
   aggregateCategories,
   computeStreak,
+  deriveState,
+  composeSummaryText,
+  EXAMPLE_PAYLOAD,
   SOLID_FOUNDATION_CEILING,
   MEANINGFUL_DELTA,
   MIN_DATA_POINTS,
+  MIN_DATA_POINTS_MATURE,
+  MIN_DATA_POINTS_GROWING,
   PRIMARY_WEIGHT,
   SECONDARY_WEIGHT,
   MAX_AGGREGATION_ENTRIES,
@@ -240,5 +245,6 @@ export {
 export {
   handleEvolution,
   buildEvolutionResponse,
+  buildEvolutionResponseWithState,
   fetchUserDrawings,
 } from './routes/evolution.js';
