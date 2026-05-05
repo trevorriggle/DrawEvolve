@@ -13,6 +13,154 @@ struct PromptInputView: View {
     @State private var showGallery = false
 
     var body: some View {
+        Group {
+            if DeviceIdiom.isPhone {
+                phoneBody
+            } else {
+                padBody
+            }
+        }
+        .fullScreenCover(isPresented: $showGallery) {
+            GalleryView()
+        }
+    }
+
+    /// iPhone layout — edge-to-edge questionnaire with bottom-pinned CTAs.
+    /// SwiftUI's automatic keyboard avoidance handles inset adjustment when
+    /// a TextField becomes first responder; .scrollDismissesKeyboard(.interactively)
+    /// matches the iPad version's drag-to-dismiss-keyboard behavior.
+    private var phoneBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(spacing: 12) {
+                    Text("Let's Set Up Your Canvas")
+                        .font(.title)
+                        .fontWeight(.bold)
+                        .multilineTextAlignment(.center)
+
+                    Text("Tell me what you're creating today")
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, 8)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Skill Level")
+                        .font(.headline)
+                    Picker("Skill Level", selection: $context.skillLevel) {
+                        Text("Beginner").tag("Beginner")
+                        Text("Intermediate").tag("Intermediate")
+                        Text("Advanced").tag("Advanced")
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("What are you drawing?")
+                        .font(.headline)
+                    TextField("e.g., a portrait, landscape, still life", text: $context.subject)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.sentences)
+                        .textContentType(.none)
+                        .autocorrectionDisabled()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("What style?")
+                        .font(.headline)
+                    TextField("e.g., realism, impressionism, anime", text: $context.style)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.sentences)
+                        .textContentType(.none)
+                        .autocorrectionDisabled()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Inspired by any artists?")
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                    TextField("e.g., Van Gogh, Miyazaki (optional)", text: $context.artists)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.words)
+                        .textContentType(.none)
+                        .autocorrectionDisabled()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Techniques you'll use?")
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                    TextField("e.g., hatching, blending (optional)", text: $context.techniques)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.sentences)
+                        .textContentType(.none)
+                        .autocorrectionDisabled()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Area you want feedback on?")
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                    TextField("e.g., proportions, shading (optional)", text: $context.focus)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.sentences)
+                        .textContentType(.none)
+                        .autocorrectionDisabled()
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 24)
+            .padding(.bottom, 16)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 12) {
+                Button {
+                    if context.isComplete {
+                        isPresented = false
+                    }
+                } label: {
+                    Text("Start Drawing")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                }
+                .background(context.isComplete ? Color.accentColor : Color.gray)
+                .cornerRadius(12)
+                .disabled(!context.isComplete)
+
+                Button {
+                    showGallery = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "photo.on.rectangle")
+                        Text("View Gallery")
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                }
+                .background(Color(uiColor: .secondarySystemBackground))
+                .cornerRadius(10)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
+            .background(.ultraThinMaterial)
+        }
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    /// iPad layout — original implementation, byte-for-byte unchanged.
+    /// The outer `.fullScreenCover(isPresented: $showGallery)` lives on
+    /// the `body`'s Group wrapper now (so iPhone gets it too), but the
+    /// inner ZStack/dim-BG/centered-card structure here is identical to
+    /// pre-iPhone-strategy main.
+    private var padBody: some View {
         ZStack {
             // Dimmed background
             Color.black.opacity(0.4)
@@ -157,9 +305,6 @@ struct PromptInputView: View {
                 Spacer(minLength: 0)
             }
             .padding(40)
-        }
-        .fullScreenCover(isPresented: $showGallery) {
-            GalleryView()
         }
     }
 }
