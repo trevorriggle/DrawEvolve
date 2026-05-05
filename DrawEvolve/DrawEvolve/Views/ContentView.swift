@@ -64,30 +64,13 @@ private struct SignedInRoot: View {
             .onAppear {
                 performFirstLaunchCheck()
             }
-            .overlay {
-                if showBetaTransparency {
-                    BetaTransparencyPopup(isPresented: $showBetaTransparency)
-                } else {
-                    Color.clear.allowsHitTesting(false)
-                }
-            }
-            .overlay {
-                if showOnboarding {
-                    OnboardingPopup(isPresented: $showOnboarding)
-                } else {
-                    Color.clear.allowsHitTesting(false)
-                }
-            }
-            .overlay {
-                if showPromptInput && !hasCompletedPrompt {
-                    PromptInputView(
-                        context: $drawingContext,
-                        isPresented: $showPromptInput
-                    )
-                } else {
-                    Color.clear.allowsHitTesting(false)
-                }
-            }
+            .modifier(PopupPresentation(
+                showBetaTransparency: $showBetaTransparency,
+                showOnboarding: $showOnboarding,
+                showPromptInput: $showPromptInput,
+                hasCompletedPrompt: hasCompletedPrompt,
+                drawingContext: $drawingContext
+            ))
             .onChange(of: showBetaTransparency) { _, newValue in
                 if !newValue && !hasSeenOnboarding {
                     showOnboarding = true
@@ -126,6 +109,82 @@ private struct SignedInRoot: View {
             showOnboarding = true
             hasSeenOnboarding = true
         }
+    }
+}
+
+/// Onboarding popup presentation strategy.
+///
+/// On iPad: three layered `.overlay { ... }` modifiers, byte-for-byte
+/// identical to the pre-iPhone-strategy main code path. The dim-BG +
+/// centered-card pattern that BetaTransparencyPopup / OnboardingPopup /
+/// PromptInputView render in their `padBody` only makes sense behind a
+/// translucent overlay, so the wrapper-and-content pair must stay on
+/// iPad — it's the locked iPad design.
+///
+/// On iPhone: three layered `.fullScreenCover(isPresented:)` modifiers
+/// instead, which platform-level absorb all touches and let the popups
+/// render their `phoneBody` edge-to-edge with no dim BG and no maxWidth
+/// cap. The cascade `onChange` handlers stay on the parent SignedInRoot
+/// and fire identically across both branches.
+private struct PopupPresentation: ViewModifier {
+    @Binding var showBetaTransparency: Bool
+    @Binding var showOnboarding: Bool
+    @Binding var showPromptInput: Bool
+    let hasCompletedPrompt: Bool
+    @Binding var drawingContext: DrawingContext
+
+    func body(content: Content) -> some View {
+        if DeviceIdiom.isPhone {
+            content
+                .fullScreenCover(isPresented: $showBetaTransparency) {
+                    BetaTransparencyPopup(isPresented: $showBetaTransparency)
+                }
+                .fullScreenCover(isPresented: $showOnboarding) {
+                    OnboardingPopup(isPresented: $showOnboarding)
+                }
+                .fullScreenCover(isPresented: showPromptInputBinding) {
+                    PromptInputView(
+                        context: $drawingContext,
+                        isPresented: $showPromptInput
+                    )
+                }
+        } else {
+            content
+                .overlay {
+                    if showBetaTransparency {
+                        BetaTransparencyPopup(isPresented: $showBetaTransparency)
+                    } else {
+                        Color.clear.allowsHitTesting(false)
+                    }
+                }
+                .overlay {
+                    if showOnboarding {
+                        OnboardingPopup(isPresented: $showOnboarding)
+                    } else {
+                        Color.clear.allowsHitTesting(false)
+                    }
+                }
+                .overlay {
+                    if showPromptInput && !hasCompletedPrompt {
+                        PromptInputView(
+                            context: $drawingContext,
+                            isPresented: $showPromptInput
+                        )
+                    } else {
+                        Color.clear.allowsHitTesting(false)
+                    }
+                }
+        }
+    }
+
+    /// Match the iPad branch's `showPromptInput && !hasCompletedPrompt`
+    /// gate. Bound through a synthesized Binding so the cover dismisses
+    /// when either flag flips, matching the existing flow exactly.
+    private var showPromptInputBinding: Binding<Bool> {
+        Binding(
+            get: { showPromptInput && !hasCompletedPrompt },
+            set: { newValue in showPromptInput = newValue }
+        )
     }
 }
 

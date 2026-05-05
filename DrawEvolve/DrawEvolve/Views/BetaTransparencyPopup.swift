@@ -11,6 +11,143 @@ struct BetaTransparencyPopup: View {
     @Binding var isPresented: Bool
 
     var body: some View {
+        if DeviceIdiom.isPhone {
+            phoneBody
+        } else {
+            padBody
+        }
+    }
+
+    /// iPhone layout — edge-to-edge, no dim BG, no maxWidth/maxHeight cap.
+    /// Maps the iPad's "fixed header / scrollable middle / fixed footer"
+    /// internal structure onto a ScrollView + safeAreaInset(edge: .bottom).
+    /// Header sits at the top of the ScrollView's content (not pinned),
+    /// matching how the iPad version renders the header inside the same
+    /// card as the scrollable content.
+    private var phoneBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(spacing: 12) {
+                    Image("DrawEvolveLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 100)
+
+                    Text("DrawEvolve - Beta Transparency")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .multilineTextAlignment(.center)
+
+                    Text("We're being completely honest with you")
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("This is a BETA")
+                            .font(.headline)
+                            .fontWeight(.bold)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        BetaWarningItem(text: "There WILL be bugs")
+                        BetaWarningItem(text: "There WILL be tools that don't work perfectly")
+                        BetaWarningItem(text: "There WILL be UI quirks")
+                        BetaWarningItem(text: "There WILL be occasional crashes")
+                        BetaWarningItem(text: "Your feedback helps us improve")
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("What We DO Have")
+                            .font(.headline)
+                            .fontWeight(.bold)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        BetaFeatureItem(
+                            icon: "paintbrush.pointed.fill",
+                            text: "Metal-based drawing engine with smooth, responsive rendering"
+                        )
+                        BetaFeatureItem(
+                            icon: "square.stack.3d.up.fill",
+                            text: "Multi-layer system with undo/redo"
+                        )
+                        BetaFeatureItem(
+                            icon: "hammer.fill",
+                            text: "Core tools: brush, eraser, shapes, text, paint bucket, eyedropper"
+                        )
+                        BetaFeatureItem(
+                            icon: "sparkles",
+                            text: "GPT-4o Vision AI feedback with personalized, encouraging guidance"
+                        )
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.forward.circle.fill")
+                            .foregroundColor(.blue)
+                        Text("On the Horizon")
+                            .font(.headline)
+                            .fontWeight(.bold)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ComingSoonItem(text: "Progress tracking to see your artistic evolution over time")
+                        ComingSoonItem(text: "Custom AI art mentors with unique personalities (Bob Ross mode, anyone?)")
+                        ComingSoonItem(text: "Portfolio analysis that tracks your improvement automatically")
+                        ComingSoonItem(text: "Community galleries to share and discover artwork")
+                        ComingSoonItem(text: "Advanced brushes with watercolor, oil paint, and custom effects")
+                    }
+
+                    Text("Your journey matters. We're building this WITH you, not just FOR you.")
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                        .italic()
+                        .padding(.top, 8)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 16)
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button {
+                isPresented = false
+            } label: {
+                Text("I Understand - Let's Create!")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
+            .background(.regularMaterial)
+        }
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    /// iPad layout — original implementation, byte-for-byte unchanged.
+    private var padBody: some View {
         ZStack {
             // Dimmed background
             Color.black.opacity(0.4)
