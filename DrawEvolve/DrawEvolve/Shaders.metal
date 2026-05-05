@@ -424,6 +424,135 @@ fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
     return color;
 }
 
+// MARK: - Gaussian Blur (Effects)
+//
+// The blur tool family (Blur Brush + Blur Adjustment) shares two render
+// pipelines built on these shaders:
+//
+//   1. Two-pass separable Gaussian. `gaussianBlurShader` runs once for the
+//      horizontal pass (direction = (1/width, 0)) and once for the vertical
+//      pass (direction = (0, 1/height)). Sigma drives both kernel weights and
+//      kernelHalfWidth (caller computes ceil(3 * sigma)). Output is a fully
+//      blurred copy of the source — used by the brush-blur path as an
+//      intermediate, and by the adjustment path's first pass.
+//
+//   2. `gaussianBlurMaskedShader` is the same vertical-pass Gaussian, but
+//      blends its result with a separately-bound source texture using an
+//      r8Unorm mask. Used by the adjustment path's final pass to clip blur
+//      to the active selection (mask = 1 inside selection, 0 outside).
+//
+//   3. `stampBlurDepositShader` is a point-sprite fragment shader that
+//      samples the pre-computed blurred texture at the fragment's layer-pixel
+//      position, gated by the standard brush hardness curve. Used by the
+//      brush-blur path as the final deposit per stamp.
+
+struct GaussianUniforms {
+    float2 direction;       // (1/width, 0) horizontal; (0, 1/height) vertical
+    float sigma;            // Gaussian standard deviation in pixels
+    int   kernelHalfWidth;  // ceil(3 * sigma); 0 disables (returns source)
+};
+
+// Compute a 1-D Gaussian sample at the fragment's UV. Caller passes
+// `direction` to choose horizontal vs vertical.
+static float4 gaussian1D(texture2d<float> tex,
+                         float2 uv,
+                         float2 direction,
+                         float sigma,
+                         int halfWidth) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    if (halfWidth <= 0 || sigma <= 0.0) {
+        return tex.sample(s, uv);
+    }
+    float weightSum = 0.0;
+    float4 colorSum = float4(0.0);
+    float twoSigmaSquared = 2.0 * sigma * sigma;
+    for (int i = -halfWidth; i <= halfWidth; i++) {
+        float w = exp(-float(i * i) / twoSigmaSquared);
+        colorSum += tex.sample(s, uv + direction * float(i)) * w;
+        weightSum += w;
+    }
+    return colorSum / weightSum;
+}
+
+// Generic 1-D Gaussian blur fragment shader. Output is a pure Gaussian sample
+// of the input texture along `direction`. No masking, no compositing.
+fragment float4 gaussianBlurShader(VertexOut in [[stage_in]],
+                                   texture2d<float> inputTexture [[texture(0)]],
+                                   constant GaussianUniforms &uniforms [[buffer(0)]]) {
+    return gaussian1D(inputTexture,
+                      in.texCoord,
+                      uniforms.direction,
+                      uniforms.sigma,
+                      uniforms.kernelHalfWidth);
+}
+
+// Vertical-pass Gaussian + masked composite. The "blur adjustment" tool's
+// final pass: reads the horizontally-blurred intermediate, reads the original
+// snapshot, reads the selection mask (r8Unorm), and outputs:
+//
+//     mix(original, blurred, mask.r)
+//
+// Where mask = 1 the user sees full blur; where mask = 0 they see the
+// original. The full-layer adjustment path (no selection) supplies an all-1.0
+// mask so output == blurred everywhere.
+fragment float4 gaussianBlurMaskedShader(VertexOut in [[stage_in]],
+                                          texture2d<float> inputTexture [[texture(0)]],
+                                          texture2d<float> sourceTexture [[texture(1)]],
+                                          texture2d<float> maskTexture   [[texture(2)]],
+                                          constant GaussianUniforms &uniforms [[buffer(0)]]) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float4 blurred = gaussian1D(inputTexture,
+                                in.texCoord,
+                                uniforms.direction,
+                                uniforms.sigma,
+                                uniforms.kernelHalfWidth);
+    float maskAlpha = maskTexture.sample(s, in.texCoord).r;
+    float4 original = sourceTexture.sample(s, in.texCoord);
+    return mix(original, blurred, maskAlpha);
+}
+
+// Brush-blur deposit pass — point-sprite fragment shader. Samples the
+// pre-blurred texture at the fragment's layer-pixel position (via the
+// VertexOut `position` attribute, which is the framebuffer coordinate at
+// rasterisation time), gated by the standard brush hardness curve and
+// modulated by opacity * pressure * blurStrength. Returns a premultiplied
+// colour so the caller's standard sourceAlpha/oneMinusSourceAlpha blend
+// deposits it cleanly into the layer.
+fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
+                                       float2 pointCoord [[point_coord]],
+                                       texture2d<float> blurredTexture [[texture(0)]],
+                                       constant BrushUniforms &uniforms [[buffer(0)]],
+                                       constant float &blurStrength [[buffer(1)]]) {
+    // Same disc + hardness curve as brushFragmentShader.
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float alpha;
+    if (uniforms.hardness >= 0.99) {
+        alpha = dist < 1.0 ? 1.0 : 0.0;
+    } else {
+        float softness = 1.0 - uniforms.hardness;
+        float edge = 1.0 - softness;
+        alpha = smoothstep(1.0, edge, dist);
+    }
+    alpha *= uniforms.opacity * uniforms.pressure * blurStrength;
+
+    if (alpha <= 0.0) {
+        discard_fragment();
+    }
+
+    // Sample blurredTexture at this fragment's layer-pixel position. The
+    // VertexOut `position` attribute is in framebuffer (= layer-pixel) coords
+    // at rasterisation; normalise by layer size to get the [0,1] UV.
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 layerSize = float2(blurredTexture.get_width(), blurredTexture.get_height());
+    float2 uv = in.position.xy / layerSize;
+    float4 blurred = blurredTexture.sample(s, uv);
+
+    // Premultiplied output for the standard sourceAlpha blend.
+    return float4(blurred.rgb * alpha, alpha);
+}
+
 // MARK: - Effect Shaders
 
 // One iteration pass of a connected-component (flood) fill.

@@ -30,6 +30,11 @@ enum DrawingTool {
     case rotate  // DEPRECATED: Now integrated into selection transform handles
     case scale   // DEPRECATED: Now integrated into selection transform handles
 
+    // Effect tools
+    case blur            // Brush-form Gaussian blur — paints blur freeform along stroke.
+    case blurAdjustment  // Procreate-style adjustment tool — horizontal drag → sigma, ✓/✕ commit.
+    case smudge          // Reserved for PR 2; no toolbar surface in PR 1.
+
     var icon: String {
         switch self {
         case .brush: return "paintbrush.pointed.fill"
@@ -45,6 +50,9 @@ enum DrawingTool {
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "rotate.right"
         case .scale: return "arrow.up.left.and.arrow.down.right"
+        case .blur: return "drop.halffull"
+        case .blurAdjustment: return "camera.filters"
+        case .smudge: return "hand.draw.fill"
         }
     }
 
@@ -63,6 +71,9 @@ enum DrawingTool {
         case .move: return "Move"
         case .rotate: return "Rotate"
         case .scale: return "Scale"
+        case .blur: return "Blur Brush"
+        case .blurAdjustment: return "Blur"
+        case .smudge: return "Smudge"
         }
     }
 }
@@ -83,6 +94,13 @@ struct BrushSettings {
     // Pressure curve adjustments
     var minPressureSize: CGFloat = 0.3
     var maxPressureSize: CGFloat = 1.0
+
+    // Blur brush: mix weight between blurred output and original under each
+    // stamp. 0 = no effect, 1 = full replace with blurred sample.
+    var blurStrength: Float = 1.0
+
+    // Smudge brush (PR 2): pickup/deposit weight in the patch-update pass.
+    var smudgeStrength: Float = 0.5
 }
 
 /// Represents a single brush stroke

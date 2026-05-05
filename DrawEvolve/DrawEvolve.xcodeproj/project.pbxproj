@@ -38,6 +38,7 @@
 		DE000037 /* CanvasStateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100037 /* CanvasStateManager.swift */; };
 		DE000038 /* SelectionOverlays.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100038 /* SelectionOverlays.swift */; };
 		DE000039 /* ToolButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100039 /* ToolButton.swift */; };
+		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DE000040 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100040 /* AppConfig.swift */; };
 		DE000041 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100041 /* SupabaseManager.swift */; };
 		DE000042 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100042 /* AuthManager.swift */; };
@@ -103,6 +104,7 @@
 		DE100037 /* CanvasStateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasStateManager.swift; sourceTree = "<group>"; };
 		DE100038 /* SelectionOverlays.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionOverlays.swift; sourceTree = "<group>"; };
 		DE100039 /* ToolButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolButton.swift; sourceTree = "<group>"; };
+		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE100040 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		DE100041 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
 		DE100042 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
@@ -282,6 +284,7 @@
 			isa = PBXGroup;
 			children = (
 				DE100039 /* ToolButton.swift */,
+				DE100900 /* AdjustmentHUD.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -408,6 +411,7 @@
 				DE000037 /* CanvasStateManager.swift in Sources */,
 				DE000038 /* SelectionOverlays.swift in Sources */,
 				DE000039 /* ToolButton.swift in Sources */,
+				DE000900 /* AdjustmentHUD.swift in Sources */,
 				DE000040 /* AppConfig.swift in Sources */,
 				DE000041 /* SupabaseManager.swift in Sources */,
 				DE000042 /* AuthManager.swift in Sources */,

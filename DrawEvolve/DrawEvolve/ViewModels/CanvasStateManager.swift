@@ -86,6 +86,47 @@ class CanvasStateManager: ObservableObject {
     let rotationSnappingInterval: Angle = .degrees(15) // Snap to 15° increments
     var enableRotationSnapping: Bool = true
 
+    // MARK: - Blur Adjustment Tool (Procreate-style HUD scrubber)
+    //
+    // While the blurAdjustment tool is selected, the renderer holds a snapshot
+    // of the active layer plus a preview texture; the MetalCanvasView swaps in
+    // the preview texture for display. ✓ commits via commitBlurAdjustment(),
+    // ✕ resets sigma via cancelBlurAdjustment(). Switching tools auto-ends.
+
+    /// True while the blur adjustment HUD is visible. Drives both the HUD
+    /// overlay and the preview-texture display swap in MetalCanvasView.
+    @Published var blurAdjustmentActive: Bool = false
+
+    /// Current blur sigma in document pixels. Drives the HUD percentage
+    /// readout and the preview render. SwiftUI binds to this for live HUD
+    /// updates as the user drags.
+    @Published var blurAdjustmentSigma: Float = 0.0
+
+    /// Maximum sigma the scrubber maps to. Defined here so the HUD percentage
+    /// math and the renderer's kernel-radius math agree. Starting target per
+    /// directive; reduce if perf measurements demand a lower cap.
+    let blurAdjustmentMaxSigma: Float = 50.0
+
+    /// Live percentage display for the HUD ("Blur · 35%"). Computed from
+    /// blurAdjustmentSigma so it tracks edits in real time without manual
+    /// mirroring.
+    var blurAdjustmentPercent: Int {
+        guard blurAdjustmentMaxSigma > 0 else { return 0 }
+        return Int(round((blurAdjustmentSigma / blurAdjustmentMaxSigma) * 100.0))
+    }
+
+    // MARK: - Stamp cursor (blur brush; smudge in PR 2)
+    //
+    // Transient circle outline at the touch point during a blur-brush drag.
+    // Set on touchesBegan/Moved, cleared on touchesEnded. SwiftUI overlay in
+    // DrawingCanvasView binds to these.
+
+    /// Center of the stamp cursor in screen-space points. nil = hidden.
+    @Published var stampCursorCenter: CGPoint? = nil
+
+    /// Diameter of the stamp cursor in screen-space points.
+    @Published var stampCursorDiameter: CGFloat = 0
+
     let historyManager = HistoryManager()
     // Bridge the nested HistoryManager's ObservableObject changes up to this object so
     // SwiftUI views that read `canvasState.historyManager.canUndo / canRedo` actually
@@ -163,11 +204,27 @@ class CanvasStateManager: ObservableObject {
             .dropFirst()
             .sink { [weak self] newTool in
                 guard let self = self else { return }
-                if newTool == .move { return }
-                if self.floatingSelectionTexture != nil {
-                    self.commitSelection()
-                } else if self.isTranslatingActiveLayer {
-                    self.commitActiveLayerTranslation()
+
+                // Auto-end blur adjustment if leaving the tool. Per directive:
+                // "Switching to another tool → discards preview, no commit.
+                // Explicit commit only via ✓."
+                if newTool != .blurAdjustment && self.blurAdjustmentActive {
+                    self.endBlurAdjustment()
+                }
+
+                if newTool != .move {
+                    if self.floatingSelectionTexture != nil {
+                        self.commitSelection()
+                    } else if self.isTranslatingActiveLayer {
+                        self.commitActiveLayerTranslation()
+                    }
+                }
+
+                // Auto-begin blur adjustment when entering the tool. Begin
+                // after any pending floating-selection commit so the snapshot
+                // captures the now-flattened layer state.
+                if newTool == .blurAdjustment && !self.blurAdjustmentActive {
+                    self.beginBlurAdjustment()
                 }
             }
 
@@ -1470,5 +1527,102 @@ class CanvasStateManager: ObservableObject {
     /// Transform a path from document space to screen space
     func documentPathToScreen(_ path: [CGPoint]) -> [CGPoint] {
         return path.map { documentToScreen($0) }
+    }
+
+    // MARK: - Blur Adjustment lifecycle
+    //
+    // Snapshot + preview-texture lifecycle is managed by the renderer; the
+    // state manager owns the user-facing flags and the undo bridge.
+
+    /// Activate the blur adjustment preview. Called when the tool is selected
+    /// (via the toolChangeCancellable subscription).
+    func beginBlurAdjustment() {
+        guard !blurAdjustmentActive else { return }
+        guard let renderer = renderer,
+              let layer = layers[safe: selectedLayerIndex],
+              let texture = layer.texture else {
+            print("⚠️ beginBlurAdjustment: missing renderer or layer texture; skipping")
+            return
+        }
+        blurAdjustmentSigma = 0.0
+        renderer.beginBlurAdjustment(
+            sourceTexture: texture,
+            layerId: layer.id,
+            selectionPath: selectionPath,
+            documentSize: documentSize
+        )
+        blurAdjustmentActive = true
+    }
+
+    /// Update the preview sigma (called from the HUD scrubber touch handler).
+    /// Clamps and dispatches a re-render of the preview texture.
+    func setBlurAdjustmentSigma(_ sigma: Float) {
+        let clamped = max(0, min(blurAdjustmentMaxSigma, sigma))
+        blurAdjustmentSigma = clamped
+        renderer?.updateBlurAdjustmentPreview(sigma: clamped)
+    }
+
+    /// ✓ button: blit the preview into the layer texture, record undo, then
+    /// re-snapshot so the user can immediately stack another blur on top.
+    /// Tool stays active per directive.
+    func commitBlurAdjustment() {
+        guard blurAdjustmentActive,
+              let renderer = renderer,
+              let layer = layers[safe: selectedLayerIndex],
+              let texture = layer.texture else { return }
+        let layerId = layer.id
+
+        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        renderer.commitBlurAdjustment(into: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture)
+
+        if let before = beforeSnapshot, let after = afterSnapshot {
+            historyManager.record(.stroke(
+                layerId: layerId,
+                beforeSnapshot: before,
+                afterSnapshot: after
+            ))
+        }
+
+        // Re-snapshot the now-committed layer state so subsequent drags blur
+        // from the new baseline (allows stacking blurs).
+        blurAdjustmentSigma = 0.0
+        renderer.beginBlurAdjustment(
+            sourceTexture: texture,
+            layerId: layerId,
+            selectionPath: selectionPath,
+            documentSize: documentSize
+        )
+
+        // Update thumbnail off the main thread.
+        let currentLayerIndex = selectedLayerIndex
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let l = self.layers[safe: currentLayerIndex] {
+                        l.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+    }
+
+    /// ✕ button: discard the current preview output, reset sigma to 0%.
+    /// Layer texture is unchanged. Tool stays active.
+    func cancelBlurAdjustment() {
+        guard blurAdjustmentActive else { return }
+        blurAdjustmentSigma = 0.0
+        renderer?.updateBlurAdjustmentPreview(sigma: 0.0)
+    }
+
+    /// Tool deactivated: free GPU resources, hide HUD, drop preview.
+    /// Called automatically when user switches away from .blurAdjustment.
+    func endBlurAdjustment() {
+        guard blurAdjustmentActive else { return }
+        renderer?.endBlurAdjustment()
+        blurAdjustmentSigma = 0.0
+        blurAdjustmentActive = false
     }
 }

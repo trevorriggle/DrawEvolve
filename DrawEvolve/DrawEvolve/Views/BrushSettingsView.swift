@@ -9,6 +9,10 @@ import SwiftUI
 
 struct BrushSettingsView: View {
     @Binding var settings: BrushSettings
+    /// Optional active tool. When set to `.blur`, the panel surfaces the
+    /// blur strength slider. nil = caller doesn't supply a tool, panel
+    /// behaves as the legacy brush settings panel.
+    var activeTool: DrawingTool? = nil
 
     var body: some View {
         Form {
@@ -20,6 +24,26 @@ struct BrushSettingsView: View {
                         .foregroundColor(.primary)
                 }
                 Slider(value: $settings.size, in: 1...200)
+            }
+
+            // Blur Brush — strength slider only surfaces when the blur tool
+            // is active. Smudge slider deferred to PR 2.
+            if activeTool == .blur {
+                Section("Blur") {
+                    HStack {
+                        Text("Strength")
+                        Spacer()
+                        Text(String(format: "%.0f%%", settings.blurStrength * 100))
+                            .foregroundColor(.primary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.blurStrength) },
+                            set: { settings.blurStrength = Float($0) }
+                        ),
+                        in: 0...1
+                    )
+                }
             }
 
             // Opacity slider removed for v1.0 — the slider behaves like
