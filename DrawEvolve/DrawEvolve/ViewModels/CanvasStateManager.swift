@@ -69,6 +69,15 @@ class CanvasStateManager: ObservableObject {
     @Published var panOffset: CGPoint = .zero // Current pan offset in screen space
     @Published var canvasRotation: Angle = .zero // Current rotation angle
 
+    // Canvas flip state — display-only mirror around viewport center.
+    // Layer textures are unchanged; only the screen composition flips.
+    // See documentToScreen / screenToDocument for the transform-chain
+    // order rationale. resetAllTransforms clears these along with
+    // zoom/pan/rotation so the Recenter button is always a one-tap
+    // return to normal orientation.
+    @Published var flipHorizontal: Bool = false
+    @Published var flipVertical: Bool = false
+
     // Zoom constraints
     let minZoom: CGFloat = 0.1 // 10% minimum zoom
     let maxZoom: CGFloat = 10.0 // 1000% maximum zoom
@@ -1219,9 +1228,23 @@ class CanvasStateManager: ObservableObject {
         let centerX = screenSize.width / 2
         let centerY = screenSize.height / 2
 
+        // Step 1 (Phase 0): inverse FLIP, applied FIRST in the inverse chain.
+        // The forward render applies flip LAST in screen space (mirror around
+        // viewport center); inverting that means we mirror the touch point
+        // around viewport center BEFORE undoing pan/rotate/zoom. Flip is its
+        // own inverse, so the same negation works in both directions.
+        // Without this, a touch on the right side of a flipped canvas would
+        // map to the right side of the document — but the user's finger is
+        // visually over the LEFT side of the document because that's what
+        // the flip-LAST render is showing under their finger.
+        var sx = point.x
+        var sy = point.y
+        if flipHorizontal { sx = 2 * centerX - sx }
+        if flipVertical   { sy = 2 * centerY - sy }
+
         // Inverse pan, then translate so (0,0) is the viewport center.
-        var pt = CGPoint(x: point.x - panOffset.x - centerX,
-                         y: point.y - panOffset.y - centerY)
+        var pt = CGPoint(x: sx - panOffset.x - centerX,
+                         y: sy - panOffset.y - centerY)
 
         // Inverse rotation. The shader applies R(θ) in Y-up pixel space, which
         // reads as a visual CCW rotation by θ on screen. In UIKit Y-down math,
@@ -1290,8 +1313,18 @@ class CanvasStateManager: ObservableObject {
         let ry = -pt.x * sinT + pt.y * cosT
 
         // Translate to viewport center, then apply pan.
-        return CGPoint(x: rx + centerX + panOffset.x,
-                       y: ry + centerY + panOffset.y)
+        var sx = rx + centerX + panOffset.x
+        var sy = ry + centerY + panOffset.y
+
+        // Apply FLIP last in the forward chain (mirror around viewport
+        // center). Pairs with the same flip applied as the LAST step in
+        // the Metal shader (Shaders.metal: quadVertexShaderWithTransform
+        // and quadVertexShaderForRect) so on-screen positions and
+        // SwiftUI overlays (symmetry guides, marching ants, transform
+        // handles) all agree on where flipped doc points render.
+        if flipHorizontal { sx = 2 * centerX - sx }
+        if flipVertical   { sy = 2 * centerY - sy }
+        return CGPoint(x: sx, y: sy)
     }
 
     /// Apply zoom. `centerPoint` is the pinch location in screen space; currently only
@@ -1322,11 +1355,23 @@ class CanvasStateManager: ObservableObject {
     }
 
     /// Pan the canvas by a delta in screen space.
+    ///
+    /// Flip compensation: the rendering pipeline applies flip LAST in
+    /// screen space (mirror around viewport center). Without input
+    /// compensation, a positive panOffset.x on a horizontally-flipped
+    /// canvas would translate the un-flipped content right, which the
+    /// flip mirrors to a leftward visual move — drag-right would feel
+    /// like drag-left. Inverting delta on each flipped axis makes the
+    /// gesture feel natural while flipped: drag right → canvas-display
+    /// moves right, regardless of flip state.
     func pan(delta: CGPoint) {
         guard delta.x.isFinite, delta.y.isFinite else { return }
 
-        panOffset.x += delta.x
-        panOffset.y += delta.y
+        let dx = flipHorizontal ? -delta.x : delta.x
+        let dy = flipVertical   ? -delta.y : delta.y
+
+        panOffset.x += dx
+        panOffset.y += dy
 
         // Hard clamp so a corrupted frame can't push panOffset to infinity. With a
         // 2048-pt canvas and max 10× zoom, legitimate pan stays well inside ±2×
@@ -1337,12 +1382,22 @@ class CanvasStateManager: ObservableObject {
     }
 
     /// Rotate the canvas by an angle increment.
+    ///
+    /// Flip compensation: a single mirror reverses orientation, so a CCW
+    /// gesture under one active flip would visually appear as CW rotation
+    /// without compensation. A double mirror (both flipH and flipV) is
+    /// equivalent to a 180° rotation, which preserves orientation — no
+    /// inversion needed in that case. Rule: invert when EXACTLY ONE flip
+    /// is active (XOR of the two flags).
     func rotate(by angle: Angle, snapToGrid: Bool = true) {
         guard angle.radians.isFinite else { return }
         // Prevent rotation if change is negligible
         guard abs(angle.degrees) > 0.1 else { return }
 
-        var newRotation = canvasRotation + angle
+        let invertForFlip = flipHorizontal != flipVertical
+        let effectiveAngle = invertForFlip ? Angle(radians: -angle.radians) : angle
+
+        var newRotation = canvasRotation + effectiveAngle
 
         // Normalize to 0-360° to prevent overflow
         newRotation = .degrees(newRotation.degrees.truncatingRemainder(dividingBy: 360))
@@ -1373,9 +1428,25 @@ class CanvasStateManager: ObservableObject {
         canvasRotation = .zero
     }
 
-    /// Reset all transforms
+    /// Reset all transforms — zoom, pan, rotation, AND flips. The
+    /// Recenter button calls this; the contract is "one tap returns
+    /// the canvas to normal orientation, no matter what state it's in."
     func resetAllTransforms() {
         resetZoomAndPan()
+        flipHorizontal = false
+        flipVertical = false
+    }
+
+    /// Toggle horizontal flip (display-only mirror around viewport
+    /// center). Layer textures are unchanged.
+    func toggleFlipHorizontal() {
+        flipHorizontal.toggle()
+    }
+
+    /// Toggle vertical flip (display-only mirror around viewport
+    /// center). Layer textures are unchanged.
+    func toggleFlipVertical() {
+        flipVertical.toggle()
     }
 
     /// Transform a rectangle from document space to screen space

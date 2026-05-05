@@ -260,7 +260,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get zoom, pan, and rotation state for rendering
+            // Get zoom, pan, rotation, and flip state for rendering
             let zoomScale = MainActor.assumeIsolated {
                 canvasState?.zoomScale ?? 1.0
             }
@@ -270,6 +270,9 @@ struct MetalCanvasView: UIViewRepresentable {
             let rotation = MainActor.assumeIsolated {
                 canvasState?.canvasRotation.radians ?? 0.0
             }
+            let flipH = MainActor.assumeIsolated { canvasState?.flipHorizontal ?? false }
+            let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
+            let flipState = SIMD2<Float>(flipH ? 1 : 0, flipV ? 1 : 0)
 
             // Draw opaque white canvas background so the gray workbench
             // doesn't show through transparent layer regions
@@ -278,7 +281,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 zoomScale: Float(zoomScale),
                 panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
                 canvasRotation: Float(rotation),
-                viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                flipState: flipState
             )
 
             // Selection-drag preview state (read once so the layer loop and the
@@ -331,7 +335,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
                         canvasRotation: Float(rotation),
-                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
                     )
                 } else {
                     renderer?.renderTextureToScreen(
@@ -341,7 +346,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
                         canvasRotation: Float(rotation),
-                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
                     )
                 }
             }
@@ -367,7 +373,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     zoomScale: Float(zoomScale),
                     panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
                     canvasRotation: Float(rotation),
-                    viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+                    viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                    flipState: flipState
                 )
             }
 
@@ -377,6 +384,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
                 let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
                 let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
+                let flipH = MainActor.assumeIsolated { canvasState?.flipHorizontal ?? false }
+                let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
 
                 renderer?.renderStrokePreview(
                     stroke,
@@ -385,7 +394,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     drawableSize: view.drawableSize,
                     zoomScale: zoomScale,
                     panOffset: panOffset,
-                    canvasRotation: rotation
+                    canvasRotation: rotation,
+                    flipHorizontal: flipH,
+                    flipVertical: flipV
                 )
             }
 
