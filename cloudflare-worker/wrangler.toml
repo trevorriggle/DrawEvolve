@@ -62,7 +62,7 @@ id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 # bundled with worker code so a deploy can never accidentally pair the
 # wrong root with the wrong worker version. See DEPLOYMENT.md Phase 5f.
 [vars]
-APP_ATTEST_TEAM_ID = ""              # 10-char Apple Team ID (e.g. ABCDE12345)
+APP_ATTEST_TEAM_ID = "S2RDF2D29N"     # 10-char Apple Team ID
 APP_ATTEST_BUNDLE_ID = "com.drawevolve.app"
 APP_ATTEST_ENV = "development"       # "development" | "production"
 

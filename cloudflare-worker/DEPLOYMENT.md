@@ -220,10 +220,25 @@ they go in `[vars]` (committed) — not `wrangler secret put`.
 | `APP_ATTEST_BUNDLE_ID` | iOS bundle identifier (default `com.drawevolve.app`) | Xcode → DrawEvolve target → General → Bundle Identifier |
 | `APP_ATTEST_ENV` | `development` or `production` — must match the iOS entitlement value | `DrawEvolve.entitlements` → `com.apple.developer.devicecheck.appattest-environment` |
 
-The shipped `wrangler.toml` has `APP_ATTEST_TEAM_ID = ""` as a placeholder.
-Fill it in (and confirm `APP_ATTEST_ENV` matches the iOS entitlement) before
-the next `wrangler deploy`, or every assertion will reject with
-`assert_rpid_mismatch` / `attest_aaguid_mismatch`.
+`APP_ATTEST_TEAM_ID` **must** be set in `wrangler.toml` before any
+TestFlight build. The shipped value is the DrawEvolve Apple Team ID;
+forks need to replace it with their own. The error paths differ
+depending on how it's wrong:
+
+- **Empty string:** `appAttestAppId(env)` throws
+  `'APP_ATTEST_TEAM_ID not configured'` at
+  [`middleware/app-attest.js:330-335`](middleware/app-attest.js#L330-L335),
+  which the registration handler maps to a generic
+  `400 attestation_invalid` (the loud-but-misnamed failure mode —
+  `wrangler tail` shows the real cause).
+- **Non-empty but wrong:** registration succeeds, then every
+  per-request assertion rejects with `assert_rpid_mismatch` because
+  the rpId hash the Worker computes from `<TEAM>.<BUNDLE>` won't
+  match what the iPad bound into its assertion.
+
+Confirm `APP_ATTEST_ENV` matches the iOS entitlement at the same
+time; a mismatch surfaces as `attest_aaguid_mismatch` on every
+registration.
 
 `APP_ATTEST_TEAM_ID + "." + APP_ATTEST_BUNDLE_ID` is hashed into the rpId
 that the Worker checks on every request — a mismatch with the iOS app ID
