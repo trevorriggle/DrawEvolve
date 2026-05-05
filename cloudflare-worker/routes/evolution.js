@@ -23,11 +23,18 @@ import {
   selectWindow,
   aggregateCategories,
   computeStreak,
+  deriveState,
+  composeSummaryText,
+  EXAMPLE_PAYLOAD,
+  MIN_DATA_POINTS_GROWING,
+  MIN_DATA_POINTS_MATURE,
   DEFAULT_WINDOW_CRITIQUES,
   MAX_WINDOW_CRITIQUES,
   DEFAULT_WINDOW_DAYS,
   MAX_WINDOW_DAYS,
 } from '../lib/evolution-aggregation.js';
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // Drawings to fetch per request. 50 * average critiques/drawing should
 // comfortably exceed MAX_AGGREGATION_ENTRIES (200) for any realistic user.
@@ -72,6 +79,12 @@ function parseIntegerParam(raw, fallback, max) {
  * shape (per Phase 2 spec: "test the route handler at the level of
  * 'given this set of drawings, produce this response.'") without mocking
  * the Supabase fetch.
+ *
+ * NOTE: This function is intentionally kept stateless per Phase 2 — no
+ * `state` field, no example substitution, no summary text. Phase 2.5
+ * layers those in via `buildEvolutionResponseWithState` below; the
+ * existing 16 evolution tests still drive this function directly and
+ * lock its shape.
  */
 export function buildEvolutionResponse(drawings, { windowCritiques, windowDays, now }) {
   const allEntries = flattenCritiques(drawings);
@@ -85,6 +98,85 @@ export function buildEvolutionResponse(drawings, { windowCritiques, windowDays, 
     warming_up: warmingUp,
     classifier_version: CLASSIFIER_VERSION,
   };
+}
+
+/**
+ * Phase 2.5 orchestrator. Layers state derivation, threshold reselection,
+ * summary text composition, and example substitution on top of the pure
+ * Phase 2 builder. The route handler calls this; tests for the new
+ * Phase 2.5 behavior also drive this directly.
+ *
+ * Order of operations (load-bearing):
+ *
+ *   1. Compute streak first — `state` derives from `streak.critiques_total`.
+ *   2. Select threshold from state (mature → 5, growing → 2). Early/example
+ *      states don't render a chart from real data, so the threshold doesn't
+ *      affect their categories arrays in the response.
+ *   3. Aggregate with the chosen threshold.
+ *   4. Compose summary text from the (pre-substitution) aggregation result —
+ *      so even when "early" state empties categories/warming_up in the
+ *      response, the summary still reflects what the user actually drew.
+ *   5. For "early" state: empty out categories and warming_up in the body
+ *      (the chart isn't rendered; the summary carries the message).
+ *   6. For "example" state: substitute EXAMPLE_PAYLOAD's categories and
+ *      warming_up, override window to describe the example, attach
+ *      example_artist_label. Streak stays as the user's real (zero) values
+ *      — we don't fake activity counters.
+ *   7. Assemble final body. `summary_text` and `example_artist_label`
+ *      keys are omitted (not set to null) when not applicable.
+ */
+export function buildEvolutionResponseWithState(drawings, { windowCritiques, windowDays, now }) {
+  const allEntries = flattenCritiques(drawings);
+  const windowEntries = selectWindow(allEntries, { windowCritiques, windowDays, now });
+  const streak = computeStreak(drawings, { now });
+  const state = deriveState(streak.critiques_total);
+
+  const threshold = state === 'growing' ? MIN_DATA_POINTS_GROWING : MIN_DATA_POINTS_MATURE;
+  const { categories, warmingUp, window } = aggregateCategories(windowEntries, { threshold });
+
+  // Compose BEFORE any state-driven substitution: the early-state body
+  // empties these arrays, but the summary is computed from the real data.
+  const summaryText = composeSummaryText(state, categories, warmingUp, streak);
+
+  let bodyCategories = categories;
+  let bodyWarmingUp = warmingUp;
+  let bodyWindow = window;
+  let exampleLabel = null;
+
+  if (state === 'early') {
+    // No chart in this state. The summary text carries the message.
+    bodyCategories = [];
+    bodyWarmingUp = [];
+  } else if (state === 'example') {
+    bodyCategories = EXAMPLE_PAYLOAD.categories;
+    bodyWarmingUp = EXAMPLE_PAYLOAD.warming_up;
+    exampleLabel = EXAMPLE_PAYLOAD.example_artist_label;
+    // Override window so the iOS UI can label endpoints with sensible
+    // dates instead of nulls. critique_count = sum of data_points across
+    // example categories per the Phase 2.5 spec.
+    const exampleCritiqueCount = EXAMPLE_PAYLOAD.categories
+      .reduce((acc, c) => acc + c.data_points, 0);
+    const latestTs = now;
+    const earliestTs = now - 30 * MS_PER_DAY;
+    bodyWindow = {
+      critique_count: exampleCritiqueCount,
+      earliest_at: new Date(earliestTs).toISOString(),
+      latest_at: new Date(latestTs).toISOString(),
+      span_days: 30,
+    };
+  }
+
+  const body = {
+    window: bodyWindow,
+    streak,
+    categories: bodyCategories,
+    warming_up: bodyWarmingUp,
+    state,
+    classifier_version: CLASSIFIER_VERSION,
+  };
+  if (summaryText !== null) body.summary_text = summaryText;
+  if (exampleLabel !== null) body.example_artist_label = exampleLabel;
+  return body;
 }
 
 export async function handleEvolution(request, env, ctx, fetcher = fetch) {
@@ -115,7 +207,7 @@ export async function handleEvolution(request, env, ctx, fetcher = fetch) {
     return jsonResponse({ error: 'evolution_unavailable' }, 502);
   }
 
-  return jsonResponse(buildEvolutionResponse(drawings, {
+  return jsonResponse(buildEvolutionResponseWithState(drawings, {
     windowCritiques,
     windowDays,
     now: Date.now(),

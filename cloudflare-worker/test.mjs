@@ -72,9 +72,15 @@ import {
   aggregateCategories,
   computeStreak,
   buildEvolutionResponse,
+  buildEvolutionResponseWithState,
+  deriveState,
+  composeSummaryText,
+  EXAMPLE_PAYLOAD,
   SOLID_FOUNDATION_CEILING,
   MEANINGFUL_DELTA,
   MIN_DATA_POINTS,
+  MIN_DATA_POINTS_MATURE,
+  MIN_DATA_POINTS_GROWING,
   PRIMARY_WEIGHT,
   SECONDARY_WEIGHT,
   DEFAULT_WINDOW_CRITIQUES,
@@ -4134,4 +4140,382 @@ test('evolution: status threshold constants match spec', () => {
   assert.equal(SOLID_FOUNDATION_CEILING, 1.5);
   assert.equal(MEANINGFUL_DELTA, 0.75);
   assert.equal(MIN_DATA_POINTS, 5);
+});
+
+// =============================================================================
+// My Evolution Phase 2.5 — state derivation, summary text, example payload
+// =============================================================================
+//
+// Phase 2.5 layers four additive concerns on top of the Phase 2 endpoint:
+// state derivation, a state-dependent threshold, plain-language summary
+// text, and a hardcoded example payload for first-launch users. The
+// existing 16 evolution tests above lock the pure Phase 2 shape; the cases
+// below exercise the new orchestrator (buildEvolutionResponseWithState)
+// and the pure helpers it composes.
+
+const EVO_25_NOW = Date.parse('2026-05-01T00:00:00.000Z');
+const EVO_25_DAY = 86400000;
+
+function evo25TaggedCritique({ primary, secondaries = [], severity, createdAt }) {
+  return evoTaggedCritique({ primary, secondaries, severity, createdAt });
+}
+
+// Build N tagged critiques with the given primary/severity, spaced one
+// day apart oldest-first so they're unambiguously ordered. Returns the
+// drawing wrapper directly to keep call sites compact.
+function evo25Drawing(specs, { id = 'd1', updatedAt } = {}) {
+  const critiques = specs.map((spec, i) => evo25TaggedCritique({
+    primary: spec.primary,
+    secondaries: spec.secondaries ?? [],
+    severity: spec.severity,
+    createdAt: new Date(EVO_25_NOW - (specs.length - i) * EVO_25_DAY).toISOString(),
+  }));
+  return evoDrawing(critiques, {
+    id,
+    updatedAt: updatedAt ?? new Date(EVO_25_NOW - EVO_25_DAY).toISOString(),
+  });
+}
+
+function evo25Build(drawings) {
+  return buildEvolutionResponseWithState(drawings, {
+    windowCritiques: DEFAULT_WINDOW_CRITIQUES,
+    windowDays: DEFAULT_WINDOW_DAYS,
+    now: EVO_25_NOW,
+  });
+}
+
+// -----------------------------------------------------------------------------
+// State derivation (cases 1-7)
+// -----------------------------------------------------------------------------
+
+test('evolution 2.5: critiques_total === 0 returns state "example"', () => {
+  assert.equal(deriveState(0), 'example');
+  // And via the full orchestrator with no drawings.
+  const out = evo25Build([]);
+  assert.equal(out.state, 'example');
+});
+
+test('evolution 2.5: critiques_total === 1 returns state "early"', () => {
+  assert.equal(deriveState(1), 'early');
+  const drawing = evo25Drawing([{ primary: 'anatomy', severity: 3 }]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'early');
+  assert.equal(out.streak.critiques_total, 1);
+});
+
+test('evolution 2.5: critiques_total === 2 returns state "early"', () => {
+  assert.equal(deriveState(2), 'early');
+  const drawing = evo25Drawing([
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'composition', severity: 3 },
+  ]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'early');
+  assert.equal(out.streak.critiques_total, 2);
+});
+
+test('evolution 2.5: critiques_total === 3 returns state "growing"', () => {
+  assert.equal(deriveState(3), 'growing');
+  const drawing = evo25Drawing([
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+  ]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'growing');
+});
+
+test('evolution 2.5: critiques_total === 9 returns state "growing"', () => {
+  assert.equal(deriveState(9), 'growing');
+  const drawing = evo25Drawing(
+    Array.from({ length: 9 }, () => ({ primary: 'anatomy', severity: 3 })),
+  );
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'growing');
+});
+
+test('evolution 2.5: critiques_total === 10 returns state "mature"', () => {
+  assert.equal(deriveState(10), 'mature');
+  const drawing = evo25Drawing(
+    Array.from({ length: 10 }, () => ({ primary: 'anatomy', severity: 3 })),
+  );
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'mature');
+});
+
+test('evolution 2.5: critiques_total === 50 returns state "mature"', () => {
+  assert.equal(deriveState(50), 'mature');
+});
+
+// -----------------------------------------------------------------------------
+// Threshold behavior (cases 8-11)
+// -----------------------------------------------------------------------------
+
+test('evolution 2.5: growing state with 3 anatomy mentions → category, not warming_up', () => {
+  // 3 critiques total → state = "growing" → threshold 2 → 3 anatomy
+  // mentions (data_points = 3) lands in `categories`.
+  const drawing = evo25Drawing([
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+  ]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'growing');
+  const cat = out.categories.find((c) => c.id === 'anatomy');
+  assert.ok(cat, 'anatomy must appear in categories at threshold 2');
+  assert.equal(cat.data_points, 3);
+  assert.equal(out.warming_up.find((w) => w.id === 'anatomy'), undefined);
+  // Sanity: warming_up entries (if any others were below threshold 2)
+  // carry the growing-state needed value.
+  for (const w of out.warming_up) assert.equal(w.needed, MIN_DATA_POINTS_GROWING);
+});
+
+test('evolution 2.5: mature state with 3 anatomy mentions → warming_up, not categories', () => {
+  // 10 critiques total → state = "mature" → threshold 5. The 3 anatomy
+  // mentions (against 7 other-category mentions) stay in warming_up.
+  // Confirms the existing mature-threshold behavior is unchanged.
+  const specs = [
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'composition', severity: 3 },
+    { primary: 'composition', severity: 3 },
+    { primary: 'composition', severity: 3 },
+    { primary: 'composition', severity: 3 },
+    { primary: 'composition', severity: 3 },
+    { primary: 'composition', severity: 3 },
+    { primary: 'composition', severity: 3 },
+  ];
+  const drawing = evo25Drawing(specs);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'mature');
+  assert.equal(out.warming_up.find((w) => w.id === 'anatomy')?.data_points, 3);
+  assert.equal(out.categories.find((c) => c.id === 'anatomy'), undefined);
+  // Mature warming_up entries carry needed=5.
+  const anatomyWarming = out.warming_up.find((w) => w.id === 'anatomy');
+  assert.equal(anatomyWarming.needed, MIN_DATA_POINTS_MATURE);
+});
+
+test('evolution 2.5: early state empties categories and warming_up regardless of data', () => {
+  // 2 critiques → "early". Even though anatomy has 2 data_points (which
+  // would render at threshold 2 in growing), early state empties both
+  // arrays — the iOS UI doesn't render the chart in this state.
+  const drawing = evo25Drawing([
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'anatomy', severity: 3 },
+  ]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'early');
+  assert.deepEqual(out.categories, []);
+  assert.deepEqual(out.warming_up, []);
+});
+
+test('evolution 2.5: example state substitutes EXAMPLE_PAYLOAD into the response', () => {
+  const out = evo25Build([]);
+  assert.equal(out.state, 'example');
+  assert.deepEqual(out.categories, EXAMPLE_PAYLOAD.categories);
+  assert.deepEqual(out.warming_up, EXAMPLE_PAYLOAD.warming_up);
+  // Real user activity is still zero (we don't fake the streak).
+  assert.equal(out.streak.critiques_total, 0);
+  assert.equal(out.streak.drawings_total, 0);
+});
+
+// -----------------------------------------------------------------------------
+// Summary text (cases 12-17)
+// -----------------------------------------------------------------------------
+
+test('evolution 2.5: early state with 1 critique → summary starts with "Your last critique"', () => {
+  const drawing = evo25Drawing([{ primary: 'anatomy', severity: 3 }]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'early');
+  assert.ok(typeof out.summary_text === 'string');
+  assert.ok(
+    out.summary_text.startsWith('Your last critique'),
+    `summary_text must start with "Your last critique", got: ${out.summary_text}`,
+  );
+});
+
+test('evolution 2.5: early state with 2 critiques → summary starts with "Your last 2 critiques"', () => {
+  const drawing = evo25Drawing([
+    { primary: 'anatomy', severity: 3 },
+    { primary: 'composition', severity: 3 },
+  ]);
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'early');
+  assert.ok(
+    out.summary_text.startsWith('Your last 2 critiques'),
+    `summary_text must start with "Your last 2 critiques", got: ${out.summary_text}`,
+  );
+});
+
+test('evolution 2.5: growing state → summary starts with "Across your last"', () => {
+  const drawing = evo25Drawing(
+    Array.from({ length: 5 }, () => ({ primary: 'anatomy', severity: 3 })),
+  );
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'growing');
+  assert.ok(
+    out.summary_text.startsWith('Across your last'),
+    `summary_text must start with "Across your last", got: ${out.summary_text}`,
+  );
+});
+
+test('evolution 2.5: mature state omits summary_text', () => {
+  const drawing = evo25Drawing(
+    Array.from({ length: 10 }, () => ({ primary: 'anatomy', severity: 3 })),
+  );
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'mature');
+  assert.ok(!('summary_text' in out), 'summary_text must be absent in mature state');
+});
+
+test('evolution 2.5: example state omits summary_text', () => {
+  const out = evo25Build([]);
+  assert.equal(out.state, 'example');
+  assert.ok(!('summary_text' in out), 'summary_text must be absent in example state');
+});
+
+test('evolution 2.5: summary_text never exceeds 200 characters', () => {
+  // Exercise the early-state truncation path with all 8 categories
+  // touched across 2 critiques — primary + 2 secondaries each, then a
+  // second critique with the complementary primary + 2 secondaries to
+  // cover every taxonomy id. Even at the upper bound, the cap must hold.
+  const allCats = ['anatomy', 'composition', 'value', 'color', 'line', 'perspective', 'subject_match', 'general'];
+  const c1 = evoTaggedCritique({
+    primary: allCats[0],
+    secondaries: [allCats[1], allCats[2]],
+    severity: 3,
+    createdAt: new Date(EVO_25_NOW - 2 * EVO_25_DAY).toISOString(),
+  });
+  const c2 = evoTaggedCritique({
+    primary: allCats[3],
+    secondaries: [allCats[4], allCats[5]],
+    severity: 3,
+    createdAt: new Date(EVO_25_NOW - 1 * EVO_25_DAY).toISOString(),
+  });
+  const drawing = evoDrawing([c1, c2], {
+    id: 'd1',
+    updatedAt: new Date(EVO_25_NOW - EVO_25_DAY).toISOString(),
+  });
+  const out = evo25Build([drawing]);
+  assert.equal(out.state, 'early');
+  assert.ok(out.summary_text.length <= 200,
+    `summary_text length ${out.summary_text.length} must be <= 200; got: ${out.summary_text}`);
+
+  // Also exercise the growing-state path with a long enough taxonomy
+  // mention pattern to cover the upper end.
+  const growingDrawing = evo25Drawing([
+    { primary: 'anatomy', severity: 5, secondaries: ['composition', 'value'] },
+    { primary: 'anatomy', severity: 4, secondaries: ['composition', 'value'] },
+    { primary: 'anatomy', severity: 3, secondaries: ['composition', 'value'] },
+    { primary: 'subject_match', severity: 3 },
+    { primary: 'subject_match', severity: 3 },
+    { primary: 'subject_match', severity: 3 },
+  ]);
+  const growingOut = evo25Build([growingDrawing]);
+  assert.equal(growingOut.state, 'growing');
+  assert.ok(growingOut.summary_text.length <= 200,
+    `growing summary_text length ${growingOut.summary_text.length} must be <= 200`);
+});
+
+// -----------------------------------------------------------------------------
+// Response shape (cases 18-21)
+// -----------------------------------------------------------------------------
+
+test('evolution 2.5: example state response includes example_artist_label', () => {
+  const out = evo25Build([]);
+  assert.equal(out.state, 'example');
+  assert.equal(out.example_artist_label, EXAMPLE_PAYLOAD.example_artist_label);
+});
+
+test('evolution 2.5: non-example states omit example_artist_label', () => {
+  // early
+  const early = evo25Build([evo25Drawing([{ primary: 'anatomy', severity: 3 }])]);
+  assert.equal(early.state, 'early');
+  assert.ok(!('example_artist_label' in early), 'early must omit example_artist_label');
+
+  // growing
+  const growing = evo25Build([evo25Drawing(
+    Array.from({ length: 5 }, () => ({ primary: 'anatomy', severity: 3 })),
+  )]);
+  assert.equal(growing.state, 'growing');
+  assert.ok(!('example_artist_label' in growing), 'growing must omit example_artist_label');
+
+  // mature
+  const mature = evo25Build([evo25Drawing(
+    Array.from({ length: 10 }, () => ({ primary: 'anatomy', severity: 3 })),
+  )]);
+  assert.equal(mature.state, 'mature');
+  assert.ok(!('example_artist_label' in mature), 'mature must omit example_artist_label');
+});
+
+test('evolution 2.5: example state preserves real (zero) streak.critiques_total', () => {
+  const out = evo25Build([]);
+  assert.equal(out.state, 'example');
+  assert.equal(out.streak.critiques_total, 0);
+  assert.equal(out.streak.drawings_total, 0);
+  assert.equal(out.streak.drawings_this_week, 0);
+  assert.equal(out.streak.drawings_this_month, 0);
+});
+
+test('evolution 2.5: classifier_version is present in every state', () => {
+  // example
+  const example = evo25Build([]);
+  assert.equal(example.classifier_version, CLASSIFIER_VERSION);
+  // early
+  const early = evo25Build([evo25Drawing([{ primary: 'anatomy', severity: 3 }])]);
+  assert.equal(early.classifier_version, CLASSIFIER_VERSION);
+  // growing
+  const growing = evo25Build([evo25Drawing(
+    Array.from({ length: 5 }, () => ({ primary: 'anatomy', severity: 3 })),
+  )]);
+  assert.equal(growing.classifier_version, CLASSIFIER_VERSION);
+  // mature
+  const mature = evo25Build([evo25Drawing(
+    Array.from({ length: 10 }, () => ({ primary: 'anatomy', severity: 3 })),
+  )]);
+  assert.equal(mature.classifier_version, CLASSIFIER_VERSION);
+});
+
+// -----------------------------------------------------------------------------
+// composeSummaryText / EXAMPLE_PAYLOAD direct unit checks (sanity)
+// -----------------------------------------------------------------------------
+
+test('evolution 2.5: composeSummaryText returns null for "mature" and "example"', () => {
+  assert.equal(composeSummaryText('mature', [], [], { critiques_total: 12 }), null);
+  assert.equal(composeSummaryText('example', [], [], { critiques_total: 0 }), null);
+});
+
+test('evolution 2.5: composeSummaryText growing-state status pointer prefers current_focus', () => {
+  // Two categories, top is "anatomy" (data_points=5, status improving),
+  // second is "composition" (data_points=4, status current_focus). The
+  // pointer must call out composition as the current focus rather than
+  // anatomy as improving — current_focus wins per the locked rule.
+  const cats = [
+    { id: 'anatomy', data_points: 5, current_value: 2, series: [4, 4, 3, 2, 2], status: 'improving' },
+    { id: 'composition', data_points: 4, current_value: 4, series: [2, 3, 3.5, 4], status: 'current_focus' },
+  ];
+  const out = composeSummaryText('growing', cats, [], { critiques_total: 5 });
+  assert.ok(out.includes('Composition is your current focus.'),
+    `expected current_focus pointer for Composition, got: ${out}`);
+  assert.ok(!out.includes('improving'),
+    `expected improving pointer to be omitted when current_focus exists, got: ${out}`);
+});
+
+test('evolution 2.5: composeSummaryText growing-state falls back to GROWING_EMPTY', () => {
+  // No categories (defensive path) — should still return a string.
+  const out = composeSummaryText('growing', [], [], { critiques_total: 4 });
+  assert.equal(out, 'Across your last 4 critiques, no consistent theme yet.');
+});
+
+test('evolution 2.5: EXAMPLE_PAYLOAD status fields match what determineStatus would compute', () => {
+  // Lock: each example category's declared status must be derivable from
+  // its series via the production determineStatus math. If
+  // SOLID_FOUNDATION_CEILING or MEANINGFUL_DELTA changes, this catches
+  // the drift.
+  for (const cat of EXAMPLE_PAYLOAD.categories) {
+    const computed = determineStatus(cat.series);
+    assert.equal(computed, cat.status,
+      `EXAMPLE_PAYLOAD ${cat.id}: declared ${cat.status}, computed ${computed}`);
+  }
 });
