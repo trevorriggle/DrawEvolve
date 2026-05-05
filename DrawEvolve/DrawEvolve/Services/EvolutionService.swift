@@ -19,17 +19,28 @@ import Supabase
 
 enum EvolutionError: Error, Equatable {
     case notAuthenticated
+    /// App Attest assertion couldn't be produced. On the simulator,
+    /// `DCAppAttestService.isSupported` is `false` and this fires before
+    /// any network attempt; on real devices it indicates a Keychain or
+    /// Apple-server issue with the attested key. Distinct from `.network`
+    /// because the server was never contacted, and distinct from
+    /// `.server(Int)` because no real HTTP status exists for it.
+    case deviceVerificationFailed
     case network
     case decoding
     case server(Int)
     case unknown
 
     /// User-facing copy. Honest, direct, no padding — the Evolution feature's
-    /// design discipline applies here too.
+    /// design discipline applies here too. The simulator-specific override
+    /// for `.deviceVerificationFailed` lives in EvolutionView.errorView so
+    /// the enum stays platform-agnostic.
     var userFacingMessage: String {
         switch self {
         case .notAuthenticated:
             return "Sign in again to view your evolution."
+        case .deviceVerificationFailed:
+            return "Couldn't verify this device."
         case .network:
             return "Couldn't reach the server."
         case .decoding:
@@ -80,7 +91,11 @@ actor EvolutionService {
                 body: Data()
             )
         } catch {
-            throw EvolutionError.server(0)
+            // Pre-network failure: AppAttest couldn't produce headers (e.g.
+            // simulator without DCAppAttestService support, Keychain wedged,
+            // Apple invalidated the key). The server was never contacted —
+            // surfacing this as `.server(0)` was misleading on every count.
+            throw EvolutionError.deviceVerificationFailed
         }
 
         // 3. Build + send request.
