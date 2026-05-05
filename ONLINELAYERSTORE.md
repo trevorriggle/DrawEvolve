@@ -1,8 +1,35 @@
 # Online Layer Store — preserving full layer data on save
 
-Plan only. No implementation in this doc. Goal: make a saved DrawEvolve
-drawing fully re-editable as a layered document, instead of collapsing
-to a single flattened raster on every save.
+Goal: make a saved DrawEvolve drawing fully re-editable as a layered document, instead of collapsing to a single flattened raster on every save.
+
+---
+
+## ✅ Status snapshot (2026-05-05) — SHIPPED end-to-end
+
+This plan landed across three PRs:
+
+- **PR #12 (`18ba2b4` — "Add layered drawing storage — cloud sync layer")** — backend + cloud sync side. Migration `0010_layered_drawings.sql` adds `manifest_path`, `format_version`, `layer_count`, `total_bytes`, `version` (optimistic-concurrency), drops NOT NULL on `storage_path`, adds the path-present CHECK constraint. Storage layout switched to per-drawing prefixes (`<user_id>/<drawing_id>/{manifest.json, layer-N.png, thumb.jpg, composite.jpg}`).
+- **PR #14 (`505388a` — "Wire layered storage iOS edges (load path)")** — iOS load path. `Models/LayeredDrawingPayload.swift` added; `CloudDrawingStorageManager.loadLayeredDrawing(for:)` returns the parsed payload + per-layer PNG bytes, falls through to legacy `loadFullImage` if `manifest.json` is absent.
+- **PR #17 (`9fd9d8e` — "Wire layered storage save-side producer (end-to-end)")** — iOS save path. Canvas builds a `LayeredDrawingPayload` from the live `DrawingLayer` stack, the manager computes per-layer SHA-256, serializes the manifest, uploads in the §5.4 ordering (layers parallel → composite + thumb parallel → manifest last → row upsert).
+
+### Key path corrections vs original plan
+
+- **Migration number:** §5.2 sketched `0007_layered_drawings.sql`. Actual file is `supabase/migrations/0010_layered_drawings.sql`. Repo migration numbering is sequential with reserved-but-unused gaps at 0007 and 0008.
+- **iOS storage class file name:** the doc occasionally says `CloudDrawingStorageManager` as a file. The *file* is `Services/DrawingStorageManager.swift` (kept that name to avoid pbxproj churn); the *class* inside is `CloudDrawingStorageManager`. Same for any planning doc that referenced `CloudDrawingStorageManager.swift` — that file does not exist.
+
+### What did NOT land from this plan
+
+- **Layer-aware AI feedback** — explicit non-goal per §10. Worker still receives the flat composite.
+- **§7.1 bbox crop** — deferred per §11.3.
+- **§7.1 quantized 8-bit indexed PNG** — deferred.
+- **§9.1 conflict-detection UI** — `version` column + before-update trigger landed in PR #12, but the conditional-upsert + "this drawing was edited on another device" UX is not yet wired.
+- **§3.1 stable layer IDs** — landed (manifest carries the id; `DrawingLayer` honors it).
+
+The remainder of this doc is the original design study, retained verbatim for the trade-study trail.
+
+---
+
+## ORIGINAL PLAN (for historical context — implementation has shipped)
 
 ---
 

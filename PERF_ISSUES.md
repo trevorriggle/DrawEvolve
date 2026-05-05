@@ -1,8 +1,26 @@
 # Drawing Pipeline Performance Issues
 
-Snapshot of the perf audit run on 2026-04-30 against `main`. Pick this up after TestFlight v1 ships.
+Snapshot of the perf audit run on 2026-04-30 against `main`. **PR #8 (`ccf910a`) applied a batch of these fixes** — see status table below for what's still open.
 
 Canvas texture is **4096² BGRA8** on iPad Pro per `CLAUDE.md`, so any full-texture buffer = **64 MiB**. Several issues compound at that resolution but were invisible at the smaller texture size the code was written against.
+
+---
+
+## Status snapshot (post-PR #8)
+
+| Item | State |
+|---|---|
+| Paint bucket fill loop on background queue (`8acafb0`) | ✅ landed pre-PR #8 |
+| Region-local `getBytes` for selection-commit paths | ✅ shipped in PR #8 |
+| Text routed through `compositeFloatingTextureIntoLayer` | ✅ shipped in PR #8 |
+| Per-frame `MTLCommandQueue` allocation removed | ✅ shipped in PR #8 |
+| Hot-path `print` gated behind `#if DEBUG` | ✅ shipped in PR #8 |
+| Eyedropper 1×1 region read | ✅ shipped in PR #8 |
+| Paint bucket pre/post `captureSnapshot` full-texture reads | ⚠️ still open — see High row |
+| `floodFillKernel` rewrite as true GPU connected-component fill | ⚠️ deferred (algorithm rework, not a one-liner) |
+| `waitUntilCompleted` after every stroke commit | ⚠️ still open (Low — needs async-snapshot undo path) |
+
+The remaining open items are all in the "long-term, sign-off required" bucket. Read the rows below for context, but for current state, treat the table above as authoritative.
 
 ---
 
@@ -50,11 +68,12 @@ Canvas texture is **4096² BGRA8** on iPad Pro per `CLAUDE.md`, so any full-text
 ## Suggested order if picking this up post-TestFlight
 
 1. ~~Land the paint bucket fix~~ — landed in `8acafb0`. Verify on iPad before TestFlight.
-2. Region-local `getBytes` for the four selection-commit paths (`clearRect`, `clearPath`, `extractPixels` rect/path) — moderate change, 16×-class wins for typical selection sizes.
-3. Route text through `compositeFloatingTextureIntoLayer` — eliminates one of the seven full-texture loops.
-4. Cache the command queue in `draw(in:)` — one-line change.
-5. Gate `print` behind `#if DEBUG` in `renderStroke` and `floodFill`.
-6. (Optional, larger effort) Rewrite `floodFillKernel` in `Shaders.metal` as a real connected-component fill compute shader and wire it up. Removes the CPU fill path entirely. Needs careful correctness retest on iPad.
+2. ✅ ~~Region-local `getBytes` for the four selection-commit paths~~ — shipped in PR #8 (`ccf910a`).
+3. ✅ ~~Route text through `compositeFloatingTextureIntoLayer`~~ — shipped in PR #8.
+4. ✅ ~~Cache the command queue in `draw(in:)`~~ — shipped in PR #8.
+5. ✅ ~~Gate `print` behind `#if DEBUG` in `renderStroke` and `floodFill`~~ — shipped in PR #8.
+6. (Still open, larger effort) Rewrite `floodFillKernel` in `Shaders.metal` as a real connected-component fill compute shader and wire it up. Removes the CPU fill path entirely. Needs careful correctness retest on iPad.
+7. (Still open, Low) Replace `waitUntilCompleted` after every stroke commit with completion-handler-based undo snapshot.
 
 ---
 
