@@ -1,8 +1,41 @@
 # Custom AI Critique Prompts — Product Plan
 
-Audit + plan for letting users customize the AI critique prompt. Companion to `CUSTOM_PROMPTS_PLAN.md` (which is the narrow plumbing plan for per-drawing prompts and is partially shipped); this doc is the broader product plan covering parameterization, UI, sharing, and versioning.
+Audit + plan for letting users customize the AI critique prompt. Companion to `CUSTOM_PROMPTS_PLAN.md` (which is the narrow plumbing plan for per-drawing prompts); this doc is the broader product plan covering parameterization, UI, sharing, and versioning.
 
-Audit captured 2026-05-02. Plan only — no implementation.
+Audit captured 2026-05-02.
+
+---
+
+## ✅ Status snapshot (2026-05-05)
+
+| Sequencing item (from §8) | Status |
+|---|---|
+| 1. Authoring UI for `custom_prompts` (Tier 1 voice text) | ✅ Shipped (PR #9 `c096546` + iOS pbxproj fix PR #11 `ea9a61a`) |
+| 2. Bounded parameters (Tier 2 — tone / praise / focus / techniques / closing aside / history depth) | ✅ Shipped (PR #9). Migration `0009_custom_prompts_parameters.sql` adds `parameters jsonb` + `template_version`. |
+| 3. Versioning tables (`custom_prompt_versions`, `prompt_template_versions`) | ⚠️ Partial — `template_version` column exists on `custom_prompts`, but separate version-history tables NOT created. Drift detection planned in editor UI later. |
+| 4. Sharing v1 (share-by-URL, import as duplicate, moderation) | ☐ Not started |
+| 5. Discovery surface | ☐ Not started |
+| 6. Cross-device default (`user_preferences.preferred_preset_id` fallback in Worker) | ☐ Not started |
+
+### Path corrections
+
+The Worker is now modular (PR #3, `bb00a36`). All references below to `cloudflare-worker/index.js:NN` are stale. Current locations:
+
+| Was (`index.js:NN` in this doc) | Now |
+|---|---|
+| Voice constants (`VOICE_*`), `SHARED_SYSTEM_RULES`, `assembleSystemPrompt`, `PRESET_VOICES` | `cloudflare-worker/lib/prompt.js` |
+| `selectConfig`, `buildSystemPrompt`, `buildUserMessage`, `formatHistoryEntries`, `renderSkillCalibration`, `renderContextBlock`, `RESPONSE_FORMAT_TEMPLATE`, `HISTORY_FRAMING_DEFAULT`, `DEFAULT_FREE_CONFIG`, `DEFAULT_PRO_CONFIG` | `cloudflare-worker/lib/prompt.js` |
+| `selectVoice`, `resolvePresetId` | `cloudflare-worker/lib/prompt.js` (selectVoice) and `cloudflare-worker/routes/feedback.js` (request-time resolution) |
+| `fetchCritiqueHistory`, `buildCritiqueEntry`, OpenAI request | `cloudflare-worker/routes/feedback.js` |
+| Custom-prompt CRUD endpoints | `cloudflare-worker/routes/prompts.js` |
+| JWT validation | `cloudflare-worker/middleware/auth.js` |
+| Rate-limit / cost-ceiling enforcement | `cloudflare-worker/middleware/rate-limit.js` + `middleware/idempotency.js` |
+
+### Migration numbering note
+
+§4 of this doc proposed extending `custom_prompts` with new columns. That extension landed as a **separate** migration `0009_custom_prompts_parameters.sql` rather than amending `0005`. Migration numbering in the repo is sequential with reserved-but-unused slots (0007, 0008). Current state: 0001–0006, 0009, 0010 present.
+
+---
 
 ---
 

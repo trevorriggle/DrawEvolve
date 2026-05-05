@@ -1,10 +1,35 @@
 # Custom Prompts — Implementation Plan
 
-Audit captured 2026-04-30. Picks up post-TestFlight v1. Goal: per-drawing custom user prompts, building on the existing PromptConfig refactor in the Cloudflare Worker.
+Audit captured 2026-04-30. **Status as of 2026-05-05: most of this plan has shipped. See "What landed" below.** Original plan retained for historical context.
 
 ---
 
-## Summary
+## ✅ What landed (post-audit)
+
+The custom-prompts feature shipped across multiple PRs:
+
+- **PR #9 (`c096546` — "Add bounded-knobs custom prompts")** — full product surface for per-user custom prompts (voice text + bounded parameter knobs). Migration `0009_custom_prompts_parameters.sql` adds `parameters jsonb` and `template_version` to `custom_prompts`, drops NOT NULL on `body` (parameters-only flow). Worker resolution wired through the modular `routes/prompts.js`.
+- **PR #11 (`ea9a61a` — "Register custom-prompts iOS files in Xcode project")** — iOS pbxproj fix to register the iOS-side prompt management files (`Services/CustomPromptManager.swift`, `Models/CustomPrompt.swift`, `Views/PromptListView.swift`, `Views/PromptEditView.swift`).
+- **Migration `0005_preset_voices_and_custom_prompts.sql`** (pre-audit) had already added `user_preferences`, `custom_prompts`, and `drawings.preset_id`.
+
+### Key path corrections vs original plan
+
+- The Worker is now modular (PR #3, `bb00a36`). All the line refs below pointing into `cloudflare-worker/index.js` are stale. Current locations:
+  - Prompt assembly + voice resolution: `cloudflare-worker/lib/prompt.js`
+  - Critique persistence + `buildCritiqueEntry`: `cloudflare-worker/routes/feedback.js`
+  - Custom prompt CRUD: `cloudflare-worker/routes/prompts.js`
+- iOS storage class: cloud logic lives in `Services/DrawingStorageManager.swift` (the *class* is `CloudDrawingStorageManager`; the *file* keeps the original name to avoid pbxproj churn). Some early planning text referenced a separate `CloudDrawingStorageManager.swift` file — that file does not exist.
+
+### What did NOT land from this plan
+
+- "Drawings-row column for `custom_prompt`" — the team chose the bounded-knobs surface (PR #9) instead. Per-drawing freeform prompt override is **not shipped** and is no longer the recommended path; see CUSTOMPROMPTSPLAN.md for the bounded-knob alternative which is the live surface.
+- "Stuck Detection" (Future section) — not started. Still parked.
+
+The remainder of this doc is the original audit/plan, kept for the trade-study trail. Treat the file-path references as historical.
+
+---
+
+## Summary (historical — pre-PR #9)
 
 The Worker prompt-config refactor is real and well-shaped, but only **half-done** for the custom-prompts feature. `PromptConfig`, `buildSystemPrompt`, and the per-critique persistence (`buildCritiqueEntry`'s `prompt_config` snapshot) are all clean. The `styleModifier` field is wired up end-to-end and works.
 
@@ -35,9 +60,11 @@ Nothing in the existing code actively fights this feature. The shape is right. T
 
 ---
 
-## Concrete touch points
+## Concrete touch points (HISTORICAL — paths now stale)
 
-| Layer | File | Change |
+The path/line refs below reflect the pre-PR #3 monolithic `index.js`. The worker now lives in modular files (`routes/`, `middleware/`, `lib/`). This table is preserved for design-trail context only — do not use the line numbers.
+
+| Layer | File (pre-refactor) | Change |
 |---|---|---|
 | Migration | `supabase/migrations/0005_*.sql` (new) | `ALTER TABLE drawings ADD COLUMN custom_prompt text` |
 | Worker config | `cloudflare-worker/index.js:73` (`selectConfig`) | Grow third param for request-side input, OR merge at call site `:894` |
@@ -46,7 +73,7 @@ Nothing in the existing code actively fights this feature. The shape is right. T
 | Worker persistence | `index.js:655-659` (`buildCritiqueEntry`) | Add `custom_prompt` to the `prompt_config` snapshot so future-us can audit |
 | Worker validation | Body-validation block around `index.js:824` | New length cap; reject >2000 chars (or whatever cap is chosen) |
 | iOS request | `Services/OpenAIManager.swift:124-138` | Add `custom_prompt` to request body, OR pass as `requestFeedback` parameter (signature change ripples to canvas feedback button call site) |
-| iOS storage | Wherever drawings are saved (likely `CloudDrawingStorageManager`) | Persist per-drawing custom prompt to the new column |
+| iOS storage | Wherever drawings are saved (`Services/DrawingStorageManager.swift`, class `CloudDrawingStorageManager`) | Persist per-drawing custom prompt to the new column |
 | Tests | `cloudflare-worker/test.mjs:51, 73, 106, 125, 141, 155-158` | All four `selectConfig` tests need updates if its signature changes |
 
 ---

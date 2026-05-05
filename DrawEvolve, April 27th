@@ -1,3 +1,30 @@
+⚠️ SUPERSEDED — kept for historical reference only.
+
+This dev plan was last meaningfully updated April 28, 2026, before:
+  • Worker modular refactor (PR #3, `bb00a36`)
+  • Download to Photos shipped (PR #4, `8fa041f` — was a "hard ship blocker" here)
+  • App Attest + JWT integration (PR #5)
+  • KNOWN_ISSUES punch list (PR #6)
+  • Cost ceilings (PR #7)
+  • Canvas perf fixes from PERF_ISSUES.md (PR #8)
+  • Custom prompts product surface (PR #9)
+  • Social Phase A profiles foundation (PR #10)
+  • Layered drawing storage end-to-end (PRs #12, #14, #17)
+  • My Evolution Phase 1/1b/2 (PRs #13, #15, #16)
+
+For the current state, read CLAUDE.md plus the per-area docs
+(authandratelimitingandsecurity.md, KNOWN_ISSUES.md, PERF_ISSUES.md,
+PIPELINE_FEATURES.md, ONLINE*.md, CUSTOM*PROMPTS*.md, RATELIMITSPLAN.md).
+
+The "AI Feedback System" block below references gpt-4o, max_tokens, and a
+single-file Worker — all stale. The "Architecture Notes" coordinate-
+pipeline / pressure / memory section is still load-bearing on the canvas
+side; PERF_ISSUES.md has the post-PR #8 perf snapshot.
+
+================================================================
+ORIGINAL CONTENT BELOW (preserved verbatim; do not act on it)
+================================================================
+
 DrawEvolve Dev Plan — Current Standings
 Last updated: April 28, 2026 (revised: auth + rate-limiting + security
 plan drafted at /authandratelimitingandsecurity.md; Cloudflare Worker

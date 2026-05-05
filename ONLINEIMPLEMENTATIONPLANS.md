@@ -1,8 +1,33 @@
 # DrawEvolve — Online / Social Features Implementation Plan
 
-**Status:** Planning only. No code in this document is meant to be merged as-is.
+**Status:** Phase A (foundations) shipped. Phases B–G deferred. See "Status snapshot" below.
 **Scope:** Profiles, posts (publishing drawings), an extensible engagement system (today: likes; later: reactions / weighted signals), comments, follows, feed (following + discovery), profile search.
 **Out of scope:** New auth flows, payments, DMs/chat, notifications delivery infrastructure, moderation tooling beyond MVP report-flag, web client.
+
+---
+
+## ✅ Status snapshot (2026-05-05)
+
+| Phase (from §11) | Status |
+|---|---|
+| **Phase A — Foundations** (profiles migration + auto-create trigger + avatars bucket + Worker `GET /v1/me`, `PATCH /v1/profiles/me`, avatar upload, `GET /v1/profiles/:username`, `GET /v1/profiles/search`) | ✅ Shipped (PR #10 `f266c5b`). |
+| Phase B — Profile editing UI | ☐ Deferred |
+| Phase C — Posts (public + unlisted) | ☐ Deferred |
+| Phase D — Reactions (binary like) | ☐ Deferred |
+| Phase E — Comments | ☐ Deferred |
+| Phase F — Follows + feeds + search | ☐ Deferred |
+| Phase G — Notifications inbox | ☐ Deferred |
+
+### Key corrections vs original plan
+
+- **Migration number for `profiles`:** plan said `0008_profiles.sql`. Actual file is `supabase/migrations/0006_profiles.sql`. The "reserve a slot for parallel work" defense from PR #2 (migration numbering fix) shifted the numbering; current on-disk sequence is 0001–0006, then 0009, then 0010 (0007/0008 reserved but never claimed).
+- **Worker route layout:** §2.2 sketched a refactor "split `index.js` into `auth.js`, `kv.js`, `routes/feedback.js`, `routes/profiles.js`". This **shipped via PR #3 (`bb00a36`)** before Phase A — current layout is `routes/{feedback,profiles,prompts,evolution,attest/*}.js`, `middleware/{auth,app-attest,rate-limit,idempotency}.js`, `lib/{prompt,supabase,http,classifier,evolution-aggregation,taxonomy}.js`. The line refs in this doc to `cloudflare-worker/index.js:276–305` for `validateJWT` are stale — that function now lives in `cloudflare-worker/middleware/auth.js` (`validateJWT` exported around line 82).
+- **App Attest:** not contemplated in this doc but landed as a Worker-wide gate via PR #5 (`b306787`). All `/v1/*` routes go through both JWT validation (`middleware/auth.js`) and App Attest assertion verification (`middleware/app-attest.js`). New social writes inherit this for free.
+- **`OpenAIManager.swift:161`** reference in §9 is approximate — file structure is unchanged but the bearer-attach lives in the request builder; treat as a pointer rather than a line number.
+
+The remainder of this doc is the original plan, kept verbatim for design-trail context. Open questions Q1–Q10 remain as the original plan stated; Phase A foundations did **not** answer them — only laid the schema + endpoints.
+
+---
 
 ---
 

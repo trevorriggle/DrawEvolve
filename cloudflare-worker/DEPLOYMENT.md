@@ -70,9 +70,37 @@ wrangler secret put ANOMALY_ALERT_WEBHOOK
 # Paste a Slack incoming webhook URL (or compatible) when prompted.
 ```
 
-## Files Created
-- `index.js` - The Cloudflare Worker code
-- `wrangler.toml` - Configuration file
+## Files (current layout — post PR #3 modular refactor)
+
+The worker is no longer a single `index.js`. Current structure:
+
+```
+cloudflare-worker/
+├── index.js                    # top-level router only (~244 lines)
+├── routes/
+│   ├── feedback.js             # POST / — AI critique flow
+│   ├── profiles.js             # /v1/me, /v1/profiles/* (Phase A social)
+│   ├── prompts.js              # /v1/prompts/* — custom prompt CRUD
+│   ├── evolution.js            # GET /v1/me/evolution — Phase 2 Evolution
+│   └── attest/
+│       ├── challenge.js        # POST /attest/challenge
+│       └── register.js         # POST /attest/register
+├── middleware/
+│   ├── auth.js                 # JWT validation (ES256/JWKS), getUserTier
+│   ├── app-attest.js           # Apple App Attest assertion verification
+│   ├── rate-limit.js           # TIER_LIMITS, per-IP backstop, cost ceilings
+│   └── idempotency.js          # client_request_id replay cache
+├── lib/
+│   ├── prompt.js               # voice presets, SHARED_SYSTEM_RULES, assembly
+│   ├── supabase.js             # service-role REST helpers
+│   ├── http.js                 # CORS_HEADERS, jsonResponse
+│   ├── classifier.js           # critique tagging (My Evolution Phase 1)
+│   ├── evolution-aggregation.js # pure aggregation for /v1/me/evolution
+│   └── taxonomy.js             # critique tag enum (single source of truth)
+├── test.mjs                    # node:test suite
+├── package.json
+└── wrangler.toml
+```
 
 ## Deployment Steps
 
@@ -154,11 +182,13 @@ wrangler secret put OPENAI_API_KEY
 **Worker deployed but returns errors**
 Check Cloudflare dashboard → Workers → Logs to see errors
 
-## Phase 5f manual steps (App Attest device verification)
+## Phase 5f manual steps (App Attest device verification — ✅ SHIPPED via PR #5)
 
 App Attest layers on top of Supabase JWT auth. JWT proves who the user is;
 App Attest proves the request comes from a real DrawEvolve install on a real
 Apple device. **Both must pass for any protected request.**
+
+PR #5 (`b306787` — "Forward-port App Attest + JWT testability into modular Worker") landed the Worker-side enforcement in `cloudflare-worker/middleware/app-attest.js` and the iOS-side in `Services/AppAttestManager.swift`. The manual steps below remain operator-required (capability, profile, root-CA pinning) — the *code* is in place, but a fresh Worker deploy still needs the Apple App Attest Root CA pinned per the runbook below before `/attest/register` will accept any device.
 
 ### iOS-side prerequisites
 

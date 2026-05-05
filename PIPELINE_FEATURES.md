@@ -1,14 +1,42 @@
 # DrawEvolve - Pipeline Features & Roadmap
 
-**Last Updated:** 2025-11-06
-**Status:** MVP+ Complete with Known Issues
+**Last meaningful update of this doc:** 2025-11-06.
+**Refreshed against code state:** 2026-05-05 — see "Status snapshot" below.
+**Status:** MVP+ complete; auth, layered storage, custom prompts, social Phase A, and My Evolution Phase 1/1b/2 shipped. Phase 3 Evolution UI deferred. Social Phases B–G deferred.
 
 ---
 
-## ⚠️ Known Issues (November 2025)
+## ✅ Status snapshot (2026-05-05)
+
+This roadmap pre-dates a lot of what's now landed. Cross-walking against PRs on `main`:
+
+| Roadmap section | Code state |
+|---|---|
+| **Phase 1 — Progress Tracking & Evolution** | Backend Phase 1 (critique classifier, PR #15 `af52f58`), Phase 1b (`d788e7a`), Phase 2 (GET `/v1/me/evolution` aggregation, PR #16 `f788e3a`) ✅ shipped. Frontend Phase 3 (Evolution tab UI, charts) ☐ deferred. |
+| **Phase 2 — Custom AI Art Teachers** | Bounded-knobs custom prompts (PR #9 `c096546`) ✅ shipped — voice text + parameter knobs. Multi-agent feedback / agent library / sharing ☐ deferred (see CUSTOMPROMPTSPLAN.md §8). |
+| **Phase 3 — Social & Community** | Phase A foundations (profiles table + Worker `/v1/me`, `/v1/profiles/*`, PR #10 `f266c5b`) ✅ shipped. Phases B–G (posts, reactions, comments, follows, feeds, search, notifications) ☐ deferred. See ONLINEIMPLEMENTATIONPLANS.md. |
+| **Phase 4 — Advanced Drawing Tools** | Largely unchanged. Download to Photos shipped (PR #4 `8fa041f`). |
+| **Phase 5 — Monetization** | ☐ Not started. Credit-system design exists in RATELIMITSPLAN.md but is not built. Cost ceilings (provider $/day + per-user tokens/day, PR #7 `e2cae45`) shipped as a backstop. |
+| **Phase 6 — Advanced AI Features** | ☐ Not started. |
+| **Phase 7 — Portfolio Analysis Pipeline (Agentic System)** | The classifier + aggregation backend (PR #15 / #16) is the foundation; agentic orchestrator not built. |
+| **Infrastructure / Auth** | ✅ Shipped — see `authandratelimitingandsecurity.md`. JWT validation (PR #5), App Attest (PR #5), cost ceilings (PR #7), layered cloud sync (PR #12, #14, #17). |
+
+### Stale claims worth flagging
+
+- "Currently basic, needs full implementation" auth section ➜ actually fully shipped (Sign in with Apple + email magic link + Supabase Auth + JWT validation + App Attest).
+- "Cloud sync (infrastructure exists, needs full implementation)" ➜ shipped end-to-end (Phase 3 of `authandratelimitingandsecurity.md`).
+- References to `TOOL_IMPLEMENTATION_ROADMAP.md` and `toolaudit.md` — those files are not in the repo at root; treat as superseded.
+- "8 tools remain unimplemented" — current state per `DrawEvolve, April 27th` Tool Inventory (which is itself dated; see that doc for the actual current state).
+- Phase 7 SQL sketch references a `users` table — DrawEvolve uses `auth.users` (Supabase) directly. Use that as the FK target.
+
+The original roadmap text below is preserved; the snapshot above is what's actually true today.
+
+---
+
+## ⚠️ Known Issues (November 2025 — historical)
 
 ### Deferred Features
-2. **Unimplemented Tools** - 8 tools remain unimplemented (Smudge, Clone Stamp, Move). See `TOOL_IMPLEMENTATION_ROADMAP.md` and `toolaudit.md` for details.
+2. **Unimplemented Tools** - 8 tools remain unimplemented (Smudge, Clone Stamp, Move). See `TOOL_IMPLEMENTATION_ROADMAP.md` and `toolaudit.md` for details. *(Both referenced files are not present in the repo as of 2026-05-05.)*
 3. **Blur/Sharpen Brush Mode** - Currently apply globally to entire layer instead of brush-based application.
 
 ---

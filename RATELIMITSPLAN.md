@@ -1,8 +1,45 @@
 # Rate Limits & Credit System — Audit + Plan
 
-**Status:** Plan only. No implementation in this document.
+**Status:** Plan only. **Credit-based system NOT shipped.** Some related backstops landed independently — see "Status snapshot" below.
 **Date:** 2026-05-02
 **Scope:** Replace the current tier-bucket rate limiter with a credit-based system that supports Apple StoreKit 2 in-app purchases.
+
+---
+
+## ✅ Status snapshot (2026-05-05)
+
+| Item | Status |
+|---|---|
+| **Credit-based system (Part 2 of this doc)** | ☐ Not started. Tier-quota system is still the live model. |
+| Cost ceilings — provider $/day + per-user tokens/day | ✅ Shipped via **PR #7 (`e2cae45` — "Add cost ceilings (provider $/day + per-user tokens/day) to the Worker")**. Lives in `cloudflare-worker/middleware/rate-limit.js` (`DAILY_SPEND_CAP_USD`, `getDailySpend` / `incrementDailySpend`, per-user token cap via `PER_USER_DAILY_TOKEN_CAP` env var). The Part 2 design treats these as belt-and-suspenders backstops; that's the role they currently play. |
+| App Attest device gate (orthogonal but cited as anti-farming defense) | ✅ Shipped via **PR #5 (`b306787`)**. Lives in `cloudflare-worker/middleware/app-attest.js`. |
+| Worker modular refactor (referenced throughout below) | ✅ Shipped via **PR #3 (`bb00a36`)**. All `cloudflare-worker/index.js:NN` line refs in this doc are stale — see "Path corrections" below. |
+
+### Path corrections — stale `index.js` refs
+
+The Worker is now modular. Every reference below to `cloudflare-worker/index.js:NN` is wrong. Approximate current locations:
+
+| Was (`index.js:NN`) | Now |
+|---|---|
+| `TIER_LIMITS` (lines 565–568) | `cloudflare-worker/middleware/rate-limit.js` (line ~20, exported `TIER_LIMITS`) |
+| `IP_HOURLY_CAP` (line 569, 691–710) | `cloudflare-worker/middleware/rate-limit.js` |
+| Idempotency cache (`recordIdempotent` / `checkIdempotency`) | `cloudflare-worker/middleware/idempotency.js` |
+| Daily spend cap (`DAILY_SPEND_CAP_USD`, lines 1169–1204, 1411–1423) | `cloudflare-worker/middleware/rate-limit.js` (line ~246, `DAILY_SPEND_CAP_USD`) |
+| Anomaly alert (lines 728–765) | `cloudflare-worker/middleware/rate-limit.js` |
+| `OPENAI_MODEL` constant (line 1148) | `cloudflare-worker/routes/feedback.js` |
+| `getUserTier` (line 514) | `cloudflare-worker/middleware/auth.js` (line ~153) |
+| Voice presets / `assembleSystemPrompt` (lines 28–98) | `cloudflare-worker/lib/prompt.js` |
+| Critique persistence / `recordSuccessfulCritique` (lines 737–740) | `cloudflare-worker/routes/feedback.js` |
+| Body validation / `client_request_id` parsing (around line 824) | `cloudflare-worker/routes/feedback.js` |
+
+Token-cost numbers in §1.5 were captured against `gpt-5.1`; verify the current model in `routes/feedback.js` before re-pricing decisions.
+
+### Notes on factual claims that may have drifted
+
+- §1.4 cites `MEMORY.md` as stale on the `OPENAI_MODEL` value. **Do not consult MEMORY.md from this doc** — verify the model directly from `routes/feedback.js`.
+- §2.5 references commit `54d830b` (Sign in with Apple). Still valid.
+
+The remainder is the original audit + credit-system plan, kept verbatim for the design-trail.
 
 ---
 

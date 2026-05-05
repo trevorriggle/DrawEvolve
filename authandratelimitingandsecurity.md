@@ -2,11 +2,56 @@
 
 Working checklist for the foundational plumbing pass. Tick items as they land.
 
-Last updated: 2026-04-29
+Original last update: 2026-04-29. Status refresh: 2026-05-05.
 
 ---
 
-## CURRENT STATE — RESUME HERE
+## ✅ Status snapshot (2026-05-05)
+
+All TestFlight-blocker phases have shipped. PRs that landed since the original 2026-04-29 update:
+
+| Phase | Status | Landed via |
+|---|---|---|
+| Phase 1 — iOS auth foundation | ✅ shipped | original 2026-04-28 push |
+| Phase 2 — Postgres schema + RLS | ✅ applied 2026-04-28 | `supabase/migrations/0001_init.sql` |
+| Phase 3 — cloud sync (local-first) | ✅ shipped | original 2026-04-29 push |
+| Phase 4 — legacy drawing migration | ⏭️ skipped (no pre-auth users in production) |
+| Phase 5a + 5b — JWT gate + request validation | ✅ shipped | original 2026-04-30 push; **forward-ported into modular Worker via PR #5 (`b306787`)** |
+| Phase 5c — rate limits + cost ceilings | ✅ shipped | original push + **PR #7 (`e2cae45`)** added cost ceilings (provider $/day, per-user tokens/day) |
+| Phase 5d — server-side persistence + idempotency | ✅ shipped | migrations 0002–0003 applied; persistence in `cloudflare-worker/routes/feedback.js` |
+| Phase 5e — request logging | ✅ shipped | logging via `routes/feedback.js` `logRequest` + `REQUEST_STATUS` enum |
+| Phase 5f — App Attest device verification | ✅ shipped | **PR #5 (`b306787`)** — code in `middleware/app-attest.js` + iOS `Services/AppAttestManager.swift`. Operator pin of Apple App Attest Root CA still required per `cloudflare-worker/DEPLOYMENT.md` runbook. |
+| Phase 6 — sign out + delete account | ✅ shipped | edge function `supabase/functions/delete-account/`, migration `0004_account_deletions_audit.sql`, iOS `Views/SettingsView.swift` |
+| Phase 7 — observability + admin polish | ☐ not started — post-TestFlight |
+
+### Key path corrections vs the original plan
+
+The Worker is now modular (PR #3, `bb00a36`). Every `cloudflare-worker/index.js:NN` line ref in this document is stale. Approximate current locations:
+
+| Was | Now |
+|---|---|
+| `validateJWT` (`index.js:276–305`) | `middleware/auth.js` (`validateJWT` exported around line 82) |
+| `getUserTier` | `middleware/auth.js` (around line 153) |
+| `validateImagePayload`, `validateContext`, `verifyDrawingOwnership` | `routes/feedback.js` |
+| `fetchCritiqueHistory`, `buildCritiqueEntry`, `persistCritique`, `logRequest`, `REQUEST_STATUS` | `routes/feedback.js` |
+| `TIER_LIMITS`, `IP_HOURLY_CAP`, `DAILY_SPEND_CAP_USD`, anomaly counter | `middleware/rate-limit.js` |
+| `recordIdempotent` / `checkIdempotency` | `middleware/idempotency.js` |
+| `selectVoice`, `assembleSystemPrompt`, `PRESET_VOICES`, `SHARED_SYSTEM_RULES`, `selectConfig`, `buildSystemPrompt`, `buildUserMessage` | `lib/prompt.js` |
+| Service-role REST helpers | `lib/supabase.js` |
+
+### iOS storage class file name
+
+This doc and others occasionally refer to `CloudDrawingStorageManager` as if it were a separate file. It isn't — the *file* is `Services/DrawingStorageManager.swift` (kept that name to avoid pbxproj churn during the Phase 3 rewrite); the *class* inside is `CloudDrawingStorageManager`. There is no `CloudDrawingStorageManager.swift` on disk.
+
+### Migration numbering
+
+Current on-disk: `0001_init.sql`, `0002_append_critique_function.sql`, `0003_feedback_requests_nullable_user.sql`, `0004_account_deletions_audit.sql`, `0005_preset_voices_and_custom_prompts.sql`, `0006_profiles.sql`, `0009_custom_prompts_parameters.sql`, `0010_layered_drawings.sql`. Slots `0007` and `0008` were reserved during parallel work and never claimed; current numbering is sequential with those gaps. PR #2 (`2e00f62`) was the defensive renumbering pass that established this scheme.
+
+The remainder of this doc is the original 2026-04-29 status text plus the session log. Treat the "What Trevor needs to do next" list below as the **2026-04-29 backlog** — most items have since landed (see snapshot above).
+
+---
+
+## CURRENT STATE — RESUME HERE (HISTORICAL — 2026-04-29)
 
 A future helper or future-me should read this section first; everything below is the longer paper trail.
 
@@ -499,9 +544,9 @@ These are conservative starting values; revise once we have a week of real usage
 
 ### 5d. Server-side feedback persistence
 
-- [ ] Worker writes the feedback response **directly to Postgres** (`drawings.critique_history` append) using service role key, not relying on the client to persist.
-- [ ] Why: closes the gap where a client could request feedback, get the response, and never persist it (free queries). Also makes feedback tamper-evident — client can't doctor what GPT-4o said.
-- [ ] Client gets feedback in the response and updates UI optimistically; on next gallery refresh, the cloud row is canonical.
+- [x] Worker writes the feedback response **directly to Postgres** (`drawings.critique_history` append) using service role key, not relying on the client to persist. Lives in `cloudflare-worker/routes/feedback.js` (`persistCritique` → `append_critique` RPC).
+- [x] Why: closes the gap where a client could request feedback, get the response, and never persist it (free queries). Also makes feedback tamper-evident — client can't doctor what the model said.
+- [x] Client gets feedback in the response and updates UI optimistically; on next gallery refresh, the cloud row is canonical.
 
 ### 5e. Logging
 
@@ -555,6 +600,17 @@ order by w.hour_bucket desc;
 #### Future critique-history / usage surface (no work needed now)
 
 The existing RLS policy `auth.uid() = user_id` already permits authenticated users to read their own `feedback_requests` rows. A future iOS Settings → "Usage" screen (showing the user their own request log, status breakdown, token totals) needs **no** schema or RLS change — just a SwiftUI view that calls `client.from("feedback_requests").select().order("requested_at", ascending: false)`. Auth-failed rows (null `user_id`) stay invisible to all authenticated reads.
+
+### 5f. App Attest (device verification) — ✅ shipped via PR #5 (`b306787`)
+
+Layered on top of JWT auth: JWT proves *who* the user is; App Attest proves the request comes from a real DrawEvolve install on a real Apple device. **Both must pass for any protected request.**
+
+- [x] iOS `Services/AppAttestManager.swift` — silent registration on first launch (real device only; simulator returns `notSupported`), per-request assertion generation.
+- [x] Worker `cloudflare-worker/middleware/app-attest.js` — verifies attestation cert chain to pinned Apple root, AAGUID, rpId hash, nonce extension; verifies per-request assertion signature + replay counter.
+- [x] Two unauth'd endpoints (`POST /attest/challenge`, `POST /attest/register`) for first-launch flow. Stored under `attest_chal:<base64url>` (5min TTL) and `attest_key:<keyId>` (30 day TTL) in QUOTA_KV.
+- [x] All other protected routes require `X-Apple-AppAttest-KeyId` + `X-Apple-AppAttest-Assertion` headers in addition to `Authorization: Bearer <jwt>`.
+- [x] Worker env vars `APP_ATTEST_TEAM_ID`, `APP_ATTEST_BUNDLE_ID`, `APP_ATTEST_ENV` documented in `cloudflare-worker/DEPLOYMENT.md`.
+- ⚠️ **Operator step still required:** the Apple App Attest Root CA public key must be pasted into `middleware/app-attest.js`'s `APPLE_ATTEST_ROOT_PUBKEY_HEX` constant before `/attest/register` will accept any device. See DEPLOYMENT.md runbook. Until then the Worker fails closed with `attest_root_not_pinned` (HTTP 500).
 
 ## Phase 6 — Account lifecycle (App Store compliance)
 
