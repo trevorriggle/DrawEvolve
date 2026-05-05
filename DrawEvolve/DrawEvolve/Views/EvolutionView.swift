@@ -70,18 +70,39 @@ struct EvolutionView: View {
     }
 
     private func errorView(_ error: EvolutionError) -> some View {
-        VStack(spacing: 16) {
+        // Simulator-specific override for .deviceVerificationFailed only:
+        // DCAppAttestService is unsupported on simulator, so retrying loops
+        // back to the same failure forever. Tell the user honestly that
+        // this won't work here and hide the action button — there's no
+        // useful retry to offer. The enum's default copy + retry button
+        // still applies on real devices, where a retry can succeed after
+        // AppAttestManager auto-recovers from DCError.invalidKey.
+        let isSimulatorDeviceVerification: Bool = {
+            #if targetEnvironment(simulator)
+            return error == .deviceVerificationFailed
+            #else
+            return false
+            #endif
+        }()
+
+        let message: String = isSimulatorDeviceVerification
+            ? "Device verification can't run in the simulator. Try on a device."
+            : error.userFacingMessage
+
+        return VStack(spacing: 16) {
             Image(systemName: "exclamationmark.circle")
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
-            Text(error.userFacingMessage)
+            Text(message)
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
-            Button(action: { Task { await viewModel.retry() } }) {
-                Text(error == .notAuthenticated ? "Sign Out" : "Try again")
+            if !isSimulatorDeviceVerification {
+                Button(action: { Task { await viewModel.retry() } }) {
+                    Text(error == .notAuthenticated ? "Sign Out" : "Try again")
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
