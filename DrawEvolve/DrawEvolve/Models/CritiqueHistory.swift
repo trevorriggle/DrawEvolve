@@ -28,6 +28,14 @@ struct CritiqueEntry: Codable, Identifiable {
     let promptTokenCount: Int?
     let completionTokenCount: Int?
 
+    // Phase 1 / 2.5 additions for the My Evolution feature. `tags` is
+    // produced by the classifier post-critique and stored on the cloud row;
+    // `presetId` records which voice preset was active for this critique.
+    // Both decode-only on iOS — the Worker is the sole writer of
+    // critique_history per CLAUDE.md, so we never PATCH these back.
+    let tags: CritiqueTags?
+    let presetId: String?
+
     struct PromptConfigSnapshot: Codable, Equatable {
         let tier: String
         let includeHistoryCount: Int
@@ -42,7 +50,9 @@ struct CritiqueEntry: Codable, Identifiable {
         sequenceNumber: Int? = nil,
         promptConfig: PromptConfigSnapshot? = nil,
         promptTokenCount: Int? = nil,
-        completionTokenCount: Int? = nil
+        completionTokenCount: Int? = nil,
+        tags: CritiqueTags? = nil,
+        presetId: String? = nil
     ) {
         self.id = id
         self.feedback = feedback
@@ -52,6 +62,8 @@ struct CritiqueEntry: Codable, Identifiable {
         self.promptConfig = promptConfig
         self.promptTokenCount = promptTokenCount
         self.completionTokenCount = completionTokenCount
+        self.tags = tags
+        self.presetId = presetId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -65,6 +77,8 @@ struct CritiqueEntry: Codable, Identifiable {
         case promptConfig = "prompt_config"
         case promptTokenCount = "prompt_token_count"
         case completionTokenCount = "completion_token_count"
+        case tags
+        case presetId = "preset_id"
     }
 
     init(from decoder: Decoder) throws {
@@ -92,6 +106,8 @@ struct CritiqueEntry: Codable, Identifiable {
         self.promptConfig = try container.decodeIfPresent(PromptConfigSnapshot.self, forKey: .promptConfig)
         self.promptTokenCount = try container.decodeIfPresent(Int.self, forKey: .promptTokenCount)
         self.completionTokenCount = try container.decodeIfPresent(Int.self, forKey: .completionTokenCount)
+        self.tags = try container.decodeIfPresent(CritiqueTags.self, forKey: .tags)
+        self.presetId = try container.decodeIfPresent(String.self, forKey: .presetId)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -106,5 +122,30 @@ struct CritiqueEntry: Codable, Identifiable {
         try container.encodeIfPresent(promptConfig, forKey: .promptConfig)
         try container.encodeIfPresent(promptTokenCount, forKey: .promptTokenCount)
         try container.encodeIfPresent(completionTokenCount, forKey: .completionTokenCount)
+        try container.encodeIfPresent(tags, forKey: .tags)
+        try container.encodeIfPresent(presetId, forKey: .presetId)
+    }
+}
+
+/// Classifier-produced metadata, attached to each critique row by the
+/// Worker (cloudflare-worker/lib/classifier.js). iOS reads only — the
+/// Worker is the sole writer.
+struct CritiqueTags: Codable, Equatable {
+    let primaryCategory: CategoryID
+    let secondaryCategories: [CategoryID]
+    let severity: Int
+    let focusAreaText: String?
+    let subjectInferred: String?
+    let acknowledgedProgress: Bool
+    let classifierVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case primaryCategory = "primary_category"
+        case secondaryCategories = "secondary_categories"
+        case severity
+        case focusAreaText = "focus_area_text"
+        case subjectInferred = "subject_inferred"
+        case acknowledgedProgress = "acknowledged_progress"
+        case classifierVersion = "classifier_version"
     }
 }
