@@ -214,6 +214,17 @@ struct DrawingCanvasView: View {
                     .ignoresSafeArea()
             }
 
+            // Symmetry guides — dashed reference lines for the active
+            // mirror mode. Static (not animated; marching ants is for
+            // selection feedback, guides are persistent). Coordinate
+            // pattern matches MarchingAntsPath: doc-space endpoints
+            // mapped through canvasState.documentToScreen so the guides
+            // rotate / zoom / pan with the canvas. allowsHitTesting(false)
+            // is baked into the overlay; ignoresSafeArea handled here so
+            // the canvas's full-bleed layout matches.
+            SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
+                .ignoresSafeArea()
+
             // Free-transform handles for the active floating selection
             // (rect/lasso/import). Sits above the marching ants overlays so
             // the handles aren't obscured by the marquee. Hit tests are
