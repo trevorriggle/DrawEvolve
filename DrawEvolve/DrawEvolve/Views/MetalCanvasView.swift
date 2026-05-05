@@ -169,6 +169,16 @@ struct MetalCanvasView: UIViewRepresentable {
         private var marqueeStartScreen: CGPoint?
         private var coordDiagLogsRemaining = 3 // One-time on-device coordinate-pipeline diagnostic logs
 
+        // Blur Adjustment scrubber state.
+        // Anchor for horizontal drag (touchdown screen point) + the sigma value
+        // captured at touchdown. Each new drag re-anchors so values don't
+        // accumulate across drags. lastUpdateAt throttles preview re-renders
+        // to ~30 fps regardless of pencil sample rate.
+        private var blurAdjustmentTouchStartScreen: CGPoint?
+        private var blurAdjustmentTouchStartSigma: Float = 0.0
+        private var blurAdjustmentLastUpdateAt: TimeInterval = 0
+        private static let blurAdjustmentThrottleInterval: TimeInterval = 1.0 / 30.0
+
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
@@ -318,7 +328,19 @@ struct MetalCanvasView: UIViewRepresentable {
             // active layer is rendered at an offset doc rect so the user sees
             // a real-time preview without any per-frame texture writes.
             for (index, layer) in layers.enumerated() where layer.isVisible {
-                guard let texture = layer.texture else { continue }
+                // Blur adjustment preview swap: while the blurAdjustment tool
+                // is active for this layer, the renderer hosts a preview
+                // texture (filterPreviewTexture) holding the live-blurred
+                // result. Display that instead of the layer's own texture so
+                // the user sees the in-progress blur until they ✓/✕.
+                let displayTexture: MTLTexture? = {
+                    if index == activeLayerIndex,
+                       let preview = renderer?.blurAdjustmentPreviewTexture(forLayer: layer.id) {
+                        return preview
+                    }
+                    return layer.texture
+                }()
+                guard let texture = displayTexture else { continue }
 
                 if isTranslatingActiveLayer && index == activeLayerIndex && documentSize.width > 0 {
                     let docRect = CGRect(
@@ -379,8 +401,11 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // IMPORTANT: Render current stroke preview on top
-            // Preview stroke points are in document space, so apply transforms for display
-            if let stroke = currentStroke, !stroke.points.isEmpty {
+            // Preview stroke points are in document space, so apply transforms for display.
+            // Skip the preview for the blur tool — its in-progress stamps don't
+            // produce visible color (the blur output materialises only on commit).
+            // The stamp cursor SwiftUI overlay handles user feedback during the drag.
+            if let stroke = currentStroke, !stroke.points.isEmpty, stroke.tool != .blur {
                 let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
                 let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
                 let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
@@ -526,6 +551,18 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             } else {
                 print("   ❌ ERROR: selectedLayerIndex \(selectedLayerIndex) is OUT OF BOUNDS!")
+            }
+
+            // Handle blur adjustment tool — horizontal-drag scrubber for sigma.
+            // No stroke is created; touchdown anchors the drag, touchesMoved
+            // updates sigma, touchesEnded clears the anchor.
+            if currentTool == .blurAdjustment {
+                blurAdjustmentTouchStartScreen = screenLocation
+                if let cs = canvasState {
+                    blurAdjustmentTouchStartSigma = MainActor.assumeIsolated { cs.blurAdjustmentSigma }
+                }
+                blurAdjustmentLastUpdateAt = touch.timestamp
+                return
             }
 
             // Handle text tool - show text input dialog
@@ -744,6 +781,18 @@ struct MetalCanvasView: UIViewRepresentable {
             lastPoint = location
             lastTimestamp = timestamp
             print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
+
+            // Stamp cursor for the blur tool (smudge in PR 2). The brush
+            // doesn't render a stamp preview for blur (its blurred output
+            // doesn't materialise until commit), so the cursor outline is the
+            // user's only feedback during the drag.
+            if currentTool == .blur, let cs = canvasState {
+                let diameter = stampScreenDiameter(forSize: brushSettings.size)
+                MainActor.assumeIsolated {
+                    cs.stampCursorCenter = screenLocation
+                    cs.stampCursorDiameter = diameter
+                }
+            }
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -756,6 +805,37 @@ struct MetalCanvasView: UIViewRepresentable {
             // care about the most recent finger/pencil position, not every sub-sample.
             let latestScreenLocation = touch.location(in: view)
             let latestLocation = canvasState?.screenToDocument(latestScreenLocation) ?? latestScreenLocation
+
+            // Blur adjustment scrubber — horizontal drag delta maps to sigma
+            // delta from the touchdown anchor. Throttled to ~30fps so the
+            // Gaussian preview keeps up with the drag without saturating the
+            // GPU at 240Hz pencil sample rate.
+            if currentTool == .blurAdjustment, let startScreen = blurAdjustmentTouchStartScreen,
+               let cs = canvasState {
+                let now = touch.timestamp
+                if now - blurAdjustmentLastUpdateAt < Self.blurAdjustmentThrottleInterval {
+                    return
+                }
+                blurAdjustmentLastUpdateAt = now
+
+                let dragRange = max(1, view.bounds.width * 0.7)
+                let delta = latestScreenLocation.x - startScreen.x
+                let maxSigma = MainActor.assumeIsolated { cs.blurAdjustmentMaxSigma }
+                let newSigma = blurAdjustmentTouchStartSigma + Float(delta / dragRange) * maxSigma
+                Task { @MainActor in
+                    cs.setBlurAdjustmentSigma(newSigma)
+                }
+                return
+            }
+
+            // Update stamp cursor during a blur-tool drag.
+            if currentTool == .blur, let cs = canvasState {
+                let diameter = stampScreenDiameter(forSize: brushSettings.size)
+                MainActor.assumeIsolated {
+                    cs.stampCursorCenter = latestScreenLocation
+                    cs.stampCursorDiameter = diameter
+                }
+            }
 
             // Handle dragging an existing selection. We *only* update the
             // doc-space offset here — the draw loop renders the floating
@@ -992,6 +1072,15 @@ struct MetalCanvasView: UIViewRepresentable {
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("=== TOUCH ENDED ===")
 
+            // Blur adjustment: clear the touchdown anchor — no commit on lift.
+            // Sigma is held at whatever value the last drag tick set it to;
+            // commit happens only via the HUD's ✓ button.
+            if currentTool == .blurAdjustment {
+                blurAdjustmentTouchStartScreen = nil
+                blurAdjustmentLastUpdateAt = 0
+                return
+            }
+
             // Handle ending a selection drag
             if isDraggingSelection {
                 print("Finished dragging selection, committing to layer")
@@ -1169,7 +1258,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 // thread on `waitUntilCompleted`. The completion fires on main
                 // once the GPU is done — that's the safe point to take the
                 // AFTER snapshot, record undo, and kick off the thumbnail.
-                renderer.renderStroke(stroke, to: texture, screenSize: documentSize) { [weak self] in
+                let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
+                    if stroke.tool == .blur {
+                        renderer.renderBlurStroke(stroke, to: texture, screenSize: documentSize, completion: completion)
+                    } else {
+                        renderer.renderStroke(stroke, to: texture, screenSize: documentSize, completion: completion)
+                    }
+                }
+                dispatchStroke { [weak self] in
                     print("Stroke committed successfully - texture should now contain the stroke")
 
                     print("Capturing AFTER snapshot...")
@@ -1208,6 +1304,13 @@ struct MetalCanvasView: UIViewRepresentable {
             shapeStartPoint = nil
             shapeStartScreen = nil
             marqueeStartScreen = nil
+            // Hide stamp cursor on lift.
+            if let cs = canvasState {
+                MainActor.assumeIsolated {
+                    cs.stampCursorCenter = nil
+                    cs.stampCursorDiameter = 0
+                }
+            }
             print("Stroke cleared from preview, should now be visible in layer texture")
         }
 
@@ -1220,12 +1323,16 @@ struct MetalCanvasView: UIViewRepresentable {
             lassoPath = []
             isDraggingSelection = false
             selectionDragStart = nil
+            blurAdjustmentTouchStartScreen = nil
+            blurAdjustmentLastUpdateAt = 0
 
-            // Clear selection previews
+            // Clear selection previews + stamp cursor.
             if let canvasState = canvasState {
                 Task { @MainActor in
                     canvasState.previewSelection = nil
                     canvasState.previewLassoPath = nil
+                    canvasState.stampCursorCenter = nil
+                    canvasState.stampCursorDiameter = 0
                 }
             }
         }
@@ -1355,6 +1462,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
             return result
+        }
+
+        // Approximate doc-pixel → screen-pixel conversion for the stamp
+        // cursor. The display is roughly square-fit and zoomable; canvas
+        // rotation is ignored in the diameter (rotation rotates the whole
+        // canvas, not the stamp shape). Good enough for a cursor outline.
+        private func stampScreenDiameter(forSize docSize: CGFloat) -> CGFloat {
+            guard let cs = canvasState else { return docSize }
+            let docWidth = MainActor.assumeIsolated { cs.documentSize.width }
+            let screenWidth = MainActor.assumeIsolated { cs.screenSize.width }
+            let zoom = MainActor.assumeIsolated { cs.zoomScale }
+            guard docWidth > 0 else { return docSize }
+            return docSize * (screenWidth / docWidth) * zoom
         }
 
         // MARK: - Shape Generation

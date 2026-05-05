@@ -249,6 +249,10 @@ struct DrawingCanvasView: View {
                 .ignoresSafeArea()
             }
 
+            blurAdjustmentHUDOverlay
+
+            stampCursorOverlay
+
             // Delete button for active selection (rect or lasso)
             if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {
@@ -312,6 +316,16 @@ struct DrawingCanvasView: View {
                                 canvasState.currentTool = .eraser
                             }
 
+                            // Blur Brush — paints Gaussian blur freeform
+                            ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
+                                canvasState.currentTool = .blur
+                            }
+
+                            // Blur Adjustment — Procreate-style scrubber HUD
+                            ToolButton(icon: DrawingTool.blurAdjustment.icon, isSelected: canvasState.currentTool == .blurAdjustment) {
+                                canvasState.currentTool = .blurAdjustment
+                            }
+
                             // Shape tools
                             ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
                                 canvasState.currentTool = .line
@@ -372,14 +386,25 @@ struct DrawingCanvasView: View {
                                 showClearConfirmation = true
                             }
 
-                            // Color picker button
-                            Button(action: { showColorPicker.toggle() }) {
+                            // Color picker button. Grayed (not hidden) when
+                            // blur or blurAdjustment is the active tool —
+                            // those tools don't read brush color.
+                            Button(action: {
+                                guard canvasState.currentTool != .blur,
+                                      canvasState.currentTool != .blurAdjustment else { return }
+                                showColorPicker.toggle()
+                            }) {
                                 Circle()
                                     .fill(Color(canvasState.brushSettings.color))
                                     .frame(width: 40, height: 40)
                                     .overlay(Circle().stroke(Color.white, lineWidth: 3))
                                     .shadow(radius: 2)
+                                    .opacity(
+                                        (canvasState.currentTool == .blur ||
+                                         canvasState.currentTool == .blurAdjustment) ? 0.4 : 1.0
+                                    )
                             }
+                            .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment)
 
                             // Brush settings
                             ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
@@ -657,7 +682,10 @@ struct DrawingCanvasView: View {
         }
         .sheet(isPresented: $showBrushSettings) {
             NavigationView {
-                BrushSettingsView(settings: $canvasState.brushSettings)
+                BrushSettingsView(
+                    settings: $canvasState.brushSettings,
+                    activeTool: canvasState.currentTool
+                )
                     .navigationTitle("Brush Settings")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -764,6 +792,61 @@ struct DrawingCanvasView: View {
             loadExistingDrawing()
         }
         .preferredColorScheme(colorSchemeValue)
+    }
+
+    // MARK: - Blur Adjustment HUD overlay
+    //
+    // Extracted into a computed property to keep `body` under the Swift
+    // type-checker's tolerance — same pattern as `bottomRightActionButtons`.
+
+    @ViewBuilder
+    private var blurAdjustmentHUDOverlay: some View {
+        if canvasState.blurAdjustmentActive {
+            VStack {
+                HStack {
+                    Spacer()
+                    AdjustmentHUD(
+                        label: "Blur",
+                        valueText: "\(canvasState.blurAdjustmentPercent)%",
+                        onCommit: { canvasState.commitBlurAdjustment() },
+                        onCancel: { canvasState.cancelBlurAdjustment() }
+                    )
+                    .frame(maxWidth: 360)
+                    Spacer()
+                }
+                .padding(.top, 12)
+                .padding(.horizontal, 12)
+                Spacer()
+            }
+            .ignoresSafeArea()
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    // MARK: - Stamp cursor overlay (blur brush; smudge in PR 2)
+
+    @ViewBuilder
+    private var stampCursorOverlay: some View {
+        if let cursorCenter = canvasState.stampCursorCenter,
+           canvasState.stampCursorDiameter > 0 {
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.black.opacity(0.5), lineWidth: 1)
+                    .frame(
+                        width: canvasState.stampCursorDiameter + 1,
+                        height: canvasState.stampCursorDiameter + 1
+                    )
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.95), lineWidth: 1.25)
+                    .frame(
+                        width: canvasState.stampCursorDiameter,
+                        height: canvasState.stampCursorDiameter
+                    )
+            }
+            .position(cursorCenter)
+            .allowsHitTesting(false)
+            .ignoresSafeArea()
+        }
     }
 
     // MARK: - Bottom-right action buttons (Phase 6 extraction)

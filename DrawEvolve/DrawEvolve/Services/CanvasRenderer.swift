@@ -22,9 +22,43 @@ class CanvasRenderer: NSObject {
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
     private var floatingTexturePipelineState: MTLRenderPipelineState? // For floating selection drag preview
+    // Blur tool family (PR 1) — separable Gaussian + masked variant + stamp deposit.
+    // gaussianBlurPipelineState writes its result with no blending (raw replace).
+    // gaussianBlurMaskedPipelineState ditto; the mask handling is in the shader.
+    // stampBlurDepositPipelineState uses standard sourceAlpha blending.
+    private var gaussianBlurPipelineState: MTLRenderPipelineState?
+    private var gaussianBlurMaskedPipelineState: MTLRenderPipelineState?
+    private var stampBlurDepositPipelineState: MTLRenderPipelineState?
 
     // 1x1 white texture used to draw an opaque canvas background quad
     private var whiteTexture: MTLTexture?
+
+    // MARK: - Blur Adjustment (Procreate-style scrubber) state.
+    //
+    // Allocated by `beginBlurAdjustment`, populated as the user drags, freed by
+    // `endBlurAdjustment` (or rolled-over by `commitBlurAdjustment`). The
+    // MetalCanvasView's draw loop swaps `blurPreviewTexture` in for display
+    // when `blurAdjustmentLayerId != nil` matches the active layer's id.
+
+    /// Lossless copy of the active layer texture at the moment the adjustment
+    /// began. Read-only during preview — every Gaussian pass samples from
+    /// here so subsequent slider tweaks don't compound on previous output.
+    private var blurAdjustmentSource: MTLTexture?
+
+    /// Output of the masked vertical pass — what the user sees while the tool
+    /// is active. Display swap target.
+    private var blurAdjustmentPreview: MTLTexture?
+
+    /// Intermediate for the horizontal pass.
+    private var blurAdjustmentScratch: MTLTexture?
+
+    /// r8Unorm mask sized to the layer texture. 1.0 inside the selection
+    /// (or everywhere when no selection is active), 0.0 elsewhere.
+    private var blurAdjustmentMask: MTLTexture?
+
+    /// Layer the preview is bound to. Used by MetalCanvasView to decide
+    /// whether to swap in the preview texture for display.
+    private var blurAdjustmentLayerId: UUID?
 
     // Canvas dimensions - dynamically calculated to be a square larger than screen diagonal
     // This ensures no clipping/distortion when rotating the canvas
@@ -77,7 +111,10 @@ class CanvasRenderer: NSObject {
               let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
               let quadVertexForRect = library.makeFunction(name: "quadVertexShaderForRect"),
               let compositeFragment = library.makeFunction(name: "compositeFragmentShader"),
-              let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader") else {
+              let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader"),
+              let gaussianBlurFragment = library.makeFunction(name: "gaussianBlurShader"),
+              let gaussianBlurMaskedFragment = library.makeFunction(name: "gaussianBlurMaskedShader"),
+              let stampBlurDepositFragment = library.makeFunction(name: "stampBlurDepositShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -168,6 +205,35 @@ class CanvasRenderer: NSObject {
         floatingTextureDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         floatingTextureDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Gaussian blur pipelines (no blending — raw replace into intermediate
+        // textures). Both the unmasked and the masked variants write opaque
+        // RGBA to their target.
+        let gaussianBlurDescriptor = MTLRenderPipelineDescriptor()
+        gaussianBlurDescriptor.vertexFunction = quadVertex
+        gaussianBlurDescriptor.fragmentFunction = gaussianBlurFragment
+        gaussianBlurDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        gaussianBlurDescriptor.colorAttachments[0].isBlendingEnabled = false
+
+        let gaussianBlurMaskedDescriptor = MTLRenderPipelineDescriptor()
+        gaussianBlurMaskedDescriptor.vertexFunction = quadVertex
+        gaussianBlurMaskedDescriptor.fragmentFunction = gaussianBlurMaskedFragment
+        gaussianBlurMaskedDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        gaussianBlurMaskedDescriptor.colorAttachments[0].isBlendingEnabled = false
+
+        // Brush-blur deposit — premultiplied source-over into the layer
+        // texture, same blend factors as the brush pipeline.
+        let stampBlurDepositDescriptor = MTLRenderPipelineDescriptor()
+        stampBlurDepositDescriptor.vertexFunction = brushVertex
+        stampBlurDepositDescriptor.fragmentFunction = stampBlurDepositFragment
+        stampBlurDepositDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        stampBlurDepositDescriptor.colorAttachments[0].isBlendingEnabled = true
+        stampBlurDepositDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one  // source pre-multiplied
+        stampBlurDepositDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        stampBlurDepositDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        stampBlurDepositDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        stampBlurDepositDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        stampBlurDepositDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
@@ -175,6 +241,9 @@ class CanvasRenderer: NSObject {
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
             floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
+            gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
+            gaussianBlurMaskedPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurMaskedDescriptor)
+            stampBlurDepositPipelineState = try device.makeRenderPipelineState(descriptor: stampBlurDepositDescriptor)
         } catch {
             print("Failed to create pipeline states: \(error)")
         }
@@ -1979,6 +2048,440 @@ class CanvasRenderer: NSObject {
                 withBytes: baseAddress,
                 bytesPerRow: regionBytesPerRow
             )
+        }
+    }
+
+    // MARK: - Blur (PR 1)
+
+    /// Layout-matched twin of the Metal `GaussianUniforms` struct (Shaders.metal).
+    private struct GaussianUniformsCPU {
+        var direction: SIMD2<Float>
+        var sigma: Float
+        var kernelHalfWidth: Int32
+    }
+
+    /// Cap kernel half-width to keep single-pass tap counts sane on the
+    /// lowest-spec target. ceil(3 * sigma) covers ~99.7% of a Gaussian; at
+    /// sigma=50 that's 150 taps per direction. We cap at 96 (sigma~32 retains
+    /// full quality, larger sigma falls back to a slightly truncated kernel).
+    private static let maxBlurKernelHalfWidth: Int32 = 96
+
+    private static func gaussianHalfWidth(for sigma: Float) -> Int32 {
+        guard sigma > 0 else { return 0 }
+        let raw = Int32(ceil(3.0 * sigma))
+        return min(raw, maxBlurKernelHalfWidth)
+    }
+
+    /// Texture for an effect intermediate. Same dims as a layer texture but
+    /// with usage tuned for the Gaussian pipelines.
+    private func makeBlurIntermediateTexture() -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: Int(canvasSize.width),
+            height: Int(canvasSize.height),
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .private  // GPU-only — never read by CPU.
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    /// Single-pass Gaussian. `target` and `source` must be different textures.
+    /// `direction` is in UV space (1/width, 0) for horizontal, (0, 1/height)
+    /// for vertical. Caller may pass a non-nil `scissorRect` to limit output.
+    private func runGaussianPass(
+        commandBuffer: MTLCommandBuffer,
+        target: MTLTexture,
+        source: MTLTexture,
+        direction: SIMD2<Float>,
+        sigma: Float,
+        kernelHalfWidth: Int32,
+        scissorRect: MTLScissorRect? = nil,
+        loadAction: MTLLoadAction = .dontCare
+    ) {
+        guard let pipeline = gaussianBlurPipelineState else { return }
+
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = target
+        descriptor.colorAttachments[0].loadAction = loadAction
+        descriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.setRenderPipelineState(pipeline)
+        if let rect = scissorRect {
+            encoder.setScissorRect(rect)
+        }
+        encoder.setFragmentTexture(source, index: 0)
+        var uniforms = GaussianUniformsCPU(
+            direction: direction,
+            sigma: sigma,
+            kernelHalfWidth: kernelHalfWidth
+        )
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<GaussianUniformsCPU>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        encoder.endEncoding()
+    }
+
+    /// Vertical-pass Gaussian + masked composite into `target`. Reads the
+    /// already-horizontally-blurred `intermediate`, the original `source`, and
+    /// a per-pixel `mask`. Result blended via `mix(source, blurred, mask.r)`.
+    private func runGaussianMaskedPass(
+        commandBuffer: MTLCommandBuffer,
+        target: MTLTexture,
+        intermediate: MTLTexture,
+        source: MTLTexture,
+        mask: MTLTexture,
+        sigma: Float,
+        kernelHalfWidth: Int32
+    ) {
+        guard let pipeline = gaussianBlurMaskedPipelineState else { return }
+
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = target
+        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(intermediate, index: 0)
+        encoder.setFragmentTexture(source, index: 1)
+        encoder.setFragmentTexture(mask, index: 2)
+        var uniforms = GaussianUniformsCPU(
+            direction: SIMD2<Float>(0, 1.0 / Float(target.height)),
+            sigma: sigma,
+            kernelHalfWidth: kernelHalfWidth
+        )
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<GaussianUniformsCPU>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        encoder.endEncoding()
+    }
+
+    /// Blit `source` into `dest` via a Metal blit encoder. Both textures must
+    /// be same dimensions and pixel format. Used for snapshot lifecycle.
+    private func blitCopy(commandBuffer: MTLCommandBuffer, source: MTLTexture, dest: MTLTexture) {
+        guard let encoder = commandBuffer.makeBlitCommandEncoder() else { return }
+        encoder.copy(
+            from: source,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: source.width, height: source.height, depth: 1),
+            to: dest,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        encoder.endEncoding()
+    }
+
+    /// Rasterize a polygon (`selectionPath`, in document-space points) into an
+    /// `r8Unorm` mask texture sized to the canvas. Inside the polygon → 1.0,
+    /// outside → 0.0. When the path is nil/empty, returns an all-1.0 mask
+    /// (whole-layer fallback).
+    private func rasterizeSelectionMask(_ selectionPath: [CGPoint]?,
+                                        canvasSize: CGSize) -> MTLTexture? {
+        let width = Int(canvasSize.width)
+        let height = Int(canvasSize.height)
+        guard width > 0, height > 0 else { return nil }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+
+        let bytesPerRow = width
+        var bytes = [UInt8](repeating: 0, count: width * height)
+
+        if let path = selectionPath, path.count >= 3 {
+            // CPU rasterize via CGContext into a single-channel buffer.
+            let colorSpace = CGColorSpaceCreateDeviceGray()
+            bytes.withUnsafeMutableBytes { rawBuf in
+                guard let base = rawBuf.baseAddress,
+                      let ctx = CGContext(
+                        data: base,
+                        width: width,
+                        height: height,
+                        bitsPerComponent: 8,
+                        bytesPerRow: bytesPerRow,
+                        space: colorSpace,
+                        bitmapInfo: CGImageAlphaInfo.none.rawValue
+                      ) else { return }
+                ctx.setFillColor(gray: 1.0, alpha: 1.0)
+                ctx.beginPath()
+                ctx.move(to: path[0])
+                for p in path.dropFirst() { ctx.addLine(to: p) }
+                ctx.closePath()
+                ctx.fillPath()
+            }
+        } else {
+            // No selection — fill the whole mask with 1.0 (255 in r8Unorm).
+            for i in 0..<bytes.count { bytes[i] = 255 }
+        }
+
+        bytes.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: base,
+                bytesPerRow: bytesPerRow
+            )
+        }
+        return texture
+    }
+
+    // MARK: - Blur Adjustment Tool (Procreate-style HUD scrubber)
+
+    /// True when the renderer is hosting an active blur-adjustment preview
+    /// for the given layer. MetalCanvasView checks this to swap the preview
+    /// texture into its display loop in place of the layer's own texture.
+    func blurAdjustmentPreviewTexture(forLayer layerId: UUID) -> MTLTexture? {
+        guard blurAdjustmentLayerId == layerId else { return nil }
+        return blurAdjustmentPreview
+    }
+
+    /// Allocate snapshot/preview/scratch/mask textures and seed them. Called
+    /// when the user enters the blur adjustment tool and on each successful
+    /// commit (so they can stack another adjustment).
+    func beginBlurAdjustment(
+        sourceTexture: MTLTexture,
+        layerId: UUID,
+        selectionPath: [CGPoint]?,
+        documentSize: CGSize
+    ) {
+        // Free any prior session.
+        endBlurAdjustment()
+
+        // Allocate new textures matching the layer dims.
+        guard let snapshot = makeBlurIntermediateTexture(),
+              let preview = makeBlurIntermediateTexture(),
+              let scratch = makeBlurIntermediateTexture() else {
+            print("⚠️ beginBlurAdjustment: failed to allocate intermediate textures")
+            return
+        }
+
+        guard let mask = rasterizeSelectionMask(selectionPath, canvasSize: documentSize) else {
+            print("⚠️ beginBlurAdjustment: failed to rasterize selection mask")
+            return
+        }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        // Snapshot the current layer state — every preview Gaussian samples
+        // from this, so subsequent slider tweaks don't compound on previous
+        // output.
+        blitCopy(commandBuffer: commandBuffer, source: sourceTexture, dest: snapshot)
+        // Initial preview = snapshot (sigma starts at 0%; user sees the
+        // unmodified layer until they drag).
+        blitCopy(commandBuffer: commandBuffer, source: snapshot, dest: preview)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        blurAdjustmentSource = snapshot
+        blurAdjustmentPreview = preview
+        blurAdjustmentScratch = scratch
+        blurAdjustmentMask = mask
+        blurAdjustmentLayerId = layerId
+    }
+
+    /// Re-render the preview texture at a given sigma. Called from the HUD's
+    /// horizontal-drag handler. Caller is expected to throttle (~30 fps).
+    func updateBlurAdjustmentPreview(sigma: Float) {
+        guard let snapshot = blurAdjustmentSource,
+              let preview = blurAdjustmentPreview,
+              let scratch = blurAdjustmentScratch,
+              let mask = blurAdjustmentMask,
+              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+
+        let halfWidth = Self.gaussianHalfWidth(for: sigma)
+
+        if halfWidth <= 0 {
+            // Sigma 0 → preview is just the snapshot. Cheap blit, no kernel.
+            blitCopy(commandBuffer: commandBuffer, source: snapshot, dest: preview)
+            commandBuffer.commit()
+            return
+        }
+
+        // Pass 1: horizontal Gaussian, snapshot → scratch. No mask.
+        runGaussianPass(
+            commandBuffer: commandBuffer,
+            target: scratch,
+            source: snapshot,
+            direction: SIMD2<Float>(1.0 / Float(snapshot.width), 0),
+            sigma: sigma,
+            kernelHalfWidth: halfWidth
+        )
+
+        // Pass 2: vertical Gaussian + masked composite, scratch → preview.
+        // mix(snapshot, blurred, mask) so unselected regions stay original.
+        runGaussianMaskedPass(
+            commandBuffer: commandBuffer,
+            target: preview,
+            intermediate: scratch,
+            source: snapshot,
+            mask: mask,
+            sigma: sigma,
+            kernelHalfWidth: halfWidth
+        )
+
+        commandBuffer.commit()
+    }
+
+    /// Bake the current preview into the supplied layer texture. Caller
+    /// records undo with snapshots taken before/after this call.
+    func commitBlurAdjustment(into layerTexture: MTLTexture) {
+        guard let preview = blurAdjustmentPreview,
+              let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        blitCopy(commandBuffer: commandBuffer, source: preview, dest: layerTexture)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    /// Free all blur-adjustment textures and clear bookkeeping. Called on
+    /// tool change away from blurAdjustment, or before re-allocating in
+    /// beginBlurAdjustment.
+    func endBlurAdjustment() {
+        blurAdjustmentSource = nil
+        blurAdjustmentPreview = nil
+        blurAdjustmentScratch = nil
+        blurAdjustmentMask = nil
+        blurAdjustmentLayerId = nil
+    }
+
+    // MARK: - Brush-blur Stroke (paints Gaussian blur freeform)
+
+    /// Per-stroke blur dispatch — mirrors `renderStroke` but performs a
+    /// scissored two-pass Gaussian + stamp deposit at each interpolated point.
+    /// Deferred batch: every stamp is enqueued on a single command buffer at
+    /// touchesEnded, same as the brush.
+    func renderBlurStroke(
+        _ stroke: BrushStroke,
+        to layerTexture: MTLTexture,
+        screenSize: CGSize,
+        completion: (() -> Void)? = nil
+    ) {
+        guard let depositPipeline = stampBlurDepositPipelineState,
+              let snapshot = makeBlurIntermediateTexture(),
+              let scratchH = makeBlurIntermediateTexture(),
+              let scratchV = makeBlurIntermediateTexture(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            print("⚠️ renderBlurStroke: pipeline or intermediate textures unavailable")
+            completion?()
+            return
+        }
+
+        // Snapshot the layer at stroke start. Every stamp samples from here.
+        blitCopy(commandBuffer: commandBuffer, source: layerTexture, dest: snapshot)
+
+        // Sigma derived from brush size only (per directive). Hardness drives
+        // the stamp's edge falloff in the deposit shader; it does not affect
+        // kernel width.
+        let sigma = max(0.0, Float(stroke.settings.size) * 0.5)
+        let halfWidth = Self.gaussianHalfWidth(for: sigma)
+        let blurStrengthValue = max(0.0, min(1.0, stroke.settings.blurStrength))
+
+        // Brush uniforms shared across all stamps in the stroke (only
+        // pressure varies per-point).
+        var uniforms = BrushUniforms(
+            color: stroke.settings.color,
+            size: Float(stroke.settings.size),
+            opacity: Float(stroke.settings.opacity),
+            hardness: Float(stroke.settings.hardness)
+        )
+        var blurStrength = blurStrengthValue
+
+        let layerWidth = layerTexture.width
+        let layerHeight = layerTexture.height
+        let viewport = SIMD2<Float>(Float(layerWidth), Float(layerHeight))
+        var viewportCopy = viewport
+
+        // Scissor footprint per stamp = bbox of (radius + kernel half-width)
+        // around the stamp center, with a small rounding margin. Computed
+        // inline below since `radiusOnLayer` uses per-stamp pressure.
+
+        for point in stroke.points {
+            let safePressure: CGFloat = {
+                guard point.pressure.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressure))
+            }()
+            uniforms.pressure = Float(safePressure)
+
+            let radiusOnLayer = max(1, Int(ceil(stroke.settings.size * 0.5 * safePressure)))
+            let kernelMargin = Int(halfWidth) + 4
+            let footprint = radiusOnLayer + kernelMargin
+
+            let cx = Int(point.location.x.rounded())
+            let cy = Int(point.location.y.rounded())
+
+            let x0 = max(0, cx - footprint)
+            let y0 = max(0, cy - footprint)
+            let x1 = min(layerWidth, cx + footprint)
+            let y1 = min(layerHeight, cy + footprint)
+            let rectW = x1 - x0
+            let rectH = y1 - y0
+            if rectW <= 0 || rectH <= 0 {
+                continue
+            }
+            let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
+
+            // Pass 1: horizontal Gaussian, scissored.
+            runGaussianPass(
+                commandBuffer: commandBuffer,
+                target: scratchH,
+                source: snapshot,
+                direction: SIMD2<Float>(1.0 / Float(snapshot.width), 0),
+                sigma: sigma,
+                kernelHalfWidth: halfWidth,
+                scissorRect: scissor
+            )
+
+            // Pass 2: vertical Gaussian, scissored. Result is a fully blurred
+            // copy of the snapshot inside the scissor footprint.
+            runGaussianPass(
+                commandBuffer: commandBuffer,
+                target: scratchV,
+                source: scratchH,
+                direction: SIMD2<Float>(0, 1.0 / Float(scratchH.height)),
+                sigma: sigma,
+                kernelHalfWidth: halfWidth,
+                scissorRect: scissor
+            )
+
+            // Pass 3: stamp deposit into the layer with scissor + brush
+            // hardness mask. Standard sourceAlpha/oneMinusSourceAlpha blend.
+            let depositDescriptor = MTLRenderPassDescriptor()
+            depositDescriptor.colorAttachments[0].texture = layerTexture
+            depositDescriptor.colorAttachments[0].loadAction = .load
+            depositDescriptor.colorAttachments[0].storeAction = .store
+            guard let depositEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: depositDescriptor) else {
+                continue
+            }
+            depositEncoder.setRenderPipelineState(depositPipeline)
+            depositEncoder.setScissorRect(scissor)
+            depositEncoder.setFragmentTexture(scratchV, index: 0)
+
+            var stampPosition = SIMD2<Float>(Float(point.location.x), Float(point.location.y))
+            depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            depositEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            depositEncoder.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            depositEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            depositEncoder.setFragmentBytes(&blurStrength, length: MemoryLayout<Float>.stride, index: 1)
+            depositEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+            depositEncoder.endEncoding()
+        }
+
+        if let completion = completion {
+            commandBuffer.addCompletedHandler { _ in
+                DispatchQueue.main.async { completion() }
+            }
+            commandBuffer.commit()
+        } else {
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
         }
     }
 }
