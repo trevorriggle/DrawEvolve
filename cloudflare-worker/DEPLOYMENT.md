@@ -261,15 +261,84 @@ Recipe (run on a Mac with `openssl` ≥ 1.1.1 and `curl`):
    If the URL ever 404s, fall back to the parent page and copy the link
    from there — Apple has not historically renamed this cert, but they could.
 
-2. **Verify the SHA-256 fingerprint** matches what Apple publishes alongside
-   the cert on the parent page. Compute locally:
+2. **Verify the SHA-256 fingerprint** by triangulating against multiple
+   independent open-source App Attest verifier libraries that bundle the
+   same root cert as a source constant. Apple does NOT render this
+   cert's fingerprint inline on `apple.com/certificateauthority/` and
+   does NOT bundle it in Xcode or in any iOS/macOS framework (the iOS
+   client never verifies attestations — only the relying party does),
+   so neither apple.com nor a local Xcode install can serve as a second
+   source. Cross-checking against multiple unrelated maintainers who
+   independently downloaded and committed the same value is the
+   strongest practical supply-chain check available.
+
+   Compute the local fingerprint:
    ```bash
    openssl x509 -in Apple_App_Attestation_Root_CA.pem -noout -fingerprint -sha256
    ```
-   Cross-check the colon-separated hex against the value rendered on
-   apple.com character-for-character. **If they diverge, stop and
-   investigate** before continuing — a mismatch means either Apple rotated
-   the root (rare; would be announced) or the download was tampered with.
+   Expected (Apple App Attestation Root CA, valid 2020-03-18 → 2045-03-15):
+   ```
+   1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32
+   ```
+
+   Reference set used to validate this expected value (last verified
+   2026-05-05, all four matched the apple.com download bit-for-bit):
+
+   | Repo | Commit | Lang |
+   | --- | --- | --- |
+   | [srinivas1729/appattest-checker-node](https://github.com/srinivas1729/appattest-checker-node) | `d958bc5256b62621089c23c70bab09382cb69aed` | TypeScript |
+   | [uebelack/node-app-attest](https://github.com/uebelack/node-app-attest) | `f16c4bb71b737466872bc8b8a7dfd215364eaa83` | JavaScript |
+   | [veehaitch/devicecheck-appattest](https://github.com/veehaitch/devicecheck-appattest) | `cb26211f63c1e2e7949deafe2efdf352daca27fa` | Kotlin |
+   | [bas-d/appattest](https://github.com/bas-d/appattest) | `fe1ac6f8fcec9f4e711f62d4cdc0478acc3d3e69` | Go |
+
+   Reproduce the cross-check (clones the four repos at the pinned
+   commits, extracts each embedded PEM, computes SHA-256, prints
+   any mismatch):
+   ```bash
+   set -e
+   D=$(mktemp -d)
+   git clone --depth 50 https://github.com/srinivas1729/appattest-checker-node.git "$D/a"
+   git clone --depth 50 https://github.com/uebelack/node-app-attest.git "$D/b"
+   git clone --depth 50 https://github.com/veehaitch/devicecheck-appattest.git "$D/c"
+   git clone --depth 50 https://github.com/bas-d/appattest.git "$D/d"
+   git -C "$D/a" checkout -q d958bc5256b62621089c23c70bab09382cb69aed
+   git -C "$D/b" checkout -q f16c4bb71b737466872bc8b8a7dfd215364eaa83
+   git -C "$D/c" checkout -q cb26211f63c1e2e7949deafe2efdf352daca27fa
+   git -C "$D/d" checkout -q fe1ac6f8fcec9f4e711f62d4cdc0478acc3d3e69
+   python3 - "$D" <<'PY'
+   import re, sys, base64, hashlib, pathlib
+   FILES = {
+     "a/src/attestation.ts": "appattest-checker-node",
+     "b/src/verifyAttestation.js": "node-app-attest",
+     "c/src/main/kotlin/ch/veehait/devicecheck/appattest/attestation/AttestationValidator.kt": "devicecheck-appattest",
+     "d/attestation/attestation.go": "bas-d/appattest",
+   }
+   EXPECT = "1cb9823ba28ba6ad2d33a006941de2ae4f513ef1d4e831b9f7e0fa7b6242c932"
+   root = pathlib.Path(sys.argv[1])
+   ok = True
+   for rel, label in FILES.items():
+     src = (root/rel).read_text()
+     m = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", src, re.S)
+     body = m.group(1).replace("\\n","").replace("\\r","")
+     b64  = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+     der  = base64.b64decode(b64)
+     fp   = hashlib.sha256(der).hexdigest()
+     mark = "OK" if fp == EXPECT else "MISMATCH"
+     if fp != EXPECT: ok = False
+     print(f"{mark}  {label}: {fp}")
+   sys.exit(0 if ok else 1)
+   PY
+   ```
+
+   **If any line prints `MISMATCH`, stop and investigate** before
+   continuing — a divergence means either Apple rotated the root
+   (rare; would be announced), one of the libraries was tampered
+   with at the pinned commit, or the apple.com download was
+   tampered with. Do NOT paste an unverified value into line 61.
+
+   When refreshing this step (e.g., adding new reference libraries
+   or bumping commit hashes), update both the table above and the
+   inline `git -C ... checkout` lines so they remain in sync.
 
 3. **Extract the EC public key as an uncompressed point** (`04` || X(48) ||
    Y(48), 97 bytes / 194 hex chars). The trailing 97 bytes of a P-384 SPKI
