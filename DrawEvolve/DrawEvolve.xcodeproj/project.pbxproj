@@ -51,6 +51,16 @@
 		DE000050 /* PromptEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100050 /* PromptEditView.swift */; };
 		DE000051 /* PromptListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100051 /* PromptListView.swift */; };
 		DE000052 /* LayeredDrawingPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100052 /* LayeredDrawingPayload.swift */; };
+		DE000053 /* EvolutionData.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100053 /* EvolutionData.swift */; };
+		DE000054 /* EvolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100054 /* EvolutionService.swift */; };
+		DE000055 /* EvolutionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100055 /* EvolutionViewModel.swift */; };
+		DE000056 /* EvolutionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100056 /* EvolutionView.swift */; };
+		DE000057 /* EvolutionContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100057 /* EvolutionContentView.swift */; };
+		DE000058 /* StreakRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100058 /* StreakRowView.swift */; };
+		DE000059 /* EvolutionChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100059 /* EvolutionChartView.swift */; };
+		DE000060 /* EvolutionLegendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100060 /* EvolutionLegendView.swift */; };
+		DE000061 /* WarmingUpRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100061 /* WarmingUpRowView.swift */; };
+		DE000062 /* EvolutionEmptyStateCTA.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100062 /* EvolutionEmptyStateCTA.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -101,6 +111,16 @@
 		DE100050 /* PromptEditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptEditView.swift; sourceTree = "<group>"; };
 		DE100051 /* PromptListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptListView.swift; sourceTree = "<group>"; };
 		DE100052 /* LayeredDrawingPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayeredDrawingPayload.swift; sourceTree = "<group>"; };
+		DE100053 /* EvolutionData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionData.swift; sourceTree = "<group>"; };
+		DE100054 /* EvolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionService.swift; sourceTree = "<group>"; };
+		DE100055 /* EvolutionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionViewModel.swift; sourceTree = "<group>"; };
+		DE100056 /* EvolutionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionView.swift; sourceTree = "<group>"; };
+		DE100057 /* EvolutionContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionContentView.swift; sourceTree = "<group>"; };
+		DE100058 /* StreakRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreakRowView.swift; sourceTree = "<group>"; };
+		DE100059 /* EvolutionChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionChartView.swift; sourceTree = "<group>"; };
+		DE100060 /* EvolutionLegendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionLegendView.swift; sourceTree = "<group>"; };
+		DE100061 /* WarmingUpRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarmingUpRowView.swift; sourceTree = "<group>"; };
+		DE100062 /* EvolutionEmptyStateCTA.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionEmptyStateCTA.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -178,6 +198,8 @@
 				DE100031 /* DrawingDetailView.swift */,
 				DE100038 /* SelectionOverlays.swift */,
 				DE100045 /* SettingsView.swift */,
+				DE100056 /* EvolutionView.swift */,
+				DE000317 /* Evolution */,
 				DE000316 /* Components */,
 			);
 			path = Views;
@@ -193,6 +215,7 @@
 				DE100032 /* CritiqueHistory.swift */,
 				DE100048 /* CustomPrompt.swift */,
 				DE100052 /* LayeredDrawingPayload.swift */,
+				DE100053 /* EvolutionData.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -212,6 +235,7 @@
 				DE100046 /* PhotoLibrarySaver.swift */,
 				DE100047 /* AppAttestManager.swift */,
 				DE100049 /* CustomPromptManager.swift */,
+				DE100054 /* EvolutionService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -237,6 +261,7 @@
 			isa = PBXGroup;
 			children = (
 				DE100037 /* CanvasStateManager.swift */,
+				DE100055 /* EvolutionViewModel.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -247,6 +272,19 @@
 				DE100039 /* ToolButton.swift */,
 			);
 			path = Components;
+			sourceTree = "<group>";
+		};
+		DE000317 /* Evolution */ = {
+			isa = PBXGroup;
+			children = (
+				DE100057 /* EvolutionContentView.swift */,
+				DE100058 /* StreakRowView.swift */,
+				DE100059 /* EvolutionChartView.swift */,
+				DE100060 /* EvolutionLegendView.swift */,
+				DE100061 /* WarmingUpRowView.swift */,
+				DE100062 /* EvolutionEmptyStateCTA.swift */,
+			);
+			path = Evolution;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -370,6 +408,16 @@
 				DE000050 /* PromptEditView.swift in Sources */,
 				DE000051 /* PromptListView.swift in Sources */,
 				DE000052 /* LayeredDrawingPayload.swift in Sources */,
+				DE000053 /* EvolutionData.swift in Sources */,
+				DE000054 /* EvolutionService.swift in Sources */,
+				DE000055 /* EvolutionViewModel.swift in Sources */,
+				DE000056 /* EvolutionView.swift in Sources */,
+				DE000057 /* EvolutionContentView.swift in Sources */,
+				DE000058 /* StreakRowView.swift in Sources */,
+				DE000059 /* EvolutionChartView.swift in Sources */,
+				DE000060 /* EvolutionLegendView.swift in Sources */,
+				DE000061 /* WarmingUpRowView.swift in Sources */,
+				DE000062 /* EvolutionEmptyStateCTA.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

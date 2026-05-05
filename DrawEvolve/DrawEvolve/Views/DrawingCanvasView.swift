@@ -49,6 +49,7 @@ struct DrawingCanvasView: View {
     @State private var showSavedConfirmation = false
     @State private var showGallery = false
     @State private var showSettings = false   // Phase 6 — gear in collapsible chrome
+    @State private var showEvolution = false  // My Evolution sheet — chrome chart icon
     @StateObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
@@ -549,6 +550,8 @@ struct DrawingCanvasView: View {
                         if !isToolbarCollapsed {
                             settingsGearButton
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
+                            evolutionButton
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
                         }
                     }
                     .padding(.top, 12)
@@ -614,6 +617,9 @@ struct DrawingCanvasView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showEvolution) {
+            EvolutionView()
         }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}
@@ -730,6 +736,23 @@ struct DrawingCanvasView: View {
                 .shadow(radius: 4)
         }
         .accessibilityLabel("Settings")
+    }
+
+    /// Extracted next to settingsGearButton for the same Swift type-checker
+    /// reason the gear and bottom-right action buttons were extracted —
+    /// the chrome ZStack tips over its tolerance threshold once a third
+    /// 44pt circle button gets stacked here.
+    private var evolutionButton: some View {
+        Button(action: { showEvolution = true }) {
+            Image(systemName: "chart.line.uptrend.xyaxis")
+                .font(.system(size: 22))
+                .foregroundColor(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                .clipShape(Circle())
+                .shadow(radius: 4)
+        }
+        .accessibilityLabel("My Evolution")
     }
 
     private var saveToGalleryButton: some View {
