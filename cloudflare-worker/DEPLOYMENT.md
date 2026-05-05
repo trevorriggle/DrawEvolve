@@ -181,17 +181,28 @@ Apple device. **Both must pass for any protected request.**
 
 The Worker reuses the existing `QUOTA_KV` namespace for App Attest storage —
 no new binding required. Three new vars must be set in `wrangler.toml`'s
-`[vars]` block before deploy:
+`[vars]` block before deploy. These are non-secret operational values, so
+they go in `[vars]` (committed) — not `wrangler secret put`.
 
-| Var | Value |
-|---|---|
-| `APP_ATTEST_TEAM_ID` | Your 10-character Apple Team ID (e.g. `ABCDE12345`) |
-| `APP_ATTEST_BUNDLE_ID` | iOS bundle identifier (default `com.drawevolve.app`) |
-| `APP_ATTEST_ENV` | `development` or `production` — must match the iOS entitlement value |
+| Var | Value | Where to find it |
+|---|---|---|
+| `APP_ATTEST_TEAM_ID` | Your 10-character Apple Team ID (e.g. `ABCDE12345`) | Apple Developer Portal → Membership → Team ID |
+| `APP_ATTEST_BUNDLE_ID` | iOS bundle identifier (default `com.drawevolve.app`) | Xcode → DrawEvolve target → General → Bundle Identifier |
+| `APP_ATTEST_ENV` | `development` or `production` — must match the iOS entitlement value | `DrawEvolve.entitlements` → `com.apple.developer.devicecheck.appattest-environment` |
+
+The shipped `wrangler.toml` has `APP_ATTEST_TEAM_ID = ""` as a placeholder.
+Fill it in (and confirm `APP_ATTEST_ENV` matches the iOS entitlement) before
+the next `wrangler deploy`, or every assertion will reject with
+`assert_rpid_mismatch` / `attest_aaguid_mismatch`.
 
 `APP_ATTEST_TEAM_ID + "." + APP_ATTEST_BUNDLE_ID` is hashed into the rpId
 that the Worker checks on every request — a mismatch with the iOS app ID
 will reject every assertion with `assert_rpid_mismatch`.
+
+**Promoting to App Store:** flip `APP_ATTEST_ENV` to `production` in
+`wrangler.toml` *and* the iOS entitlement string in the same release. The
+two must move together; a one-sided flip causes `attest_env_mismatch` on
+every request.
 
 ### One-time: pin the Apple App Attest Root CA public key
 
@@ -200,27 +211,90 @@ the operator pastes the Apple App Attest Root CA's uncompressed P-384 public
 key into `middleware/app-attest.js`'s `APPLE_ATTEST_ROOT_PUBKEY_HEX` constant.
 This lives as a source constant on purpose — bundling it with the worker code
 ensures a deploy can never accidentally pair the wrong root with the wrong
-worker version.
+worker version. The value is a **public** key (Apple publishes it openly and
+all relying parties bundle it identically), so once filled in **the constant
+is meant to be committed** to this repo. It is not a secret.
 
-To extract it:
+> Note: the recipe references the **App Attest Root CA** specifically — this
+> is a different cert than the generic "Apple Root CA" used for code signing.
+> Don't substitute one for the other. Apple's PKI index page lists both.
 
-1. Download `Apple_App_Attestation_Root_CA.pem` from
-   <https://www.apple.com/certificateauthority/>.
-2. Confirm SHA-256 fingerprint matches what Apple publishes on that page
-   (cross-check before pasting).
-3. Extract the EC public key as an uncompressed point (`04` || X(48) || Y(48),
-   97 bytes / 194 hex chars):
+Recipe (run on a Mac with `openssl` ≥ 1.1.1 and `curl`):
+
+1. **Download the App Attest Root CA PEM** from Apple's PKI index. The
+   parent index is at <https://www.apple.com/certificateauthority/>; the file
+   is listed there as "Apple App Attestation Root CA".
+   ```bash
+   curl -fSL -o Apple_App_Attestation_Root_CA.pem \
+     https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem
+   ```
+   If the URL ever 404s, fall back to the parent page and copy the link
+   from there — Apple has not historically renamed this cert, but they could.
+
+2. **Verify the SHA-256 fingerprint** matches what Apple publishes alongside
+   the cert on the parent page. Compute locally:
+   ```bash
+   openssl x509 -in Apple_App_Attestation_Root_CA.pem -noout -fingerprint -sha256
+   ```
+   Cross-check the colon-separated hex against the value rendered on
+   apple.com character-for-character. **If they diverge, stop and
+   investigate** before continuing — a mismatch means either Apple rotated
+   the root (rare; would be announced) or the download was tampered with.
+
+3. **Extract the EC public key as an uncompressed point** (`04` || X(48) ||
+   Y(48), 97 bytes / 194 hex chars). The trailing 97 bytes of a P-384 SPKI
+   DER are exactly the uncompressed point inside the BIT STRING, so a blind
+   `tail -c 97` slices it without needing DER-aware tooling:
    ```bash
    openssl x509 -in Apple_App_Attestation_Root_CA.pem -noout -pubkey \
      | openssl ec -pubin -outform DER 2>/dev/null \
      | tail -c 97 \
-     | xxd -p -c 0
+     | xxd -p \
+     | tr -d '\n'
    ```
-4. Paste the resulting hex string (no `0x`, no whitespace) into
-   `APPLE_ATTEST_ROOT_PUBKEY_HEX` and redeploy.
+   `openssl pkey -pubin -outform DER` works as a drop-in for `openssl ec`
+   on OpenSSL 3.x if `openssl ec` ever gets removed; it accepts the same
+   PEM SPKI input. The output **must** be exactly 194 lowercase hex chars
+   and **must** begin with `04` (the uncompressed-point marker). If it
+   doesn't match both checks, the input was wrong — re-download the PEM
+   and start over rather than pasting a malformed key.
 
-Until this step is done, the Worker is intentionally unable to register any
-new device.
+4. **Paste the 194-char hex string** (no `0x` prefix, no whitespace, no
+   newlines) into `middleware/app-attest.js`, replacing the empty literal:
+   ```js
+   const APPLE_ATTEST_ROOT_PUBKEY_HEX = '04...';   // 194 hex chars
+   ```
+   Commit the change to a branch and merge it. The value is a public key,
+   not a secret — bundling it in source is the entire point of the design.
+
+5. **Deploy:**
+   ```bash
+   wrangler deploy
+   ```
+
+6. **Verify the pin took** by hitting the worker:
+   ```bash
+   WORKER=https://drawevolve-backend.<your-subdomain>.workers.dev
+
+   # /attest/challenge: should return 200 with a base64 challenge
+   curl -s -o /dev/null -w "%{http_code}\n" -X POST "$WORKER/attest/challenge"
+   # expect: 200
+
+   # /attest/register with junk body: should return a 4xx structural error
+   # (e.g. attest_bad_structure or attest_bad_fmt) — NOT 500
+   # attest_root_not_pinned. A 500 here means the constant is still empty
+   # or the worker didn't redeploy.
+   curl -s -X POST -H 'content-type: application/json' \
+     -d '{"keyId":"AAAA","attestation":"AAAA","challenge":"AAAA"}' \
+     "$WORKER/attest/register"
+   ```
+   `wrangler tail` in another shell shows the exact error code each request
+   produced — useful for confirming the failure mode is no longer
+   `attest_root_not_pinned`.
+
+Until step 4 lands and step 5 deploys, the Worker is intentionally unable
+to register any new device. The empty placeholder in the source tree is a
+fail-safe and **must not** be removed or worked around.
 
 ### Endpoints
 
