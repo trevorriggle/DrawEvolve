@@ -603,8 +603,22 @@ struct DrawingCanvasView: View {
                         .padding(.horizontal, 8)
                         .padding(.top, 8)
 
+                        // Tool slots — 8 cells, 4 rows. Five grouped
+                        // (Effects, Sample, Shapes, Select, Text) reveal a
+                        // long-press popover for variant selection; the
+                        // other three (Brush, Eraser, Move) are single-tool
+                        // slots. Below the tool slots sit the 10 non-tool
+                        // middle items in their pre-refactor relative
+                        // order. Import/Export and Undo/Redo are pinned
+                        // OUTSIDE this ScrollView, just above the existing
+                        // Globe block (see below).
+                        //
+                        // NOTE: this iPad layout intentionally diverges
+                        // from the iPhone phoneToolPanel grid. The
+                        // tile-mirroring comment on phoneToolPanel is
+                        // therefore stale by design for v1.1+.
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
-                            // Drawing tools
+                            // Row 1: Brush, Eraser
                             ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
                                 canvasState.currentTool = .brush
                             }
@@ -613,99 +627,107 @@ struct DrawingCanvasView: View {
                                 canvasState.currentTool = .eraser
                             }
 
-                            // Blur Brush — paints Gaussian blur freeform
-                            ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
-                                canvasState.currentTool = .blur
-                            }
+                            // Row 2: Effects (smudge / blur / blur adjustment), Sample (eyedropper / paint bucket)
+                            GroupedToolButton(
+                                group: .effects,
+                                isSelected: { v in
+                                    if case .tool(let t) = v {
+                                        return canvasState.currentTool == t
+                                    }
+                                    return false
+                                },
+                                onActivate: { v in
+                                    if case .tool(let t) = v {
+                                        canvasState.currentTool = t
+                                    }
+                                }
+                            )
 
-                            // Blur Adjustment — Procreate-style scrubber HUD
-                            ToolButton(icon: DrawingTool.blurAdjustment.icon, isSelected: canvasState.currentTool == .blurAdjustment) {
-                                canvasState.currentTool = .blurAdjustment
-                            }
+                            GroupedToolButton(
+                                group: .sample,
+                                isSelected: { v in
+                                    if case .tool(let t) = v {
+                                        return canvasState.currentTool == t
+                                    }
+                                    return false
+                                },
+                                onActivate: { v in
+                                    if case .tool(let t) = v {
+                                        canvasState.currentTool = t
+                                    }
+                                }
+                            )
 
-                            // Smudge — stamp-as-you-go pickup/deposit smear
-                            ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
-                                canvasState.currentTool = .smudge
-                            }
+                            // Row 3: Shapes (line / rectangle / circle), Select (rectangle / lasso)
+                            GroupedToolButton(
+                                group: .shapes,
+                                isSelected: { v in
+                                    if case .tool(let t) = v {
+                                        return canvasState.currentTool == t
+                                    }
+                                    return false
+                                },
+                                onActivate: { v in
+                                    if case .tool(let t) = v {
+                                        canvasState.currentTool = t
+                                    }
+                                }
+                            )
 
-                            // Shape tools
-                            ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
-                                canvasState.currentTool = .line
-                            }
+                            GroupedToolButton(
+                                group: .select,
+                                isSelected: { v in
+                                    if case .tool(let t) = v {
+                                        return canvasState.currentTool == t
+                                    }
+                                    return false
+                                },
+                                onActivate: { v in
+                                    if case .tool(let t) = v {
+                                        canvasState.currentTool = t
+                                    }
+                                }
+                            )
 
-                            ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
-                                canvasState.currentTool = .rectangle
-                            }
-
-                            ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
-                                canvasState.currentTool = .circle
-                            }
-
-                            // Fill and color tools
-                            ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
-                                canvasState.currentTool = .paintBucket
-                            }
-
-                            ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
-                                canvasState.currentTool = .eyeDropper
-                            }
-
-                            // Selection tools
-                            ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
-                                canvasState.currentTool = .rectangleSelect
-                            }
-
-                            ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
-                                canvasState.currentTool = .lasso
-                            }
+                            // Row 4: Text (text / settings opener / text-on-path), Move
+                            //
+                            // The textSettings variant activates .text AND
+                            // opens the settings sheet. Same on slot-tap
+                            // and on popover-pick — re-activating .text
+                            // when it's already current is a no-op.
+                            GroupedToolButton(
+                                group: .text,
+                                isSelected: { v in
+                                    switch v {
+                                    case .tool(let t): return canvasState.currentTool == t
+                                    case .textSettings: return showTextSettings
+                                    }
+                                },
+                                onActivate: { v in
+                                    switch v {
+                                    case .tool(let t):
+                                        canvasState.currentTool = t
+                                    case .textSettings:
+                                        canvasState.currentTool = .text
+                                        showTextSettings = true
+                                    }
+                                }
+                            )
 
                             ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
                                 canvasState.currentTool = .move
                             }
 
-                            ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
-                                canvasState.currentTool = .text
-                            }
-
-                            // Text on Path — draw a freehand path, then lay
-                            // text along it. Path-bearing FloatingText shares
-                            // the rest of the floating-text lifecycle (commit
-                            // on tap-outside / tool-switch, cancel pill).
-                            ToolButton(icon: DrawingTool.textOnPath.icon, isSelected: canvasState.currentTool == .textOnPath) {
-                                canvasState.currentTool = .textOnPath
-                            }
-
-                            // Text Settings — opens the typographic settings
-                            // sheet. Independent from the text tool button:
-                            // user can adjust defaults at any time, not just
-                            // while text is selected (matches brush-settings
-                            // behaviour).
-                            ToolButton(icon: "textformat.size", isSelected: showTextSettings) {
-                                showTextSettings.toggle()
-                            }
-
-                            // Image import (Photos picker)
-                            PhotosPicker(selection: $photoPickerItem, matching: .images) {
-                                Image(systemName: "photo.badge.plus")
-                                    .font(.system(size: 22))
-                                    .frame(width: 44, height: 44)
-                            }
-
-                            // Download composited image to Photos
-                            ToolButton(
-                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
-                                isSelected: false
-                            ) {
-                                Task { await downloadToPhotos() }
-                            }
-                            .disabled(isSavingToPhotos)
+                            // Middle items — non-tool entries in their
+                            // pre-refactor relative order. Behavior
+                            // unchanged.
 
                             // Clear button
                             ToolButton(icon: "trash", isSelected: false) {
                                 showClearConfirmation = true
                             }
 
-                            // Color picker button. Grayed (not hidden) when
+                            // Color picker swatch. Grayed (not hidden) when
                             // blur, blurAdjustment, or smudge is the active
                             // tool — those tools don't read brush color.
                             Button(action: {
@@ -755,17 +777,6 @@ struct DrawingCanvasView: View {
                             ) {
                                 toggleColorScheme()
                             }
-
-                            // Undo/Redo
-                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
-                                canvasState.undo()
-                            }
-                            .disabled(!canvasState.historyManager.canUndo)
-
-                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
-                                canvasState.redo()
-                            }
-                            .disabled(!canvasState.historyManager.canRedo)
 
                             // Canvas flip — display-only mirrors around the
                             // viewport center. Layer textures unchanged. Used
@@ -821,6 +832,45 @@ struct DrawingCanvasView: View {
                         .padding(.horizontal, 8)
                         .padding(.bottom, 8)
                     }
+
+                    // Pinned bottom — Import/Export above Undo/Redo, both
+                    // above the existing Globe block. These sit OUTSIDE
+                    // the ScrollView so they remain anchored regardless
+                    // of toolbar scroll position. Behavior of each entry
+                    // is unchanged from when they lived inside the grid.
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            // Image import (Photos picker)
+                            PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.system(size: 22))
+                                    .frame(width: 44, height: 44)
+                            }
+
+                            // Download composited image to Photos
+                            ToolButton(
+                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                                isSelected: false
+                            ) {
+                                Task { await downloadToPhotos() }
+                            }
+                            .disabled(isSavingToPhotos)
+                        }
+
+                        HStack(spacing: 8) {
+                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                                canvasState.undo()
+                            }
+                            .disabled(!canvasState.historyManager.canUndo)
+
+                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                                canvasState.redo()
+                            }
+                            .disabled(!canvasState.historyManager.canRedo)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
 
                     if Self.showGlobeIcon {
                         Divider()
