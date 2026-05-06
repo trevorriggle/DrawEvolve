@@ -179,6 +179,24 @@ struct MetalCanvasView: UIViewRepresentable {
         private var blurAdjustmentLastUpdateAt: TimeInterval = 0
         private static let blurAdjustmentThrottleInterval: TimeInterval = 1.0 / 30.0
 
+        // Smudge tool state (PR 2).
+        // Smudge is stamp-as-you-go (each stamp depends on the previous
+        // stamp's deposit), so it doesn't go through `currentStroke` /
+        // `touchesEnded`'s batch-dispatch path. Instead the renderer holds
+        // ping-pong patch textures across the stroke; we dispatch new
+        // stamps from `touchesMoved` and capture the undo snapshot pair
+        // around the whole stroke (before in `touchesBegan`, after in
+        // `touchesEnded`).
+        private var isSmudgeStrokeActive = false
+        private var smudgeStrokeLayerIndex: Int?
+        private var smudgeStrokeLayerId: UUID?
+        // Stamp 0 of the stroke is the touchdown point — captured here in
+        // `touchesBegan` and prepended to the first `renderSmudgeStamps`
+        // batch in `touchesMoved` (so it dispatches as the pickup-only
+        // first stamp). Cleared after the first batch.
+        private var smudgePendingTouchdown: BrushStroke.StrokePoint?
+        private var smudgeBeforeSnapshot: Data?
+
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
@@ -565,6 +583,48 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Handle smudge tool — allocate ping-pong patches, capture undo
+            // before-snapshot, stash the touchdown stamp for the first
+            // `renderSmudgeStamps` batch in `touchesMoved`. We bypass the
+            // standard `currentStroke` flow because smudge dispatches stamps
+            // incrementally from `touchesMoved` (each stamp depends on the
+            // layer state the previous one wrote).
+            if currentTool == .smudge {
+                guard selectedLayerIndex < layers.count,
+                      let layerTexture = layers[selectedLayerIndex].texture,
+                      let renderer = renderer else {
+                    print("Smudge: cannot begin stroke — invalid layer or texture")
+                    return
+                }
+                let layerId = layers[selectedLayerIndex].id
+                if !renderer.beginSmudgeStroke(brushSize: brushSettings.size, layerId: layerId) {
+                    print("Smudge: renderer failed to allocate patch textures")
+                    return
+                }
+                smudgeBeforeSnapshot = renderer.captureSnapshot(of: layerTexture)
+                smudgeStrokeLayerIndex = selectedLayerIndex
+                smudgeStrokeLayerId = layerId
+                smudgePendingTouchdown = BrushStroke.StrokePoint(
+                    location: location,
+                    pressure: pressure,
+                    timestamp: timestamp
+                )
+                isSmudgeStrokeActive = true
+                lastPoint = location
+                lastTimestamp = timestamp
+
+                // Stamp cursor outline — same overlay as the blur brush.
+                if let cs = canvasState {
+                    let diameter = stampScreenDiameter(forSize: brushSettings.size)
+                    MainActor.assumeIsolated {
+                        cs.stampCursorCenter = screenLocation
+                        cs.stampCursorDiameter = diameter
+                    }
+                }
+                print("Smudge: began stroke on layer \(selectedLayerIndex) at \(location)")
+                return
+            }
+
             // Handle text tool - show text input dialog
             if currentTool == .text {
                 print("Text tool: requesting text input at \(location)")
@@ -837,6 +897,94 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
+            // Smudge: dispatch stamps incrementally — one command buffer
+            // per touchesMoved call. Build a batch from coalesced samples
+            // (Apple Pencil at ~240 Hz produces several samples per
+            // top-level touchesMoved, same as the brush path), interpolate
+            // along each segment using brushSettings.spacing, prepend the
+            // pending touchdown stamp on the very first batch, and hand
+            // the whole list to the renderer.
+            if currentTool == .smudge, isSmudgeStrokeActive, let renderer = renderer {
+                guard let strokeLayerIndex = smudgeStrokeLayerIndex,
+                      let strokeLayerId = smudgeStrokeLayerId,
+                      strokeLayerIndex < layers.count,
+                      let layerTexture = layers[strokeLayerIndex].texture,
+                      layers[strokeLayerIndex].id == strokeLayerId else {
+                    // Layer changed mid-stroke (or texture went away).
+                    // Sanity-assert and bail. The renderer's own assert in
+                    // `renderSmudgeStamps` is the authoritative guard;
+                    // this is the early-out so we don't even try.
+                    assertionFailure("Smudge: layer mismatch during touchesMoved")
+                    return
+                }
+
+                var batch: [BrushStroke.StrokePoint] = []
+                if let touchdown = smudgePendingTouchdown {
+                    batch.append(touchdown)
+                    smudgePendingTouchdown = nil
+                }
+
+                let samples = event?.coalescedTouches(for: touch) ?? [touch]
+                for sample in samples {
+                    let sampleScreen = sample.location(in: view)
+                    let sampleLoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
+                    let samplePressure = computePressure(for: sample)
+                    let sampleTimestamp = sample.timestamp
+
+                    if let last = lastPoint {
+                        let distance = hypot(sampleLoc.x - last.x, sampleLoc.y - last.y)
+                        let spacing = brushSettings.size * brushSettings.spacing
+                        if distance > spacing {
+                            let steps = Int(ceil(distance / spacing))
+                            for i in 1...steps {
+                                let t = CGFloat(i) / CGFloat(steps)
+                                let interpLocation = CGPoint(
+                                    x: last.x + (sampleLoc.x - last.x) * t,
+                                    y: last.y + (sampleLoc.y - last.y) * t
+                                )
+                                let prevPressure = batch.last?.pressure ?? samplePressure
+                                let safePrev = prevPressure.isFinite ? prevPressure : samplePressure
+                                let safeSample = samplePressure.isFinite ? samplePressure : 1.0
+                                let interpPressure = (1 - t) * safePrev + t * safeSample
+                                batch.append(BrushStroke.StrokePoint(
+                                    location: interpLocation,
+                                    pressure: interpPressure.isFinite ? interpPressure : 1.0,
+                                    timestamp: sampleTimestamp
+                                ))
+                            }
+                            lastPoint = sampleLoc
+                            lastTimestamp = sampleTimestamp
+                        }
+                    } else {
+                        lastPoint = sampleLoc
+                        lastTimestamp = sampleTimestamp
+                    }
+                }
+
+                if !batch.isEmpty {
+                    let docSize = MainActor.assumeIsolated {
+                        canvasState?.documentSize ?? view.bounds.size
+                    }
+                    renderer.renderSmudgeStamps(
+                        batch,
+                        settings: brushSettings,
+                        to: layerTexture,
+                        layerId: strokeLayerId,
+                        screenSize: docSize
+                    )
+                }
+
+                // Stamp cursor follows the finger.
+                if let cs = canvasState {
+                    let diameter = stampScreenDiameter(forSize: brushSettings.size)
+                    MainActor.assumeIsolated {
+                        cs.stampCursorCenter = latestScreenLocation
+                        cs.stampCursorDiameter = diameter
+                    }
+                }
+                return
+            }
+
             // Handle dragging an existing selection. We *only* update the
             // doc-space offset here — the draw loop renders the floating
             // texture (or the active layer, for whole-layer move) at offset
@@ -1078,6 +1226,65 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .blurAdjustment {
                 blurAdjustmentTouchStartScreen = nil
                 blurAdjustmentLastUpdateAt = 0
+                return
+            }
+
+            // Smudge: capture after-snapshot, record undo, free patches.
+            // The patch was being mutated incrementally during the drag, so
+            // the layer texture already holds the final state — no extra
+            // dispatch needed at lift, just bookkeeping.
+            if isSmudgeStrokeActive {
+                isSmudgeStrokeActive = false
+                let strokeLayerIndex = smudgeStrokeLayerIndex
+                let strokeLayerId = smudgeStrokeLayerId
+                let beforeSnapshot = smudgeBeforeSnapshot
+                smudgeStrokeLayerIndex = nil
+                smudgeStrokeLayerId = nil
+                smudgePendingTouchdown = nil
+                smudgeBeforeSnapshot = nil
+
+                if let renderer = renderer {
+                    if let li = strokeLayerIndex,
+                       let lid = strokeLayerId,
+                       li < layers.count,
+                       layers[li].id == lid,
+                       let layerTexture = layers[li].texture {
+                        // Drain the in-flight smudge command buffers before
+                        // reading back. We don't have a handle to them
+                        // here, but `captureSnapshot` issues a blit with
+                        // waitUntilCompleted internally — that drain
+                        // serialises behind any pending smudge dispatches
+                        // on the same queue.
+                        let afterSnapshot = renderer.captureSnapshot(of: layerTexture)
+                        if let before = beforeSnapshot, let after = afterSnapshot,
+                           let canvasState = canvasState {
+                            canvasState.historyManager.record(.stroke(
+                                layerId: lid,
+                                beforeSnapshot: before,
+                                afterSnapshot: after
+                            ))
+                            print("Smudge: recorded stroke undo (before: \(before.count)B, after: \(after.count)B)")
+                        }
+                        // Refresh thumbnail off-thread.
+                        DispatchQueue.global(qos: .utility).async { [weak self] in
+                            if let thumbnail = renderer.generateThumbnail(from: layerTexture, size: CGSize(width: 44, height: 44)) {
+                                DispatchQueue.main.async {
+                                    self?.layers[li].updateThumbnail(thumbnail)
+                                }
+                            }
+                        }
+                    }
+                    renderer.endSmudgeStroke()
+                }
+
+                lastPoint = nil
+                lastTimestamp = 0
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.stampCursorCenter = nil
+                        cs.stampCursorDiameter = 0
+                    }
+                }
                 return
             }
 
@@ -1325,6 +1532,19 @@ struct MetalCanvasView: UIViewRepresentable {
             selectionDragStart = nil
             blurAdjustmentTouchStartScreen = nil
             blurAdjustmentLastUpdateAt = 0
+
+            // Smudge: discard the in-progress stroke (no commit, no undo
+            // record). Layer texture is left in its partially-mutated
+            // state; the user can undo if they want to roll back. This
+            // matches how the brush handles cancellation today.
+            if isSmudgeStrokeActive {
+                isSmudgeStrokeActive = false
+                smudgeStrokeLayerIndex = nil
+                smudgeStrokeLayerId = nil
+                smudgePendingTouchdown = nil
+                smudgeBeforeSnapshot = nil
+                renderer?.endSmudgeStroke()
+            }
 
             // Clear selection previews + stamp cursor.
             if let canvasState = canvasState {

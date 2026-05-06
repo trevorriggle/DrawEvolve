@@ -27,7 +27,7 @@ struct BrushSettingsView: View {
             }
 
             // Blur Brush — strength slider only surfaces when the blur tool
-            // is active. Smudge slider deferred to PR 2.
+            // is active.
             if activeTool == .blur {
                 Section("Blur") {
                     HStack {
@@ -40,6 +40,30 @@ struct BrushSettingsView: View {
                         value: Binding(
                             get: { Double(settings.blurStrength) },
                             set: { settings.blurStrength = Float($0) }
+                        ),
+                        in: 0...1
+                    )
+                }
+            }
+
+            // Smudge — pickup/deposit weight. Drives the patch-update mix
+            // (strength * pressure) at every stamp; lower = the same
+            // pigment carries longer along the drag, higher = each stamp
+            // freshly samples the layer underneath. First-stamp pickup
+            // always uses weight 1.0 internally so the patch initialises
+            // to a full-saturation sample regardless of slider value.
+            if activeTool == .smudge {
+                Section("Smudge") {
+                    HStack {
+                        Text("Strength")
+                        Spacer()
+                        Text(String(format: "%.0f%%", settings.smudgeStrength * 100))
+                            .foregroundColor(.primary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.smudgeStrength) },
+                            set: { settings.smudgeStrength = Float($0) }
                         ),
                         in: 0...1
                     )

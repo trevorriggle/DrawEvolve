@@ -326,6 +326,11 @@ struct DrawingCanvasView: View {
                                 canvasState.currentTool = .blurAdjustment
                             }
 
+                            // Smudge — stamp-as-you-go pickup/deposit smear
+                            ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
+                                canvasState.currentTool = .smudge
+                            }
+
                             // Shape tools
                             ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
                                 canvasState.currentTool = .line
@@ -387,11 +392,12 @@ struct DrawingCanvasView: View {
                             }
 
                             // Color picker button. Grayed (not hidden) when
-                            // blur or blurAdjustment is the active tool —
-                            // those tools don't read brush color.
+                            // blur, blurAdjustment, or smudge is the active
+                            // tool — those tools don't read brush color.
                             Button(action: {
                                 guard canvasState.currentTool != .blur,
-                                      canvasState.currentTool != .blurAdjustment else { return }
+                                      canvasState.currentTool != .blurAdjustment,
+                                      canvasState.currentTool != .smudge else { return }
                                 showColorPicker.toggle()
                             }) {
                                 Circle()
@@ -401,10 +407,11 @@ struct DrawingCanvasView: View {
                                     .shadow(radius: 2)
                                     .opacity(
                                         (canvasState.currentTool == .blur ||
-                                         canvasState.currentTool == .blurAdjustment) ? 0.4 : 1.0
+                                         canvasState.currentTool == .blurAdjustment ||
+                                         canvasState.currentTool == .smudge) ? 0.4 : 1.0
                                     )
                             }
-                            .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment)
+                            .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
 
                             // Brush settings
                             ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
