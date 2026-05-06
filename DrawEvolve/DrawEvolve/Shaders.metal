@@ -553,6 +553,125 @@ fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
     return float4(blurred.rgb * alpha, alpha);
 }
 
+// MARK: - Smudge (PR 2)
+//
+// Smudge is "stamp-as-you-go": each stamp depends on the layer state the
+// previous stamp deposited, so we cannot batch the whole stroke at touchesEnded
+// the way the brush/blur paths do. Instead the renderer holds a small
+// `smudgePatch` texture (~ stampSize square) and dispatches a (patch update,
+// deposit) pair per stamp, in order, on a single command buffer per
+// touchesMoved batch.
+//
+// The patch holds the "carried paint" — at each stamp the layer is sampled
+// under the stamp center and mixed into the patch with weight = strength *
+// pressure (the pickup). The patch is then sampled by a point-sprite deposit
+// pass that paints picked color back into the layer with the standard hardness
+// disc + opacity falloff.
+//
+// Two patches are kept (front/back ping-pong): the pickup pass reads the
+// "front" patch + the layer and writes the result to the "back" patch; the
+// caller then swaps them so the next pickup reads the just-written carry.
+// First-stamp pickup uses weight = 1.0 (initialise the patch to the layer
+// sample directly) and the deposit pass is skipped — the patch is "empty"
+// before stamp 0 so depositing it would just paint zero.
+//
+// Patch ↔ layer mapping is anchored at the current stamp center: the patch's
+// world half-size in layer pixels is `patchHalfSize`, so patch UV (u,v) maps
+// to layer pixel `stampCenter + (uv - 0.5) * 2 * patchHalfSize`. Sampling
+// uses clamp_to_edge so stamps near the layer border read the edge pixel
+// instead of garbage.
+
+struct SmudgeUniforms {
+    float2 stampCenter;        // layer pixel coords of this stamp's center
+    float2 patchHalfSize;      // half-extent of the patch in layer pixel units
+    float2 layerSize;          // layer texture pixel size
+    float  weight;             // pickup mix weight = strength * pressure (0..1).
+                               // First stamp of a stroke is dispatched with 1.0
+                               // so mix(empty_patch, layer, 1.0) = layer.
+};
+
+// Smudge patch update — full-quad pass on the BACK patch. For each patch
+// pixel: read the FRONT patch at the same UV (the previously-carried paint),
+// read the layer at the world coord that this patch UV maps to, mix.
+//
+// `frontPatch` is the patch that holds the current carry (read-only here);
+// its content was written by the previous stamp. `layerTexture` is the active
+// layer's MTLTexture (read-only). The fragment writes to the BACK patch (the
+// render target).
+fragment float4 smudgePatchUpdateShader(VertexOut in [[stage_in]],
+                                         texture2d<float> frontPatch    [[texture(0)]],
+                                         texture2d<float> layerTexture  [[texture(1)]],
+                                         constant SmudgeUniforms &uniforms [[buffer(0)]]) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+
+    // Patch UV → layer pixel coord, then normalise to layer UV.
+    float2 layerPx = uniforms.stampCenter + (in.texCoord - 0.5) * 2.0 * uniforms.patchHalfSize;
+    float2 layerUV = layerPx / uniforms.layerSize;
+    float4 layerSample = layerTexture.sample(s, layerUV);
+
+    // Front patch sample at the same UV — the previously-carried paint at
+    // this offset from the (now-current) stamp center. Since the patch is
+    // anchored at the new stamp center, this is a tiny approximation: the
+    // previous stamp's patch was anchored at the previous stamp's center.
+    // For tightly-spaced stamps along a drag (stampSpacing << patchSize) the
+    // two anchors are close enough that the carry stays coherent. This is
+    // the standard cheap-smudge approximation; it matches Procreate-style
+    // behaviour without per-stamp per-pixel resampling of the patch.
+    float4 frontSample = frontPatch.sample(s, in.texCoord);
+
+    return mix(frontSample, layerSample, uniforms.weight);
+}
+
+// Smudge deposit — point-sprite fragment shader. Same disc + hardness curve
+// as brushFragmentShader / stampBlurDepositShader. Samples the (just-updated)
+// patch via the fragment's layer-pixel position mapped to patch UV, returns
+// premultiplied colour for the standard sourceAlpha source-over blend.
+//
+// NB: smudgeStrength does NOT scale the deposit alpha — strength only drives
+// pickup weight in the patch update pass. The deposit alpha is just the
+// brush mask (hardness disc) modulated by opacity * pressure, identical to
+// the brush. Doubling-up strength on the deposit would make low-strength
+// smudges nearly invisible (pickup * deposit both attenuated).
+fragment float4 smudgeDepositShader(VertexOut in [[stage_in]],
+                                     float2 pointCoord [[point_coord]],
+                                     texture2d<float> patchTexture [[texture(0)]],
+                                     constant BrushUniforms &uniforms [[buffer(0)]],
+                                     constant SmudgeUniforms &smudge [[buffer(1)]]) {
+    // Same disc + hardness curve as the brush.
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float alpha;
+    if (uniforms.hardness >= 0.99) {
+        alpha = dist < 1.0 ? 1.0 : 0.0;
+    } else {
+        float softness = 1.0 - uniforms.hardness;
+        float edge = 1.0 - softness;
+        alpha = smoothstep(1.0, edge, dist);
+    }
+    alpha *= uniforms.opacity * uniforms.pressure;
+
+    if (alpha <= 0.0) {
+        discard_fragment();
+    }
+
+    // Layer pixel position → patch UV. The patch is anchored at the current
+    // stamp center with world half-size `patchHalfSize`, so the UV at
+    // `layerPx` is (layerPx - center + halfSize) / (2 * halfSize). Sampler
+    // clamps so fragments outside the patch's world footprint (shouldn't
+    // happen — point sprite is sized to fit) read the edge.
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 layerPx = in.position.xy;
+    float2 patchUV = (layerPx - smudge.stampCenter + smudge.patchHalfSize) / (2.0 * smudge.patchHalfSize);
+    float4 picked = patchTexture.sample(s, patchUV);
+
+    // The patch holds premultiplied content (it was sampled from the
+    // layer, which stores premultiplied bgra8Unorm). Scaling the entire
+    // tuple by `alpha` produces a premultiplied output that the standard
+    // sourceAlpha/oneMinusSourceAlpha blend deposits cleanly.
+    return picked * alpha;
+}
+
 // MARK: - Effect Shaders
 
 // One iteration pass of a connected-component (flood) fill.
