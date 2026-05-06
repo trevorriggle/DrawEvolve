@@ -45,6 +45,13 @@ struct DrawingCanvasView: View {
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
 
+    // iPhone tool-panel expand state. Inverse default of iPad's
+    // isToolbarCollapsed (false = collapsed) because iPhone has less
+    // vertical space and benefits from collapse-by-default. Drives
+    // phoneToolPanel visibility; never co-fires with isToolbarCollapsed
+    // since they live in disjoint body branches (phoneBody vs padBody).
+    @State private var isToolPanelExpanded = false
+
     // Save state
     @State private var showSaveDialog = false
     @State private var drawingTitle = ""
@@ -294,9 +301,16 @@ struct DrawingCanvasView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                saveToGalleryButton
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                VStack(spacing: 8) {
+                    phoneSelectionContextBar
+                    phoneActionRow
+                    if isToolPanelExpanded {
+                        phoneToolPanel
+                    }
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+                .background(.regularMaterial)
             }
             // iPhone Phase 4: half-sheet for FloatingFeedbackPanel.
             // iPad's path renders the panel inline inside padBody's ZStack
@@ -819,57 +833,18 @@ struct DrawingCanvasView: View {
                 )
             }
 
-            // Selection actions overlay
+            // Selection actions overlay — iPad positioning. The card
+            // content (caption + Cancel + Delete pills) lives in the
+            // shared `selectionActiveCard` computed property; only the
+            // outer VStack/Spacer/HStack/Spacer + bottom-200 positioning
+            // is iPad-specific. Same justified-deviation pattern as
+            // Phase 4's critiqueContent extraction.
             if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {
                     Spacer()
                     HStack {
                         Spacer()
-                        VStack(spacing: 12) {
-                            Text("Selection Active")
-                                .font(.caption)
-                                .foregroundColor(.primary)
-
-                            HStack(spacing: 12) {
-                                // Cancel selection button
-                                Button(action: {
-                                    canvasState.clearSelection()
-                                }) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 16))
-                                        Text("Cancel")
-                                            .font(.subheadline)
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color.gray)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
-                                }
-
-                                // Delete selection button
-                                Button(action: {
-                                    canvasState.deleteSelectedPixels()
-                                }) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "trash.fill")
-                                            .font(.system(size: 16))
-                                        Text("Delete")
-                                            .font(.subheadline)
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color.red)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
-                                }
-                            }
-                        }
-                        .padding()
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(12)
-                        .shadow(radius: 5)
+                        selectionActiveCard
                         .padding(.trailing, 12)
                         .padding(.bottom, 200) // Position above Save/Feedback buttons
                     }
@@ -1009,6 +984,16 @@ struct DrawingCanvasView: View {
         .accessibilityLabel("Settings")
     }
 
+    // saveToGalleryButton and getFeedbackButton scale themselves down on
+    // iPhone via internal DeviceIdiom branches. Padding, icon size, font,
+    // corner radius, and shadow all shrink — but the disabled state
+    // bindings, "Saved ✓" confirmation logic, and ProgressView-while-
+    // loading branches stay in one place across both idioms. This is
+    // a deliberate, contained deviation from "wholesale-quoted padBody"
+    // — same justification class as Phase 4's critiqueContent extraction:
+    // shared elements that need idiom-specific tuning belong in one
+    // computed property to prevent functional drift between idioms.
+
     private var saveToGalleryButton: some View {
         // First save (currentDrawingID == nil) opens the title-input alert.
         // Subsequent taps on an already-saved drawing skip the alert and
@@ -1025,22 +1010,22 @@ struct DrawingCanvasView: View {
                     ProgressView().tint(.white)
                 } else if showSavedConfirmation {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 18))
+                        .font(.system(size: actionButtonIconSize))
                     Text("Saved")
-                        .font(.headline)
+                        .font(actionButtonFont)
                 } else {
                     Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 18))
+                        .font(.system(size: actionButtonIconSize))
                     Text("Save to Gallery")
-                        .font(.headline)
+                        .font(actionButtonFont)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.horizontal, actionButtonHPadding)
+            .padding(.vertical, actionButtonVPadding)
             .background(Color.green)
             .foregroundColor(.white)
-            .cornerRadius(12)
-            .shadow(radius: 4)
+            .cornerRadius(actionButtonCornerRadius)
+            .shadow(radius: actionButtonShadow)
         }
         .disabled(isSaving || canvasState.isEmpty)
         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
@@ -1053,20 +1038,375 @@ struct DrawingCanvasView: View {
                     ProgressView().tint(.white)
                 } else {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 18))
+                        .font(.system(size: actionButtonIconSize))
                     Text("Get Feedback")
-                        .font(.headline)
+                        .font(actionButtonFont)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.horizontal, actionButtonHPadding)
+            .padding(.vertical, actionButtonVPadding)
             .background(Color.accentColor)
             .foregroundColor(.white)
-            .cornerRadius(12)
-            .shadow(radius: 4)
+            .cornerRadius(actionButtonCornerRadius)
+            .shadow(radius: actionButtonShadow)
         }
         .disabled(isRequestingFeedback || canvasState.isEmpty)
         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+    }
+
+    // MARK: - Action-button sizing tokens (idiom-branched)
+    //
+    // iPhone values per the toolbar-redesign spec: ~13pt font, ~8pt
+    // vertical padding, frame proportionally shrunk. iPad values are
+    // the pre-redesign defaults, byte-preserved.
+
+    private var actionButtonHPadding: CGFloat {
+        DeviceIdiom.isPhone ? 12 : 20
+    }
+    private var actionButtonVPadding: CGFloat {
+        DeviceIdiom.isPhone ? 8 : 14
+    }
+    private var actionButtonIconSize: CGFloat {
+        DeviceIdiom.isPhone ? 14 : 18
+    }
+    private var actionButtonFont: Font {
+        DeviceIdiom.isPhone
+            ? .system(size: 13, weight: .semibold)
+            : .headline
+    }
+    private var actionButtonCornerRadius: CGFloat {
+        DeviceIdiom.isPhone ? 10 : 12
+    }
+    private var actionButtonShadow: CGFloat {
+        DeviceIdiom.isPhone ? 2 : 4
+    }
+
+    // MARK: - Selection-active card (shared, idiom-positioned)
+    //
+    // Card content (caption + Cancel + Delete pill row) shared between
+    // iPad's floating overlay (positioned via padding(.bottom, 200) over
+    // the bottom-right action stack) and iPhone's bottom-inset stack
+    // (positioned via VStack placement above phoneActionRow). Functional
+    // behavior — clearSelection / deleteSelectedPixels button actions —
+    // is identical across idioms; only outer positioning differs. Same
+    // justified-deviation reasoning as Phase 4's critiqueContent
+    // extraction: shared elements that need idiom-specific positioning
+    // belong in one computed property to prevent functional drift.
+
+    private var selectionActiveCard: some View {
+        VStack(spacing: 12) {
+            Text("Selection Active")
+                .font(.caption)
+                .foregroundColor(.primary)
+
+            HStack(spacing: 12) {
+                Button(action: { canvasState.clearSelection() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16))
+                        Text("Cancel")
+                            .font(.subheadline)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.gray)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+
+                Button(action: { canvasState.deleteSelectedPixels() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 16))
+                        Text("Delete")
+                            .font(.subheadline)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.red)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+        .shadow(radius: 5)
+    }
+
+    // MARK: - iPhone tool-panel chrome (collapsed-by-default)
+    //
+    // The bottom inset of phoneBody now stacks (top→bottom):
+    //   1. phoneSelectionContextBar  — conditional, only when selection active
+    //   2. phoneActionRow             — [tools trigger, Save flex, Feedback flex]
+    //   3. phoneToolPanel             — conditional, only when expanded
+    //
+    // Trigger sits on the LEFT of the action row, showing the currently-
+    // selected tool's icon. Tap toggles isToolPanelExpanded. Selecting
+    // a tile in the expanded grid auto-collapses the panel. Spring
+    // animation matches iPad's chevron-collapse profile.
+    //
+    // Tool grid lives in C2 of this PR — `phoneToolPanel` returns
+    // EmptyView in C1 so the state machine + collapsed layout can land
+    // and verify cleanly before the 28-tile grid stacks on top.
+
+    private var phoneSelectionContextBar: some View {
+        Group {
+            if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+                selectionActiveCard
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+    }
+
+    private var phoneActionRow: some View {
+        HStack(spacing: 8) {
+            phoneToolsTrigger
+            saveToGalleryButton
+                .frame(maxWidth: .infinity)
+            getFeedbackButton
+                .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var phoneToolsTrigger: some View {
+        // Selected-tool-icon variant (per locked spec): the trigger shows
+        // the currently-selected tool's icon, both indicating active
+        // tool and inviting expansion. Visually distinct from the action
+        // pills (Circle vs. RoundedRect, .regularMaterial vs. solid
+        // brand color) so it doesn't read as a third primary action.
+        Button(action: {
+            withAnimation(.spring(response: 0.3)) {
+                isToolPanelExpanded.toggle()
+            }
+        }) {
+            ZStack {
+                Circle()
+                    .fill(isToolPanelExpanded
+                          ? Color.accentColor.opacity(0.18)
+                          : Color(uiColor: .secondarySystemBackground))
+                    .overlay(
+                        Circle().stroke(
+                            isToolPanelExpanded
+                                ? Color.accentColor
+                                : Color.clear,
+                            lineWidth: 2
+                        )
+                    )
+                Image(systemName: canvasState.currentTool.icon)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(.primary)
+            }
+            .frame(width: 44, height: 44)
+        }
+        .accessibilityLabel(isToolPanelExpanded ? "Collapse tool panel" : "Expand tool panel")
+    }
+
+    // Helper for tile actions inside phoneToolPanel: every tile auto-
+    // collapses the panel after firing, since once the user has picked
+    // a tool / triggered a modifier they want to see the canvas. The
+    // collapse animation matches the trigger button's spring profile.
+    private func collapsePhoneToolPanel() {
+        withAnimation(.spring(response: 0.3)) {
+            isToolPanelExpanded = false
+        }
+    }
+
+    private var phoneToolPanel: some View {
+        // 28 tiles in iPad LazyVGrid order, wholesale-quoted from
+        // padBody. 5 columns × 6 rows = 30 cells, 28 used, 2 empty
+        // slots at end of last row (per spec — don't try to fill).
+        // Each tile auto-collapses the panel via collapsePhoneToolPanel()
+        // after firing.
+        //
+        // Tile bodies are duplicated rather than extracted-and-shared
+        // because extracting would force a structural change to padBody's
+        // LazyVGrid; the redesign only authorizes the action-button
+        // sizing extraction and selectionActiveCard extraction. If a
+        // tile is added / reordered / removed in padBody's LazyVGrid,
+        // mirror the change here.
+        //
+        // ViewBuilder limit of 10 children in HStack/LazyVGrid is sided
+        // around with Group{} chunks below — same pattern as other large
+        // tile sets in this file.
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5),
+            spacing: 12
+        ) {
+            Group {
+                ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
+                    canvasState.currentTool = .brush
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
+                    canvasState.currentTool = .eraser
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
+                    canvasState.currentTool = .blur
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.blurAdjustment.icon, isSelected: canvasState.currentTool == .blurAdjustment) {
+                    canvasState.currentTool = .blurAdjustment
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
+                    canvasState.currentTool = .smudge
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
+                    canvasState.currentTool = .line
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
+                    canvasState.currentTool = .rectangle
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
+                    canvasState.currentTool = .circle
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
+                    canvasState.currentTool = .paintBucket
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
+                    canvasState.currentTool = .eyeDropper
+                    collapsePhoneToolPanel()
+                }
+            }
+            Group {
+                ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
+                    canvasState.currentTool = .rectangleSelect
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
+                    canvasState.currentTool = .lasso
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
+                    canvasState.currentTool = .move
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
+                    canvasState.currentTool = .text
+                    collapsePhoneToolPanel()
+                }
+                PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 22))
+                        .frame(width: 44, height: 44)
+                }
+                .onChange(of: photoPickerItem) { _, _ in
+                    // Collapse on pick so the canvas is visible while
+                    // the import sheet is being interacted with.
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(
+                    icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                    isSelected: false
+                ) {
+                    Task { await downloadToPhotos() }
+                    collapsePhoneToolPanel()
+                }
+                .disabled(isSavingToPhotos)
+                ToolButton(icon: "trash", isSelected: false) {
+                    showClearConfirmation = true
+                    collapsePhoneToolPanel()
+                }
+                Button(action: {
+                    guard canvasState.currentTool != .blur,
+                          canvasState.currentTool != .blurAdjustment,
+                          canvasState.currentTool != .smudge else { return }
+                    showColorPicker.toggle()
+                    collapsePhoneToolPanel()
+                }) {
+                    Circle()
+                        .fill(Color(canvasState.brushSettings.color))
+                        .frame(width: 40, height: 40)
+                        .overlay(Circle().stroke(Color.white, lineWidth: 3))
+                        .shadow(radius: 2)
+                        .opacity(
+                            (canvasState.currentTool == .blur ||
+                             canvasState.currentTool == .blurAdjustment ||
+                             canvasState.currentTool == .smudge) ? 0.4 : 1.0
+                        )
+                }
+                .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
+                ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
+                    showBrushSettings.toggle()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
+                    showLayerPanel.toggle()
+                    collapsePhoneToolPanel()
+                }
+            }
+            Group {
+                ToolButton(
+                    icon: "square.split.2x1",
+                    isSelected: showSymmetrySettings || symmetry.mode != .off
+                ) {
+                    showSymmetrySettings.toggle()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(
+                    icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
+                    isSelected: false
+                ) {
+                    toggleColorScheme()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                    canvasState.undo()
+                    collapsePhoneToolPanel()
+                }
+                .disabled(!canvasState.historyManager.canUndo)
+                ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                    canvasState.redo()
+                    collapsePhoneToolPanel()
+                }
+                .disabled(!canvasState.historyManager.canRedo)
+                ToolButton(
+                    icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                    isSelected: canvasState.flipHorizontal
+                ) {
+                    canvasState.toggleFlipHorizontal()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(
+                    icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                    isSelected: canvasState.flipVertical
+                ) {
+                    canvasState.toggleFlipVertical()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: "viewfinder", isSelected: false) {
+                    canvasState.resetAllTransforms()
+                    collapsePhoneToolPanel()
+                }
+                .disabled(canvasState.zoomScale == 1.0
+                          && canvasState.panOffset == .zero
+                          && canvasState.canvasRotation == .zero
+                          && !canvasState.flipHorizontal
+                          && !canvasState.flipVertical)
+                ToolButton(icon: "sparkles", isSelected: showFeedback) {
+                    if canvasState.feedback != nil {
+                        showFeedback.toggle()
+                    } else {
+                        requestFeedback()
+                    }
+                    collapsePhoneToolPanel()
+                }
+                .disabled(canvasState.isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private var colorSchemeValue: ColorScheme? {
