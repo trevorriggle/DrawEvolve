@@ -179,6 +179,26 @@ struct MetalCanvasView: UIViewRepresentable {
         private var blurAdjustmentLastUpdateAt: TimeInterval = 0
         private static let blurAdjustmentThrottleInterval: TimeInterval = 1.0 / 30.0
 
+        // Snap-to-line state. While a brush/eraser/blur stroke is in progress,
+        // a 600ms stationary timer waits for the touch to settle (<2pt screen-
+        // space movement) and then replaces the wobbly in-progress geometry
+        // with a clean straight line from the stroke's first point to the
+        // current touch position. Continued movement after engagement keeps
+        // updating the endpoint (with 15° snap when within 3° of an
+        // increment); lift commits as a normal stroke through the existing
+        // touchesEnded path.
+        private var snapToLineTimer: Timer?
+        private var isSnappedToLine = false
+        private var snapToLineStartDoc: CGPoint?
+        private var snapToLineAnchorScreen: CGPoint?
+        private var snapLatestDoc: CGPoint = .zero
+        private var snapLatestPressure: CGFloat = 1.0
+        private var snapLatestTimestamp: TimeInterval = 0
+        private static let snapToLineHoldDuration: TimeInterval = 0.6
+        private static let snapToLineMovementThreshold: CGFloat = 2.0   // screen pts
+        private static let snapToLineAngleIncrement: CGFloat = 15.0     // degrees
+        private static let snapToLineAngleTolerance: CGFloat = 3.0      // degrees
+
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
@@ -782,6 +802,18 @@ struct MetalCanvasView: UIViewRepresentable {
             lastTimestamp = timestamp
             print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
 
+            // Snap-to-line: arm the stationary timer for brush-like tools.
+            // Shape tools, selection tools, and effects don't participate.
+            if canSnapToLine {
+                snapToLineStartDoc = location
+                snapToLineAnchorScreen = screenLocation
+                snapLatestDoc = location
+                snapLatestPressure = pressure
+                snapLatestTimestamp = timestamp
+                isSnappedToLine = false
+                armStationaryTimer()
+            }
+
             // Stamp cursor for the blur tool (smudge in PR 2). The brush
             // doesn't render a stamp preview for blur (its blurred output
             // doesn't materialise until commit), so the cursor outline is the
@@ -965,6 +997,36 @@ struct MetalCanvasView: UIViewRepresentable {
                 stroke.points = originals + mirrors
                 currentStroke = stroke
             } else {
+                // Snap-to-line: track latest sample and stationarity for the
+                // 600ms hold-to-snap timer. Once snapped, replace the in-progress
+                // stroke with a clean straight line from start to current touch
+                // (with 15° angle snap when within 3°) and skip the normal
+                // sample-accumulation pass.
+                if canSnapToLine {
+                    let samples = event?.coalescedTouches(for: touch) ?? [touch]
+                    let lastSample = samples.last ?? touch
+                    let lastSampleScreen = lastSample.location(in: view)
+                    let lastSampleDoc = canvasState?.screenToDocument(lastSampleScreen) ?? lastSampleScreen
+                    snapLatestDoc = lastSampleDoc
+                    snapLatestPressure = computePressure(for: lastSample)
+                    snapLatestTimestamp = lastSample.timestamp
+
+                    if isSnappedToLine, let start = snapToLineStartDoc {
+                        stroke.points = buildSnapLineGeometry(start: start, target: lastSampleDoc)
+                        currentStroke = stroke
+                        return
+                    }
+
+                    if let anchor = snapToLineAnchorScreen {
+                        let dist = hypot(lastSampleScreen.x - anchor.x, lastSampleScreen.y - anchor.y)
+                        if dist >= Self.snapToLineMovementThreshold {
+                            snapToLineAnchorScreen = lastSampleScreen
+                            armStationaryTimer()
+                        }
+                        // else: leave the timer running — the user is still settling.
+                    }
+                }
+
                 // Regular brush/eraser: iterate every coalesced sample so Apple Pencil
                 // input at 240 Hz isn't undersampled. For each sample, keep the original
                 // distance/spacing interpolation from the previous committed point, which
@@ -1304,6 +1366,7 @@ struct MetalCanvasView: UIViewRepresentable {
             shapeStartPoint = nil
             shapeStartScreen = nil
             marqueeStartScreen = nil
+            resetSnapToLineState()
             // Hide stamp cursor on lift.
             if let cs = canvasState {
                 MainActor.assumeIsolated {
@@ -1325,6 +1388,7 @@ struct MetalCanvasView: UIViewRepresentable {
             selectionDragStart = nil
             blurAdjustmentTouchStartScreen = nil
             blurAdjustmentLastUpdateAt = 0
+            resetSnapToLineState()
 
             // Clear selection previews + stamp cursor.
             if let canvasState = canvasState {
@@ -1475,6 +1539,103 @@ struct MetalCanvasView: UIViewRepresentable {
             let zoom = MainActor.assumeIsolated { cs.zoomScale }
             guard docWidth > 0 else { return docSize }
             return docSize * (screenWidth / docWidth) * zoom
+        }
+
+        // MARK: - Snap-to-Line
+
+        /// Whether the active tool participates in snap-to-line. Brush, eraser,
+        /// and blur all build their stroke through the per-stamp accumulation
+        /// path in touchesMoved; replacing that geometry with a clean line is
+        /// safe for all three. Shape tools have their own dedicated line tool;
+        /// selection / fill / eyedropper / text don't produce strokes at all.
+        private var canSnapToLine: Bool {
+            switch currentTool {
+            case .brush, .eraser, .blur:
+                return true
+            default:
+                return false
+            }
+        }
+
+        /// (Re)arm the 600ms stationary timer. Adds to the run loop in
+        /// `.common` mode so it actually fires during touch tracking — the
+        /// default UIKit run loop mode would not.
+        private func armStationaryTimer() {
+            cancelStationaryTimer()
+            let timer = Timer(timeInterval: Self.snapToLineHoldDuration, repeats: false) { [weak self] _ in
+                self?.engageSnapToLine()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            snapToLineTimer = timer
+        }
+
+        private func cancelStationaryTimer() {
+            snapToLineTimer?.invalidate()
+            snapToLineTimer = nil
+        }
+
+        /// Reset all snap-to-line state. Called from touchesEnded /
+        /// touchesCancelled.
+        private func resetSnapToLineState() {
+            cancelStationaryTimer()
+            isSnappedToLine = false
+            snapToLineStartDoc = nil
+            snapToLineAnchorScreen = nil
+        }
+
+        /// Fired by `snapToLineTimer` after 600ms of stationary touch.
+        /// Engages the snapped state and replaces the stroke geometry with a
+        /// clean line from the stroke start to the latest tracked sample.
+        /// Subsequent touchesMoved events refresh the geometry as the user
+        /// adjusts the endpoint.
+        private func engageSnapToLine() {
+            snapToLineTimer = nil
+            guard var stroke = currentStroke,
+                  let start = snapToLineStartDoc else { return }
+            isSnappedToLine = true
+            stroke.points = buildSnapLineGeometry(start: start, target: snapLatestDoc)
+            currentStroke = stroke
+        }
+
+        /// Build the snapped-line stroke point list, including symmetry mirrors.
+        /// Uses the existing `generateLinePoints` so brush spacing/scaling is
+        /// identical to a manual stroke.
+        private func buildSnapLineGeometry(start: CGPoint, target: CGPoint) -> [BrushStroke.StrokePoint] {
+            let snappedTarget = applyAngleSnap(start: start, target: target)
+            let originals = generateLinePoints(
+                from: start,
+                to: snappedTarget,
+                pressure: snapLatestPressure,
+                timestamp: snapLatestTimestamp
+            )
+            let docSize = MainActor.assumeIsolated {
+                canvasState?.documentSize ?? .zero
+            }
+            let mirrors = mirroredPoints(originals, in: docSize, mode: symmetry.mode)
+            return originals + mirrors
+        }
+
+        /// Snap the line's angle to a 15° increment when the current angle is
+        /// within 3° of one. Length follows the finger naturally (only the
+        /// direction is constrained).
+        private func applyAngleSnap(start: CGPoint, target: CGPoint) -> CGPoint {
+            let dx = target.x - start.x
+            let dy = target.y - start.y
+            let length = hypot(dx, dy)
+            guard length > 0.0001 else { return target }
+
+            let angleDeg = atan2(dy, dx) * 180 / .pi
+            let nearest = (angleDeg / Self.snapToLineAngleIncrement).rounded() * Self.snapToLineAngleIncrement
+            let raw = abs(angleDeg - nearest)
+            // Wrap deltas across the ±180° seam (e.g. -179° vs 180° are 1° apart).
+            let delta = min(raw, 360 - raw)
+            guard delta < Self.snapToLineAngleTolerance else { return target }
+
+            let snapRad = nearest * .pi / 180
+            return CGPoint(
+                x: start.x + cos(snapRad) * length,
+                y: start.y + sin(snapRad) * length
+            )
         }
 
         // MARK: - Shape Generation
