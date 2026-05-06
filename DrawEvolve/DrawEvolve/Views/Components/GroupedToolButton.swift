@@ -2,10 +2,18 @@
 //  GroupedToolButton.swift
 //  DrawEvolve
 //
-//  Slot view for the iPad toolbar's grouped tool slots. Wraps the
-//  existing `ToolButton` so visual styling stays in one place, then
-//  layers on a disclosure triangle in the bottom-right corner and a
-//  long-press popover that lets the user pick a different variant.
+//  Slot view for the iPad toolbar's grouped tool slots. Visually mirrors
+//  the existing `ToolButton` styling (44x44, 8pt corner radius, accent-
+//  color fill when active) and adds a disclosure triangle in the
+//  bottom-right plus a long-press popover for variant selection.
+//
+//  This view does NOT wrap `Button` directly. SwiftUI's `Button` runs
+//  its own internal tap recognizer that wins over a sibling
+//  `.onLongPressGesture` — long-press never fires. To get reliable
+//  tap + long-press composition we render the styled tile as a plain
+//  View and attach `.onTapGesture` + `.onLongPressGesture` ourselves.
+//  Accessibility traits are restored manually so the slot still
+//  announces as a button.
 //
 
 import SwiftUI
@@ -41,37 +49,51 @@ struct GroupedToolButton: View {
     }
 
     var body: some View {
-        ToolButton(icon: currentVariant.icon, isSelected: slotIsSelected) {
-            onActivate(currentVariant)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            DisclosureCornerTriangle()
-                .fill(slotIsSelected ? Color.white : Color.primary)
-                .frame(width: 6, height: 6)
-                .padding(.trailing, 4)
-                .padding(.bottom, 4)
-                .allowsHitTesting(false)
-        }
-        .accessibilityLabel(group.name)
-        .accessibilityValue(currentVariant.accessibilityLabel)
-        .onLongPressGesture(minimumDuration: 0.5) {
-            showPopover = true
-        }
-        .popover(
-            isPresented: $showPopover,
-            attachmentAnchor: .point(.trailing),
-            arrowEdge: .leading
-        ) {
-            ToolGroupPopover(
-                group: group,
-                currentVariant: currentVariant,
-                onPick: { picked in
-                    currentVariantString = picked.storageString
-                    showPopover = false
-                    onActivate(picked)
-                }
-            )
-        }
+        slotTile
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onActivate(currentVariant)
+            }
+            .onLongPressGesture(minimumDuration: 0.5) {
+                showPopover = true
+            }
+            .popover(
+                isPresented: $showPopover,
+                attachmentAnchor: .point(.trailing),
+                arrowEdge: .leading
+            ) {
+                ToolGroupPopover(
+                    group: group,
+                    currentVariant: currentVariant,
+                    onPick: { picked in
+                        currentVariantString = picked.storageString
+                        showPopover = false
+                        onActivate(picked)
+                    }
+                )
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(group.name)
+            .accessibilityValue(currentVariant.accessibilityLabel)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Double tap to activate. Long press to choose a variant.")
+    }
+
+    private var slotTile: some View {
+        Image(systemName: currentVariant.icon)
+            .font(.system(size: 22))
+            .foregroundColor(slotIsSelected ? .white : .primary)
+            .frame(width: 44, height: 44)
+            .background(slotIsSelected ? Color.accentColor : Color.clear)
+            .cornerRadius(8)
+            .overlay(alignment: .bottomTrailing) {
+                DisclosureCornerTriangle()
+                    .fill(slotIsSelected ? Color.white : Color.primary)
+                    .frame(width: 6, height: 6)
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 4)
+                    .allowsHitTesting(false)
+            }
     }
 }
 
