@@ -146,6 +146,11 @@ class CanvasStateManager: ObservableObject {
     /// `rotation`. Commit/cancel from this side; auto-commit on tool change.
     @Published var floatingText: FloatingText? = nil
 
+    /// Live preview of the user's in-progress path drawing during the
+    /// .textOnPath touch session. Doc-space points; nil when no draw is
+    /// active. DrawingCanvasView renders this as a thin guide line.
+    @Published var previewTextOnPathPoints: [CGPoint]? = nil
+
     /// Cancellable rasterise debounce (~16ms). Re-armed on every settings or
     /// content change so rapid slider drags coalesce into one rasterise.
     private var textRasterizeTask: Task<Void, Never>?
@@ -244,11 +249,20 @@ class CanvasStateManager: ObservableObject {
                     }
                 }
 
-                // Auto-commit any active floating text whenever we leave the
-                // text tool. Switching tools while a text is mid-edit must
-                // bake it down — same UX rationale as floating selection.
-                if newTool != .text && self.floatingText != nil {
-                    self.commitFloatingText()
+                // Auto-commit any active floating text whenever we leave a
+                // text-hosting tool. Both .text (plain) and .textOnPath
+                // host floating text; switching to anything else commits.
+                // Switching between .text and .textOnPath ALSO commits —
+                // each owns its own creation flow and "carrying" a float
+                // across modes would be confusing.
+                if self.floatingText != nil {
+                    let isPathText = self.floatingText?.path != nil
+                    let stayingInOwningTool =
+                        (newTool == .text && !isPathText) ||
+                        (newTool == .textOnPath && isPathText)
+                    if !stayingInOwningTool {
+                        self.commitFloatingText()
+                    }
                 }
 
                 // Auto-begin blur adjustment when entering the tool. Begin
@@ -539,6 +553,100 @@ class CanvasStateManager: ObservableObject {
         }
     }
 
+    // MARK: - Type-on-path lifecycle
+
+    /// Create a path-bearing FloatingText. Called from DrawingCanvasView's
+    /// "Add" button after the user has drawn a path with .textOnPath and
+    /// typed the text. Smooths the raw points (Catmull-Rom), builds the
+    /// arc-length LUT, auto-detects closed-loop endpoint snap, and
+    /// triggers an initial synchronous rasterise.
+    func beginTextOnPath(
+        rawPoints: [CGPoint],
+        firstScreen: CGPoint,
+        lastScreen: CGPoint,
+        content: String
+    ) {
+        if floatingText != nil {
+            commitFloatingText()
+        }
+        previewTextOnPathPoints = nil
+
+        // Below ~3 raw samples there's nothing to smooth — bail silently.
+        guard rawPoints.count >= 3 else { return }
+
+        let smoothed = PathSmoothing.catmullRom(rawPoints)
+        let path = PathSmoothing.cgPath(from: smoothed)
+        let lut = PathSmoothing.buildArcLengthLUT(smoothed)
+        let isClosed = PathSmoothing.isClosedByEndpoint(
+            firstScreen: firstScreen,
+            lastScreen: lastScreen
+        )
+
+        var ft = FloatingText(
+            content: content,
+            settings: textSettings,
+            anchor: smoothed.first ?? .zero
+        )
+        ft.path = path
+        ft.pathLUT = lut
+        ft.isClosed = isClosed
+        ft.pathStartOffset = 0
+        ft.baselineOffset = 0
+        ft.autoFlipEnabled = true
+        floatingText = ft
+        rasterizeFloatingTextNow()
+    }
+
+    /// Update where text begins along the path (PathStartHandle drag).
+    /// Clamps to [0, arcLength] for open paths; wraps mod arcLength for
+    /// closed paths so dragging past the seam keeps text continuous.
+    func setPathStartOffset(_ offset: CGFloat) {
+        guard var ft = floatingText, let lut = ft.pathLUT, !lut.isEmpty else { return }
+        let total = lut.last?.distance ?? 0
+        var d = offset
+        if ft.isClosed, total > 0 {
+            d = d.truncatingRemainder(dividingBy: total)
+            if d < 0 { d += total }
+        } else {
+            d = max(0, min(total, d))
+        }
+        guard ft.pathStartOffset != d else { return }
+        ft.pathStartOffset = d
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Set the perpendicular baseline shift (TextSettingsView slider).
+    /// Positive = above the path, negative = below.
+    func setBaselineOffset(_ offset: CGFloat) {
+        guard var ft = floatingText, ft.path != nil else { return }
+        guard ft.baselineOffset != offset else { return }
+        ft.baselineOffset = offset
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Override the auto-detected closed flag (TextSettingsView toggle).
+    /// Re-rasterises so the lookup wraps (or clamps) accordingly.
+    func setPathClosed(_ closed: Bool) {
+        guard var ft = floatingText, ft.path != nil else { return }
+        guard ft.isClosed != closed else { return }
+        ft.isClosed = closed
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Toggle auto-flip on upside-down sections.
+    func setAutoFlipEnabled(_ enabled: Bool) {
+        guard var ft = floatingText, ft.path != nil else { return }
+        guard ft.autoFlipEnabled != enabled else { return }
+        ft.autoFlipEnabled = enabled
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    // MARK: - Plain text helpers
+
     /// Bake `floatingText.scale` into `textSettings.size` and reset scale to
     /// identity, then re-rasterise. Called by the corner-handle drag's
     /// onEnded so font crispness is preserved across handle drags. Updating
@@ -585,13 +693,11 @@ class CanvasStateManager: ObservableObject {
               selectedLayerIndex < layers.count,
               let layerTexture = layers[selectedLayerIndex].texture else { return }
 
-        guard let result = renderer.rasterizeFloatingText(
+        guard let result = renderer.rasterizeFloatingTextWithDocOrigin(
             ft,
             for: layerTexture,
             screenSize: documentSize
         ) else {
-            // Empty content / degenerate layout — clear cached image but
-            // keep the float alive so the user can keep typing.
             ft.cachedImage = nil
             ft.cachedTexture = nil
             ft.bounds = CGRect(origin: ft.anchor, size: .zero)
@@ -601,7 +707,13 @@ class CanvasStateManager: ObservableObject {
 
         ft.cachedImage = result.image
         ft.cachedTexture = renderer.makeTexture(from: result.image)
-        ft.bounds = CGRect(origin: ft.anchor, size: result.docSize)
+        // For on-path text, docBounds.origin may live wherever the path
+        // sent the glyphs — anchor follows so displayedRect math (which
+        // assumes anchor = bounds.origin) keeps working for the
+        // transform handles. For plain text, docBounds.origin already
+        // equals ft.anchor so this is a no-op.
+        ft.bounds = result.docBounds
+        ft.anchor = result.docBounds.origin
         floatingText = ft
     }
 

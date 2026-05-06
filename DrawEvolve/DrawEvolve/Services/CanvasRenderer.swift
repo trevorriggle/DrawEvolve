@@ -1484,12 +1484,60 @@ class CanvasRenderer: NSObject {
         screenSize: CGSize
     ) -> (image: UIImage, docSize: CGSize)? {
         let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
+
+        // Route path-bearing FloatingText through TextOnPathRenderer so
+        // glyphs ride the arc-length LUT instead of laying out as a flat
+        // line. Plain FloatingText takes the straight Core Text path.
+        if floatingText.path != nil, floatingText.pathLUT != nil {
+            guard let result = TextOnPathRenderer.rasterize(
+                floatingText,
+                screenSize: screenSize,
+                textureSize: texSize
+            ) else { return nil }
+            // The on-path renderer returns docBounds — its origin is the
+            // top-left of the glyph union in doc space. We pass back size
+            // here; the caller (CanvasStateManager) places the FloatingText
+            // such that anchor + size matches docBounds.
+            return (result.image, result.docBounds.size)
+        }
+
         return rasterizeFloatingText(
             content: floatingText.content,
             settings: floatingText.settings,
             screenSize: screenSize,
             textureSize: texSize
         )
+    }
+
+    /// Variant that also surfaces the doc-space ORIGIN of the rasterised
+    /// content. For on-path rendering the glyph union's origin is not the
+    /// FloatingText's anchor — the path layout drifts the bounding box
+    /// off into wherever the path goes. CanvasStateManager calls this so
+    /// it can set `FloatingText.anchor = bounds.origin` after rasterise,
+    /// keeping the displayedRect logic shared with plain text.
+    func rasterizeFloatingTextWithDocOrigin(
+        _ floatingText: FloatingText,
+        for texture: MTLTexture,
+        screenSize: CGSize
+    ) -> (image: UIImage, docBounds: CGRect)? {
+        let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
+        if floatingText.path != nil, floatingText.pathLUT != nil {
+            return TextOnPathRenderer.rasterize(
+                floatingText,
+                screenSize: screenSize,
+                textureSize: texSize
+            )
+        }
+        guard let plain = rasterizeFloatingText(
+            content: floatingText.content,
+            settings: floatingText.settings,
+            screenSize: screenSize,
+            textureSize: texSize
+        ) else { return nil }
+        // Plain text: the doc-space origin is the FloatingText's anchor;
+        // the caller already knows that. Return a bounds rooted at the
+        // anchor for API consistency.
+        return (plain.image, CGRect(origin: floatingText.anchor, size: plain.docSize))
     }
 
     /// Core Text rasterisation primitive. Doc→texture scaling baked in so

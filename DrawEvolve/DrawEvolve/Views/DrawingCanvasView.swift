@@ -43,6 +43,15 @@ struct DrawingCanvasView: View {
     @State private var textToRender = ""
     @State private var showTextSettings = false
 
+    // Text-on-path tool. The user draws a path with the tool active; on
+    // lift the alert below pops up to capture text. The pendingTextOnPath
+    // tuple holds the smoothed-input data between lift and "Add".
+    @State private var showTextOnPathInput = false
+    @State private var pendingTextOnPathRawPoints: [CGPoint] = []
+    @State private var pendingTextOnPathFirstScreen: CGPoint = .zero
+    @State private var pendingTextOnPathLastScreen: CGPoint = .zero
+    @State private var textOnPathToRender = ""
+
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
 
@@ -88,6 +97,13 @@ struct DrawingCanvasView: View {
                     textInputLocation = location
                     textToRender = ""
                     showTextInput = true
+                },
+                onTextOnPathRequest: { rawPoints, firstScreen, lastScreen in
+                    pendingTextOnPathRawPoints = rawPoints
+                    pendingTextOnPathFirstScreen = firstScreen
+                    pendingTextOnPathLastScreen = lastScreen
+                    textOnPathToRender = ""
+                    showTextOnPathInput = true
                 },
                 symmetry: symmetry
             )
@@ -234,21 +250,9 @@ struct DrawingCanvasView: View {
             TransformHandlesOverlay(canvasState: canvasState)
                 .ignoresSafeArea()
 
-            // Cancel pill — top-center, only visible while a floating
-            // selection exists. Tap-outside / tool-change confirm; this is
-            // the only revert path.
-            if canvasState.floatingSelectionTexture != nil {
-                VStack {
-                    HStack {
-                        Spacer()
-                        TransformCancelPill(canvasState: canvasState)
-                        Spacer()
-                    }
-                    .padding(.top, 60) // below the existing Delete button slot
-                    Spacer()
-                }
-                .ignoresSafeArea()
-            }
+            pathStartHandleOverlay
+            textOnPathPreviewOverlay
+            cancelPillOverlay
 
             blurAdjustmentHUDOverlay
 
@@ -364,6 +368,14 @@ struct DrawingCanvasView: View {
 
                             ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
                                 canvasState.currentTool = .text
+                            }
+
+                            // Text on Path — draw a freehand path, then lay
+                            // text along it. Path-bearing FloatingText shares
+                            // the rest of the floating-text lifecycle (commit
+                            // on tap-outside / tool-switch, cancel pill).
+                            ToolButton(icon: DrawingTool.textOnPath.icon, isSelected: canvasState.currentTool == .textOnPath) {
+                                canvasState.currentTool = .textOnPath
                             }
 
                             // Text Settings — opens the typographic settings
@@ -709,7 +721,10 @@ struct DrawingCanvasView: View {
         }
         .sheet(isPresented: $showTextSettings) {
             NavigationView {
-                TextSettingsView(settings: $canvasState.textSettings)
+                TextSettingsView(
+                    settings: $canvasState.textSettings,
+                    canvasState: canvasState
+                )
                     .navigationTitle("Text Settings")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -742,6 +757,25 @@ struct DrawingCanvasView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(canvasState.errorMessage)
+        }
+        .alert("Add Text on Path", isPresented: $showTextOnPathInput) {
+            TextField("Enter text", text: $textOnPathToRender)
+            Button("Cancel", role: .cancel) {
+                pendingTextOnPathRawPoints = []
+            }
+            Button("Add") {
+                if !textOnPathToRender.isEmpty {
+                    canvasState.beginTextOnPath(
+                        rawPoints: pendingTextOnPathRawPoints,
+                        firstScreen: pendingTextOnPathFirstScreen,
+                        lastScreen: pendingTextOnPathLastScreen,
+                        content: textOnPathToRender
+                    )
+                }
+                pendingTextOnPathRawPoints = []
+            }
+        } message: {
+            Text("Text will follow the path you drew.")
         }
         .alert("Add Text", isPresented: $showTextInput) {
             TextField("Enter text", text: $textToRender)
@@ -880,6 +914,53 @@ struct DrawingCanvasView: View {
     // the Swift type-checker over its tolerance threshold once the gear
     // button was added. Each button is a separate small computed property
     // so future additions don't have to re-do this extraction.
+
+    // MARK: - Type-on-path overlays (Phase 3 extraction)
+    //
+    // Same rationale as the bottom-right buttons above: these three
+    // siblings tipped the body's type-checker over its threshold (10+
+    // SwiftUI sub-views with conditionals). Each as its own computed
+    // property so the heuristic stays happy.
+
+    private var pathStartHandleOverlay: some View {
+        // PathStartHandle internally gates on `floatingText.path != nil`,
+        // so it's safe to mount unconditionally here.
+        PathStartHandle(canvasState: canvasState)
+            .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private var textOnPathPreviewOverlay: some View {
+        if let pts = canvasState.previewTextOnPathPoints, pts.count >= 2 {
+            Path { p in
+                p.move(to: canvasState.documentToScreen(pts[0]))
+                for pt in pts.dropFirst() {
+                    p.addLine(to: canvasState.documentToScreen(pt))
+                }
+            }
+            .stroke(Color.gray.opacity(0.55), lineWidth: 1.5)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
+    private var cancelPillOverlay: some View {
+        // Top-center pill, visible while a floating selection OR a floating
+        // text exists. The pill internally routes to the right cancel.
+        if canvasState.floatingSelectionTexture != nil || canvasState.floatingText != nil {
+            VStack {
+                HStack {
+                    Spacer()
+                    TransformCancelPill(canvasState: canvasState)
+                    Spacer()
+                }
+                .padding(.top, 60)
+                Spacer()
+            }
+            .ignoresSafeArea()
+        }
+    }
 
     private var bottomRightActionButtons: some View {
         VStack {

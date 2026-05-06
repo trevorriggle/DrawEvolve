@@ -57,6 +57,14 @@ struct MetalCanvasView: UIViewRepresentable {
 
     var canvasState: CanvasStateManager? // For sharing renderer/screen size
     var onTextRequest: ((CGPoint) -> Void)? // Callback for text tool
+    /// Callback for the .textOnPath tool. Fires on touchesEnded with the
+    /// raw doc-space stroke samples plus the screen-space first/last
+    /// touch points (used by `PathSmoothing.isClosedByEndpoint` and the
+    /// 30pt closed-loop threshold). Owner shows a text input alert and
+    /// calls `canvasState.beginTextOnPath(...)` on Add.
+    var onTextOnPathRequest: ((_ rawPoints: [CGPoint],
+                               _ firstScreen: CGPoint,
+                               _ lastScreen: CGPoint) -> Void)?
 
     /// Global symmetry / mirror config. Plain reference (not @ObservedObject)
     /// — the touch handlers read `symmetry.mode` per-stamp; we don't need
@@ -134,6 +142,7 @@ struct MetalCanvasView: UIViewRepresentable {
             selectedLayerIndex: $selectedLayerIndex,
             canvasState: canvasState,
             onTextRequest: onTextRequest,
+            onTextOnPathRequest: onTextOnPathRequest,
             symmetry: symmetry
         )
     }
@@ -156,7 +165,18 @@ struct MetalCanvasView: UIViewRepresentable {
         private var lassoPath: [CGPoint] = [] // For lasso selection
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
+        private var onTextOnPathRequest: ((_ rawPoints: [CGPoint],
+                                          _ firstScreen: CGPoint,
+                                          _ lastScreen: CGPoint) -> Void)?
         private let symmetry: SymmetryConfig
+
+        // textOnPath path-drawing state. Populated during touchesMoved while
+        // the .textOnPath tool is active; flushed to onTextOnPathRequest in
+        // touchesEnded. Doc-space samples; screen-space firstScreen +
+        // lastScreen used by the 30pt closed-loop endpoint threshold.
+        private var textOnPathRawPoints: [CGPoint] = []
+        private var textOnPathFirstScreen: CGPoint = .zero
+        private var textOnPathLastScreen: CGPoint = .zero
         private var isDraggingSelection = false // Track if we're dragging a selection
         private var selectionDragStart: CGPoint? // Where the drag started (doc space)
         // Screen-space start of a rectangle-marquee drag. We store the SCREEN
@@ -213,6 +233,9 @@ struct MetalCanvasView: UIViewRepresentable {
             selectedLayerIndex: Binding<Int>,
             canvasState: CanvasStateManager?,
             onTextRequest: ((CGPoint) -> Void)?,
+            onTextOnPathRequest: ((_ rawPoints: [CGPoint],
+                                  _ firstScreen: CGPoint,
+                                  _ lastScreen: CGPoint) -> Void)?,
             symmetry: SymmetryConfig
         ) {
             _layers = layers
@@ -221,6 +244,7 @@ struct MetalCanvasView: UIViewRepresentable {
             _selectedLayerIndex = selectedLayerIndex
             self.canvasState = canvasState
             self.onTextRequest = onTextRequest
+            self.onTextOnPathRequest = onTextOnPathRequest
             self.symmetry = symmetry
 
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
@@ -629,10 +653,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
                 if let ft = activeFloat {
                     if ft.containsDocPoint(location) {
-                        isDraggingFloatingText = true
-                        floatingTextDragStartDoc = location
-                        floatingTextDragOriginAnchor = ft.anchor
-                        print("Text tool: began body drag at \(location)")
+                        // Body drag is plain-text only — path-bearing text
+                        // can't move freely (the path is fixed). User
+                        // re-positions on-path text via PathStartHandle.
+                        if ft.path == nil {
+                            isDraggingFloatingText = true
+                            floatingTextDragStartDoc = location
+                            floatingTextDragOriginAnchor = ft.anchor
+                            print("Text tool: began body drag at \(location)")
+                        }
                         return
                     } else {
                         // Tap outside the float bakes it into the layer.
@@ -647,6 +676,40 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
                 print("Text tool: requesting text input at \(location)")
                 onTextRequest?(location)
+                return
+            }
+
+            // .textOnPath: tap-and-drag draws the path. The first touch
+            // initialises the buffer; subsequent moves accumulate samples.
+            // touchesEnded smooths + fires onTextOnPathRequest.
+            if currentTool == .textOnPath {
+                let activeFloat: FloatingText? = MainActor.assumeIsolated {
+                    canvasState?.floatingText
+                }
+                if let ft = activeFloat {
+                    // Tap inside the laid-out text bounds → no-op (the user
+                    // shouldn't accidentally redraw the path on the text);
+                    // tap outside commits and consumes. Same outside-commit
+                    // semantics as plain text.
+                    if ft.containsDocPoint(location) {
+                        return
+                    } else {
+                        print("Text-on-path: tap outside → commit")
+                        if let cs = canvasState {
+                            MainActor.assumeIsolated { cs.commitFloatingText() }
+                        }
+                        return
+                    }
+                }
+                // Begin a new path-drawing session.
+                textOnPathRawPoints = [location]
+                textOnPathFirstScreen = screenLocation
+                textOnPathLastScreen = screenLocation
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.previewTextOnPathPoints = [location]
+                    }
+                }
                 return
             }
 
@@ -925,6 +988,28 @@ struct MetalCanvasView: UIViewRepresentable {
                     cs.stampCursorCenter = latestScreenLocation
                     cs.stampCursorDiameter = diameter
                 }
+            }
+
+            // .textOnPath: accumulate raw doc-space samples while the user
+            // drags out the path. Coalesced touches at ~240 Hz give us a
+            // dense polyline; PathSmoothing.catmullRom is what cleans it
+            // up at lift. Live preview is the same array, published via
+            // canvasState.previewTextOnPathPoints for the SwiftUI overlay.
+            if currentTool == .textOnPath, !textOnPathRawPoints.isEmpty {
+                let samples = event?.coalescedTouches(for: touch) ?? [touch]
+                for sample in samples {
+                    let sampleScreen = sample.location(in: view)
+                    let sampleDoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
+                    textOnPathRawPoints.append(sampleDoc)
+                    textOnPathLastScreen = sampleScreen
+                }
+                if let cs = canvasState {
+                    let copy = textOnPathRawPoints
+                    MainActor.assumeIsolated {
+                        cs.previewTextOnPathPoints = copy
+                    }
+                }
+                return
             }
 
             // FloatingText body drag — update anchor in doc space. The
@@ -1229,6 +1314,18 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // .textOnPath: lift fires the text-input alert. Caller (Drawing
+            // CanvasView) calls canvasState.beginTextOnPath(...) on Add.
+            // Cancel button discards.
+            if currentTool == .textOnPath, !textOnPathRawPoints.isEmpty {
+                let pts = textOnPathRawPoints
+                let firstScreen = textOnPathFirstScreen
+                let lastScreen = textOnPathLastScreen
+                textOnPathRawPoints = []
+                onTextOnPathRequest?(pts, firstScreen, lastScreen)
+                return
+            }
+
             // Handle ending a selection drag
             if isDraggingSelection {
                 print("Finished dragging selection, committing to layer")
@@ -1477,6 +1574,12 @@ struct MetalCanvasView: UIViewRepresentable {
             isDraggingFloatingText = false
             floatingTextDragStartDoc = nil
             floatingTextDragOriginAnchor = nil
+            textOnPathRawPoints = []
+            if let cs = canvasState {
+                Task { @MainActor in
+                    cs.previewTextOnPathPoints = nil
+                }
+            }
             resetSnapToLineState()
 
             // Clear selection previews + stamp cursor.

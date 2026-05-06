@@ -26,6 +26,7 @@ enum DrawingTool {
 
     // Other tools
     case text
+    case textOnPath  // Draw a freehand path, then lay text along it.
     case move
     case rotate  // DEPRECATED: Now integrated into selection transform handles
     case scale   // DEPRECATED: Now integrated into selection transform handles
@@ -47,6 +48,7 @@ enum DrawingTool {
         case .rectangleSelect: return "rectangle.dashed"
         case .lasso: return "lasso"
         case .text: return "textformat"
+        case .textOnPath: return "textformat.abc.dottedunderline"
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .rotate: return "rotate.right"
         case .scale: return "arrow.up.left.and.arrow.down.right"
@@ -68,6 +70,7 @@ enum DrawingTool {
         case .rectangleSelect: return "Select Rectangle"
         case .lasso: return "Lasso"
         case .text: return "Text"
+        case .textOnPath: return "Text on Path"
         case .move: return "Move"
         case .rotate: return "Rotate"
         case .scale: return "Scale"

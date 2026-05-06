@@ -520,54 +520,68 @@ struct TransformHandlesOverlay: View {
     @ViewBuilder
     private func floatingTextContent() -> some View {
         if let ft = canvasState.floatingText, ft.bounds.size != .zero {
-            let displayed = ft.displayedRect
-            let centerDoc = CGPoint(x: displayed.midX, y: displayed.midY)
-            let halfW = displayed.width / 2
-            let halfH = displayed.height / 2
-            let theta = ft.rotation.radians
-
-            let cornerLocals: [CGPoint] = [
-                CGPoint(x: -halfW, y: -halfH),  // 0 TL
-                CGPoint(x:  halfW, y: -halfH),  // 1 TR
-                CGPoint(x:  halfW, y:  halfH),  // 2 BR
-                CGPoint(x: -halfW, y:  halfH),  // 3 BL
-            ]
-            let topMidLocal = CGPoint(x: 0, y: -halfH)
-
-            let cornerDocs = cornerLocals.map { rotateLocalToDoc($0, theta: theta).offset(by: centerDoc) }
-            let topMidDoc  = rotateLocalToDoc(topMidLocal,  theta: theta).offset(by: centerDoc)
-
-            let cornerScreens = cornerDocs.map { canvasState.documentToScreen($0) }
-            let centerScreen  = canvasState.documentToScreen(centerDoc)
-            let topMidScreen  = canvasState.documentToScreen(topMidDoc)
-
-            let outward = normalized(topMidScreen - centerScreen)
-            let rotationHandleScreen = topMidScreen + outward * 30
-
-            ZStack {
-                Path { p in
-                    p.move(to: cornerScreens[0])
-                    p.addLine(to: cornerScreens[1])
-                    p.addLine(to: cornerScreens[2])
-                    p.addLine(to: cornerScreens[3])
-                    p.closeSubpath()
-                    p.move(to: topMidScreen)
-                    p.addLine(to: rotationHandleScreen)
-                }
-                .stroke(Color.blue.opacity(0.85), lineWidth: 1.5)
-                .allowsHitTesting(false)
-
-                ForEach(0..<4, id: \.self) { i in
-                    handleDot(filled: true)
-                        .position(cornerScreens[i])
-                        .gesture(textCornerDrag(corner: i))
-                }
-                handleDot(filled: true, stroke: .green)
-                    .position(rotationHandleScreen)
-                    .gesture(textRotationDrag())
+            // Path-bearing text doesn't get scale/rotate handles —
+            // the path is fixed, scale/rotate aren't meaningful.
+            // The path-start handle (rendered separately by
+            // PathStartHandle in DrawingCanvasView) is the only
+            // path-text affordance.
+            if ft.path != nil {
+                EmptyView()
+            } else {
+                plainFloatingTextHandles(ft: ft)
             }
-            .ignoresSafeArea()
         }
+    }
+
+    @ViewBuilder
+    private func plainFloatingTextHandles(ft: FloatingText) -> some View {
+        let displayed = ft.displayedRect
+        let centerDoc = CGPoint(x: displayed.midX, y: displayed.midY)
+        let halfW = displayed.width / 2
+        let halfH = displayed.height / 2
+        let theta = ft.rotation.radians
+
+        let cornerLocals: [CGPoint] = [
+            CGPoint(x: -halfW, y: -halfH),  // 0 TL
+            CGPoint(x:  halfW, y: -halfH),  // 1 TR
+            CGPoint(x:  halfW, y:  halfH),  // 2 BR
+            CGPoint(x: -halfW, y:  halfH),  // 3 BL
+        ]
+        let topMidLocal = CGPoint(x: 0, y: -halfH)
+
+        let cornerDocs = cornerLocals.map { rotateLocalToDoc($0, theta: theta).offset(by: centerDoc) }
+        let topMidDoc  = rotateLocalToDoc(topMidLocal,  theta: theta).offset(by: centerDoc)
+
+        let cornerScreens = cornerDocs.map { canvasState.documentToScreen($0) }
+        let centerScreen  = canvasState.documentToScreen(centerDoc)
+        let topMidScreen  = canvasState.documentToScreen(topMidDoc)
+
+        let outward = normalized(topMidScreen - centerScreen)
+        let rotationHandleScreen = topMidScreen + outward * 30
+
+        ZStack {
+            Path { p in
+                p.move(to: cornerScreens[0])
+                p.addLine(to: cornerScreens[1])
+                p.addLine(to: cornerScreens[2])
+                p.addLine(to: cornerScreens[3])
+                p.closeSubpath()
+                p.move(to: topMidScreen)
+                p.addLine(to: rotationHandleScreen)
+            }
+            .stroke(Color.blue.opacity(0.85), lineWidth: 1.5)
+            .allowsHitTesting(false)
+
+            ForEach(0..<4, id: \.self) { i in
+                handleDot(filled: true)
+                    .position(cornerScreens[i])
+                    .gesture(textCornerDrag(corner: i))
+            }
+            handleDot(filled: true, stroke: .green)
+                .position(rotationHandleScreen)
+                .gesture(textRotationDrag())
+        }
+        .ignoresSafeArea()
     }
 
     private func textCornerDrag(corner: Int) -> some Gesture {

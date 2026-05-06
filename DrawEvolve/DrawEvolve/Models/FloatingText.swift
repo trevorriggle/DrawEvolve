@@ -12,10 +12,14 @@
 //
 //  Codable conformance is wired up (no v1 call site), load-bearing for the
 //  v1.1 vector text layer where each float will round-trip through the
-//  layered drawing manifest. Runtime caches (cachedImage, cachedTexture)
-//  and the Phase-3 CGPath are deliberately excluded — caches rebuild from
-//  content/settings, and CGPath needs its own segment encoder which lands
-//  with Phase 3.
+//  layered drawing manifest. Three categories of fields are deliberately
+//  excluded from encoding:
+//    • Runtime caches (cachedImage, cachedTexture, pathLUT) — rebuilt from
+//      content/settings/path on demand.
+//    • CGPath itself — has no built-in Codable. v1.1 will add a path-segment
+//      encoder when the layered manifest learns about FloatingText. Until
+//      then, path-bearing texts don't survive a Codable round-trip; v1
+//      doesn't serialise either way so this is theoretical.
 //
 
 import Foundation
@@ -54,17 +58,34 @@ struct FloatingText {
     /// until the first upload completes.
     var cachedTexture: MTLTexture?
 
-    // MARK: - Reserved for Phase 3 (type-on-path)
+    // MARK: - Type-on-path (Phase 3)
     //
-    // Architected here so renderer/state-manager touchpoints don't churn
-    // again when path support lands. `pathLUT` (the arc-length lookup table)
-    // is intentionally omitted — its element type ships with Phase 3's
-    // PathSmoothing service.
+    // `path` and `pathLUT` are set together when the user finishes drawing
+    // a path with the textOnPath tool. The LUT is derived from the path
+    // (PathSmoothing.buildArcLengthLUT) and treated as a runtime cache —
+    // it's *not* persisted; loaders rebuild it from the path after decode.
 
+    /// The user-drawn (smoothed) path the text rides on. nil for plain
+    /// FloatingText. Doc-space coordinates.
     var path: CGPath? = nil
+    /// Arc-length parameterisation of `path`. Runtime cache; rebuilt by
+    /// `PathSmoothing.buildArcLengthLUT` on first rasterise after decode.
+    var pathLUT: [PathArcLengthSample]? = nil
+    /// Doc-space distance along `path` where text begins. PathStartHandle
+    /// drags this. Clamped to [0, arcLength] for open paths; wraps mod
+    /// arcLength for closed paths.
     var pathStartOffset: CGFloat = 0
+    /// Doc-space perpendicular shift of the text baseline relative to the
+    /// path. Positive = above the path (canvas-up direction); negative =
+    /// below. Single slider, not a segmented "Above/Centered/Below"
+    /// control (locked spec).
     var baselineOffset: CGFloat = 0
+    /// True when the user's draw closed the loop (endpoints within 30 pt
+    /// screen-space at lift). Auto-detected; the toggle in TextSettingsView
+    /// lets the user override.
     var isClosed: Bool = false
+    /// True ⇒ TextOnPathRenderer flips glyphs in upside-down sections
+    /// (sustained negative cos of tangent direction). Toggle to disable.
     var autoFlipEnabled: Bool = true
 
     init(
@@ -126,14 +147,17 @@ struct FloatingText {
 // MARK: - Codable
 //
 // Hand-written conformance that:
-//   • Skips runtime caches (cachedImage, cachedTexture) — they're rebuilt
-//     from content + settings via CanvasRenderer.rasterizeFloatingText.
+//   • Skips runtime caches (cachedImage, cachedTexture, pathLUT) — they're
+//     rebuilt from content + settings + path on demand.
 //   • Stores `rotation` as Double radians — SwiftUI.Angle isn't Codable
 //     itself, and radians is the canonical representation everywhere else.
-//   • decodeIfPresent for every Phase-3-reserved field so old payloads
+//   • decodeIfPresent for every type-on-path field so older payloads
 //     (without those keys) decode cleanly with the documented defaults.
-//   • Skips the path (CGPath) entirely. CGPath has no built-in Codable;
-//     when Phase 3 lands, add a path-segment encoder and decode here too.
+//   • Skips the `path` (CGPath) entirely. CGPath has no built-in Codable
+//     and adding a segment encoder is deferred to v1.1 (when the layered
+//     manifest actually serialises FloatingText). Until then, on-path text
+//     reverts to plain text on a Codable round-trip; v1 doesn't serialise
+//     either way so this is theoretical.
 
 extension FloatingText: Codable {
     private enum CodingKeys: String, CodingKey {

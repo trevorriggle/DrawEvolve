@@ -14,6 +14,12 @@ import UIKit
 struct TextSettingsView: View {
     @Binding var settings: TextSettings
 
+    /// Optional handle to the canvas state. When supplied AND the active
+    /// FloatingText has a path, an extra section surfaces baseline offset,
+    /// closed-loop, and auto-flip — properties that only make sense for
+    /// path-bearing text and live on FloatingText, not TextSettings.
+    @ObservedObject var canvasState: CanvasStateManager
+
     /// Family list cached at init — UIFont.familyNames returns a fresh array
     /// every call and a SwiftUI Picker re-evaluating it on every render is
     /// noticeable on lower-end iPads.
@@ -29,6 +35,9 @@ struct TextSettingsView: View {
             paragraphSection
             spacingSection
             styleSection
+            if let ft = canvasState.floatingText, ft.path != nil {
+                pathSection(ft: ft)
+            }
             previewSection
         }
         .onAppear {
@@ -157,6 +166,44 @@ struct TextSettingsView: View {
         }
     }
 
+    /// Path-only controls. Surfaces only while a path-bearing FloatingText
+    /// is active. The baseline-offset slider is doc-space points. Closed-
+    /// loop is auto-detected at draw time (endpoints within 30pt) but the
+    /// user can override here.
+    private func pathSection(ft: FloatingText) -> some View {
+        Section("Path") {
+            HStack {
+                Text("Baseline Offset")
+                Spacer()
+                Text(String(format: "%.0f", ft.baselineOffset))
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { ft.baselineOffset },
+                    set: { canvasState.setBaselineOffset($0) }
+                ),
+                in: -100...100
+            )
+
+            Toggle(
+                "Closed Loop",
+                isOn: Binding(
+                    get: { ft.isClosed },
+                    set: { canvasState.setPathClosed($0) }
+                )
+            )
+
+            Toggle(
+                "Auto-flip Glyphs",
+                isOn: Binding(
+                    get: { ft.autoFlipEnabled },
+                    set: { canvasState.setAutoFlipEnabled($0) }
+                )
+            )
+        }
+    }
+
     private var previewSection: some View {
         Section("Preview") {
             HStack {
@@ -213,7 +260,7 @@ struct TextSettingsView: View {
 
 #Preview {
     NavigationView {
-        TextSettingsView(settings: .constant(.default))
+        TextSettingsView(settings: .constant(.default), canvasState: CanvasStateManager())
             .navigationTitle("Text Settings")
     }
 }
