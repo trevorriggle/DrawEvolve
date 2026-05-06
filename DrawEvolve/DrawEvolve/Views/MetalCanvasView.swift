@@ -610,7 +610,14 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
                 let layerId = layers[selectedLayerIndex].id
-                if !renderer.beginSmudgeStroke(brushSize: brushSettings.size, layerId: layerId) {
+                // Selection geometry is fixed for the duration of a stroke;
+                // pass it once at begin and the renderer rasterises + caches.
+                let smudgeSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+                let smudgeDocSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+                if !renderer.beginSmudgeStroke(brushSize: brushSettings.size,
+                                               layerId: layerId,
+                                               selectionPath: smudgeSelectionPath,
+                                               documentSize: smudgeDocSize) {
                     print("Smudge: renderer failed to allocate patch textures")
                     return
                 }
@@ -854,6 +861,17 @@ struct MetalCanvasView: UIViewRepresentable {
             lastPoint = location
             lastTimestamp = timestamp
             print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
+
+            // Cache the selection mask for the wet-ink preview. Rasterised
+            // once here and reused for every preview frame for the duration
+            // of the drag — selection geometry is immutable mid-stroke
+            // because the canvas owns the touch. Pairs with the cleanup in
+            // touchesEnded / touchesCancelled. Blur (.blur) doesn't render
+            // a preview at all, so the cache will be allocated but unused —
+            // harmless; freed on lift.
+            let previewSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+            let previewDocSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
+            renderer?.beginPreviewMask(selectionPath: previewSelectionPath, documentSize: previewDocSize)
 
             // Stamp cursor for the blur tool (smudge in PR 2). The brush
             // doesn't render a stamp preview for blur (its blurred output
@@ -1466,6 +1484,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("ERROR: Invalid layer index \(selectedLayerIndex)")
                 currentStroke = nil
                 lastPoint = nil
+                renderer?.endPreviewMask()
                 return
             }
 
@@ -1494,11 +1513,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 // thread on `waitUntilCompleted`. The completion fires on main
                 // once the GPU is done — that's the safe point to take the
                 // AFTER snapshot, record undo, and kick off the thumbnail.
+                // PR 3: pass the active selection path so the GPU clips the
+                // stroke. nil = no selection = no clipping.
+                let strokeSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
                 let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
                     if stroke.tool == .blur {
-                        renderer.renderBlurStroke(stroke, to: texture, screenSize: documentSize, completion: completion)
+                        renderer.renderBlurStroke(stroke, to: texture, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     } else {
-                        renderer.renderStroke(stroke, to: texture, screenSize: documentSize, completion: completion)
+                        renderer.renderStroke(stroke, to: texture, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     }
                 }
                 dispatchStroke { [weak self] in
@@ -1540,6 +1562,10 @@ struct MetalCanvasView: UIViewRepresentable {
             shapeStartPoint = nil
             shapeStartScreen = nil
             marqueeStartScreen = nil
+            // Free the cached preview selection mask. The committed stroke
+            // dispatched above rasterises its own mask internally; the
+            // preview cache only existed for the wet-ink trail.
+            renderer?.endPreviewMask()
             // Hide stamp cursor on lift.
             if let cs = canvasState {
                 MainActor.assumeIsolated {
@@ -1561,6 +1587,9 @@ struct MetalCanvasView: UIViewRepresentable {
             selectionDragStart = nil
             blurAdjustmentTouchStartScreen = nil
             blurAdjustmentLastUpdateAt = 0
+            // Free the cached preview selection mask if any. Idempotent —
+            // safe even when no stroke was in flight.
+            renderer?.endPreviewMask()
 
             // Smudge: discard the in-progress stroke (no commit, no undo
             // record). Layer texture is left in its partially-mutated
