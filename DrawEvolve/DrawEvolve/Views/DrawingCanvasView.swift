@@ -758,36 +758,17 @@ struct DrawingCanvasView: View {
         } message: {
             Text(canvasState.errorMessage)
         }
-        .alert("Add Text on Path", isPresented: $showTextOnPathInput) {
-            TextField("Enter text", text: $textOnPathToRender)
-            Button("Cancel", role: .cancel) {
-                pendingTextOnPathRawPoints = []
-            }
-            Button("Add") {
-                if !textOnPathToRender.isEmpty {
-                    canvasState.beginTextOnPath(
-                        rawPoints: pendingTextOnPathRawPoints,
-                        firstScreen: pendingTextOnPathFirstScreen,
-                        lastScreen: pendingTextOnPathLastScreen,
-                        content: textOnPathToRender
-                    )
-                }
-                pendingTextOnPathRawPoints = []
-            }
-        } message: {
-            Text("Text will follow the path you drew.")
-        }
-        .alert("Add Text", isPresented: $showTextInput) {
-            TextField("Enter text", text: $textToRender)
-            Button("Cancel", role: .cancel) {}
-            Button("Add") {
-                if !textToRender.isEmpty {
-                    canvasState.beginText(at: textInputLocation, content: textToRender)
-                }
-            }
-        } message: {
-            Text("Enter the text you want to add to the canvas")
-        }
+        .modifier(TextInputAlerts(
+            showText: $showTextInput,
+            textToRender: $textToRender,
+            textInputLocation: textInputLocation,
+            showTextOnPath: $showTextOnPathInput,
+            textOnPathToRender: $textOnPathToRender,
+            pendingRawPoints: $pendingTextOnPathRawPoints,
+            pendingFirstScreen: pendingTextOnPathFirstScreen,
+            pendingLastScreen: pendingTextOnPathLastScreen,
+            canvasState: canvasState
+        ))
         .alert("Save Drawing", isPresented: $showSaveDialog) {
             TextField("Title", text: $drawingTitle)
             Button("Cancel", role: .cancel) {}
@@ -1343,6 +1324,64 @@ struct DrawingCanvasView: View {
 
     private static func defaultSketchTitle(for date: Date) -> String {
         "Sketch · \(sketchTitleFormatter.string(from: date))"
+    }
+}
+
+// MARK: - Text input alerts ViewModifier
+//
+// Pulled out into its own type so SwiftUI's type-checker doesn't have to
+// inline both TextField+Button alert subgraphs into DrawingCanvasView's
+// already-saturated body modifier chain. With ~17 chained modifiers + a
+// large ZStack, leaving the alerts inline tipped the heuristic over —
+// visible as cascading "Cannot find type" errors in SourceKit even though
+// xcodebuild succeeded. Moving heavy modifiers behind a struct hands the
+// type-checker a smaller subgraph and breaks the cascade.
+
+private struct TextInputAlerts: ViewModifier {
+    @Binding var showText: Bool
+    @Binding var textToRender: String
+    let textInputLocation: CGPoint
+
+    @Binding var showTextOnPath: Bool
+    @Binding var textOnPathToRender: String
+    @Binding var pendingRawPoints: [CGPoint]
+    let pendingFirstScreen: CGPoint
+    let pendingLastScreen: CGPoint
+
+    let canvasState: CanvasStateManager
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Add Text on Path", isPresented: $showTextOnPath) {
+                TextField("Enter text", text: $textOnPathToRender)
+                Button("Cancel", role: .cancel) {
+                    pendingRawPoints = []
+                }
+                Button("Add") {
+                    if !textOnPathToRender.isEmpty {
+                        canvasState.beginTextOnPath(
+                            rawPoints: pendingRawPoints,
+                            firstScreen: pendingFirstScreen,
+                            lastScreen: pendingLastScreen,
+                            content: textOnPathToRender
+                        )
+                    }
+                    pendingRawPoints = []
+                }
+            } message: {
+                Text("Text will follow the path you drew.")
+            }
+            .alert("Add Text", isPresented: $showText) {
+                TextField("Enter text", text: $textToRender)
+                Button("Cancel", role: .cancel) {}
+                Button("Add") {
+                    if !textToRender.isEmpty {
+                        canvasState.beginText(at: textInputLocation, content: textToRender)
+                    }
+                }
+            } message: {
+                Text("Enter the text you want to add to the canvas")
+            }
     }
 }
 
