@@ -68,7 +68,11 @@ struct GalleryView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                tabStripView
+                if DeviceIdiom.isPhone {
+                    phoneTabStrip
+                } else {
+                    padTabStrip
+                }
                 Group {
                     switch selectedTab {
                     case .drawings:
@@ -168,7 +172,7 @@ struct GalleryView: View {
         }
     }
 
-    // MARK: - Tab Strip
+    // MARK: - Tab Strip — iPad
     //
     // Three large-title labels side-by-side, styled to match the original
     // .navigationTitle(.large) treatment that this strip replaced. Selection
@@ -176,7 +180,7 @@ struct GalleryView: View {
     // borders. Selected = Color.accentColor (the app's blue), unselected =
     // .primary (the dark/black of a normal nav title).
 
-    private var tabStripView: some View {
+    private var padTabStrip: some View {
         // Fixed 28pt inline gap (≈ one em at .largeTitle bold) between labels
         // and left-aligned within the available width — mirrors the original
         // .navigationTitle's leading anchor rather than centering across the
@@ -187,6 +191,27 @@ struct GalleryView: View {
             tabButton(.evolution, label: "My Evolution")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Tab Strip — iPhone
+    //
+    // Segmented Picker. Three large-title labels would overflow / truncate
+    // aggressively on a 375pt viewport, and the iPad strip's leading-anchor
+    // .largeTitle treatment doesn't translate to the iPhone aesthetic
+    // anyway. Short labels ("Drawings" / "Prompts" / "Evolution") on iPhone
+    // — the "My ..." prefix is brand voice that earns its place at large
+    // size on iPad but reads as redundant inside a segmented control.
+    // iPad strip stays untouched in padTabStrip above.
+
+    private var phoneTabStrip: some View {
+        Picker("Section", selection: $selectedTab) {
+            Text("Drawings").tag(Tab.drawings)
+            Text("Prompts").tag(Tab.prompts)
+            Text("Evolution").tag(Tab.evolution)
+        }
+        .pickerStyle(.segmented)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }
