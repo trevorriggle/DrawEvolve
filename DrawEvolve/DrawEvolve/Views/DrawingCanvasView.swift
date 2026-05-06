@@ -294,10 +294,254 @@ struct DrawingCanvasView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                saveToGalleryButton
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                VStack(spacing: 8) {
+                    phoneSelectionContextBar
+                    phoneToolStrip
+                    phoneActionRow
+                }
+                .padding(.top, 8)
+                .background(.ultraThinMaterial)
             }
+        }
+    }
+
+    // MARK: - iPhone tool strip (C2)
+    //
+    // All 27 tiles, wholesale-quoted from padBody's LazyVGrid in iPad
+    // order. Phase 2 is layout-only — content parity (which tools exist,
+    // which order, dark-mode toggle in the strip vs. Settings) is a non-
+    // goal to break here. If a tile is added / reordered / removed in
+    // padBody's LazyVGrid, mirror the change here. The tile bodies are
+    // duplicated rather than extracted-and-shared because extracting
+    // would force a structural change to padBody, which Phase 2 does not
+    // authorize beyond the body-branching modifier lift in C1.
+    //
+    // Strip extent: 27 × 44 + 26 × 8 = 1396pt. On a 375pt iPhone 13 mini
+    // viewport the strip is trivially scrollable.
+
+    private var phoneToolStrip: some View {
+        // TODO: v1.1 — scroll affordance (edge fade or transient indicator
+        // on first launch). showsIndicators: false matches the iPad chrome
+        // aesthetic but first-time iPhone users may not realize the strip
+        // scrolls. Worth a once-per-install hint or a permanent gradient
+        // fade on the right edge.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Group {
+                    ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
+                        canvasState.currentTool = .brush
+                    }
+                    ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
+                        canvasState.currentTool = .eraser
+                    }
+                    ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
+                        canvasState.currentTool = .blur
+                    }
+                    ToolButton(icon: DrawingTool.blurAdjustment.icon, isSelected: canvasState.currentTool == .blurAdjustment) {
+                        canvasState.currentTool = .blurAdjustment
+                    }
+                    ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
+                        canvasState.currentTool = .line
+                    }
+                    ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
+                        canvasState.currentTool = .rectangle
+                    }
+                    ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
+                        canvasState.currentTool = .circle
+                    }
+                    ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
+                        canvasState.currentTool = .paintBucket
+                    }
+                    ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
+                        canvasState.currentTool = .eyeDropper
+                    }
+                }
+                Group {
+                    ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
+                        canvasState.currentTool = .rectangleSelect
+                    }
+                    ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
+                        canvasState.currentTool = .lasso
+                    }
+                    ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
+                        canvasState.currentTool = .move
+                    }
+                    ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
+                        canvasState.currentTool = .text
+                    }
+                    PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.system(size: 22))
+                            .frame(width: 44, height: 44)
+                    }
+                    ToolButton(
+                        icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                        isSelected: false
+                    ) {
+                        Task { await downloadToPhotos() }
+                    }
+                    .disabled(isSavingToPhotos)
+                    ToolButton(icon: "trash", isSelected: false) {
+                        showClearConfirmation = true
+                    }
+                    Button(action: {
+                        guard canvasState.currentTool != .blur,
+                              canvasState.currentTool != .blurAdjustment else { return }
+                        showColorPicker.toggle()
+                    }) {
+                        Circle()
+                            .fill(Color(canvasState.brushSettings.color))
+                            .frame(width: 40, height: 40)
+                            .overlay(Circle().stroke(Color.white, lineWidth: 3))
+                            .shadow(radius: 2)
+                            .opacity(
+                                (canvasState.currentTool == .blur ||
+                                 canvasState.currentTool == .blurAdjustment) ? 0.4 : 1.0
+                            )
+                    }
+                    .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment)
+                    ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
+                        showBrushSettings.toggle()
+                    }
+                }
+                Group {
+                    ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
+                        showLayerPanel.toggle()
+                    }
+                    ToolButton(
+                        icon: "square.split.2x1",
+                        isSelected: showSymmetrySettings || symmetry.mode != .off
+                    ) {
+                        showSymmetrySettings.toggle()
+                    }
+                    ToolButton(
+                        icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
+                        isSelected: false
+                    ) {
+                        toggleColorScheme()
+                    }
+                    ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                        canvasState.undo()
+                    }
+                    .disabled(!canvasState.historyManager.canUndo)
+                    ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                        canvasState.redo()
+                    }
+                    .disabled(!canvasState.historyManager.canRedo)
+                    ToolButton(
+                        icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                        isSelected: canvasState.flipHorizontal
+                    ) {
+                        canvasState.toggleFlipHorizontal()
+                    }
+                    .help("Flip canvas horizontally")
+                    ToolButton(
+                        icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                        isSelected: canvasState.flipVertical
+                    ) {
+                        canvasState.toggleFlipVertical()
+                    }
+                    .help("Flip canvas vertically")
+                    ToolButton(icon: "viewfinder", isSelected: false) {
+                        canvasState.resetAllTransforms()
+                    }
+                    .help("Reset zoom, pan, rotation, and flips")
+                    .disabled(canvasState.zoomScale == 1.0
+                              && canvasState.panOffset == .zero
+                              && canvasState.canvasRotation == .zero
+                              && !canvasState.flipHorizontal
+                              && !canvasState.flipVertical)
+                    ToolButton(icon: "sparkles", isSelected: showFeedback) {
+                        if canvasState.feedback != nil {
+                            showFeedback.toggle()
+                        } else {
+                            requestFeedback()
+                        }
+                    }
+                    .disabled(canvasState.isEmpty)
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+    }
+
+    // MARK: - iPhone action row (C2)
+    //
+    // Save + Get Feedback side-by-side, both keeping their existing
+    // compact pill styling (option (a) from the Phase 2 plan: "keep
+    // 'Save to Gallery / Saved ✓' as-is, frame(maxWidth: .infinity)
+    // gives plenty of room"). Centered horizontally; the iPhone width
+    // accommodates both natural pill sizes with room to breathe.
+
+    private var phoneActionRow: some View {
+        HStack(spacing: 12) {
+            saveToGalleryButton
+            getFeedbackButton
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - iPhone selection-active context bar (C2)
+    //
+    // Repositioning of iPad's existing "Selection Active" pill into the
+    // bottom safe-area inset (option (a) from the Phase 2 plan). Visual
+    // identical to padBody's pill — same caption, same Cancel/Delete
+    // buttons, same .ultraThinMaterial card styling. Only difference is
+    // the outer positioning: iPad floats it above the bottom-right
+    // action stack via padding(.bottom, 200); iPhone slots it above the
+    // tool strip + action row via the safeAreaInset VStack ordering.
+    //
+    // Conditionally rendered — when no selection is active, the safe-
+    // area inset contracts and the canvas grows to fill. SwiftUI animates
+    // the inset growth/shrinkage by default; the .move(.bottom) +
+    // .opacity transition keeps the pill itself smooth as it appears.
+
+    @ViewBuilder
+    private var phoneSelectionContextBar: some View {
+        if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+            VStack(spacing: 8) {
+                Text("Selection Active")
+                    .font(.caption)
+                    .foregroundColor(.primary)
+
+                HStack(spacing: 12) {
+                    Button(action: { canvasState.clearSelection() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16))
+                            Text("Cancel")
+                                .font(.subheadline)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.gray)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+
+                    Button(action: { canvasState.deleteSelectedPixels() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 16))
+                            Text("Delete")
+                                .font(.subheadline)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.red)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+                }
+            }
+            .padding()
+            .background(.regularMaterial)
+            .cornerRadius(12)
+            .shadow(radius: 5)
+            .padding(.horizontal, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
