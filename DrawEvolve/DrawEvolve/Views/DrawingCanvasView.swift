@@ -296,11 +296,12 @@ struct DrawingCanvasView: View {
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 8) {
                     phoneSelectionContextBar
-                    phoneToolStrip
                     phoneActionRow
+                    Divider()
+                    phoneToolStrip
                 }
                 .padding(.top, 8)
-                .background(.ultraThinMaterial)
+                .background(.regularMaterial)
             }
         }
     }
