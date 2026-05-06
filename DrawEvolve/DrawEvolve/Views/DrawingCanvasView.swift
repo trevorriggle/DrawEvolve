@@ -1205,12 +1205,208 @@ struct DrawingCanvasView: View {
         .accessibilityLabel(isToolPanelExpanded ? "Collapse tool panel" : "Expand tool panel")
     }
 
-    @ViewBuilder
+    // Helper for tile actions inside phoneToolPanel: every tile auto-
+    // collapses the panel after firing, since once the user has picked
+    // a tool / triggered a modifier they want to see the canvas. The
+    // collapse animation matches the trigger button's spring profile.
+    private func collapsePhoneToolPanel() {
+        withAnimation(.spring(response: 0.3)) {
+            isToolPanelExpanded = false
+        }
+    }
+
     private var phoneToolPanel: some View {
-        // Populated in C2 — this commit lands the state machine and
-        // collapsed layout. Tile grid stacks on top in C2 to keep the
-        // C1 diff scoped to chrome / state plumbing.
-        EmptyView()
+        // 28 tiles in iPad LazyVGrid order, wholesale-quoted from
+        // padBody. 5 columns × 6 rows = 30 cells, 28 used, 2 empty
+        // slots at end of last row (per spec — don't try to fill).
+        // Each tile auto-collapses the panel via collapsePhoneToolPanel()
+        // after firing.
+        //
+        // Tile bodies are duplicated rather than extracted-and-shared
+        // because extracting would force a structural change to padBody's
+        // LazyVGrid; the redesign only authorizes the action-button
+        // sizing extraction and selectionActiveCard extraction. If a
+        // tile is added / reordered / removed in padBody's LazyVGrid,
+        // mirror the change here.
+        //
+        // ViewBuilder limit of 10 children in HStack/LazyVGrid is sided
+        // around with Group{} chunks below — same pattern as other large
+        // tile sets in this file.
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5),
+            spacing: 12
+        ) {
+            Group {
+                ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
+                    canvasState.currentTool = .brush
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
+                    canvasState.currentTool = .eraser
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
+                    canvasState.currentTool = .blur
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.blurAdjustment.icon, isSelected: canvasState.currentTool == .blurAdjustment) {
+                    canvasState.currentTool = .blurAdjustment
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
+                    canvasState.currentTool = .smudge
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
+                    canvasState.currentTool = .line
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.rectangle.icon, isSelected: canvasState.currentTool == .rectangle) {
+                    canvasState.currentTool = .rectangle
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.circle.icon, isSelected: canvasState.currentTool == .circle) {
+                    canvasState.currentTool = .circle
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.paintBucket.icon, isSelected: canvasState.currentTool == .paintBucket) {
+                    canvasState.currentTool = .paintBucket
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.eyeDropper.icon, isSelected: canvasState.currentTool == .eyeDropper) {
+                    canvasState.currentTool = .eyeDropper
+                    collapsePhoneToolPanel()
+                }
+            }
+            Group {
+                ToolButton(icon: DrawingTool.rectangleSelect.icon, isSelected: canvasState.currentTool == .rectangleSelect) {
+                    canvasState.currentTool = .rectangleSelect
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.lasso.icon, isSelected: canvasState.currentTool == .lasso) {
+                    canvasState.currentTool = .lasso
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
+                    canvasState.currentTool = .move
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
+                    canvasState.currentTool = .text
+                    collapsePhoneToolPanel()
+                }
+                PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 22))
+                        .frame(width: 44, height: 44)
+                }
+                .onChange(of: photoPickerItem) { _, _ in
+                    // Collapse on pick so the canvas is visible while
+                    // the import sheet is being interacted with.
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(
+                    icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                    isSelected: false
+                ) {
+                    Task { await downloadToPhotos() }
+                    collapsePhoneToolPanel()
+                }
+                .disabled(isSavingToPhotos)
+                ToolButton(icon: "trash", isSelected: false) {
+                    showClearConfirmation = true
+                    collapsePhoneToolPanel()
+                }
+                Button(action: {
+                    guard canvasState.currentTool != .blur,
+                          canvasState.currentTool != .blurAdjustment,
+                          canvasState.currentTool != .smudge else { return }
+                    showColorPicker.toggle()
+                    collapsePhoneToolPanel()
+                }) {
+                    Circle()
+                        .fill(Color(canvasState.brushSettings.color))
+                        .frame(width: 40, height: 40)
+                        .overlay(Circle().stroke(Color.white, lineWidth: 3))
+                        .shadow(radius: 2)
+                        .opacity(
+                            (canvasState.currentTool == .blur ||
+                             canvasState.currentTool == .blurAdjustment ||
+                             canvasState.currentTool == .smudge) ? 0.4 : 1.0
+                        )
+                }
+                .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
+                ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
+                    showBrushSettings.toggle()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: "square.stack.3d.up", isSelected: showLayerPanel) {
+                    showLayerPanel.toggle()
+                    collapsePhoneToolPanel()
+                }
+            }
+            Group {
+                ToolButton(
+                    icon: "square.split.2x1",
+                    isSelected: showSymmetrySettings || symmetry.mode != .off
+                ) {
+                    showSymmetrySettings.toggle()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(
+                    icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
+                    isSelected: false
+                ) {
+                    toggleColorScheme()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                    canvasState.undo()
+                    collapsePhoneToolPanel()
+                }
+                .disabled(!canvasState.historyManager.canUndo)
+                ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                    canvasState.redo()
+                    collapsePhoneToolPanel()
+                }
+                .disabled(!canvasState.historyManager.canRedo)
+                ToolButton(
+                    icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                    isSelected: canvasState.flipHorizontal
+                ) {
+                    canvasState.toggleFlipHorizontal()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(
+                    icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                    isSelected: canvasState.flipVertical
+                ) {
+                    canvasState.toggleFlipVertical()
+                    collapsePhoneToolPanel()
+                }
+                ToolButton(icon: "viewfinder", isSelected: false) {
+                    canvasState.resetAllTransforms()
+                    collapsePhoneToolPanel()
+                }
+                .disabled(canvasState.zoomScale == 1.0
+                          && canvasState.panOffset == .zero
+                          && canvasState.canvasRotation == .zero
+                          && !canvasState.flipHorizontal
+                          && !canvasState.flipVertical)
+                ToolButton(icon: "sparkles", isSelected: showFeedback) {
+                    if canvasState.feedback != nil {
+                        showFeedback.toggle()
+                    } else {
+                        requestFeedback()
+                    }
+                    collapsePhoneToolPanel()
+                }
+                .disabled(canvasState.isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private var colorSchemeValue: ColorScheme? {
