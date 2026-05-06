@@ -69,6 +69,7 @@
 		DE000067 /* TextSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100067 /* TextSettings.swift */; };
 		DE000068 /* FloatingText.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100068 /* FloatingText.swift */; };
 		DE000069 /* TextSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100069 /* TextSettingsView.swift */; };
+		DE000070 /* CodableColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100070 /* CodableColor.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -137,6 +138,7 @@
 		DE100067 /* TextSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSettings.swift; sourceTree = "<group>"; };
 		DE100068 /* FloatingText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingText.swift; sourceTree = "<group>"; };
 		DE100069 /* TextSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSettingsView.swift; sourceTree = "<group>"; };
+		DE100070 /* CodableColor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodableColor.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -238,6 +240,7 @@
 				DE100063 /* SymmetryConfig.swift */,
 				DE100067 /* TextSettings.swift */,
 				DE100068 /* FloatingText.swift */,
+				DE100070 /* CodableColor.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -450,6 +453,7 @@
 				DE000067 /* TextSettings.swift in Sources */,
 				DE000068 /* FloatingText.swift in Sources */,
 				DE000069 /* TextSettingsView.swift in Sources */,
+				DE000070 /* CodableColor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
