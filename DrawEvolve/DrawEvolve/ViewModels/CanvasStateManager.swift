@@ -228,8 +228,16 @@ class CanvasStateManager: ObservableObject {
                 }
             }
 
-        // Start with one layer
-        addLayer()
+        // Start with one layer. Inlined (rather than via `addLayer()`)
+        // because the implicit first layer is canvas state, not a user
+        // action — recording it in undo history would let the user undo
+        // past it and end up with an empty `layers` array, which crashes
+        // every subsequent touch on `layers[selectedLayerIndex]`. Matches
+        // Procreate / Photoshop / Krita: the canvas always has at least
+        // one layer; you can't undo it away.
+        let initialLayer = DrawingLayer(name: "Layer 1")
+        layers.append(initialLayer)
+        selectedLayerIndex = 0
     }
 
     func addLayer() {
