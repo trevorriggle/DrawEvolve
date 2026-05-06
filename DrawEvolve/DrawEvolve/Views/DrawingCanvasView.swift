@@ -85,6 +85,259 @@ struct DrawingCanvasView: View {
     @AppStorage("userPreferredColorScheme") private var userPreferredColorScheme: String = "light"
 
     var body: some View {
+        // Body is split iPhone vs. iPad inside a Group wrapper so the
+        // sheets / alerts / fullScreenCover / onChange / onAppear /
+        // preferredColorScheme modifiers attach in one place and apply
+        // across both branches. Lifting these to the Group from the iPad
+        // ZStack is a deliberate, contained deviation from Phase 1's
+        // "wholesale-quoted, no refactoring" rule — branched bodies cannot
+        // share presentation state via simple duplication. Modifier
+        // semantics post-lift are intended to be identical; the iPhone
+        // Phase 2 / C1 smoke pass verifies every iPad presentation path
+        // still fires correctly.
+        Group {
+            if DeviceIdiom.isPhone {
+                phoneBody
+            } else {
+                padBody
+            }
+        }
+        .sheet(isPresented: $showColorPicker) {
+            NavigationView {
+                AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
+                    .navigationTitle("Color")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showColorPicker = false
+                            }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showLayerPanel) {
+            NavigationView {
+                LayerPanelView(
+                    layers: $canvasState.layers,
+                    selectedIndex: $canvasState.selectedLayerIndex,
+                    onAddLayer: { canvasState.addLayer() },
+                    onDeleteLayer: { index in canvasState.deleteLayer(at: index) }
+                )
+                .navigationTitle("Layers")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            showLayerPanel = false
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showBrushSettings) {
+            NavigationView {
+                BrushSettingsView(
+                    settings: $canvasState.brushSettings,
+                    activeTool: canvasState.currentTool
+                )
+                    .navigationTitle("Brush Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showBrushSettings = false
+                            }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showTextSettings) {
+            NavigationView {
+                TextSettingsView(
+                    settings: $canvasState.textSettings,
+                    canvasState: canvasState
+                )
+                    .navigationTitle("Text Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showTextSettings = false
+                            }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showSymmetrySettings) {
+            NavigationView {
+                SymmetrySettingsView(symmetry: symmetry)
+                    .navigationTitle("Symmetry")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showSymmetrySettings = false
+                            }
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
+        .alert("Feedback Error", isPresented: $canvasState.showError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(canvasState.errorMessage)
+        }
+        .modifier(TextInputAlerts(
+            showText: $showTextInput,
+            textToRender: $textToRender,
+            textInputLocation: textInputLocation,
+            showTextOnPath: $showTextOnPathInput,
+            textOnPathToRender: $textOnPathToRender,
+            pendingRawPoints: $pendingTextOnPathRawPoints,
+            pendingFirstScreen: pendingTextOnPathFirstScreen,
+            pendingLastScreen: pendingTextOnPathLastScreen,
+            canvasState: canvasState
+        ))
+        .alert("Save Drawing", isPresented: $showSaveDialog) {
+            TextField("Title", text: $drawingTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                Task {
+                    await saveDrawing()
+                }
+            }
+        } message: {
+            Text("Enter a title for your drawing")
+        }
+        .fullScreenCover(isPresented: $showGallery) {
+            GalleryView()
+        }
+        .onChange(of: showGallery) { _, isShowing in
+            if !isShowing {
+                // Gallery was dismissed - refresh to show any changes
+                print("Gallery dismissed, canvas state preserved")
+            }
+        }
+        .alert("Clear Canvas", isPresented: $showClearConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) {
+                canvasState.clearCanvas()
+            }
+        } message: {
+            Text("Are you sure you want to clear the canvas? This cannot be undone.")
+        }
+        .alert(
+            "Couldn't Save to Photos",
+            isPresented: Binding(
+                get: { photoSaveError != nil },
+                set: { if !$0 { photoSaveError = nil } }
+            ),
+            presenting: photoSaveError
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { err in
+            Text(err)
+        }
+        .onChange(of: canvasState.currentTool) { _, _ in
+            // When tool changes, commit any active selection
+            if canvasState.selectionPixels != nil {
+                canvasState.commitSelection()
+            }
+        }
+        .onChange(of: photoPickerItem) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self),
+                   let uiImage = UIImage(data: data) {
+                    await MainActor.run {
+                        canvasState.importImage(uiImage)
+                    }
+                }
+                await MainActor.run { photoPickerItem = nil }
+            }
+        }
+        .onAppear {
+            loadExistingDrawing()
+        }
+        .preferredColorScheme(colorSchemeValue)
+    }
+
+    // MARK: - iPhone Phase 2 / C1 skeleton
+    //
+    // Navbar (Gallery leading / Settings gear trailing) + canvas + Save
+    // button only. No tool strip, no action row, no selection bar yet —
+    // those land in C2. Tool selection, undo/redo, and the rest of the
+    // chrome are unreachable on iPhone in this commit; the user can sign
+    // in, see the canvas, hit Save, open Gallery, and reach Settings.
+    // That's enough to verify the body-branching plumbing without dragging
+    // C2's surface area into C1's diff.
+    //
+    // Leading nav button is Gallery (not "Close" or "Back") because on
+    // iPhone the canvas is always entered from a Gallery presentation or
+    // a fresh-canvas launch — Gallery is conceptually a presentation OVER
+    // the canvas, not a parent in a nav stack. Presenting GalleryView as
+    // a fullScreenCover from the leading button matches the iPad mental
+    // model where Gallery is sheet-like; canvas state (layers, undo
+    // stack, dirty bit) persists behind the cover. A "Close" button
+    // would imply discard/dismiss, which is wrong from a fresh canvas
+    // launch and ambiguous mid-session.
+
+    private var phoneBody: some View {
+        NavigationStack {
+            ZStack {
+                MetalCanvasView(
+                    layers: $canvasState.layers,
+                    currentTool: $canvasState.currentTool,
+                    brushSettings: $canvasState.brushSettings,
+                    selectedLayerIndex: $canvasState.selectedLayerIndex,
+                    canvasState: canvasState,
+                    onTextRequest: { location in
+                        textInputLocation = location
+                        textToRender = ""
+                        showTextInput = true
+                    },
+                    symmetry: symmetry
+                )
+                .ignoresSafeArea()
+                .background(Color(uiColor: .systemGray6))
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: { showGallery = true }) {
+                        Image(systemName: "photo.on.rectangle")
+                    }
+                    .accessibilityLabel("Gallery")
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                saveToGalleryButton
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+        }
+    }
+
+    // MARK: - iPad layout (unchanged from pre-Phase-2 main)
+    //
+    // Wholesale-quoted; do NOT edit padBody contents in iPhone Phase 2
+    // layout PRs. Phase 2 is layout-only on iPhone. The only structural
+    // change relative to pre-Phase-2 is that this used to be the body
+    // root directly (with all sheets / alerts / fullScreenCover modifiers
+    // attached here); those modifiers are now lifted to the outer Group
+    // wrapper in `body` so both branches share them.
+
+    private var padBody: some View {
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
             MetalCanvasView(
@@ -331,6 +584,11 @@ struct DrawingCanvasView: View {
                                 canvasState.currentTool = .blurAdjustment
                             }
 
+                            // Smudge — stamp-as-you-go pickup/deposit smear
+                            ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
+                                canvasState.currentTool = .smudge
+                            }
+
                             // Shape tools
                             ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {
                                 canvasState.currentTool = .line
@@ -409,11 +667,12 @@ struct DrawingCanvasView: View {
                             }
 
                             // Color picker button. Grayed (not hidden) when
-                            // blur or blurAdjustment is the active tool —
-                            // those tools don't read brush color.
+                            // blur, blurAdjustment, or smudge is the active
+                            // tool — those tools don't read brush color.
                             Button(action: {
                                 guard canvasState.currentTool != .blur,
-                                      canvasState.currentTool != .blurAdjustment else { return }
+                                      canvasState.currentTool != .blurAdjustment,
+                                      canvasState.currentTool != .smudge else { return }
                                 showColorPicker.toggle()
                             }) {
                                 Circle()
@@ -423,10 +682,11 @@ struct DrawingCanvasView: View {
                                     .shadow(radius: 2)
                                     .opacity(
                                         (canvasState.currentTool == .blur ||
-                                         canvasState.currentTool == .blurAdjustment) ? 0.4 : 1.0
+                                         canvasState.currentTool == .blurAdjustment ||
+                                         canvasState.currentTool == .smudge) ? 0.4 : 1.0
                                     )
                             }
-                            .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment)
+                            .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
 
                             // Brush settings
                             ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
@@ -669,168 +929,11 @@ struct DrawingCanvasView: View {
                 bottomRightActionButtons
             }
         }
-        .sheet(isPresented: $showColorPicker) {
-            NavigationView {
-                AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
-                    .navigationTitle("Color")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                showColorPicker = false
-                            }
-                        }
-                    }
-            }
-        }
-        .sheet(isPresented: $showLayerPanel) {
-            NavigationView {
-                LayerPanelView(
-                    layers: $canvasState.layers,
-                    selectedIndex: $canvasState.selectedLayerIndex,
-                    onAddLayer: { canvasState.addLayer() },
-                    onDeleteLayer: { index in canvasState.deleteLayer(at: index) }
-                )
-                .navigationTitle("Layers")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") {
-                            showLayerPanel = false
-                        }
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $showBrushSettings) {
-            NavigationView {
-                BrushSettingsView(
-                    settings: $canvasState.brushSettings,
-                    activeTool: canvasState.currentTool
-                )
-                    .navigationTitle("Brush Settings")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                showBrushSettings = false
-                            }
-                        }
-                    }
-            }
-        }
-        .sheet(isPresented: $showTextSettings) {
-            NavigationView {
-                TextSettingsView(
-                    settings: $canvasState.textSettings,
-                    canvasState: canvasState
-                )
-                    .navigationTitle("Text Settings")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                showTextSettings = false
-                            }
-                        }
-                    }
-            }
-        }
-        .sheet(isPresented: $showSymmetrySettings) {
-            NavigationView {
-                SymmetrySettingsView(symmetry: symmetry)
-                    .navigationTitle("Symmetry")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                showSymmetrySettings = false
-                            }
-                        }
-                    }
-            }
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-        }
-        .alert("Feedback Error", isPresented: $canvasState.showError) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(canvasState.errorMessage)
-        }
-        .modifier(TextInputAlerts(
-            showText: $showTextInput,
-            textToRender: $textToRender,
-            textInputLocation: textInputLocation,
-            showTextOnPath: $showTextOnPathInput,
-            textOnPathToRender: $textOnPathToRender,
-            pendingRawPoints: $pendingTextOnPathRawPoints,
-            pendingFirstScreen: pendingTextOnPathFirstScreen,
-            pendingLastScreen: pendingTextOnPathLastScreen,
-            canvasState: canvasState
-        ))
-        .alert("Save Drawing", isPresented: $showSaveDialog) {
-            TextField("Title", text: $drawingTitle)
-            Button("Cancel", role: .cancel) {}
-            Button("Save") {
-                Task {
-                    await saveDrawing()
-                }
-            }
-        } message: {
-            Text("Enter a title for your drawing")
-        }
-        .fullScreenCover(isPresented: $showGallery) {
-            GalleryView()
-        }
-        .onChange(of: showGallery) { _, isShowing in
-            if !isShowing {
-                // Gallery was dismissed - refresh to show any changes
-                print("Gallery dismissed, canvas state preserved")
-            }
-        }
-        .alert("Clear Canvas", isPresented: $showClearConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Clear", role: .destructive) {
-                canvasState.clearCanvas()
-            }
-        } message: {
-            Text("Are you sure you want to clear the canvas? This cannot be undone.")
-        }
-        .alert(
-            "Couldn't Save to Photos",
-            isPresented: Binding(
-                get: { photoSaveError != nil },
-                set: { if !$0 { photoSaveError = nil } }
-            ),
-            presenting: photoSaveError
-        ) { _ in
-            Button("OK", role: .cancel) {}
-        } message: { err in
-            Text(err)
-        }
-        .onChange(of: canvasState.currentTool) { _, _ in
-            // When tool changes, commit any active selection
-            if canvasState.selectionPixels != nil {
-                canvasState.commitSelection()
-            }
-        }
-        .onChange(of: photoPickerItem) { _, newItem in
-            guard let newItem else { return }
-            Task {
-                if let data = try? await newItem.loadTransferable(type: Data.self),
-                   let uiImage = UIImage(data: data) {
-                    await MainActor.run {
-                        canvasState.importImage(uiImage)
-                    }
-                }
-                await MainActor.run { photoPickerItem = nil }
-            }
-        }
-        .onAppear {
-            loadExistingDrawing()
-        }
-        .preferredColorScheme(colorSchemeValue)
+        // Note: sheets / alerts / fullScreenCover / onChange / onAppear /
+        // preferredColorScheme modifiers used to live here on the ZStack;
+        // PR #33 (iPhone Phase 2 / C1) lifted them onto the outer Group
+        // wrapper in `body` so phoneBody and padBody share them. Don't
+        // re-add them here — they'd double-fire.
     }
 
     // MARK: - Blur Adjustment HUD overlay
