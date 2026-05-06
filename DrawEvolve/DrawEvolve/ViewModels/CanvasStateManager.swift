@@ -256,6 +256,27 @@ class CanvasStateManager: ObservableObject {
         historyManager.clear()
     }
 
+    /// Clamp `selectedLayerIndex` into the valid range after a layer
+    /// removal. The previous formula `max(0, layers.count - 1)` returns 0
+    /// when `layers.isEmpty` — a valid Int but an INVALID array index — so
+    /// callers that read `layers[selectedLayerIndex]` without a separate
+    /// bounds check would crash. This helper keeps the index 0 only when
+    /// the array is non-empty; when empty it parks at 0 and relies on the
+    /// touch-handler guards in MetalCanvasView to skip the access. The
+    /// empty case should be unreachable in practice once `init()` stops
+    /// recording the implicit first layer in undo history (see commit
+    /// "fix: don't record initial layer creation in undo history").
+    ///
+    /// TODO: consider Int? for selectedLayerIndex to make "no selection"
+    /// representable at the type level. Touches every read site
+    /// (LayerPanelView, MetalCanvasView in many places) so it's a
+    /// follow-up; revisit post-TestFlight.
+    private func clampSelectedLayerIndex() {
+        selectedLayerIndex = layers.isEmpty
+            ? 0
+            : min(selectedLayerIndex, layers.count - 1)
+    }
+
     func undo() {
         guard let action = historyManager.undo() else { return }
 
@@ -286,9 +307,7 @@ class CanvasStateManager: ObservableObject {
             // Remove the layer
             if let index = layers.firstIndex(where: { $0.id == layer.id }) {
                 layers.remove(at: index)
-                if selectedLayerIndex >= layers.count {
-                    selectedLayerIndex = max(0, layers.count - 1)
-                }
+                clampSelectedLayerIndex()
             }
 
         case .layerRemoved(let layer, let index):
@@ -352,9 +371,7 @@ class CanvasStateManager: ObservableObject {
             // Remove the layer again
             if let currentIndex = layers.firstIndex(where: { $0.id == layer.id }) {
                 layers.remove(at: currentIndex)
-                if selectedLayerIndex >= layers.count {
-                    selectedLayerIndex = max(0, layers.count - 1)
-                }
+                clampSelectedLayerIndex()
             }
 
         case .layerMoved(let from, let to):
