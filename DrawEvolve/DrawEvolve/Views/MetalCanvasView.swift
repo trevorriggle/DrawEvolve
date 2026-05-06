@@ -532,6 +532,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Active-layer bounds guard. Multiple downstream sites in this
+            // function index `layers[selectedLayerIndex]` without a local
+            // bounds check (e.g. the brush-stroke path's
+            // `layerId: layers[selectedLayerIndex].id`). If the canvas state
+            // ever transiently holds an empty `layers` array (or a stale
+            // index), the unguarded subscript would crash. Bail silently
+            // here — touches with no valid active layer are no-ops.
+            guard !layers.isEmpty,
+                  layers.indices.contains(selectedLayerIndex) else {
+                print("⚠️ touchesBegan ignored: no valid active layer (layers.count=\(layers.count), selectedLayerIndex=\(selectedLayerIndex))")
+                return
+            }
+
             // Ensure layer textures exist
             ensureLayerTextures()
 
@@ -858,6 +871,14 @@ struct MetalCanvasView: UIViewRepresentable {
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             guard let touch = touches.first else {
                 print("touchesMoved: No touch in set")
+                return
+            }
+
+            // Active-layer bounds guard — see touchesBegan for rationale.
+            // touchesMoved indexes `layers[selectedLayerIndex]` for stroke
+            // dispatch and the smudge-tool layer-id match check.
+            guard !layers.isEmpty,
+                  layers.indices.contains(selectedLayerIndex) else {
                 return
             }
 
@@ -1219,6 +1240,14 @@ struct MetalCanvasView: UIViewRepresentable {
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("=== TOUCH ENDED ===")
+
+            // Active-layer bounds guard — see touchesBegan for rationale.
+            // touchesEnded reads `layers[selectedLayerIndex]` for stroke
+            // commit + thumbnail refresh. Bail before any of that runs.
+            guard !layers.isEmpty,
+                  layers.indices.contains(selectedLayerIndex) else {
+                return
+            }
 
             // Blur adjustment: clear the touchdown anchor — no commit on lift.
             // Sigma is held at whatever value the last drag tick set it to;
