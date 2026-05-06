@@ -282,10 +282,38 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
 
 // MARK: - Fragment Shaders
 
+// MARK: - Selection mask convention (PR 3)
+//
+// Brush, eraser, blur-brush deposit, and smudge (both pickup + deposit)
+// sample a selection mask at `[[texture(2)]]`. The mask is r8Unorm,
+// canvas-sized: 1.0 inside the active selection, 0.0 outside. When no
+// selection is active, the renderer binds a 1×1 all-ones texture so the
+// shader's mask multiply is a no-op without per-shader branching.
+// Sampling is by normalised layer coords — `in.position.xy` is the
+// fragment's layer-pixel coord (Metal framebuffer convention, y=0 at
+// top), so `uv = in.position.xy / mask.size` gives the [0,1] lookup.
+// `clamp_to_edge + linear` so soft (anti-aliased) selection edges
+// produce smooth clipping without per-shader edge handling.
+
+// Sample the selection mask at the fragment's layer pixel position. Returns
+// 1.0 inside the selection (or everywhere when no-mask 1×1 is bound) and
+// 0.0 outside; soft-edge selections produce in-between values.
+static float sampleSelectionMask(texture2d<float> mask,
+                                 float4 fragPosition) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float2 maskSize = float2(mask.get_width(), mask.get_height());
+    // For the 1×1 no-mask texture, maskSize is (1,1) and any UV samples
+    // the single pixel (= 1.0). For the canvas-sized real mask, maskSize
+    // matches the layer texture's dims and `fragPosition.xy` is in those
+    // same pixel units.
+    return mask.sample(s, fragPosition.xy / maskSize).r;
+}
+
 // Fragment shader for brush strokes with soft edges
 fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
                                      float2 pointCoord [[point_coord]],
-                                     constant BrushUniforms &uniforms [[buffer(0)]]) {
+                                     constant BrushUniforms &uniforms [[buffer(0)]],
+                                     texture2d<float> selectionMask [[texture(2)]]) {
     // Calculate distance from center (0.5, 0.5)
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0; // 0.0 at center, 1.0 at edge
@@ -302,8 +330,9 @@ fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
 
-    // Apply opacity and pressure
+    // Apply opacity and pressure, then clip to selection.
     alpha *= uniforms.opacity * uniforms.pressure;
+    alpha *= sampleSelectionMask(selectionMask, in.position);
 
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
@@ -311,7 +340,8 @@ fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
 // Fragment shader for eraser (outputs transparent pixels)
 fragment float4 eraserFragmentShader(VertexOut in [[stage_in]],
                                       float2 pointCoord [[point_coord]],
-                                      constant BrushUniforms &uniforms [[buffer(0)]]) {
+                                      constant BrushUniforms &uniforms [[buffer(0)]],
+                                      texture2d<float> selectionMask [[texture(2)]]) {
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
@@ -325,6 +355,7 @@ fragment float4 eraserFragmentShader(VertexOut in [[stage_in]],
     }
 
     alpha *= uniforms.opacity * uniforms.pressure;
+    alpha *= sampleSelectionMask(selectionMask, in.position);
 
     // Return transparent black with alpha for erasing
     return float4(0.0, 0.0, 0.0, alpha);
@@ -521,6 +552,7 @@ fragment float4 gaussianBlurMaskedShader(VertexOut in [[stage_in]],
 fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
                                        float2 pointCoord [[point_coord]],
                                        texture2d<float> blurredTexture [[texture(0)]],
+                                       texture2d<float> selectionMask  [[texture(2)]],
                                        constant BrushUniforms &uniforms [[buffer(0)]],
                                        constant float &blurStrength [[buffer(1)]]) {
     // Same disc + hardness curve as brushFragmentShader.
@@ -536,6 +568,7 @@ fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
     alpha *= uniforms.opacity * uniforms.pressure * blurStrength;
+    alpha *= sampleSelectionMask(selectionMask, in.position);
 
     if (alpha <= 0.0) {
         discard_fragment();
@@ -601,6 +634,7 @@ struct SmudgeUniforms {
 fragment float4 smudgePatchUpdateShader(VertexOut in [[stage_in]],
                                          texture2d<float> frontPatch    [[texture(0)]],
                                          texture2d<float> layerTexture  [[texture(1)]],
+                                         texture2d<float> selectionMask [[texture(2)]],
                                          constant SmudgeUniforms &uniforms [[buffer(0)]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
 
@@ -608,6 +642,17 @@ fragment float4 smudgePatchUpdateShader(VertexOut in [[stage_in]],
     float2 layerPx = uniforms.stampCenter + (in.texCoord - 0.5) * 2.0 * uniforms.patchHalfSize;
     float2 layerUV = layerPx / uniforms.layerSize;
     float4 layerSample = layerTexture.sample(s, layerUV);
+
+    // Selection-aware pickup: scale the pickup weight by the mask sampled
+    // at the SOURCE layer pixel (not the patch UV). When the world coord
+    // for this patch pixel is OUTSIDE the selection, the layer sample
+    // contributes nothing — the patch retains its previous carry instead
+    // of dragging "outside" colour into the inside of the selection on
+    // the next deposit. Photoshop-correct: pickup AND deposit clip.
+    constexpr sampler maskSampler(address::clamp_to_edge, filter::linear);
+    float2 maskSize = float2(selectionMask.get_width(), selectionMask.get_height());
+    float maskSrc = selectionMask.sample(maskSampler, layerPx / maskSize).r;
+    float weight = uniforms.weight * maskSrc;
 
     // Front patch sample at the same UV — the previously-carried paint at
     // this offset from the (now-current) stamp center. Since the patch is
@@ -619,7 +664,7 @@ fragment float4 smudgePatchUpdateShader(VertexOut in [[stage_in]],
     // behaviour without per-stamp per-pixel resampling of the patch.
     float4 frontSample = frontPatch.sample(s, in.texCoord);
 
-    return mix(frontSample, layerSample, uniforms.weight);
+    return mix(frontSample, layerSample, weight);
 }
 
 // Smudge deposit — point-sprite fragment shader. Same disc + hardness curve
@@ -634,7 +679,8 @@ fragment float4 smudgePatchUpdateShader(VertexOut in [[stage_in]],
 // smudges nearly invisible (pickup * deposit both attenuated).
 fragment float4 smudgeDepositShader(VertexOut in [[stage_in]],
                                      float2 pointCoord [[point_coord]],
-                                     texture2d<float> patchTexture [[texture(0)]],
+                                     texture2d<float> patchTexture  [[texture(0)]],
+                                     texture2d<float> selectionMask [[texture(2)]],
                                      constant BrushUniforms &uniforms [[buffer(0)]],
                                      constant SmudgeUniforms &smudge [[buffer(1)]]) {
     // Same disc + hardness curve as the brush.
@@ -650,6 +696,10 @@ fragment float4 smudgeDepositShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
     alpha *= uniforms.opacity * uniforms.pressure;
+    // Selection clip on deposit: outside the selection, alpha → 0 and the
+    // discard below short-circuits the patch sample. Pairs with the
+    // pickup-side mask in smudgePatchUpdateShader.
+    alpha *= sampleSelectionMask(selectionMask, in.position);
 
     if (alpha <= 0.0) {
         discard_fragment();
