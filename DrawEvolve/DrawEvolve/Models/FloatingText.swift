@@ -10,6 +10,13 @@
 //  `rotation`. v1 commits to pixels — there's no re-edit story yet, but the
 //  reserved fields below leave the door open.
 //
+//  Codable conformance is wired up (no v1 call site), load-bearing for the
+//  v1.1 vector text layer where each float will round-trip through the
+//  layered drawing manifest. Runtime caches (cachedImage, cachedTexture)
+//  and the Phase-3 CGPath are deliberately excluded — caches rebuild from
+//  content/settings, and CGPath needs its own segment encoder which lands
+//  with Phase 3.
+//
 
 import Foundation
 import SwiftUI
@@ -113,5 +120,76 @@ struct FloatingText {
     mutating func setUniformScale(_ factor: CGFloat) {
         let clamped = max(0.05, factor)
         scale = CGSize(width: clamped, height: clamped)
+    }
+}
+
+// MARK: - Codable
+//
+// Hand-written conformance that:
+//   • Skips runtime caches (cachedImage, cachedTexture) — they're rebuilt
+//     from content + settings via CanvasRenderer.rasterizeFloatingText.
+//   • Stores `rotation` as Double radians — SwiftUI.Angle isn't Codable
+//     itself, and radians is the canonical representation everywhere else.
+//   • decodeIfPresent for every Phase-3-reserved field so old payloads
+//     (without those keys) decode cleanly with the documented defaults.
+//   • Skips the path (CGPath) entirely. CGPath has no built-in Codable;
+//     when Phase 3 lands, add a path-segment encoder and decode here too.
+
+extension FloatingText: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case content
+        case settings
+        case anchor
+        case scale
+        case rotationRadians
+        case bounds
+        case pathStartOffset
+        case baselineOffset
+        case isClosed
+        case autoFlipEnabled
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(content, forKey: .content)
+        try c.encode(settings, forKey: .settings)
+        try c.encode(anchor, forKey: .anchor)
+        try c.encode(scale, forKey: .scale)
+        try c.encode(rotation.radians, forKey: .rotationRadians)
+        try c.encode(bounds, forKey: .bounds)
+        try c.encode(pathStartOffset, forKey: .pathStartOffset)
+        try c.encode(baselineOffset, forKey: .baselineOffset)
+        try c.encode(isClosed, forKey: .isClosed)
+        try c.encode(autoFlipEnabled, forKey: .autoFlipEnabled)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let id       = try c.decode(UUID.self, forKey: .id)
+        let content  = try c.decode(String.self, forKey: .content)
+        let settings = try c.decode(TextSettings.self, forKey: .settings)
+        let anchor   = try c.decode(CGPoint.self, forKey: .anchor)
+        let bounds   = try c.decode(CGRect.self, forKey: .bounds)
+
+        // Memberwise init handles id/content/settings/anchor/bounds; the
+        // rest are mutated in below since they aren't init parameters.
+        self.init(
+            id: id,
+            content: content,
+            settings: settings,
+            anchor: anchor,
+            bounds: bounds
+        )
+
+        self.scale = try c.decode(CGSize.self, forKey: .scale)
+        self.rotation = .radians(try c.decode(Double.self, forKey: .rotationRadians))
+        self.pathStartOffset  = try c.decodeIfPresent(CGFloat.self, forKey: .pathStartOffset)  ?? 0
+        self.baselineOffset   = try c.decodeIfPresent(CGFloat.self, forKey: .baselineOffset)   ?? 0
+        self.isClosed         = try c.decodeIfPresent(Bool.self,    forKey: .isClosed)         ?? false
+        self.autoFlipEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .autoFlipEnabled)  ?? true
+        // Runtime caches (cachedImage, cachedTexture) and the path stay nil;
+        // caller re-rasterises after load.
     }
 }

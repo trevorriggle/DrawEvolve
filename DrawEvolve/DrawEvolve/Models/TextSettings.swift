@@ -8,12 +8,18 @@
 //  FloatingText is active updates BOTH the global default and the active
 //  text's settings (single source of truth, see CanvasStateManager).
 //
+//  Codable conformance is wired up here even though v1 only persists the
+//  global default to UserDefaults — v1.1 vector text layers will need to
+//  serialise per-document FloatingText payloads, and getting the wire
+//  format right (CodableColor wrapper for UIColor, tagged Kerning enum)
+//  costs nothing now. Don't add a new serialiser; just use the conformance.
+//
 
 import Foundation
 import UIKit
 
 struct TextSettings {
-    enum Alignment: String, CaseIterable {
+    enum Alignment: String, Codable, CaseIterable {
         case leading
         case center
         case trailing
@@ -32,6 +38,9 @@ struct TextSettings {
     ///   kern table.
     /// - .none: explicit zero kern, no native pair adjustment.
     /// - .manual(value): explicit doc-space points added to every glyph pair.
+    ///
+    /// Codable conformance lives in an extension (associated values can't
+    /// auto-synthesise — see KerningCoding below).
     enum Kerning: Equatable {
         case auto
         case none
@@ -46,6 +55,8 @@ struct TextSettings {
     /// Doc-space point size. Sliders run 1...500.
     var size: CGFloat
     /// Drawing color. Independent from BrushSettings.color (locked decision).
+    /// On the wire this round-trips through CodableColor (RGBA) so we don't
+    /// depend on UIColor's NSCoding.
     var color: UIColor
     var alignment: Alignment
     /// Doc-space leading (extra inter-line spacing). Sliders run -20...80.
@@ -70,79 +81,120 @@ struct TextSettings {
     )
 }
 
-// MARK: - Persistence
-//
-// JSON-encoded via a small flat struct so UIColor and the kerning enum can
-// round-trip. Keep the storage key versioned — bumping schema requires
-// invalidating older payloads (decode failures fall through to .default).
+// MARK: - CodableColor
 
-private struct TextSettingsCodable: Codable {
-    let fontFamily: String
-    let fontFace: String
-    let size: CGFloat
-    let r: CGFloat
-    let g: CGFloat
-    let b: CGFloat
-    let a: CGFloat
-    let alignment: String
-    let leading: CGFloat
-    let tracking: CGFloat
-    let kerningKind: String
-    let kerningValue: CGFloat
-    let italic: Bool
+/// RGBA component wrapper so UIColor can ride through Codable graphs without
+/// pulling in NSCoding or sRGB-vs-displayP3 surprises. Components are stored
+/// in extended-sRGB (UIColor.getRed semantics) — round-tripping through
+/// `init(red:green:blue:alpha:)` reproduces the original color faithfully
+/// for the colors users pick from AdvancedColorPicker.
+///
+/// Re-usable for any UIColor-bearing model that needs serialisation (the
+/// imminent v1.1 vector text layer being the load-bearing consumer).
+struct CodableColor: Codable, Equatable {
+    let red: CGFloat
+    let green: CGFloat
+    let blue: CGFloat
+    let alpha: CGFloat
 
-    init(_ s: TextSettings) {
-        fontFamily = s.fontFamily
-        fontFace = s.fontFace
-        size = s.size
-        var rr: CGFloat = 0, gg: CGFloat = 0, bb: CGFloat = 0, aa: CGFloat = 1
-        s.color.getRed(&rr, green: &gg, blue: &bb, alpha: &aa)
-        r = rr; g = gg; b = bb; a = aa
-        alignment = s.alignment.rawValue
-        leading = s.leading
-        tracking = s.tracking
-        switch s.kerning {
-        case .auto:           kerningKind = "auto";   kerningValue = 0
-        case .none:           kerningKind = "none";   kerningValue = 0
-        case .manual(let v):  kerningKind = "manual"; kerningValue = v
-        }
-        italic = s.italic
+    init(_ color: UIColor) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        red = r; green = g; blue = b; alpha = a
     }
 
-    func unwrap() -> TextSettings {
-        let kerning: TextSettings.Kerning
-        switch kerningKind {
-        case "manual": kerning = .manual(kerningValue)
-        case "none":   kerning = .none
-        default:       kerning = .auto
+    var uiColor: UIColor {
+        UIColor(red: red, green: green, blue: blue, alpha: alpha)
+    }
+}
+
+// MARK: - Codable conformance
+//
+// Hand-written rather than synthesised because UIColor isn't Codable and
+// Kerning has associated values. Both surfaces live in extensions so the
+// memberwise initialiser the rest of the codebase relies on stays
+// synthesised.
+
+extension TextSettings.Kerning: Codable {
+    private enum Tag: String, Codable {
+        case auto, none, manual
+    }
+    private enum CodingKeys: String, CodingKey {
+        case tag, value
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .auto:
+            try c.encode(Tag.auto, forKey: .tag)
+        case .none:
+            try c.encode(Tag.none, forKey: .tag)
+        case .manual(let v):
+            try c.encode(Tag.manual, forKey: .tag)
+            try c.encode(v, forKey: .value)
         }
-        return TextSettings(
-            fontFamily: fontFamily,
-            fontFace: fontFace,
-            size: size,
-            color: UIColor(red: r, green: g, blue: b, alpha: a),
-            alignment: TextSettings.Alignment(rawValue: alignment) ?? .leading,
-            leading: leading,
-            tracking: tracking,
-            kerning: kerning,
-            italic: italic
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Tag.self, forKey: .tag) {
+        case .auto:   self = .auto
+        case .none:   self = .none
+        case .manual: self = .manual(try c.decode(CGFloat.self, forKey: .value))
+        }
+    }
+}
+
+extension TextSettings: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case fontFamily, fontFace, size, color, alignment, leading, tracking, kerning, italic
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(fontFamily, forKey: .fontFamily)
+        try c.encode(fontFace, forKey: .fontFace)
+        try c.encode(size, forKey: .size)
+        try c.encode(CodableColor(color), forKey: .color)
+        try c.encode(alignment, forKey: .alignment)
+        try c.encode(leading, forKey: .leading)
+        try c.encode(tracking, forKey: .tracking)
+        try c.encode(kerning, forKey: .kerning)
+        try c.encode(italic, forKey: .italic)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            fontFamily: try c.decode(String.self, forKey: .fontFamily),
+            fontFace:   try c.decode(String.self, forKey: .fontFace),
+            size:       try c.decode(CGFloat.self, forKey: .size),
+            color:      try c.decode(CodableColor.self, forKey: .color).uiColor,
+            alignment:  try c.decode(Alignment.self, forKey: .alignment),
+            leading:    try c.decode(CGFloat.self, forKey: .leading),
+            tracking:   try c.decode(CGFloat.self, forKey: .tracking),
+            kerning:    try c.decode(Kerning.self, forKey: .kerning),
+            italic:     try c.decode(Bool.self, forKey: .italic)
         )
     }
 }
+
+// MARK: - Persistence
 
 extension TextSettings {
     static let storageKey = "DrawEvolve.TextSettings.v1"
 
     static func loadPersisted() -> TextSettings {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let coded = try? JSONDecoder().decode(TextSettingsCodable.self, from: data) else {
+              let decoded = try? JSONDecoder().decode(TextSettings.self, from: data) else {
             return .default
         }
-        return coded.unwrap()
+        return decoded
     }
 
     func savePersisted() {
-        guard let data = try? JSONEncoder().encode(TextSettingsCodable(self)) else { return }
+        guard let data = try? JSONEncoder().encode(self) else { return }
         UserDefaults.standard.set(data, forKey: Self.storageKey)
     }
 }
