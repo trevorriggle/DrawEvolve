@@ -73,6 +73,9 @@
 		DE000071 /* PathSmoothing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100071 /* PathSmoothing.swift */; };
 		DE000072 /* TextOnPathRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100072 /* TextOnPathRenderer.swift */; };
 		DE000073 /* PathStartHandle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100073 /* PathStartHandle.swift */; };
+		DE000074 /* ToolGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100074 /* ToolGroup.swift */; };
+		DE000075 /* GroupedToolButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100075 /* GroupedToolButton.swift */; };
+		DE000076 /* ToolGroupPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100076 /* ToolGroupPopover.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -145,6 +148,9 @@
 		DE100071 /* PathSmoothing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathSmoothing.swift; sourceTree = "<group>"; };
 		DE100072 /* TextOnPathRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextOnPathRenderer.swift; sourceTree = "<group>"; };
 		DE100073 /* PathStartHandle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathStartHandle.swift; sourceTree = "<group>"; };
+		DE100074 /* ToolGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroup.swift; sourceTree = "<group>"; };
+		DE100075 /* GroupedToolButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupedToolButton.swift; sourceTree = "<group>"; };
+		DE100076 /* ToolGroupPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupPopover.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -306,6 +312,9 @@
 				DE100039 /* ToolButton.swift */,
 				DE100900 /* AdjustmentHUD.swift */,
 				DE100073 /* PathStartHandle.swift */,
+				DE100074 /* ToolGroup.swift */,
+				DE100075 /* GroupedToolButton.swift */,
+				DE100076 /* ToolGroupPopover.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -466,6 +475,9 @@
 				DE000071 /* PathSmoothing.swift in Sources */,
 				DE000072 /* TextOnPathRenderer.swift in Sources */,
 				DE000073 /* PathStartHandle.swift in Sources */,
+				DE000074 /* ToolGroup.swift in Sources */,
+				DE000075 /* GroupedToolButton.swift in Sources */,
+				DE000076 /* ToolGroupPopover.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
