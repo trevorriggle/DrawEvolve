@@ -41,6 +41,7 @@ struct DrawingCanvasView: View {
     @State private var showTextInput = false
     @State private var textInputLocation: CGPoint = .zero
     @State private var textToRender = ""
+    @State private var showTextSettings = false
 
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
@@ -363,6 +364,15 @@ struct DrawingCanvasView: View {
 
                             ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
                                 canvasState.currentTool = .text
+                            }
+
+                            // Text Settings — opens the typographic settings
+                            // sheet. Independent from the text tool button:
+                            // user can adjust defaults at any time, not just
+                            // while text is selected (matches brush-settings
+                            // behaviour).
+                            ToolButton(icon: "textformat.size", isSelected: showTextSettings) {
+                                showTextSettings.toggle()
                             }
 
                             // Image import (Photos picker)
@@ -697,6 +707,20 @@ struct DrawingCanvasView: View {
                     }
             }
         }
+        .sheet(isPresented: $showTextSettings) {
+            NavigationView {
+                TextSettingsView(settings: $canvasState.textSettings)
+                    .navigationTitle("Text Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                showTextSettings = false
+                            }
+                        }
+                    }
+            }
+        }
         .sheet(isPresented: $showSymmetrySettings) {
             NavigationView {
                 SymmetrySettingsView(symmetry: symmetry)
@@ -724,7 +748,7 @@ struct DrawingCanvasView: View {
             Button("Cancel", role: .cancel) {}
             Button("Add") {
                 if !textToRender.isEmpty {
-                    canvasState.renderText(textToRender, at: textInputLocation)
+                    canvasState.beginText(at: textInputLocation, content: textToRender)
                 }
             }
         } message: {

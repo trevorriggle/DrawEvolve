@@ -179,6 +179,13 @@ struct MetalCanvasView: UIViewRepresentable {
         private var blurAdjustmentLastUpdateAt: TimeInterval = 0
         private static let blurAdjustmentThrottleInterval: TimeInterval = 1.0 / 30.0
 
+        // FloatingText body-drag state. The transform handles overlay (a
+        // SwiftUI sibling) handles scale/rotate via .gesture; this path
+        // covers the body-drag (move) gesture inside the canvas's MTKView.
+        private var isDraggingFloatingText = false
+        private var floatingTextDragStartDoc: CGPoint?
+        private var floatingTextDragOriginAnchor: CGPoint?
+
         // Snap-to-line state. While a brush/eraser/blur stroke is in progress,
         // a 600ms stationary timer waits for the touch to settle (<2pt screen-
         // space movement) and then replaces the wobbly in-progress geometry
@@ -420,6 +427,32 @@ struct MetalCanvasView: UIViewRepresentable {
                 )
             }
 
+            // FloatingText live preview. Composited on top of the layer
+            // stack (and any floating selection) using the same shader the
+            // floating selection uses — rotation included. The text's
+            // doc-space `displayedRect` already encodes scale, so we don't
+            // pass a scale uniform.
+            let (floatingTextTexture, floatingTextDocRect, floatingTextRotation): (MTLTexture?, CGRect, CGFloat) = MainActor.assumeIsolated {
+                guard let ft = canvasState?.floatingText, let tex = ft.cachedTexture else {
+                    return (MTLTexture?.none, CGRect.zero, CGFloat(0))
+                }
+                return (tex, ft.displayedRect, ft.rotation.radians)
+            }
+            if let ftTex = floatingTextTexture, floatingTextDocRect.width > 0, floatingTextDocRect.height > 0 {
+                renderer?.renderFloatingTexture(
+                    ftTex,
+                    atDocRect: floatingTextDocRect,
+                    rotation: Float(floatingTextRotation),
+                    to: renderEncoder,
+                    opacity: 1.0,
+                    zoomScale: Float(zoomScale),
+                    panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                    canvasRotation: Float(rotation),
+                    viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                    flipState: flipState
+                )
+            }
+
             // IMPORTANT: Render current stroke preview on top
             // Preview stroke points are in document space, so apply transforms for display.
             // Skip the preview for the blur tool — its in-progress stamps don't
@@ -585,8 +618,33 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Handle text tool - show text input dialog
+            // Handle text tool — three branches based on the current
+            // FloatingText state:
+            //   1. tap inside an active float's bounds → drag the body
+            //   2. tap outside the bounds            → commit and consume
+            //   3. no active float                    → open the input alert
             if currentTool == .text {
+                let activeFloat: FloatingText? = MainActor.assumeIsolated {
+                    canvasState?.floatingText
+                }
+                if let ft = activeFloat {
+                    if ft.containsDocPoint(location) {
+                        isDraggingFloatingText = true
+                        floatingTextDragStartDoc = location
+                        floatingTextDragOriginAnchor = ft.anchor
+                        print("Text tool: began body drag at \(location)")
+                        return
+                    } else {
+                        // Tap outside the float bakes it into the layer.
+                        // The tap itself is consumed — the user has to tap
+                        // again to start a new text.
+                        print("Text tool: tap outside floating text → commit")
+                        if let cs = canvasState {
+                            MainActor.assumeIsolated { cs.commitFloatingText() }
+                        }
+                        return
+                    }
+                }
                 print("Text tool: requesting text input at \(location)")
                 onTextRequest?(location)
                 return
@@ -869,6 +927,24 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
+            // FloatingText body drag — update anchor in doc space. The
+            // floating-text texture composites at the new anchor on the
+            // next frame via renderFloatingTexture in draw().
+            if isDraggingFloatingText,
+               let start = floatingTextDragStartDoc,
+               let originalAnchor = floatingTextDragOriginAnchor,
+               let cs = canvasState {
+                let newAnchor = CGPoint(
+                    x: originalAnchor.x + (latestLocation.x - start.x),
+                    y: originalAnchor.y + (latestLocation.y - start.y)
+                )
+                MainActor.assumeIsolated {
+                    cs.floatingText?.anchor = newAnchor
+                }
+                view.setNeedsDisplay()
+                return
+            }
+
             // Handle dragging an existing selection. We *only* update the
             // doc-space offset here — the draw loop renders the floating
             // texture (or the active layer, for whole-layer move) at offset
@@ -1143,6 +1219,16 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // FloatingText body drag — lift commits the position change but
+            // doesn't bake to the layer. Commit happens on tap-outside or
+            // tool-change; this branch only resets drag bookkeeping.
+            if isDraggingFloatingText {
+                isDraggingFloatingText = false
+                floatingTextDragStartDoc = nil
+                floatingTextDragOriginAnchor = nil
+                return
+            }
+
             // Handle ending a selection drag
             if isDraggingSelection {
                 print("Finished dragging selection, committing to layer")
@@ -1388,6 +1474,9 @@ struct MetalCanvasView: UIViewRepresentable {
             selectionDragStart = nil
             blurAdjustmentTouchStartScreen = nil
             blurAdjustmentLastUpdateAt = 0
+            isDraggingFloatingText = false
+            floatingTextDragStartDoc = nil
+            floatingTextDragOriginAnchor = nil
             resetSnapToLineState()
 
             // Clear selection previews + stamp cursor.

@@ -149,12 +149,17 @@ private struct TransformDragSession {
 struct TransformHandlesOverlay: View {
     @ObservedObject var canvasState: CanvasStateManager
     @State private var session: TransformDragSession?
+    /// Active session for FloatingText handles. Lives separately from the
+    /// selection session so the two can never share state mid-drag.
+    @State private var textSession: FloatingTextHandleSession?
 
     var body: some View {
         Group {
             if canvasState.floatingSelectionTexture != nil,
                let originalRect = canvasState.selectionOriginalRect {
                 content(originalRect: originalRect)
+            } else if canvasState.floatingText != nil {
+                floatingTextContent()
             }
         }
     }
@@ -499,6 +504,228 @@ struct TransformHandlesOverlay: View {
         guard len > 0.0001 else { return CGPoint(x: 0, y: -1) } // fallback: pretend the box is upright
         return CGPoint(x: v.x / len, y: v.y / len)
     }
+
+    // MARK: - FloatingText handles
+    //
+    // Same visual handles as the selection (bounding box + corner dots +
+    // rotation stem), but driven by FloatingText state and constrained to
+    // UNIFORM scale (per locked decision: no non-uniform text scaling in
+    // v1). Edge handles are intentionally omitted — they would let the
+    // user squish text horizontally, which the spec rules out.
+    //
+    // End-of-corner-drag bakes `floatingText.scale` into `textSettings.size`
+    // and re-rasterises via `canvasState.bakeFloatingTextScale()` so text
+    // stays crisp at any scale.
+
+    @ViewBuilder
+    private func floatingTextContent() -> some View {
+        if let ft = canvasState.floatingText, ft.bounds.size != .zero {
+            let displayed = ft.displayedRect
+            let centerDoc = CGPoint(x: displayed.midX, y: displayed.midY)
+            let halfW = displayed.width / 2
+            let halfH = displayed.height / 2
+            let theta = ft.rotation.radians
+
+            let cornerLocals: [CGPoint] = [
+                CGPoint(x: -halfW, y: -halfH),  // 0 TL
+                CGPoint(x:  halfW, y: -halfH),  // 1 TR
+                CGPoint(x:  halfW, y:  halfH),  // 2 BR
+                CGPoint(x: -halfW, y:  halfH),  // 3 BL
+            ]
+            let topMidLocal = CGPoint(x: 0, y: -halfH)
+
+            let cornerDocs = cornerLocals.map { rotateLocalToDoc($0, theta: theta).offset(by: centerDoc) }
+            let topMidDoc  = rotateLocalToDoc(topMidLocal,  theta: theta).offset(by: centerDoc)
+
+            let cornerScreens = cornerDocs.map { canvasState.documentToScreen($0) }
+            let centerScreen  = canvasState.documentToScreen(centerDoc)
+            let topMidScreen  = canvasState.documentToScreen(topMidDoc)
+
+            let outward = normalized(topMidScreen - centerScreen)
+            let rotationHandleScreen = topMidScreen + outward * 30
+
+            ZStack {
+                Path { p in
+                    p.move(to: cornerScreens[0])
+                    p.addLine(to: cornerScreens[1])
+                    p.addLine(to: cornerScreens[2])
+                    p.addLine(to: cornerScreens[3])
+                    p.closeSubpath()
+                    p.move(to: topMidScreen)
+                    p.addLine(to: rotationHandleScreen)
+                }
+                .stroke(Color.blue.opacity(0.85), lineWidth: 1.5)
+                .allowsHitTesting(false)
+
+                ForEach(0..<4, id: \.self) { i in
+                    handleDot(filled: true)
+                        .position(cornerScreens[i])
+                        .gesture(textCornerDrag(corner: i))
+                }
+                handleDot(filled: true, stroke: .green)
+                    .position(rotationHandleScreen)
+                    .gesture(textRotationDrag())
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private func textCornerDrag(corner: Int) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { value in
+                if textSession == nil {
+                    textSession = makeTextSession(for: .corner(corner), fingerScreen: value.startLocation)
+                }
+                guard let s = textSession else { return }
+                applyTextCornerDrag(session: s, fingerScreen: value.location)
+            }
+            .onEnded { _ in
+                textSession = nil
+                // Bake the new scale into settings.size and re-rasterise.
+                canvasState.bakeFloatingTextScale()
+            }
+    }
+
+    private func textRotationDrag() -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { value in
+                if textSession == nil {
+                    textSession = makeTextSession(for: .rotation, fingerScreen: value.startLocation)
+                }
+                guard let s = textSession else { return }
+                applyTextRotationDrag(session: s, fingerScreen: value.location)
+            }
+            .onEnded { _ in
+                textSession = nil
+            }
+    }
+
+    private func makeTextSession(for handle: TransformHandle, fingerScreen: CGPoint) -> FloatingTextHandleSession? {
+        guard let ft = canvasState.floatingText else { return nil }
+        let displayed = ft.displayedRect
+        let center = CGPoint(x: displayed.midX, y: displayed.midY)
+        let theta = ft.rotation.radians
+        let halfW = displayed.width / 2
+        let halfH = displayed.height / 2
+
+        // Anchor in local frame for corner: the OPPOSITE corner stays put.
+        let anchorLocal: CGPoint = {
+            switch handle {
+            case .corner(let i): return [
+                CGPoint(x:  halfW, y:  halfH), // TL → BR pinned
+                CGPoint(x: -halfW, y:  halfH), // TR → BL pinned
+                CGPoint(x: -halfW, y: -halfH), // BR → TL pinned
+                CGPoint(x:  halfW, y: -halfH), // BL → TR pinned
+            ][i]
+            case .edge: return .zero  // edge handles unused for text
+            case .rotation: return .zero
+            }
+        }()
+        let cornerLocal: CGPoint = {
+            switch handle {
+            case .corner(let i): return [
+                CGPoint(x: -halfW, y: -halfH),
+                CGPoint(x:  halfW, y: -halfH),
+                CGPoint(x:  halfW, y:  halfH),
+                CGPoint(x: -halfW, y:  halfH),
+            ][i]
+            default: return .zero
+            }
+        }()
+
+        let anchorDoc = rotateLocalToDoc(anchorLocal, theta: theta).offset(by: center)
+        let cornerDoc = rotateLocalToDoc(cornerLocal, theta: theta).offset(by: center)
+        let fingerDoc = canvasState.screenToDocument(fingerScreen)
+
+        let initialAngle: CGFloat = {
+            let dx = fingerDoc.x - center.x
+            let dy = fingerDoc.y - center.y
+            return atan2(dy, dx)
+        }()
+
+        return FloatingTextHandleSession(
+            handle: handle,
+            startScale: ft.scale,
+            startAnchor: ft.anchor,
+            startBoundsSize: ft.bounds.size,
+            startRotation: theta,
+            anchorDoc: anchorDoc,
+            centerDocAtStart: center,
+            originalDiagonalDoc: CGPoint(x: cornerDoc.x - anchorDoc.x, y: cornerDoc.y - anchorDoc.y),
+            initialAngleAtCenter: initialAngle
+        )
+    }
+
+    private func applyTextCornerDrag(session s: FloatingTextHandleSession, fingerScreen: CGPoint) {
+        guard var ft = canvasState.floatingText else { return }
+        let fingerDoc = canvasState.screenToDocument(fingerScreen)
+        let fromAnchorDoc = CGPoint(x: fingerDoc.x - s.anchorDoc.x,
+                                    y: fingerDoc.y - s.anchorDoc.y)
+        let inLocal = rotateDocToLocal(fromAnchorDoc, theta: s.startRotation)
+        let origInLocal = rotateDocToLocal(s.originalDiagonalDoc, theta: s.startRotation)
+
+        let len2 = origInLocal.x * origInLocal.x + origInLocal.y * origInLocal.y
+        guard len2 > 0 else { return }
+        let dot = inLocal.x * origInLocal.x + inLocal.y * origInLocal.y
+        let factor = max(0.05, dot / len2)
+
+        // Uniform scale only — width AND height multiply by the same factor.
+        let newScaleW = s.startScale.width  * factor
+        let newScaleH = s.startScale.height * factor
+        // Snap to identity if the user dragged back near the start (avoids
+        // accumulated floating-point drift after a round-trip).
+        ft.setUniformScale(newScaleW)
+
+        // Re-pin the anchor corner (opposite corner of the dragged one) in
+        // doc space. Same math as selection's applyScaleDrag.
+        let newDisplayedSize = CGSize(
+            width:  s.startBoundsSize.width  * newScaleW,
+            height: s.startBoundsSize.height * newScaleH
+        )
+        let anchorLocalSign = anchorSign(for: s.handle)
+        let anchorLocalNew = CGPoint(
+            x: anchorLocalSign.x * newDisplayedSize.width  / 2,
+            y: anchorLocalSign.y * newDisplayedSize.height / 2
+        )
+        let anchorOffsetFromCenter = rotateLocalToDoc(anchorLocalNew, theta: s.startRotation)
+        let newCenter = CGPoint(
+            x: s.anchorDoc.x - anchorOffsetFromCenter.x,
+            y: s.anchorDoc.y - anchorOffsetFromCenter.y
+        )
+        // FloatingText.anchor is the unrotated displayed rect's TOP-LEFT.
+        let newAnchor = CGPoint(
+            x: newCenter.x - newDisplayedSize.width  / 2,
+            y: newCenter.y - newDisplayedSize.height / 2
+        )
+        ft.anchor = newAnchor
+        canvasState.floatingText = ft
+    }
+
+    private func applyTextRotationDrag(session s: FloatingTextHandleSession, fingerScreen: CGPoint) {
+        guard var ft = canvasState.floatingText else { return }
+        let fingerDoc = canvasState.screenToDocument(fingerScreen)
+        let dx = fingerDoc.x - s.centerDocAtStart.x
+        let dy = fingerDoc.y - s.centerDocAtStart.y
+        let currentAngle = atan2(dy, dx)
+        // Same sign convention as selection: visual CCW = -(atan2 delta).
+        let delta = -(currentAngle - s.initialAngleAtCenter)
+        ft.rotation = .radians(s.startRotation + delta)
+        canvasState.floatingText = ft
+    }
+}
+
+/// Per-drag bookkeeping for FloatingText handles. Mirrors
+/// TransformDragSession but tracks anchor (top-left) instead of offset.
+private struct FloatingTextHandleSession {
+    let handle: TransformHandle
+    let startScale: CGSize
+    let startAnchor: CGPoint
+    let startBoundsSize: CGSize
+    let startRotation: CGFloat
+    let anchorDoc: CGPoint           // doc-space pin for the opposite corner
+    let centerDocAtStart: CGPoint
+    let originalDiagonalDoc: CGPoint
+    let initialAngleAtCenter: CGFloat
 }
 
 private extension CGPoint {
@@ -527,19 +754,25 @@ struct TransformCancelPill: View {
 
     var body: some View {
         if canvasState.floatingSelectionTexture != nil {
-            Button(action: { canvasState.cancelSelection() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark")
-                    Text("Cancel")
-                }
-                .font(.subheadline.weight(.medium))
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.75))
-                .clipShape(Capsule())
-                .shadow(radius: 3)
+            cancelButton(action: { canvasState.cancelSelection() })
+        } else if canvasState.floatingText != nil {
+            cancelButton(action: { canvasState.cancelFloatingText() })
+        }
+    }
+
+    private func cancelButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "xmark")
+                Text("Cancel")
             }
+            .font(.subheadline.weight(.medium))
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.75))
+            .clipShape(Capsule())
+            .shadow(radius: 3)
         }
     }
 }

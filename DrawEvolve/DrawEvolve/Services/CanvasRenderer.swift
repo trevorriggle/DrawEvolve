@@ -9,6 +9,7 @@ import Foundation
 import Metal
 import MetalKit
 import UIKit
+import CoreText
 
 class CanvasRenderer: NSObject {
     let device: MTLDevice // Public for GPU sync
@@ -1436,54 +1437,193 @@ class CanvasRenderer: NSObject {
         to texture: MTLTexture,
         screenSize: CGSize
     ) {
-        print("CanvasRenderer: Rendering text '\(text)' at \(location)")
+        // Single-line, default-style adapter that routes through
+        // `rasterizeFloatingText` so legacy callers get the same Core Text
+        // path the floating-text pipeline uses.
+        let settings = TextSettings(
+            fontFamily: "Helvetica Neue",
+            fontFace: "HelveticaNeue",
+            size: fontSize,
+            color: color,
+            alignment: .leading,
+            leading: 0,
+            tracking: 0,
+            kerning: .auto,
+            italic: false
+        )
+        let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
+        guard let result = rasterizeFloatingText(
+            content: text,
+            settings: settings,
+            screenSize: screenSize,
+            textureSize: texSize
+        ) else { return }
+        let destRect = CGRect(origin: location, size: result.docSize)
+        renderImage(result.image, at: destRect, to: texture, screenSize: screenSize)
+    }
 
-        // Doc→texture scale. With current architecture both equal canvasSize
-        // and this is 1.0. Computed anyway so the math holds if they ever
-        // diverge.
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
+    // MARK: - Core Text rasterisation
+
+    /// Rasterise a string + TextSettings to a UIImage at canvas-native
+    /// resolution. Single source of truth for both legacy `renderText` and
+    /// the FloatingText pipeline.
+    ///
+    /// Returns the image and its doc-space size — anchor + this size is the
+    /// rect callers blit into the layer (or pass to `renderFloatingTexture`
+    /// for live preview).
+    ///
+    /// Italic resolution uses UIFontDescriptor.SymbolicTraits.traitItalic
+    /// first; if the family has no italic variant, falls back to a 12°
+    /// horizontal shear applied via the CGContext text matrix. Trailing
+    /// kerning is stripped from the last grapheme (NSAttributedString-level
+    /// `.kern` applies to the trailing gap, so the final character would
+    /// otherwise add unwanted right padding).
+    func rasterizeFloatingText(
+        _ floatingText: FloatingText,
+        for texture: MTLTexture,
+        screenSize: CGSize
+    ) -> (image: UIImage, docSize: CGSize)? {
+        let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
+        return rasterizeFloatingText(
+            content: floatingText.content,
+            settings: floatingText.settings,
+            screenSize: screenSize,
+            textureSize: texSize
+        )
+    }
+
+    /// Core Text rasterisation primitive. Doc→texture scaling baked in so
+    /// the resulting image has native-pixel dimensions and `renderImage`'s
+    /// internal scaleX/scaleY math cancels back to 1:1.
+    func rasterizeFloatingText(
+        content: String,
+        settings: TextSettings,
+        screenSize: CGSize,
+        textureSize: CGSize
+    ) -> (image: UIImage, docSize: CGSize)? {
+        guard !content.isEmpty,
+              screenSize.width > 0, screenSize.height > 0,
+              textureSize.width > 0, textureSize.height > 0 else { return nil }
+
+        let scaleX = textureSize.width  / screenSize.width
+        let scaleY = textureSize.height / screenSize.height
         let textureScale = max(scaleX, scaleY)
 
-        // Render text at the texture-pixel font size so the rasterized image
-        // is sharp at native canvas resolution. (Equivalent to `fontSize` in
-        // doc units when scale is 1:1.)
-        let renderFontSize = fontSize * textureScale
-        let font = UIFont.systemFont(ofSize: renderFontSize, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color
-        ]
+        // Render at texture-pixel size so the rasterised image is sharp at
+        // canvas-native resolution. Doc-space sizes (size / leading /
+        // tracking / kerning) all scale up by the same factor.
+        let renderSize = settings.size * textureScale
 
-        let textSizePx = (text as NSString).size(withAttributes: attributes)
-        guard textSizePx.width > 0, textSizePx.height > 0 else {
-            print("  ERROR: Invalid text dimensions")
-            return
+        // Resolve font + italic shear fallback.
+        let baseFont = UIFont(name: settings.fontFace, size: renderSize)
+            ?? UIFont(name: settings.fontFamily, size: renderSize)
+            ?? UIFont.systemFont(ofSize: renderSize, weight: .regular)
+
+        var resolvedFont = baseFont
+        var shearAngle: CGFloat = 0
+        if settings.italic {
+            if let italicDescriptor = baseFont.fontDescriptor.withSymbolicTraits(.traitItalic) {
+                resolvedFont = UIFont(descriptor: italicDescriptor, size: renderSize)
+            } else {
+                // 12° fallback shear applied via cgctx.textMatrix below.
+                shearAngle = 12 * .pi / 180
+            }
         }
 
-        // Rasterize to a transparent-background UIImage at scale=1.0 so the
-        // backing CGImage's pixel dimensions equal `textSizePx`. Without
-        // forcing scale=1.0, UIGraphicsImageRenderer uses the device's main
-        // screen scale (2× or 3×), which would blow the image up and break
-        // the 1:1 doc→texture mapping renderImage relies on.
+        // Paragraph style (alignment + leading).
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = settings.alignment.nsTextAlignment
+        paragraph.lineSpacing = settings.leading * textureScale
+
+        var attrs: [NSAttributedString.Key: Any] = [
+            .font: resolvedFont,
+            .foregroundColor: settings.color,
+            .paragraphStyle: paragraph,
+        ]
+        if settings.tracking != 0 {
+            // .tracking adds uniform spacing to every glyph (iOS 14+).
+            attrs[.tracking] = settings.tracking * textureScale
+        }
+
+        var kernValue: CGFloat? = nil
+        switch settings.kerning {
+        case .auto:           kernValue = nil
+        case .none:           kernValue = 0
+        case .manual(let v):  kernValue = v * textureScale
+        }
+        if let k = kernValue {
+            attrs[.kern] = k
+        }
+
+        // Build attributed string. Strip kerning from the last grapheme
+        // cluster so the trailing gap doesn't push the laid-out width past
+        // the visible glyph edge.
+        let attrStr = NSMutableAttributedString(string: content, attributes: attrs)
+        if kernValue != nil {
+            let ns = content as NSString
+            let length = ns.length
+            if length > 0 {
+                let last = ns.rangeOfComposedCharacterSequence(at: length - 1)
+                attrStr.removeAttribute(.kern, range: last)
+            }
+        }
+
+        // Layout via CTFramesetter.
+        let framesetter = CTFramesetterCreateWithAttributedString(attrStr)
+        let constraint = CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                height: CGFloat.greatestFiniteMagnitude)
+        let suggested = CTFramesetterSuggestFrameSizeWithConstraints(
+            framesetter,
+            CFRangeMake(0, attrStr.length),
+            nil,
+            constraint,
+            nil
+        )
+        guard suggested.width > 0, suggested.height > 0 else { return nil }
+
+        // Padding to absorb shear extension and descender clipping. CT
+        // returns the typographic bounds, which can clip italic descenders
+        // and the right-shifted cap of a sheared glyph.
+        let descenderPadding = ceil(renderSize * 0.25)
+        let shearExtra: CGFloat = shearAngle > 0
+            ? ceil(suggested.height * tan(shearAngle))
+            : 0
+        let drawW = ceil(suggested.width)  + descenderPadding * 2 + shearExtra
+        let drawH = ceil(suggested.height) + descenderPadding * 2
+
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1.0
         format.opaque = false
-        let imageRenderer = UIGraphicsImageRenderer(size: textSizePx, format: format)
-        let textImage = imageRenderer.image { _ in
-            (text as NSString).draw(at: .zero, withAttributes: attributes)
+        let imageRenderer = UIGraphicsImageRenderer(size: CGSize(width: drawW, height: drawH),
+                                                    format: format)
+        let image = imageRenderer.image { ctx in
+            let cgctx = ctx.cgContext
+            cgctx.textMatrix = .identity
+            // Flip to Y-up for Core Text.
+            cgctx.translateBy(x: 0, y: drawH)
+            cgctx.scaleBy(x: 1, y: -1)
+
+            if shearAngle > 0 {
+                // Italic shear: top of glyph (y>0 in CT's frame) shifts
+                // right by tan(angle) * y. Applied via the text matrix so
+                // CTFrameDraw picks it up.
+                let shear = tan(shearAngle)
+                cgctx.textMatrix = CGAffineTransform(a: 1, b: 0, c: shear, d: 1, tx: 0, ty: 0)
+            }
+
+            let path = CGMutablePath()
+            path.addRect(CGRect(
+                x: descenderPadding,
+                y: descenderPadding,
+                width: suggested.width,
+                height: suggested.height
+            ))
+            let frame = CTFramesetterCreateFrame(framesetter, CFRangeMake(0, attrStr.length), path, nil)
+            CTFrameDraw(frame, cgctx)
         }
 
-        // Convert the texture-pixel size back to doc units for renderImage,
-        // which re-applies texture/screenSize scaling internally. The two
-        // scale factors cancel and the image lands at pixel-perfect 1:1.
-        let docW = textSizePx.width / textureScale
-        let docH = textSizePx.height / textureScale
-        let destRect = CGRect(x: location.x, y: location.y, width: docW, height: docH)
-
-        renderImage(textImage, at: destRect, to: texture, screenSize: screenSize)
-
-        print("  Text rendered via renderImage at doc rect \(destRect)")
+        let docSize = CGSize(width: drawW / textureScale, height: drawH / textureScale)
+        return (image, docSize)
     }
 
     // MARK: - Load Image
