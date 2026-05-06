@@ -12,6 +12,21 @@
     {
       "idiom" : "universal",
       "scale" : "3x"
+    },
+    {
+      "filename" : "DrawEvolveLoadingScreen-iphone.png",
+      "idiom" : "iphone",
+      "scale" : "1x"
+    },
+    {
+      "filename" : "DrawEvolveLoadingScreen-iphone@2x.png",
+      "idiom" : "iphone",
+      "scale" : "2x"
+    },
+    {
+      "filename" : "DrawEvolveLoadingScreen-iphone@3x.png",
+      "idiom" : "iphone",
+      "scale" : "3x"
     }
   ],
   "info" : {
