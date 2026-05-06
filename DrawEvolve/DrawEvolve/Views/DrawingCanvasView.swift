@@ -45,6 +45,13 @@ struct DrawingCanvasView: View {
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
 
+    // iPhone tool-panel expand state. Inverse default of iPad's
+    // isToolbarCollapsed (false = collapsed) because iPhone has less
+    // vertical space and benefits from collapse-by-default. Drives
+    // phoneToolPanel visibility; never co-fires with isToolbarCollapsed
+    // since they live in disjoint body branches (phoneBody vs padBody).
+    @State private var isToolPanelExpanded = false
+
     // Save state
     @State private var showSaveDialog = false
     @State private var drawingTitle = ""
@@ -294,9 +301,16 @@ struct DrawingCanvasView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                saveToGalleryButton
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                VStack(spacing: 8) {
+                    phoneSelectionContextBar
+                    phoneActionRow
+                    if isToolPanelExpanded {
+                        phoneToolPanel
+                    }
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+                .background(.regularMaterial)
             }
             // iPhone Phase 4: half-sheet for FloatingFeedbackPanel.
             // iPad's path renders the panel inline inside padBody's ZStack
@@ -819,57 +833,18 @@ struct DrawingCanvasView: View {
                 )
             }
 
-            // Selection actions overlay
+            // Selection actions overlay — iPad positioning. The card
+            // content (caption + Cancel + Delete pills) lives in the
+            // shared `selectionActiveCard` computed property; only the
+            // outer VStack/Spacer/HStack/Spacer + bottom-200 positioning
+            // is iPad-specific. Same justified-deviation pattern as
+            // Phase 4's critiqueContent extraction.
             if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {
                     Spacer()
                     HStack {
                         Spacer()
-                        VStack(spacing: 12) {
-                            Text("Selection Active")
-                                .font(.caption)
-                                .foregroundColor(.primary)
-
-                            HStack(spacing: 12) {
-                                // Cancel selection button
-                                Button(action: {
-                                    canvasState.clearSelection()
-                                }) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 16))
-                                        Text("Cancel")
-                                            .font(.subheadline)
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color.gray)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
-                                }
-
-                                // Delete selection button
-                                Button(action: {
-                                    canvasState.deleteSelectedPixels()
-                                }) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "trash.fill")
-                                            .font(.system(size: 16))
-                                        Text("Delete")
-                                            .font(.subheadline)
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 10)
-                                    .background(Color.red)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
-                                }
-                            }
-                        }
-                        .padding()
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(12)
-                        .shadow(radius: 5)
+                        selectionActiveCard
                         .padding(.trailing, 12)
                         .padding(.bottom, 200) // Position above Save/Feedback buttons
                     }
@@ -1009,6 +984,16 @@ struct DrawingCanvasView: View {
         .accessibilityLabel("Settings")
     }
 
+    // saveToGalleryButton and getFeedbackButton scale themselves down on
+    // iPhone via internal DeviceIdiom branches. Padding, icon size, font,
+    // corner radius, and shadow all shrink — but the disabled state
+    // bindings, "Saved ✓" confirmation logic, and ProgressView-while-
+    // loading branches stay in one place across both idioms. This is
+    // a deliberate, contained deviation from "wholesale-quoted padBody"
+    // — same justification class as Phase 4's critiqueContent extraction:
+    // shared elements that need idiom-specific tuning belong in one
+    // computed property to prevent functional drift between idioms.
+
     private var saveToGalleryButton: some View {
         // First save (currentDrawingID == nil) opens the title-input alert.
         // Subsequent taps on an already-saved drawing skip the alert and
@@ -1025,22 +1010,22 @@ struct DrawingCanvasView: View {
                     ProgressView().tint(.white)
                 } else if showSavedConfirmation {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 18))
+                        .font(.system(size: actionButtonIconSize))
                     Text("Saved")
-                        .font(.headline)
+                        .font(actionButtonFont)
                 } else {
                     Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 18))
+                        .font(.system(size: actionButtonIconSize))
                     Text("Save to Gallery")
-                        .font(.headline)
+                        .font(actionButtonFont)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.horizontal, actionButtonHPadding)
+            .padding(.vertical, actionButtonVPadding)
             .background(Color.green)
             .foregroundColor(.white)
-            .cornerRadius(12)
-            .shadow(radius: 4)
+            .cornerRadius(actionButtonCornerRadius)
+            .shadow(radius: actionButtonShadow)
         }
         .disabled(isSaving || canvasState.isEmpty)
         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
@@ -1053,20 +1038,179 @@ struct DrawingCanvasView: View {
                     ProgressView().tint(.white)
                 } else {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 18))
+                        .font(.system(size: actionButtonIconSize))
                     Text("Get Feedback")
-                        .font(.headline)
+                        .font(actionButtonFont)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.horizontal, actionButtonHPadding)
+            .padding(.vertical, actionButtonVPadding)
             .background(Color.accentColor)
             .foregroundColor(.white)
-            .cornerRadius(12)
-            .shadow(radius: 4)
+            .cornerRadius(actionButtonCornerRadius)
+            .shadow(radius: actionButtonShadow)
         }
         .disabled(isRequestingFeedback || canvasState.isEmpty)
         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+    }
+
+    // MARK: - Action-button sizing tokens (idiom-branched)
+    //
+    // iPhone values per the toolbar-redesign spec: ~13pt font, ~8pt
+    // vertical padding, frame proportionally shrunk. iPad values are
+    // the pre-redesign defaults, byte-preserved.
+
+    private var actionButtonHPadding: CGFloat {
+        DeviceIdiom.isPhone ? 12 : 20
+    }
+    private var actionButtonVPadding: CGFloat {
+        DeviceIdiom.isPhone ? 8 : 14
+    }
+    private var actionButtonIconSize: CGFloat {
+        DeviceIdiom.isPhone ? 14 : 18
+    }
+    private var actionButtonFont: Font {
+        DeviceIdiom.isPhone
+            ? .system(size: 13, weight: .semibold)
+            : .headline
+    }
+    private var actionButtonCornerRadius: CGFloat {
+        DeviceIdiom.isPhone ? 10 : 12
+    }
+    private var actionButtonShadow: CGFloat {
+        DeviceIdiom.isPhone ? 2 : 4
+    }
+
+    // MARK: - Selection-active card (shared, idiom-positioned)
+    //
+    // Card content (caption + Cancel + Delete pill row) shared between
+    // iPad's floating overlay (positioned via padding(.bottom, 200) over
+    // the bottom-right action stack) and iPhone's bottom-inset stack
+    // (positioned via VStack placement above phoneActionRow). Functional
+    // behavior — clearSelection / deleteSelectedPixels button actions —
+    // is identical across idioms; only outer positioning differs. Same
+    // justified-deviation reasoning as Phase 4's critiqueContent
+    // extraction: shared elements that need idiom-specific positioning
+    // belong in one computed property to prevent functional drift.
+
+    private var selectionActiveCard: some View {
+        VStack(spacing: 12) {
+            Text("Selection Active")
+                .font(.caption)
+                .foregroundColor(.primary)
+
+            HStack(spacing: 12) {
+                Button(action: { canvasState.clearSelection() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16))
+                        Text("Cancel")
+                            .font(.subheadline)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.gray)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+
+                Button(action: { canvasState.deleteSelectedPixels() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash.fill")
+                            .font(.system(size: 16))
+                        Text("Delete")
+                            .font(.subheadline)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.red)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(12)
+        .shadow(radius: 5)
+    }
+
+    // MARK: - iPhone tool-panel chrome (collapsed-by-default)
+    //
+    // The bottom inset of phoneBody now stacks (top→bottom):
+    //   1. phoneSelectionContextBar  — conditional, only when selection active
+    //   2. phoneActionRow             — [tools trigger, Save flex, Feedback flex]
+    //   3. phoneToolPanel             — conditional, only when expanded
+    //
+    // Trigger sits on the LEFT of the action row, showing the currently-
+    // selected tool's icon. Tap toggles isToolPanelExpanded. Selecting
+    // a tile in the expanded grid auto-collapses the panel. Spring
+    // animation matches iPad's chevron-collapse profile.
+    //
+    // Tool grid lives in C2 of this PR — `phoneToolPanel` returns
+    // EmptyView in C1 so the state machine + collapsed layout can land
+    // and verify cleanly before the 28-tile grid stacks on top.
+
+    private var phoneSelectionContextBar: some View {
+        Group {
+            if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+                selectionActiveCard
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+    }
+
+    private var phoneActionRow: some View {
+        HStack(spacing: 8) {
+            phoneToolsTrigger
+            saveToGalleryButton
+                .frame(maxWidth: .infinity)
+            getFeedbackButton
+                .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var phoneToolsTrigger: some View {
+        // Selected-tool-icon variant (per locked spec): the trigger shows
+        // the currently-selected tool's icon, both indicating active
+        // tool and inviting expansion. Visually distinct from the action
+        // pills (Circle vs. RoundedRect, .regularMaterial vs. solid
+        // brand color) so it doesn't read as a third primary action.
+        Button(action: {
+            withAnimation(.spring(response: 0.3)) {
+                isToolPanelExpanded.toggle()
+            }
+        }) {
+            ZStack {
+                Circle()
+                    .fill(isToolPanelExpanded
+                          ? Color.accentColor.opacity(0.18)
+                          : Color(uiColor: .secondarySystemBackground))
+                    .overlay(
+                        Circle().stroke(
+                            isToolPanelExpanded
+                                ? Color.accentColor
+                                : Color.clear,
+                            lineWidth: 2
+                        )
+                    )
+                Image(systemName: canvasState.currentTool.icon)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(.primary)
+            }
+            .frame(width: 44, height: 44)
+        }
+        .accessibilityLabel(isToolPanelExpanded ? "Collapse tool panel" : "Expand tool panel")
+    }
+
+    @ViewBuilder
+    private var phoneToolPanel: some View {
+        // Populated in C2 — this commit lands the state machine and
+        // collapsed layout. Tile grid stacks on top in C2 to keep the
+        // C1 diff scoped to chrome / state plumbing.
+        EmptyView()
     }
 
     private var colorSchemeValue: ColorScheme? {
