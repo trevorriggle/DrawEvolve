@@ -29,6 +29,11 @@ class CanvasRenderer: NSObject {
     private var gaussianBlurPipelineState: MTLRenderPipelineState?
     private var gaussianBlurMaskedPipelineState: MTLRenderPipelineState?
     private var stampBlurDepositPipelineState: MTLRenderPipelineState?
+    // Smudge tool (PR 2). patch-update writes raw (no blend) into the back
+    // patch texture; deposit uses standard premultiplied source-over into
+    // the layer (same blend as the brush-blur deposit).
+    private var smudgePatchUpdatePipelineState: MTLRenderPipelineState?
+    private var smudgeDepositPipelineState: MTLRenderPipelineState?
 
     // 1x1 white texture used to draw an opaque canvas background quad
     private var whiteTexture: MTLTexture?
@@ -59,6 +64,27 @@ class CanvasRenderer: NSObject {
     /// Layer the preview is bound to. Used by MetalCanvasView to decide
     /// whether to swap in the preview texture for display.
     private var blurAdjustmentLayerId: UUID?
+
+    // MARK: - Smudge tool state (PR 2).
+    //
+    // Two ping-pong patches that hold the "carried paint" of the active
+    // stroke. The pickup pass reads the FRONT patch and writes to the BACK
+    // patch; we swap the pointers after each pickup so the deposit (and the
+    // next pickup) read the just-written carry.
+    //
+    // `smudgePatchHalfSize` is the world half-size of the patch in layer
+    // pixels (= brushSize / 2 at stroke begin; constant for the stroke).
+    // `smudgeStampIndex` counts stamps dispatched since `beginSmudgeStroke`
+    // — index 0 is the first-stamp pickup-only special case.
+    // `smudgeStrokeLayerId` is the layer the patches are sized for; used by
+    // `renderSmudgeStamps` to assert the active layer hasn't changed
+    // mid-stroke (textures sized to one layer would smudge incorrectly on
+    // another, so the assert is a hard sanity check).
+    private var smudgePatchFront: MTLTexture?
+    private var smudgePatchBack: MTLTexture?
+    private var smudgePatchHalfSize: Float = 0
+    private var smudgeStampIndex: Int = 0
+    private var smudgeStrokeLayerId: UUID?
 
     // Canvas dimensions - dynamically calculated to be a square larger than screen diagonal
     // This ensures no clipping/distortion when rotating the canvas
@@ -114,7 +140,9 @@ class CanvasRenderer: NSObject {
               let textureDisplayFragment = library.makeFunction(name: "textureDisplayShader"),
               let gaussianBlurFragment = library.makeFunction(name: "gaussianBlurShader"),
               let gaussianBlurMaskedFragment = library.makeFunction(name: "gaussianBlurMaskedShader"),
-              let stampBlurDepositFragment = library.makeFunction(name: "stampBlurDepositShader") else {
+              let stampBlurDepositFragment = library.makeFunction(name: "stampBlurDepositShader"),
+              let smudgePatchUpdateFragment = library.makeFunction(name: "smudgePatchUpdateShader"),
+              let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -234,6 +262,31 @@ class CanvasRenderer: NSObject {
         stampBlurDepositDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         stampBlurDepositDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Smudge patch-update — raw replace into the back patch (no blend).
+        // The mix happens inside the shader (sample front patch + layer,
+        // mix), so the framebuffer write is just an opaque store.
+        let smudgePatchUpdateDescriptor = MTLRenderPipelineDescriptor()
+        smudgePatchUpdateDescriptor.vertexFunction = quadVertex
+        smudgePatchUpdateDescriptor.fragmentFunction = smudgePatchUpdateFragment
+        smudgePatchUpdateDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        smudgePatchUpdateDescriptor.colorAttachments[0].isBlendingEnabled = false
+
+        // Smudge deposit — premultiplied source-over into the layer, same
+        // blend factors as the brush-blur deposit (the patch holds
+        // premultiplied content from the layer; the deposit shader returns
+        // patchSample * alpha which composites cleanly).
+        let smudgeDepositDescriptor = MTLRenderPipelineDescriptor()
+        smudgeDepositDescriptor.vertexFunction = brushVertex
+        smudgeDepositDescriptor.fragmentFunction = smudgeDepositFragment
+        smudgeDepositDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        smudgeDepositDescriptor.colorAttachments[0].isBlendingEnabled = true
+        smudgeDepositDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        smudgeDepositDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        smudgeDepositDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        smudgeDepositDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        smudgeDepositDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        smudgeDepositDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
@@ -244,6 +297,8 @@ class CanvasRenderer: NSObject {
             gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
             gaussianBlurMaskedPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurMaskedDescriptor)
             stampBlurDepositPipelineState = try device.makeRenderPipelineState(descriptor: stampBlurDepositDescriptor)
+            smudgePatchUpdatePipelineState = try device.makeRenderPipelineState(descriptor: smudgePatchUpdateDescriptor)
+            smudgeDepositPipelineState = try device.makeRenderPipelineState(descriptor: smudgeDepositDescriptor)
         } catch {
             print("Failed to create pipeline states: \(error)")
         }
@@ -2483,5 +2538,256 @@ class CanvasRenderer: NSObject {
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
         }
+    }
+
+    // MARK: - Smudge Stroke (PR 2)
+
+    /// Layout-matched twin of the Metal `SmudgeUniforms` struct (Shaders.metal).
+    /// `_pad` makes Swift's `MemoryLayout<...>.stride` 32 bytes — same as the
+    /// Metal struct, which rounds up to its 8-byte (float2) alignment — so
+    /// `setFragmentBytes(_:length:index:)` writes a buffer the shader can
+    /// read without UB. Memberwise init takes only the meaningful fields.
+    private struct SmudgeUniformsCPU {
+        var stampCenter: SIMD2<Float>
+        var patchHalfSize: SIMD2<Float>
+        var layerSize: SIMD2<Float>
+        var weight: Float
+        var _pad: Float = 0
+
+        init(stampCenter: SIMD2<Float>,
+             patchHalfSize: SIMD2<Float>,
+             layerSize: SIMD2<Float>,
+             weight: Float) {
+            self.stampCenter = stampCenter
+            self.patchHalfSize = patchHalfSize
+            self.layerSize = layerSize
+            self.weight = weight
+        }
+    }
+
+    /// Allocate a smudge patch texture sized to fit a stamp of the given
+    /// brush size (≥ ceil(brushSize) on each side, capped to keep memory
+    /// sane on the lowest-spec target). Format matches the active layer's
+    /// pixelFormat (bgra8Unorm) so the patch can be sampled directly from
+    /// the layer with the same color space and premultiplication.
+    private func makeSmudgePatchTexture(brushSize: CGFloat) -> MTLTexture? {
+        // Patch is 1:1 layer-pixel:patch-pixel near the stamp center, so the
+        // patch's pixel side equals the stamp's full pixel diameter at max
+        // pressure (≈ brushSize). Cap at 256 — beyond that the patch starts
+        // costing real memory and the smudge feel doesn't meaningfully
+        // improve (large brushes also have soft falloff so the patch's
+        // outer rows contribute little to the deposit).
+        let raw = max(2, Int(ceil(brushSize)))
+        let side = min(raw, 256)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: side,
+            height: side,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .private  // GPU-only — never read by CPU.
+        return device.makeTexture(descriptor: descriptor)
+    }
+
+    /// Clear a patch texture to fully transparent. Uses a one-shot
+    /// command buffer; cheap (textures are tiny). Sync because callers
+    /// expect a cleared patch on return from `beginSmudgeStroke`.
+    private func clearSmudgePatch(_ patch: MTLTexture) {
+        guard let cb = commandQueue.makeCommandBuffer() else { return }
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = patch
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        descriptor.colorAttachments[0].storeAction = .store
+        if let enc = cb.makeRenderCommandEncoder(descriptor: descriptor) {
+            enc.endEncoding()
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+    }
+
+    /// Allocate the front/back smudge patches and zero them. Called from
+    /// `MetalCanvasView.touchesBegan` when the smudge tool is active. Caller
+    /// records the active layer's id; later calls to `renderSmudgeStamps`
+    /// assert the layer hasn't changed mid-stroke (textures are sized to
+    /// the layer at this point in time).
+    func beginSmudgeStroke(brushSize: CGFloat, layerId: UUID) -> Bool {
+        endSmudgeStroke()
+        guard let front = makeSmudgePatchTexture(brushSize: brushSize),
+              let back  = makeSmudgePatchTexture(brushSize: brushSize) else {
+            print("⚠️ beginSmudgeStroke: failed to allocate patch textures")
+            return false
+        }
+        clearSmudgePatch(front)
+        clearSmudgePatch(back)
+        smudgePatchFront = front
+        smudgePatchBack = back
+        smudgePatchHalfSize = Float(brushSize) * 0.5
+        smudgeStampIndex = 0
+        smudgeStrokeLayerId = layerId
+        return true
+    }
+
+    /// Free patch textures and clear bookkeeping. Idempotent — safe to call
+    /// from `touchesEnded`, `touchesCancelled`, or `beginSmudgeStroke`'s
+    /// startup reset.
+    func endSmudgeStroke() {
+        smudgePatchFront = nil
+        smudgePatchBack = nil
+        smudgePatchHalfSize = 0
+        smudgeStampIndex = 0
+        smudgeStrokeLayerId = nil
+    }
+
+    /// Dispatch a batch of smudge stamps — one (patch-update, deposit) pair
+    /// per stamp — on a single command buffer. Called from
+    /// `MetalCanvasView.touchesMoved` per coalesced sub-batch (NOT per
+    /// stamp). Patches mutate in-order on the GPU; we swap front/back in
+    /// Swift after each pickup pass so the next pickup reads the just-
+    /// written carry.
+    ///
+    /// First-stamp pickup-only: when the renderer's internal stamp counter
+    /// is 0, the first stamp in this batch dispatches a pickup at weight =
+    /// 1.0 (so `mix(empty_patch, layer, 1.0)` initialises the patch to the
+    /// layer sample) and skips its deposit. All subsequent stamps use
+    /// weight = `settings.smudgeStrength * pressure` and deposit normally.
+    func renderSmudgeStamps(
+        _ stamps: [BrushStroke.StrokePoint],
+        settings: BrushSettings,
+        to layerTexture: MTLTexture,
+        layerId: UUID,
+        screenSize: CGSize
+    ) {
+        guard !stamps.isEmpty else { return }
+        guard let patchUpdatePipeline = smudgePatchUpdatePipelineState,
+              let depositPipeline = smudgeDepositPipelineState,
+              var front = smudgePatchFront,
+              var back = smudgePatchBack else {
+            print("⚠️ renderSmudgeStamps: pipeline or patch textures unavailable")
+            return
+        }
+        // Hard sanity: layer must not change mid-stroke (patch is sized to
+        // the layer captured at beginSmudgeStroke). If this trips, the
+        // touch handler let the user switch layers under an active stroke
+        // — that's a logic bug, not user error.
+        assert(smudgeStrokeLayerId == layerId,
+               "Smudge layer changed mid-stroke (was \(String(describing: smudgeStrokeLayerId)), now \(layerId))")
+        guard smudgeStrokeLayerId == layerId else {
+            print("⚠️ renderSmudgeStamps: layerId mismatch — refusing to render")
+            return
+        }
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+
+        let strength = max(0, min(1, settings.smudgeStrength))
+        let halfSize = SIMD2<Float>(smudgePatchHalfSize, smudgePatchHalfSize)
+        let layerSize = SIMD2<Float>(Float(layerTexture.width), Float(layerTexture.height))
+        var viewport = SIMD2<Float>(Float(layerTexture.width), Float(layerTexture.height))
+
+        // Brush uniforms — color is unused by the deposit shader (smudge
+        // doesn't paint the brush color), but the struct is shared with
+        // the brush vertex shader so we still pass it. `pressure` is set
+        // per-stamp below.
+        var brushUniforms = BrushUniforms(
+            color: settings.color,
+            size: Float(settings.size),
+            opacity: Float(settings.opacity),
+            hardness: Float(settings.hardness)
+        )
+
+        for stamp in stamps {
+            let safePressure: Float = {
+                guard stamp.pressure.isFinite else { return 1.0 }
+                return Float(max(0, min(1, stamp.pressure)))
+            }()
+
+            let isFirstStamp = (smudgeStampIndex == 0)
+            // Pickup weight: first stamp is full-replace (initialise patch
+            // to layer sample); subsequent stamps mix at strength * pressure.
+            let pickupWeight: Float = isFirstStamp ? 1.0 : (strength * safePressure)
+
+            let stampCenter = SIMD2<Float>(Float(stamp.location.x), Float(stamp.location.y))
+            var smudgeUniforms = SmudgeUniformsCPU(
+                stampCenter: stampCenter,
+                patchHalfSize: halfSize,
+                layerSize: layerSize,
+                weight: pickupWeight
+            )
+
+            // ----- Pass 1: patch update — full quad on the BACK patch.
+            // Reads FRONT patch + layer, mixes, writes BACK.
+            let updateDescriptor = MTLRenderPassDescriptor()
+            updateDescriptor.colorAttachments[0].texture = back
+            updateDescriptor.colorAttachments[0].loadAction = .dontCare
+            updateDescriptor.colorAttachments[0].storeAction = .store
+            guard let updateEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: updateDescriptor) else {
+                continue
+            }
+            updateEncoder.setRenderPipelineState(patchUpdatePipeline)
+            updateEncoder.setFragmentTexture(front, index: 0)
+            updateEncoder.setFragmentTexture(layerTexture, index: 1)
+            updateEncoder.setFragmentBytes(&smudgeUniforms, length: MemoryLayout<SmudgeUniformsCPU>.stride, index: 0)
+            updateEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            updateEncoder.endEncoding()
+
+            // After the pickup pass, BACK holds the just-updated carry.
+            // Swap so it becomes the new FRONT for the deposit + next stamp.
+            swap(&front, &back)
+
+            // ----- Pass 2: deposit — point sprite into the layer. Skipped
+            // for the first stamp (patch was empty before pickup; the
+            // pickup just initialised it, nothing to deposit yet).
+            if !isFirstStamp {
+                let radiusOnLayer = max(1, Int(ceil(settings.size * 0.5 * CGFloat(safePressure))))
+                let footprint = radiusOnLayer + 4  // small margin for soft edges
+                let cx = Int(stamp.location.x.rounded())
+                let cy = Int(stamp.location.y.rounded())
+                let x0 = max(0, cx - footprint)
+                let y0 = max(0, cy - footprint)
+                let x1 = min(layerTexture.width, cx + footprint)
+                let y1 = min(layerTexture.height, cy + footprint)
+                let rectW = x1 - x0
+                let rectH = y1 - y0
+                if rectW > 0 && rectH > 0 {
+                    let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
+
+                    let depositDescriptor = MTLRenderPassDescriptor()
+                    depositDescriptor.colorAttachments[0].texture = layerTexture
+                    depositDescriptor.colorAttachments[0].loadAction = .load
+                    depositDescriptor.colorAttachments[0].storeAction = .store
+                    if let depositEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: depositDescriptor) {
+                        depositEncoder.setRenderPipelineState(depositPipeline)
+                        depositEncoder.setScissorRect(scissor)
+                        depositEncoder.setFragmentTexture(front, index: 0)  // updated patch
+
+                        brushUniforms.pressure = safePressure
+
+                        var stampPosition = stampCenter
+                        depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+                        depositEncoder.setVertexBytes(&brushUniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+                        depositEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+                        depositEncoder.setFragmentBytes(&brushUniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+                        depositEncoder.setFragmentBytes(&smudgeUniforms, length: MemoryLayout<SmudgeUniformsCPU>.stride, index: 1)
+                        depositEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+                        depositEncoder.endEncoding()
+                    }
+                }
+            }
+
+            smudgeStampIndex += 1
+        }
+
+        // Persist the (possibly swapped) patch refs so the next batch picks
+        // up where this one left off. `front` here points at whatever was
+        // last written (the most recent BACK after the final swap).
+        smudgePatchFront = front
+        smudgePatchBack = back
+
+        commandBuffer.commit()
+        // Don't waitUntilCompleted — touchesMoved is hot path. Subsequent
+        // dispatches will queue behind on the same command queue; Metal
+        // serialises within the queue so each stamp's writes are visible
+        // to the next stamp's reads.
     }
 }
