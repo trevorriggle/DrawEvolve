@@ -127,6 +127,35 @@ class CanvasStateManager: ObservableObject {
     /// Diameter of the stamp cursor in screen-space points.
     @Published var stampCursorDiameter: CGFloat = 0
 
+    // MARK: - Text tool (FloatingText)
+    //
+    // textSettings is the global default; loaded from UserDefaults on init,
+    // saved via a Combine sink on every change. Editing the sheet while a
+    // FloatingText is active also propagates to `floatingText.settings` —
+    // single source of truth, see `applyTextSettingsToFloating`. Drag,
+    // resize, and rotate mutate `floatingText` directly. Commit blits the
+    // rasterised image into the active layer and clears the float.
+
+    /// Persisted typographic defaults. Sliders/pickers in TextSettingsView
+    /// bind to this; the didSet sink saves to UserDefaults and pushes a
+    /// debounced re-rasterise of the active FloatingText (if any).
+    @Published var textSettings: TextSettings = TextSettings.loadPersisted()
+
+    /// In-flight text object. nil = no floating text. Drag updates `anchor`,
+    /// corner handle updates `scale` (uniform), rotation handle updates
+    /// `rotation`. Commit/cancel from this side; auto-commit on tool change.
+    @Published var floatingText: FloatingText? = nil
+
+    /// Live preview of the user's in-progress path drawing during the
+    /// .textOnPath touch session. Doc-space points; nil when no draw is
+    /// active. DrawingCanvasView renders this as a thin guide line.
+    @Published var previewTextOnPathPoints: [CGPoint]? = nil
+
+    /// Cancellable rasterise debounce (~16ms). Re-armed on every settings or
+    /// content change so rapid slider drags coalesce into one rasterise.
+    private var textRasterizeTask: Task<Void, Never>?
+    private var textSettingsCancellable: AnyCancellable?
+
     let historyManager = HistoryManager()
     // Bridge the nested HistoryManager's ObservableObject changes up to this object so
     // SwiftUI views that read `canvasState.historyManager.canUndo / canRedo` actually
@@ -220,6 +249,22 @@ class CanvasStateManager: ObservableObject {
                     }
                 }
 
+                // Auto-commit any active floating text whenever we leave a
+                // text-hosting tool. Both .text (plain) and .textOnPath
+                // host floating text; switching to anything else commits.
+                // Switching between .text and .textOnPath ALSO commits —
+                // each owns its own creation flow and "carrying" a float
+                // across modes would be confusing.
+                if self.floatingText != nil {
+                    let isPathText = self.floatingText?.path != nil
+                    let stayingInOwningTool =
+                        (newTool == .text && !isPathText) ||
+                        (newTool == .textOnPath && isPathText)
+                    if !stayingInOwningTool {
+                        self.commitFloatingText()
+                    }
+                }
+
                 // Auto-begin blur adjustment when entering the tool. Begin
                 // after any pending floating-selection commit so the snapshot
                 // captures the now-flattened layer state.
@@ -238,6 +283,17 @@ class CanvasStateManager: ObservableObject {
         let initialLayer = DrawingLayer(name: "Layer 1")
         layers.append(initialLayer)
         selectedLayerIndex = 0
+
+        // Persist textSettings to UserDefaults on every change, and propagate
+        // edits to the active FloatingText so the sheet's sliders update the
+        // live preview. dropFirst() skips the initial value emitted at init.
+        textSettingsCancellable = $textSettings
+            .dropFirst()
+            .sink { [weak self] newSettings in
+                guard let self = self else { return }
+                newSettings.savePersisted()
+                self.applyTextSettingsToFloating(newSettings)
+            }
     }
 
     func addLayer() {
@@ -413,38 +469,89 @@ class CanvasStateManager: ObservableObject {
         return renderer.exportImage(layers: layers)
     }
 
-    func renderText(_ text: String, at location: CGPoint) {
+    // MARK: - FloatingText lifecycle
+    //
+    // beginText creates the float at the tap location with the global
+    // textSettings as a snapshot. Drag updates `anchor`; the corner handle
+    // updates `scale` (uniform); rotation handle updates `rotation`. Commit
+    // = rasterise → renderImage → record stroke; cancel = drop without
+    // touching the layer. Auto-commit on tool change, see init().
+
+    /// Create a FloatingText at the tap location with the current global
+    /// textSettings. The initial rasterise runs synchronously so the live
+    /// preview / transform handles have valid bounds and a cached texture
+    /// before the next touch event can race against the 16ms debounce.
+    func beginText(at location: CGPoint, content: String) {
+        // If a previous floating text is somehow still alive (shouldn't be —
+        // the tap-outside-commit path should have caught it), bake it down
+        // before starting the new one.
+        if floatingText != nil {
+            commitFloatingText()
+        }
+        let ft = FloatingText(content: content, settings: textSettings, anchor: location)
+        floatingText = ft
+        rasterizeFloatingTextNow()
+    }
+
+    /// Replace the active FloatingText's content. Re-rasterises (debounced).
+    func setFloatingTextContent(_ content: String) {
+        guard var ft = floatingText else { return }
+        ft.content = content
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Discard the floating text without touching the layer. Used by the
+    /// cancel pill and touch handlers' touchesCancelled paths.
+    func cancelFloatingText() {
+        textRasterizeTask?.cancel()
+        textRasterizeTask = nil
+        floatingText = nil
+    }
+
+    /// Bake the active FloatingText into the active layer. Single GPU pass
+    /// via `compositeFloatingTextureIntoLayer` (rotation included);
+    /// before/after snapshots wrap the operation as a `.stroke` history
+    /// entry so undo works the same as any other paint operation.
+    func commitFloatingText() {
+        guard floatingText != nil else { return }
+
+        // Cancel any pending debounced rasterise and run one synchronously
+        // so the commit always uses the latest content/settings — a setting
+        // tweak immediately followed by a tool change can otherwise commit
+        // a frame-stale image.
+        textRasterizeTask?.cancel()
+        textRasterizeTask = nil
+        rasterizeFloatingTextNow()
+
+        guard let ft = floatingText else { return }
+
+        defer {
+            // Always clear the float — even if commit failed, leaving the
+            // float alive after an intended commit would strand the user.
+            floatingText = nil
+        }
+
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture else {
-            print("ERROR: Cannot render text - invalid layer or texture")
+              let texture = layers[selectedLayerIndex].texture,
+              let renderer = renderer,
+              let cachedTexture = ft.cachedTexture else {
+            print("⚠️ commitFloatingText: missing layer/texture/cached image — discarding")
             return
         }
 
-        guard let renderer = renderer else {
-            print("ERROR: Renderer not available")
-            return
-        }
-
-        let fontSize: CGFloat = 32
-
-        // `location` arrives in DOCUMENT space (the touch handler ran it
-        // through screenToDocument). The renderer scales by texture/screenSize
-        // internally — passing UIKit-points `screenSize` was the source of the
-        // ~1.7× double-scale that walked the blit destination off the texture
-        // and crashed the app. Pass documentSize so the internal scale is 1:1.
         let beforeSnapshot = renderer.captureSnapshot(of: texture)
 
-        renderer.renderText(
-            text,
-            at: location,
-            fontSize: fontSize,
-            color: brushSettings.color,
-            to: texture,
-            screenSize: documentSize
+        let displayed = ft.displayedRect
+        let docRect = displayed
+        renderer.compositeFloatingTextureIntoLayer(
+            cachedTexture,
+            into: texture,
+            atDocRect: docRect,
+            rotation: Float(ft.rotation.radians)
         )
 
         let afterSnapshot = renderer.captureSnapshot(of: texture)
-
         if let before = beforeSnapshot, let after = afterSnapshot {
             let layerId = layers[selectedLayerIndex].id
             historyManager.record(.stroke(
@@ -454,18 +561,185 @@ class CanvasStateManager: ObservableObject {
             ))
         }
 
+        // Refresh the layer thumbnail off-main, same pattern as renderStroke.
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        let layerId = layers[selectedLayerIndex].id
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
-                await MainActor.run {
-                    if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
-                        layer.updateThumbnail(thumbnail)
-                    }
+                await MainActor.run { [weak self] in
+                    guard let self = self,
+                          currentLayerIndex < self.layers.count,
+                          self.layers[currentLayerIndex].id == layerId else { return }
+                    self.layers[currentLayerIndex].updateThumbnail(thumbnail)
                 }
             }
         }
+    }
+
+    // MARK: - Type-on-path lifecycle
+
+    /// Create a path-bearing FloatingText. Called from DrawingCanvasView's
+    /// "Add" button after the user has drawn a path with .textOnPath and
+    /// typed the text. Smooths the raw points (Catmull-Rom), builds the
+    /// arc-length LUT, auto-detects closed-loop endpoint snap, and
+    /// triggers an initial synchronous rasterise.
+    func beginTextOnPath(
+        rawPoints: [CGPoint],
+        firstScreen: CGPoint,
+        lastScreen: CGPoint,
+        content: String
+    ) {
+        if floatingText != nil {
+            commitFloatingText()
+        }
+        previewTextOnPathPoints = nil
+
+        // Below ~3 raw samples there's nothing to smooth — bail silently.
+        guard rawPoints.count >= 3 else { return }
+
+        let smoothed = PathSmoothing.catmullRom(rawPoints)
+        let path = PathSmoothing.cgPath(from: smoothed)
+        let lut = PathSmoothing.buildArcLengthLUT(smoothed)
+        let isClosed = PathSmoothing.isClosedByEndpoint(
+            firstScreen: firstScreen,
+            lastScreen: lastScreen
+        )
+
+        var ft = FloatingText(
+            content: content,
+            settings: textSettings,
+            anchor: smoothed.first ?? .zero
+        )
+        ft.path = path
+        ft.pathLUT = lut
+        ft.isClosed = isClosed
+        ft.pathStartOffset = 0
+        ft.baselineOffset = 0
+        ft.autoFlipEnabled = true
+        floatingText = ft
+        rasterizeFloatingTextNow()
+    }
+
+    /// Update where text begins along the path (PathStartHandle drag).
+    /// Clamps to [0, arcLength] for open paths; wraps mod arcLength for
+    /// closed paths so dragging past the seam keeps text continuous.
+    func setPathStartOffset(_ offset: CGFloat) {
+        guard var ft = floatingText, let lut = ft.pathLUT, !lut.isEmpty else { return }
+        let total = lut.last?.distance ?? 0
+        var d = offset
+        if ft.isClosed, total > 0 {
+            d = d.truncatingRemainder(dividingBy: total)
+            if d < 0 { d += total }
+        } else {
+            d = max(0, min(total, d))
+        }
+        guard ft.pathStartOffset != d else { return }
+        ft.pathStartOffset = d
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Set the perpendicular baseline shift (TextSettingsView slider).
+    /// Positive = above the path, negative = below.
+    func setBaselineOffset(_ offset: CGFloat) {
+        guard var ft = floatingText, ft.path != nil else { return }
+        guard ft.baselineOffset != offset else { return }
+        ft.baselineOffset = offset
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Override the auto-detected closed flag (TextSettingsView toggle).
+    /// Re-rasterises so the lookup wraps (or clamps) accordingly.
+    func setPathClosed(_ closed: Bool) {
+        guard var ft = floatingText, ft.path != nil else { return }
+        guard ft.isClosed != closed else { return }
+        ft.isClosed = closed
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Toggle auto-flip on upside-down sections.
+    func setAutoFlipEnabled(_ enabled: Bool) {
+        guard var ft = floatingText, ft.path != nil else { return }
+        guard ft.autoFlipEnabled != enabled else { return }
+        ft.autoFlipEnabled = enabled
+        floatingText = ft
+        scheduleRasterizeFloatingText()
+    }
+
+    // MARK: - Plain text helpers
+
+    /// Bake `floatingText.scale` into `textSettings.size` and reset scale to
+    /// identity, then re-rasterise. Called by the corner-handle drag's
+    /// onEnded so font crispness is preserved across handle drags. Updating
+    /// `textSettings` propagates through the global Combine sink to the
+    /// active float (single source of truth).
+    func bakeFloatingTextScale() {
+        guard let ft = floatingText else { return }
+        let factor = ft.scale.width
+        guard abs(factor - 1.0) > 0.001 else { return }
+        floatingText?.scale = CGSize(width: 1, height: 1)
+        // didSet on textSettings propagates the new size to floatingText.settings
+        // and schedules a re-rasterise.
+        textSettings.size = max(1, textSettings.size * factor)
+    }
+
+    /// Push a settings update onto the active FloatingText (if any) and
+    /// schedule a re-rasterise. Called from the textSettings publisher.
+    private func applyTextSettingsToFloating(_ newSettings: TextSettings) {
+        guard floatingText != nil else { return }
+        floatingText?.settings = newSettings
+        scheduleRasterizeFloatingText()
+    }
+
+    /// Debounce a rasterise of the active FloatingText. Short text uses a
+    /// ~16ms debounce so each slider tick produces a smooth live preview;
+    /// long text (>200 graphemes, where a single rasterise can cost >16ms)
+    /// uses a longer debounce so rapid slider drags coalesce into a single
+    /// rasterise on slider release. Approximates the spec's "defer rasterise
+    /// to slider release" rule without UIKit slider state.
+    private func scheduleRasterizeFloatingText() {
+        textRasterizeTask?.cancel()
+        let glyphCount = floatingText?.content.count ?? 0
+        let delayNs: UInt64 = glyphCount > 200 ? 250_000_000 : 16_000_000
+        textRasterizeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNs)
+            guard !Task.isCancelled else { return }
+            self?.rasterizeFloatingTextNow()
+        }
+    }
+
+    private func rasterizeFloatingTextNow() {
+        guard var ft = floatingText,
+              let renderer = renderer,
+              selectedLayerIndex < layers.count,
+              let layerTexture = layers[selectedLayerIndex].texture else { return }
+
+        guard let result = renderer.rasterizeFloatingTextWithDocOrigin(
+            ft,
+            for: layerTexture,
+            screenSize: documentSize
+        ) else {
+            ft.cachedImage = nil
+            ft.cachedTexture = nil
+            ft.bounds = CGRect(origin: ft.anchor, size: .zero)
+            floatingText = ft
+            return
+        }
+
+        ft.cachedImage = result.image
+        ft.cachedTexture = renderer.makeTexture(from: result.image)
+        // For on-path text, docBounds.origin may live wherever the path
+        // sent the glyphs — anchor follows so displayedRect math (which
+        // assumes anchor = bounds.origin) keeps working for the
+        // transform handles. For plain text, docBounds.origin already
+        // equals ft.anchor so this is a no-op.
+        ft.bounds = result.docBounds
+        ft.anchor = result.docBounds.origin
+        floatingText = ft
     }
 
     func loadImage(_ image: UIImage) {
