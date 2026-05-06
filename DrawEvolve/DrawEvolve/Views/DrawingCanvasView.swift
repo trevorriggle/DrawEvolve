@@ -298,6 +298,31 @@ struct DrawingCanvasView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
             }
+            // iPhone Phase 4: half-sheet for FloatingFeedbackPanel.
+            // iPad's path renders the panel inline inside padBody's ZStack
+            // (the existing `if showFeedback, canvasState.feedback != nil
+            // { FloatingFeedbackPanel(...) }` block), so this .sheet lives
+            // here in phoneBody and only fires on iPhone — no double
+            // presentation, no state duplication. Detents .medium and
+            // .large are the iOS-standard half-sheet sizes.
+            //
+            // Idiom-specific presentation modifiers attach inside the
+            // idiom body (here), not on the outer Group from Phase 2.
+            // Phase 2's modifier lift was for shared modifiers (sheets /
+            // alerts / fullScreenCover that fire identically on both
+            // idioms); idiom-specific presentations stay inside the
+            // relevant idiom body.
+            .sheet(isPresented: $showFeedback) {
+                if canvasState.feedback != nil {
+                    FloatingFeedbackPanel(
+                        feedback: canvasState.feedback,
+                        critiqueHistory: critiqueHistory,
+                        isPresented: $showFeedback
+                    )
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                }
+            }
         }
     }
 

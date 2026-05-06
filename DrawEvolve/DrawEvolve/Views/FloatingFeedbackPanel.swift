@@ -42,6 +42,136 @@ struct FloatingFeedbackPanel: View {
     }
 
     var body: some View {
+        // Container shape forks per idiom. iPad keeps the floating-card +
+        // collapsed-pill model byte-preserved in `padBody`. iPhone uses
+        // a half-sheet with `.presentationDetents([.medium, .large])` —
+        // the .sheet itself is attached at the parent (DrawingCanvasView's
+        // phoneBody), not here, since `.sheet` is a presentation modifier
+        // and lives on the presenting view, not the presented one.
+        //
+        // The critique scroll view (timestamp + markdown) is shared
+        // between both branches via `critiqueContent`. That extraction is
+        // a deliberate, contained deviation from the locked "wholesale-
+        // quoted padBody, no refactoring" rule — pad/phoneBody must
+        // share critique rendering to maintain functional parity and
+        // prevent silent platform drift in the markdown / textSelection /
+        // history-jumping logic. Same class of justified carve-out as
+        // Phase 2's modifier lift.
+        Group {
+            if DeviceIdiom.isPhone {
+                phoneBody
+            } else {
+                padBody
+            }
+        }
+    }
+
+    // MARK: - iPhone body (half-sheet content)
+    //
+    // Header (history Menu + title + dismiss X) over the shared
+    // critiqueContent. No drag gesture, no position state, no expand /
+    // collapse — the half-sheet handles dismissal via drag-down + tap-
+    // outside; the X button is redundant explicit dismissal for
+    // accessibility. Reset-position and collapse-to-pill buttons are
+    // dropped (no position to reset, no pill state in a sheet).
+    //
+    // History uses a SwiftUI Menu containing a Picker — the standard
+    // iOS pattern for "pick one of these recent items" inside a sheet.
+    // Items show timestamps only (the iPad list shows a 50-char preview
+    // of each critique; that level of richness doesn't fit Menu items
+    // cleanly and is dropped on iPhone — the user gets the full
+    // critique on selection anyway).
+
+    private var phoneBody: some View {
+        VStack(spacing: 0) {
+            phoneHeader
+            Divider()
+            critiqueContent
+        }
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    private var phoneHeader: some View {
+        HStack {
+            // History Menu (left). Disabled when there's nothing to pick.
+            Menu {
+                Picker("History", selection: $selectedHistoryIndex) {
+                    ForEach(Array(critiqueHistory.enumerated().reversed()), id: \.element.id) { index, entry in
+                        Text(formatTimestamp(entry.timestamp)).tag(index)
+                    }
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .foregroundColor(critiqueHistory.isEmpty ? .secondary : .accentColor)
+                    .font(.title3)
+            }
+            .disabled(critiqueHistory.isEmpty)
+
+            Spacer()
+
+            Text("AI Feedback")
+                .font(.headline)
+
+            Spacer()
+
+            // Explicit dismiss. Redundant with sheet drag-down / tap-
+            // outside but standard chrome on iOS sheets.
+            Button(action: { isPresented = false }) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+                    .font(.title3)
+            }
+        }
+        .padding()
+    }
+
+    // MARK: - Shared critique content
+    //
+    // Timestamp header + FormattedMarkdownView, used by both padBody and
+    // phoneBody. Extracted from the original inline ScrollView block so
+    // the markdown rendering, text selection, and "X of Y" indicator
+    // stay in one place across both idioms. See the body comment above
+    // for why this extraction is a justified, contained deviation from
+    // the wholesale-quote rule.
+
+    @ViewBuilder
+    private var critiqueContent: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                // Show timestamp of current feedback
+                if !critiqueHistory.isEmpty && selectedHistoryIndex < critiqueHistory.count {
+                    HStack {
+                        Image(systemName: "clock")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                        Text(formatTimestamp(critiqueHistory[selectedHistoryIndex].timestamp))
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Text("\(selectedHistoryIndex + 1) of \(critiqueHistory.count)")
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                    }
+                    .padding(.horizontal, 4)
+                }
+
+                FormattedMarkdownView(text: displayedFeedback)
+                    .textSelection(.enabled)
+            }
+            .padding()
+        }
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    // MARK: - iPad body (floating-card / collapsed-pill, byte-preserved)
+    //
+    // Wholesale-quoted from pre-Phase-4 main. The only structural change
+    // is the inline critique ScrollView block (formerly here) is now a
+    // reference to `critiqueContent` — see body comment for the
+    // justification. All other geometry, drag, position, expand /
+    // collapse, history-slide-out, and modifier chain are unchanged.
+
+    private var padBody: some View {
         GeometryReader { geometry in
             ZStack {
                 if isExpanded, feedback != nil {
@@ -129,32 +259,10 @@ struct FloatingFeedbackPanel: View {
 
                         Divider()
 
-                        // Feedback content
-                        ScrollView {
-                            VStack(spacing: 16) {
-                                // Show timestamp of current feedback
-                                if !critiqueHistory.isEmpty && selectedHistoryIndex < critiqueHistory.count {
-                                    HStack {
-                                        Image(systemName: "clock")
-                                            .foregroundColor(.secondary)
-                                            .font(.caption)
-                                        Text(formatTimestamp(critiqueHistory[selectedHistoryIndex].timestamp))
-                                            .font(.caption)
-                                            .foregroundColor(.primary)
-                                        Spacer()
-                                        Text("\(selectedHistoryIndex + 1) of \(critiqueHistory.count)")
-                                            .font(.caption)
-                                            .foregroundColor(.primary)
-                                    }
-                                    .padding(.horizontal, 4)
-                                }
-
-                                FormattedMarkdownView(text: displayedFeedback)
-                                    .textSelection(.enabled)
-                            }
-                            .padding()
-                        }
-                        .background(Color(uiColor: .systemBackground))
+                        // Feedback content (shared with iPhone phoneBody —
+                        // see `critiqueContent` for the markdown view +
+                        // timestamp header).
+                        critiqueContent
                     }
                     .frame(width: actualExpandedSize.width, height: actualExpandedSize.height)
                     .background(Color(uiColor: .systemBackground))
