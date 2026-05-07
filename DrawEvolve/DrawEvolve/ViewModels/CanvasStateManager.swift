@@ -678,11 +678,16 @@ class CanvasStateManager: ObservableObject {
 
         let smoothed = PathSmoothing.catmullRom(rawPoints)
         let path = PathSmoothing.cgPath(from: smoothed)
-        let lut = PathSmoothing.buildArcLengthLUT(smoothed)
+        // Closure is detected from raw screen-space endpoints (locked
+        // 30pt threshold) and threaded into LUT construction so the
+        // tangent stencil wraps the seam continuously for closed paths.
+        // Open paths fall through with isClosed=false and clamp at the
+        // boundaries.
         let isClosed = PathSmoothing.isClosedByEndpoint(
             firstScreen: firstScreen,
             lastScreen: lastScreen
         )
+        let lut = PathSmoothing.buildArcLengthLUT(smoothed, isClosed: isClosed)
 
         var ft = FloatingText(
             content: content,
@@ -694,7 +699,10 @@ class CanvasStateManager: ObservableObject {
         ft.isClosed = isClosed
         ft.pathStartOffset = 0
         ft.baselineOffset = 0
-        ft.autoFlipEnabled = true
+        // autoFlipEnabled left at the model default (false post-Tier-1.5
+        // re-audit). Users with heart-shape / closed-loop paths who want
+        // the v1 flip behaviour can toggle the field — UI surface for
+        // the toggle is deferred until the inspector half-sheet returns.
         floatingText = ft
         rasterizeFloatingTextNow()
     }

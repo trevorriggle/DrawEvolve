@@ -85,8 +85,17 @@ struct FloatingText {
     /// lets the user override.
     var isClosed: Bool = false
     /// True ⇒ TextOnPathRenderer flips glyphs in upside-down sections
-    /// (sustained negative cos of tangent direction). Toggle to disable.
-    var autoFlipEnabled: Bool = true
+    /// (sustained negative cos of tangent direction). Default off, per
+    /// the Tier-1.5 re-audit: matches Procreate / Illustrator behaviour
+    /// where text follows path direction continuously. With auto-flip
+    /// ON, glyphs on a return leg are rotated upright but their
+    /// placement order still walks arclength forward, producing
+    /// mirror-text on self-doubling paths (the screenshotted bug). The
+    /// toggle stays in the model so users who want the v1 flip
+    /// behaviour on heart shapes / closed loops can re-enable it; the
+    /// UI surface for the toggle is deferred until the inspector
+    /// half-sheet returns.
+    var autoFlipEnabled: Bool = false
 
     /// Runtime cache (Tier-1.5): the doc-space origin where the most
     /// recent rasterise placed the path-laid glyphs. Used by
@@ -222,7 +231,7 @@ extension FloatingText: Codable {
         self.pathStartOffset  = try c.decodeIfPresent(CGFloat.self, forKey: .pathStartOffset)  ?? 0
         self.baselineOffset   = try c.decodeIfPresent(CGFloat.self, forKey: .baselineOffset)   ?? 0
         self.isClosed         = try c.decodeIfPresent(Bool.self,    forKey: .isClosed)         ?? false
-        self.autoFlipEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .autoFlipEnabled)  ?? true
+        self.autoFlipEnabled  = try c.decodeIfPresent(Bool.self,    forKey: .autoFlipEnabled)  ?? false
         // Runtime caches (cachedImage, cachedTexture) and the path stay nil;
         // caller re-rasterises after load.
     }

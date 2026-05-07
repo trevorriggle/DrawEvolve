@@ -119,15 +119,33 @@ enum PathSmoothing {
 
     // MARK: - Arc-length LUT
 
+    /// Half-width of the windowed central-difference stencil used for
+    /// LUT tangents. For a Catmull-Rom polyline at 12 sub-samples per
+    /// raw segment, k=5 averages over ~one raw stroke segment of jitter
+    /// without spanning across legitimate sharp corners (those rotate
+    /// over 2-3 LUT entries, much smaller than k). Locked-spec
+    /// constant; document inline rather than expose as a parameter.
+    private static let tangentStencilHalfWidth: Int = 5
+
     /// Build the arc-length parameterisation table from the smoothed
     /// polyline. Each entry stores the cumulative distance from the start
-    /// plus the point's tangent (atan2 of the leaving segment).
+    /// plus the path's tangent at that sample, computed via a windowed
+    /// central difference (`atan2(p[i+k] − p[i−k])`) so per-glyph rotation
+    /// doesn't inherit residual position jitter from the smoother.
+    ///
+    /// `isClosed` controls boundary handling for the tangent stencil:
+    /// open paths clamp to the widest one-sided stencil at the endpoints;
+    /// closed paths wrap modulo `n` so the seam doesn't have a tangent
+    /// discontinuity. Distance bookkeeping ignores closure (the LUT's
+    /// `total` excludes the seam-closing segment); `point(at:in:isClosed:)`
+    /// applies modulo wrap on lookup, matching this convention.
     ///
     /// Take the polyline directly; spec lists CGPath as the input but the
     /// caller already has the points and converting back via
     /// `path.applyWithBlock` is wasteful. Use the polyline path API only
     /// for rendering / hit-testing.
-    static func buildArcLengthLUT(_ smoothed: [CGPoint]) -> [PathArcLengthSample] {
+    static func buildArcLengthLUT(_ smoothed: [CGPoint],
+                                  isClosed: Bool = false) -> [PathArcLengthSample] {
         guard smoothed.count >= 2 else {
             if let only = smoothed.first {
                 return [PathArcLengthSample(distance: 0, point: only, tangent: 0)]
@@ -135,30 +153,76 @@ enum PathSmoothing {
             return []
         }
 
+        let n = smoothed.count
+        let k = tangentStencilHalfWidth
+        // For paths shorter than 2k+1 samples the windowed stencil would
+        // self-overlap (i+k and i-k landing on the same or near-same
+        // index → atan2 of zero-vector). Fall back to the original
+        // one-segment forward difference in that case — which is what
+        // the pre-Tier-1.5 code did and worked fine for tiny paths.
+        let useWindowed = n >= (2 * k + 1)
+
         var lut: [PathArcLengthSample] = []
-        lut.reserveCapacity(smoothed.count)
+        lut.reserveCapacity(n)
 
         var dist: CGFloat = 0
-        for i in 0..<smoothed.count {
+        for i in 0..<n {
             let p = smoothed[i]
-            // Tangent direction: outgoing segment for non-final samples, and
-            // the incoming segment for the final sample (so the last entry
-            // has a sensible angle).
-            let tangent: CGFloat
-            if i + 1 < smoothed.count {
-                let nxt = smoothed[i + 1]
-                tangent = atan2(nxt.y - p.y, nxt.x - p.x)
-            } else {
-                let prv = smoothed[i - 1]
-                tangent = atan2(p.y - prv.y, p.x - prv.x)
-            }
+            let tangent: CGFloat = useWindowed
+                ? windowedTangent(at: i, smoothed: smoothed, k: k, isClosed: isClosed)
+                : forwardTangent(at: i, smoothed: smoothed)
             lut.append(PathArcLengthSample(distance: dist, point: p, tangent: tangent))
-            if i + 1 < smoothed.count {
+            if i + 1 < n {
                 let nxt = smoothed[i + 1]
                 dist += hypot(nxt.x - p.x, nxt.y - p.y)
             }
         }
         return lut
+    }
+
+    /// Tiny-path fallback: outgoing-segment tangent for non-final samples,
+    /// incoming-segment tangent for the final sample. Same behaviour as
+    /// the pre-Tier-1.5 code path. Only invoked when the polyline is
+    /// shorter than the windowed stencil.
+    private static func forwardTangent(at i: Int, smoothed: [CGPoint]) -> CGFloat {
+        let p = smoothed[i]
+        if i + 1 < smoothed.count {
+            let nxt = smoothed[i + 1]
+            return atan2(nxt.y - p.y, nxt.x - p.x)
+        } else {
+            let prv = smoothed[i - 1]
+            return atan2(p.y - prv.y, p.x - prv.x)
+        }
+    }
+
+    /// Windowed central difference. For closed paths the index wraps
+    /// modulo n so the seam doesn't produce a tangent jump; for open
+    /// paths the indices clamp to `[0, n-1]` (degenerating to a one-sided
+    /// stencil at the endpoints). Caller has already verified `n ≥ 2k+1`,
+    /// so for closed paths `(i+k) mod n` and `(i-k+n) mod n` always land
+    /// on distinct samples.
+    private static func windowedTangent(at i: Int,
+                                        smoothed: [CGPoint],
+                                        k: Int,
+                                        isClosed: Bool) -> CGFloat {
+        let n = smoothed.count
+        let prvIdx: Int
+        let nxtIdx: Int
+        if isClosed {
+            nxtIdx = (i + k) % n
+            // Swift's `%` keeps the sign of the dividend; offset by `n`
+            // to land in `[0, n)` for negative inputs.
+            prvIdx = ((i - k) % n + n) % n
+        } else {
+            prvIdx = max(0, i - k)
+            nxtIdx = min(n - 1, i + k)
+        }
+        if nxtIdx == prvIdx {
+            return 0
+        }
+        let nxt = smoothed[nxtIdx]
+        let prv = smoothed[prvIdx]
+        return atan2(nxt.y - prv.y, nxt.x - prv.x)
     }
 
     /// Look up the (point, tangent) at arc-length `distance` along the LUT
