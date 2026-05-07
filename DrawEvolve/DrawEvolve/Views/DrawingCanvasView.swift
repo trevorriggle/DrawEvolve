@@ -37,6 +37,13 @@ struct DrawingCanvasView: View {
     // not a per-tool toggle. Hydrates from UserDefaults on init.
     @StateObject private var symmetry = SymmetryConfig()
 
+    // Pose-reference overlay state. Session-only (no persistence). Reads
+    // from canvasState for geometry; never writes back. The detection
+    // sheet is bound to `poseDetectionRequest` — `nil` = sheet closed,
+    // `.hand`/`.body` = sheet open for that kind.
+    @StateObject private var poseOverlayManager = PoseOverlayManager()
+    @State private var poseDetectionRequest: PoseSkeletonKind?
+
     // Text tool
     @State private var showTextInput = false
     @State private var textInputLocation: CGPoint = .zero
@@ -129,7 +136,8 @@ struct DrawingCanvasView: View {
                     layers: $canvasState.layers,
                     selectedIndex: $canvasState.selectedLayerIndex,
                     onAddLayer: { canvasState.addLayer() },
-                    onDeleteLayer: { index in canvasState.deleteLayer(at: index) }
+                    onDeleteLayer: { index in canvasState.deleteLayer(at: index) },
+                    poseManager: poseOverlayManager
                 )
                 .navigationTitle("Layers")
                 .navigationBarTitleDisplayMode(.inline)
@@ -141,6 +149,13 @@ struct DrawingCanvasView: View {
                     }
                 }
             }
+        }
+        .sheet(item: $poseDetectionRequest) { kind in
+            PoseDetectionSheet(
+                kind: kind,
+                poseManager: poseOverlayManager,
+                canvasState: canvasState
+            )
         }
         .sheet(isPresented: $showBrushSettings) {
             NavigationView {
@@ -542,6 +557,17 @@ struct DrawingCanvasView: View {
             TransformHandlesOverlay(canvasState: canvasState)
                 .ignoresSafeArea()
 
+            // Pose-reference skeleton(s). Sibling to TransformHandlesOverlay
+            // (Decision 4 — no Metal layer, no DrawingLayer subtype). PR 2
+            // is read-only; per-joint editing arrives in PR 3.
+            PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
+                .ignoresSafeArea()
+
+            // Floating chip per active skeleton — Hide / Discard for the
+            // PR 2 stub. Full menu in PR 6.
+            PoseSkeletonChipsOverlay(poseManager: poseOverlayManager, canvasState: canvasState)
+                .ignoresSafeArea()
+
             pathStartHandleOverlay
             textOnPathPreviewOverlay
             cancelPillOverlay
@@ -603,15 +629,19 @@ struct DrawingCanvasView: View {
                         .padding(.horizontal, 8)
                         .padding(.top, 8)
 
-                        // Tool slots — 8 cells, 4 rows. Five grouped
-                        // (Effects, Sample, Shapes, Select, Text) reveal a
-                        // long-press popover for variant selection; the
-                        // other three (Brush, Eraser, Move) are single-tool
-                        // slots. Below the tool slots sit the 10 non-tool
-                        // middle items in their pre-refactor relative
-                        // order. Import/Export and Undo/Redo are pinned
-                        // OUTSIDE this ScrollView, just above the existing
-                        // Globe block (see below).
+                        // Tool slots — 9 cells, 4 rows of 2 + 1 cell. Six
+                        // grouped (Effects, Sample, Shapes, Select, Text,
+                        // Pose Reference) reveal a long-press popover for
+                        // variant selection; the other three (Brush,
+                        // Eraser, Move) are single-tool slots. The 9th
+                        // cell (Pose Reference) sits in row-5-left,
+                        // pushing the first non-tool middle item (Clear
+                        // / trash) to row-5-right and reflowing the rest
+                        // by one cell. Below the tool slots sit the 10
+                        // non-tool middle items in their pre-refactor
+                        // relative order. Import/Export and Undo/Redo
+                        // are pinned OUTSIDE this ScrollView, just above
+                        // the existing Globe block (see below).
                         //
                         // NOTE: this iPad layout intentionally diverges
                         // from the iPhone phoneToolPanel grid. The
@@ -717,6 +747,16 @@ struct DrawingCanvasView: View {
                             ToolButton(icon: DrawingTool.move.icon, isSelected: canvasState.currentTool == .move) {
                                 canvasState.currentTool = .move
                             }
+
+                            // Row 5 left — Pose Reference (9th tool slot).
+                            // Wrapper handles the Decision-7 tap cycle so
+                            // GroupedToolButton stays pose-agnostic.
+                            PoseReferenceSlot(
+                                poseManager: poseOverlayManager,
+                                onRequestDetection: { kind in
+                                    poseDetectionRequest = kind
+                                }
+                            )
 
                             // Middle items — non-tool entries in their
                             // pre-refactor relative order. Behavior
@@ -1357,9 +1397,9 @@ struct DrawingCanvasView: View {
     }
 
     private var phoneToolPanel: some View {
-        // 28 tiles in iPad LazyVGrid order, wholesale-quoted from
-        // padBody. 5 columns × 6 rows = 30 cells, 28 used, 2 empty
-        // slots at end of last row (per spec — don't try to fill).
+        // 30 tiles. 5 columns × 6 rows = 30 cells, all used. The two
+        // pose-reference tiles (handPose / bodyPose) absorb the two
+        // empty trailing slots that the v1.1 toolbar refactor reserved.
         // Each tile auto-collapses the panel via collapsePhoneToolPanel()
         // after firing.
         //
@@ -1436,6 +1476,27 @@ struct DrawingCanvasView: View {
                     canvasState.currentTool = .text
                     collapsePhoneToolPanel()
                 }
+                // Pose-reference tiles. Each is its own ToolButton-styled
+                // tile (no popover; iPhone is flat). Tap routes through
+                // the same Decision-7 cycle used by the iPad slot.
+                PoseReferenceTile(
+                    tool: .handPose,
+                    poseManager: poseOverlayManager,
+                    onRequestDetection: { kind in poseDetectionRequest = kind },
+                    onTapCompleted: { collapsePhoneToolPanel() }
+                )
+                PoseReferenceTile(
+                    tool: .bodyPose,
+                    poseManager: poseOverlayManager,
+                    onRequestDetection: { kind in poseDetectionRequest = kind },
+                    onTapCompleted: { collapsePhoneToolPanel() }
+                )
+            }
+            // ViewBuilder caps each Group at 10 children. The second Group
+            // hit that ceiling pre-pose; the two pose tiles above forced a
+            // third Group split here so PhotosPicker..layerPanel can keep
+            // their original tile sequence.
+            Group {
                 PhotosPicker(selection: $photoPickerItem, matching: .images) {
                     Image(systemName: "photo.badge.plus")
                         .font(.system(size: 22))

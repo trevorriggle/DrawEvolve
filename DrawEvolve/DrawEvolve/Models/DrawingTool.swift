@@ -36,6 +36,15 @@ enum DrawingTool {
     case blurAdjustment  // Procreate-style adjustment tool — horizontal drag → sigma, ✓/✕ commit.
     case smudge          // Reserved for PR 2; no toolbar surface in PR 1.
 
+    // Pose reference tools (DrawEvolve v1.1+ pose feature). These tools
+    // surface a Vision-detected reference skeleton on the canvas; they
+    // do NOT participate in the brush-stroke pipeline. MetalCanvasView's
+    // touchesBegan path is gated by `if currentTool == .X` checks, so
+    // adding these cases is no-op for the canvas — strokes are not
+    // produced when one of these is the current tool.
+    case handPose
+    case bodyPose
+
     var icon: String {
         switch self {
         case .brush: return "paintbrush.pointed.fill"
@@ -55,6 +64,8 @@ enum DrawingTool {
         case .blur: return "drop.halffull"
         case .blurAdjustment: return "camera.filters"
         case .smudge: return "hand.draw.fill"
+        case .handPose: return "hand.raised"
+        case .bodyPose: return "figure.stand"
         }
     }
 
@@ -77,6 +88,8 @@ enum DrawingTool {
         case .blur: return "Blur Brush"
         case .blurAdjustment: return "Blur"
         case .smudge: return "Smudge"
+        case .handPose: return "Hand Pose"
+        case .bodyPose: return "Body Pose"
         }
     }
 }

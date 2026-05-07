@@ -79,6 +79,8 @@ extension DrawingTool {
         case .blur: return "blur"
         case .blurAdjustment: return "blurAdjustment"
         case .smudge: return "smudge"
+        case .handPose: return "handPose"
+        case .bodyPose: return "bodyPose"
         }
     }
 
@@ -101,6 +103,8 @@ extension DrawingTool {
         case "blur": self = .blur
         case "blurAdjustment": self = .blurAdjustment
         case "smudge": self = .smudge
+        case "handPose": self = .handPose
+        case "bodyPose": self = .bodyPose
         default: return nil
         }
     }
@@ -148,5 +152,17 @@ struct ToolGroup {
         variants: [.tool(.text), .textSettings, .tool(.textOnPath)],
         storageKey: "toolGroup.text.lastSelected",
         defaultVariant: .tool(.text)
+    )
+
+    /// Pose Reference category — hand and body skeleton overlays. The slot
+    /// is consumed by `PoseReferenceToolSlot` (a thin wrapper around
+    /// `GroupedToolButton`); the wrapper interprets tap as the Decision-7
+    /// state cycle (no skeleton → detection sheet, visible ↔ hidden) so
+    /// `GroupedToolButton` itself stays free of pose-specific behavior.
+    static let poseReference = ToolGroup(
+        name: "Pose Reference",
+        variants: [.tool(.handPose), .tool(.bodyPose)],
+        storageKey: "toolGroup.poseReference.lastSelected",
+        defaultVariant: .tool(.handPose)
     )
 }
