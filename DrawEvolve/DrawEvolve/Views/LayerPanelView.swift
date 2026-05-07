@@ -152,14 +152,21 @@ struct LayerPanelView: View {
                 y: isDragging ? 4 : 0)
         .opacity(isDragging ? 0.95 : 1.0)
         .zIndex(isDragging ? 1 : 0)
-        // Two independent gestures instead of LongPressGesture.sequenced(
-        // before: DragGesture). The sequenced form was losing arbitration
-        // to the parent ScrollView's pan after sheet dismiss/reopen,
-        // causing pickup to silently fail. Splitting them lets the long
-        // press detect pickup on its own; the drag gesture only acts when
-        // the @State pickup flag is set for this row.
-        .simultaneousGesture(pickupGesture(layer: layer))
-        .simultaneousGesture(dragTrackingGesture(index: index, layer: layer))
+        // Sequenced long-press → drag, attached as a high-priority gesture
+        // so it wins over the parent ScrollView's pan recognizer (which
+        // otherwise eats the touch on second-and-later sheet reopens —
+        // see the prior simultaneousGesture attempt's regression).
+        //
+        // Notes that took two failed attempts to learn:
+        //   • LongPressGesture defaults to maximumDistance: 10pt — far too
+        //     tight for finger jitter on a real iPad. We pass 50.
+        //   • Splitting into two .simultaneousGesture recognizers (a
+        //     LongPress + a DragGesture(minimumDistance: 0)) does NOT
+        //     work. The drag's per-frame jitter trips the long-press's
+        //     maximumDistance check and silently cancels pickup. The
+        //     sequenced form is the right primitive: drag isn't even
+        //     active until the press has succeeded.
+        .highPriorityGesture(reorderGesture(index: index, layer: layer))
     }
 
     @ViewBuilder
@@ -199,26 +206,30 @@ struct LayerPanelView: View {
         return 0
     }
 
-    private func pickupGesture(layer: DrawingLayer) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.25)
-            .onEnded { _ in
-                guard draggingLayerId == nil else { return }
-                draggingLayerId = layer.id
-                dragTranslation = 0
-                // Collapse expanded rows so heights stay uniform — otherwise
-                // the displacement math (which assumes a single row stride)
-                // shifts rows by the wrong amount.
-                expandedLayerIds.removeAll()
-            }
-    }
-
-    private func dragTrackingGesture(index: Int, layer: DrawingLayer) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+    private func reorderGesture(index: Int, layer: DrawingLayer) -> some Gesture {
+        // maximumDistance: 50 instead of the default 10. iPad fingers
+        // routinely jitter more than 10pt during a hold; the default
+        // makes pickup roulette.
+        LongPressGesture(minimumDuration: 0.25, maximumDistance: 50)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { value in
-                // Only act on this row if it's the one currently picked up.
-                // Dragging an un-picked-up row does nothing.
-                guard draggingLayerId == layer.id else { return }
-                dragTranslation = value.translation.height
+                switch value {
+                case .first(true):
+                    // Long press succeeded — pick up this row.
+                    if draggingLayerId == nil {
+                        draggingLayerId = layer.id
+                        dragTranslation = 0
+                        // Collapse expanded rows so heights stay uniform;
+                        // displacement math assumes a single row stride.
+                        expandedLayerIds.removeAll()
+                    }
+                case .second(true, let drag):
+                    if let drag, draggingLayerId == layer.id {
+                        dragTranslation = drag.translation.height
+                    }
+                default:
+                    break
+                }
             }
             .onEnded { value in
                 guard draggingLayerId == layer.id else { return }
@@ -226,9 +237,10 @@ struct LayerPanelView: View {
                     draggingLayerId = nil
                     dragTranslation = 0
                 }
+                guard case .second(true, let drag?) = value else { return }
 
                 let stride = measuredRowHeight + rowSpacing
-                let rowsMovedVisually = Int((value.translation.height / stride).rounded())
+                let rowsMovedVisually = Int((drag.translation.height / stride).rounded())
                 guard rowsMovedVisually != 0 else { return }
 
                 // Reversed display: dragging visually DOWN (positive y) means
