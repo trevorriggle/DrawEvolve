@@ -570,9 +570,23 @@ struct DrawingCanvasView: View {
             PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
                 .ignoresSafeArea()
 
-            // Floating chip per active skeleton — Hide / Discard for the
-            // PR 2 stub. Full menu in PR 6.
-            PoseSkeletonChipsOverlay(poseManager: poseOverlayManager, canvasState: canvasState)
+            // Floating chip per active skeleton — chevron menu with
+            // Replace Photo / Commit / Hide-or-Show / Manually Place /
+            // Discard. PR 6.
+            PoseSkeletonChipsOverlay(
+                poseManager: poseOverlayManager,
+                canvasState: canvasState,
+                onRequestReplace: { kind in poseDetectionRequest = kind },
+                onRequestManualPlace: { kind in
+                    poseOverlayManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
+                }
+            )
+            .ignoresSafeArea()
+
+            // Low-confidence banner (top of canvas, 5s auto-dismiss).
+            // Slides down on detection-place when joints fall below
+            // PoseConfidence.lowThreshold; user can tap X to dismiss.
+            PoseLowConfidenceBanner(poseManager: poseOverlayManager)
                 .ignoresSafeArea()
 
             pathStartHandleOverlay

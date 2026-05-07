@@ -3,12 +3,16 @@
 //  DrawEvolve
 //
 //  Floating chip rendered above each visible skeleton's bounding box.
-//  PR 5: ships Commit + Hide + Discard. PR 6 reorganizes into a chevron
-//  popover with the full menu (Replace Photo, Commit, Hide, Manually
-//  Place, Discard).
+//
+//  PR 2 stub: Hide + Discard buttons.
+//  PR 5: added Commit button (paintbrush) ahead of Hide.
+//  PR 6 (this revision): replaced the icon row with a single labeled
+//  chevron button → SwiftUI Menu with the full action set:
+//    Replace Photo, Commit to Trace, Hide / Show, Manually Place,
+//    Discard.
 //
 //  Style mirrors `TransformCancelPill` (SelectionOverlays.swift:766):
-//  black 75% opacity capsule, white text/icons, soft shadow.
+//  black ~75% opacity capsule, white text/icons, soft shadow.
 //
 
 import SwiftUI
@@ -16,12 +20,17 @@ import SwiftUI
 struct PoseSkeletonChipsOverlay: View {
     @ObservedObject var poseManager: PoseOverlayManager
     @ObservedObject var canvasState: CanvasStateManager
+    /// Re-open the detection sheet for the given kind. Wired up in
+    /// DrawingCanvasView; the sheet itself is mounted there. PR 6.
+    let onRequestReplace: (PoseSkeletonKind) -> Void
+    /// Build a default skeleton at canvas center for the given kind.
+    /// Same trigger surface as the detection sheet's "Use default
+    /// skeleton" CTA — both call into PoseOverlayManager.placeDefault.
+    let onRequestManualPlace: (PoseSkeletonKind) -> Void
+
     @State private var pendingDiscard: PoseSkeletonKind?
     @State private var pendingCommit: PoseSkeletonKind?
     @State private var commitOpacity: CGFloat = 0.5
-    /// User-facing failure note when commit-to-trace can't run (e.g.
-    /// no selected layer / locked layer). Cleared on next commit
-    /// attempt.
     @State private var commitFailureMessage: String?
 
     var body: some View {
@@ -30,16 +39,24 @@ struct PoseSkeletonChipsOverlay: View {
                 PoseSkeletonChip(
                     skeleton: skeleton,
                     canvasState: canvasState,
-                    onHide: {
+                    isHidden: false, // chip only renders for visible skeletons
+                    onReplacePhoto: {
                         let kind = PoseSkeletonKind(skeleton: skeleton)
-                        poseManager.setVisible(false, for: kind)
+                        onRequestReplace(kind)
                     },
                     onCommit: {
                         let kind = PoseSkeletonKind(skeleton: skeleton)
-                        // Reset slider to default each time the dialog opens
-                        // so prior commits don't bleed forward.
                         commitOpacity = 0.5
                         pendingCommit = kind
+                    },
+                    onToggleVisibility: {
+                        let kind = PoseSkeletonKind(skeleton: skeleton)
+                        let visible = poseManager.state(for: kind).isVisible
+                        poseManager.setVisible(!visible, for: kind)
+                    },
+                    onManuallyPlace: {
+                        let kind = PoseSkeletonKind(skeleton: skeleton)
+                        onRequestManualPlace(kind)
                     },
                     onDiscard: {
                         let kind = PoseSkeletonKind(skeleton: skeleton)
@@ -68,10 +85,6 @@ struct PoseSkeletonChipsOverlay: View {
         } message: { _ in
             Text("You've manually moved joints. Discarding can't be undone.")
         }
-        // Commit-to-trace confirmation. iOS's .confirmationDialog can't
-        // host a Slider, so we use a sheet with a small dedicated view.
-        // .medium detent + drag indicator matches the pose-detection
-        // sheet's pattern from PR 2.
         .sheet(isPresented: Binding(
             get: { pendingCommit != nil },
             set: { if !$0 { pendingCommit = nil } }
@@ -87,7 +100,7 @@ struct PoseSkeletonChipsOverlay: View {
                             canvasState: canvasState
                         )
                         if !success {
-                            commitFailureMessage = commitFailureCopy(kind: kind)
+                            commitFailureMessage = "Select an unlocked layer first, then try again."
                         }
                         pendingCommit = nil
                     },
@@ -110,63 +123,69 @@ struct PoseSkeletonChipsOverlay: View {
             Text(msg)
         }
     }
-
-    private func commitFailureCopy(kind: PoseSkeletonKind) -> String {
-        // CanvasStateManager.commitPoseToTrace fails when there is no
-        // selected layer or the active layer is locked. Surface a single
-        // copy line that covers both — the user fixes either by picking
-        // an unlocked layer in the Layer Panel.
-        _ = kind
-        return "Select an unlocked layer first, then try again."
-    }
 }
 
-// MARK: - Chip
+// MARK: - Chip (chevron + Menu)
 
 private struct PoseSkeletonChip: View {
     let skeleton: PoseSkeleton
     @ObservedObject var canvasState: CanvasStateManager
-    let onHide: () -> Void
+    let isHidden: Bool
+    let onReplacePhoto: () -> Void
     let onCommit: () -> Void
+    let onToggleVisibility: () -> Void
+    let onManuallyPlace: () -> Void
     let onDiscard: () -> Void
 
     var body: some View {
         let anchor = chipAnchorScreen()
-        HStack(spacing: 10) {
-            Button(action: onCommit) {
-                Image(systemName: "paintbrush.pointed")
-                    .font(.callout)
-                    .foregroundColor(.white)
+        Menu {
+            Button {
+                onReplacePhoto()
+            } label: {
+                Label("Replace Photo", systemImage: "photo.badge.plus")
             }
-            .accessibilityLabel("Commit pose to active layer")
-
+            Button {
+                onCommit()
+            } label: {
+                Label("Commit to Trace", systemImage: "paintbrush.pointed")
+            }
+            Button {
+                onToggleVisibility()
+            } label: {
+                Label(
+                    isHidden ? "Show Skeleton" : "Hide Skeleton",
+                    systemImage: isHidden ? "eye" : "eye.slash"
+                )
+            }
+            Button {
+                onManuallyPlace()
+            } label: {
+                Label("Manually Place", systemImage: "hand.draw")
+            }
             Divider()
-                .frame(height: 16)
-                .background(Color.white.opacity(0.4))
-
-            Button(action: onHide) {
-                Image(systemName: "eye.slash")
-                    .font(.callout)
-                    .foregroundColor(.white)
+            Button(role: .destructive) {
+                onDiscard()
+            } label: {
+                Label("Discard", systemImage: "trash")
             }
-            .accessibilityLabel("Hide pose reference")
-
-            Divider()
-                .frame(height: 16)
-                .background(Color.white.opacity(0.4))
-
-            Button(action: onDiscard) {
-                Image(systemName: "xmark")
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: skeleton.iconName)
                     .font(.callout)
-                    .foregroundColor(.white)
+                Text(skeleton.shortLabel)
+                    .font(.subheadline.weight(.medium))
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
             }
-            .accessibilityLabel("Discard pose reference")
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.78))
+            .clipShape(Capsule())
+            .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 1)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.75))
-        .clipShape(Capsule())
-        .shadow(radius: 3)
+        .accessibilityLabel("\(skeleton.shortLabel) actions")
         .position(anchor)
     }
 
@@ -187,6 +206,22 @@ private struct PoseSkeletonChip: View {
         switch skeleton {
         case .hand(let pose): return pose.joints.values.map(\.position)
         case .body(let pose): return pose.joints.values.map(\.position)
+        }
+    }
+}
+
+private extension PoseSkeleton {
+    var iconName: String {
+        switch self {
+        case .hand: return "hand.raised"
+        case .body: return "figure.stand"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .hand: return "Hand"
+        case .body: return "Body"
         }
     }
 }

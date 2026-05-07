@@ -88,6 +88,7 @@
 		DE000086 /* PoseSkeletonChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100086 /* PoseSkeletonChip.swift */; };
 		DE000087 /* PoseTransformHandlesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100087 /* PoseTransformHandlesView.swift */; };
 		DE000088 /* PoseRasterizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100088 /* PoseRasterizer.swift */; };
+		DE000089 /* PoseLowConfidenceBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100089 /* PoseLowConfidenceBanner.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -175,6 +176,7 @@
 		DE100086 /* PoseSkeletonChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseSkeletonChip.swift; sourceTree = "<group>"; };
 		DE100087 /* PoseTransformHandlesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseTransformHandlesView.swift; sourceTree = "<group>"; };
 		DE100088 /* PoseRasterizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseRasterizer.swift; sourceTree = "<group>"; };
+		DE100089 /* PoseLowConfidenceBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseLowConfidenceBanner.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -388,6 +390,7 @@
 				DE100085 /* PoseReferenceToolSlot.swift */,
 				DE100086 /* PoseSkeletonChip.swift */,
 				DE100087 /* PoseTransformHandlesView.swift */,
+				DE100089 /* PoseLowConfidenceBanner.swift */,
 			);
 			path = Pose;
 			sourceTree = "<group>";
@@ -558,6 +561,7 @@
 				DE000086 /* PoseSkeletonChip.swift in Sources */,
 				DE000087 /* PoseTransformHandlesView.swift in Sources */,
 				DE000088 /* PoseRasterizer.swift in Sources */,
+				DE000089 /* PoseLowConfidenceBanner.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -161,18 +161,48 @@ struct PoseDetectionSheet: View {
                 advisoryBlock(result.advisories)
             }
         case .empty:
-            inlineHelp(
-                title: "No pose detected",
-                body: kind == .hand
-                    ? "Try a clearer photo of a hand against a contrasting background."
-                    : "Try a clearer full-body photo where the figure faces the camera."
-            )
+            VStack(spacing: 10) {
+                inlineHelp(
+                    title: "No pose detected",
+                    body: kind == .hand
+                        ? "Try a clearer photo of a hand against a contrasting background."
+                        : "Try a clearer full-body photo where the figure faces the camera."
+                )
+                manualPlaceButton
+            }
         case .failure(let reason):
-            inlineHelp(
-                title: "Couldn't run detection",
-                body: reason ?? "Try a different photo."
-            )
+            VStack(spacing: 10) {
+                inlineHelp(
+                    title: "Couldn't run detection",
+                    body: reason ?? "Try a different photo."
+                )
+                manualPlaceButton
+            }
         }
+    }
+
+    /// "Use default skeleton instead" — Risk 1 fallback (audit §10).
+    /// Surfaces under inline-help blocks so the user has a path forward
+    /// when Vision doesn't find anything in their photo. Same trigger
+    /// surface as the chip's "Manually Place" entry.
+    private var manualPlaceButton: some View {
+        Button(action: placeDefault) {
+            HStack {
+                Image(systemName: "hand.draw")
+                Text("Use default skeleton instead")
+                    .font(.body.weight(.medium))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(Color.accentColor.opacity(0.15))
+            .foregroundColor(.accentColor)
+            .cornerRadius(10)
+        }
+    }
+
+    private func placeDefault() {
+        poseManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
+        dismiss()
     }
 
     private func advisoryBlock(_ advisories: [PoseAdvisory]) -> some View {
