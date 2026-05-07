@@ -2,29 +2,33 @@
 //  TypeBarView.swift
 //  DrawEvolve
 //
-//  Floating, movable, collapsible Type Bar that's the controller for the
-//  Type tool session. Replaces the auto-opening inspector behavior shipped
-//  in PR #52 — the inspector becomes opt-in via the bar's More button.
+//  Floating, movable Type Bar — the controller for the Type tool session.
+//
+//  Tier-1.4 slimdown: alignment picker, More button, collapse chevron, and
+//  collapsed-pill state are gone; leading slider is gone (replaced by size
+//  in row 2). Bar is now: row 1 = grab handle + font pill (wider) + color
+//  swatch + checkmark; row 2 = size slider + tracking slider. The deeper
+//  inspector half-sheet (italic, kerning kind, manual kern, on-path
+//  toggles) is no longer reachable from the bar — those settings can come
+//  back via a different surface in a future tier if/when they're needed.
 //
 //  Lifecycle:
 //    • Appears when `.text` is selected, OR when `.textOnPath` is selected
-//      AND the user has finished drawing the path (i.e., a path-bearing
+//      AND the user has finished drawing the path (a path-bearing
 //      FloatingText exists).
-//    • Persists for the entire Type session — does NOT auto-dismiss when a
-//      float commits or when the user is between texts.
-//    • Dismisses ONLY when the user taps the checkmark or selects another
-//      tool (commit-on-tool-change is the existing CanvasStateManager
-//      behavior).
+//    • Hides when the user taps the checkmark — the float stays alive so
+//      the user can drag / scale / rotate it via the existing transform
+//      handles. Subsequent tap-outside in .text commits to the layer.
+//    • Also hides on a real tool change.
 //
 //  Position:
 //    • First launch: bottom-center, above safe area.
 //    • Subsequent launches: last user-placed position from UserDefaults.
-//    • Drag handle on the left edge — slider/button hits don't trigger drag.
-//    • Constrained to canvas bounds during drag.
-//    • Soft keyboard: bar slides up to sit just above the keyboard via
-//      keyboardWillShow/Hide notifications. On hide, bar returns to placed
-//      position. Hardware keyboard attached: no soft keyboard rises, bar
-//      stays put.
+//    • Drag handle on the left edge — slider/checkmark hits don't trigger
+//      drag.
+//    • Constrained to canvas bounds.
+//    • Soft keyboard: bar slides up to sit above the keyboard via
+//      keyboardWillShow/Hide notifications. Hardware keyboard: no-op.
 //
 
 import SwiftUI
@@ -32,6 +36,7 @@ import UIKit
 
 struct TypeBarView: View {
     @Binding var settings: TextSettings
+
     @ObservedObject var canvasState: CanvasStateManager
 
     /// Canvas size in screen-points, used to clamp drag and compute the
@@ -39,13 +44,10 @@ struct TypeBarView: View {
     /// so the bar follows reflow on rotation or inspector mount.
     let canvasSize: CGSize
 
-    /// Tapped when the user wants the half-sheet inspector with the deeper
-    /// controls (italic, kerning kind, manual kern, on-path toggles).
-    let onMore: () -> Void
-
-    /// Tapped when the user is done with the Type session. Parent handles
-    /// commit-or-cancel of the active float and switches `currentTool`
-    /// back to the previous non-Type tool.
+    /// Tapped when the user is done with the typing portion of the Type
+    /// session. Parent decides what that means — Tier-1.4 keeps the float
+    /// alive with transform handles, so this fires "stop typing" rather
+    /// than "commit pixels."
     let onCheckmark: () -> Void
 
     // MARK: - Persisted position
@@ -59,7 +61,6 @@ struct TypeBarView: View {
     @State private var keyboardAvoidanceOffset: CGFloat = 0
     @State private var keyboardAnimationDuration: Double = 0.25
 
-    @State private var isCollapsed = false
     @State private var showFontPickerPopover = false
     @State private var showColorPickerPopover = false
 
@@ -67,24 +68,21 @@ struct TypeBarView: View {
 
     // MARK: - Layout constants
 
-    private let expandedWidth: CGFloat = 388
-    private let collapsedWidth: CGFloat = 132
-    private let expandedHeight: CGFloat = 88
-    private let collapsedHeight: CGFloat = 44
+    private let barWidth: CGFloat = 340
+    private let barHeight: CGFloat = 92
     private let edgeMargin: CGFloat = 12
     private let keyboardClearance: CGFloat = 8
 
     var body: some View {
-        let size = currentSize
+        let size = CGSize(width: barWidth, height: barHeight)
         let pos = effectivePosition(for: size)
 
-        Group {
-            if isCollapsed {
-                collapsedContent
-            } else {
-                expandedContent
-            }
+        VStack(spacing: 6) {
+            row1
+            row2
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .frame(width: size.width, height: size.height)
         .background(Color(uiColor: .systemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -96,9 +94,6 @@ struct TypeBarView: View {
         .position(x: pos.x, y: pos.y - keyboardAvoidanceOffset)
         .onAppear { ensureInitialPosition(for: size) }
         .onChange(of: canvasSize) { _ in
-            // Re-clamp position whenever the canvas reshapes (rotation,
-            // side-column mount). Keep the user's intended location but
-            // never let it sit off-screen.
             if var p = position {
                 p = clampPosition(p, size: size)
                 position = p
@@ -114,60 +109,33 @@ struct TypeBarView: View {
         )) { handleKeyboardHide($0) }
     }
 
-    // MARK: - Content
-
-    private var expandedContent: some View {
-        VStack(spacing: 4) {
-            row1
-            row2
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-    }
-
-    private var collapsedContent: some View {
-        HStack(spacing: 6) {
-            grabHandle
-            Button { isCollapsed = false } label: {
-                Text("Aa")
-                    .font(.custom(settings.fontFamily, size: 18).weight(.semibold))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Color(uiColor: .secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            Spacer(minLength: 0)
-            checkmarkButton
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-    }
+    // MARK: - Rows
 
     private var row1: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             grabHandle
             fontPill
-            sizeControl
             colorSwatch
-            alignmentPicker
-            moreButton
-            collapseButton
             checkmarkButton
         }
     }
 
     private var row2: some View {
-        HStack(spacing: 12) {
-            sliderSnippet(label: "Lead",
-                          value: $settings.leading,
-                          range: -20...80,
-                          fmt: "%.0f")
+        HStack(spacing: 14) {
+            sliderSnippet(label: "Size",
+                          value: $settings.size,
+                          range: 1...500,
+                          fmt: "%.0f",
+                          unit: "pt",
+                          labelWidth: 28,
+                          valueWidth: 38)
             sliderSnippet(label: "Track",
                           value: $settings.tracking,
                           range: -10...50,
-                          fmt: "%.1f")
+                          fmt: "%.1f",
+                          unit: nil,
+                          labelWidth: 32,
+                          valueWidth: 30)
         }
         .padding(.horizontal, 4)
     }
@@ -185,37 +153,26 @@ struct TypeBarView: View {
 
     private var fontPill: some View {
         Button { showFontPickerPopover = true } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Text(settings.fontFamily)
-                    .font(.custom(settings.fontFamily, size: 13))
+                    .font(.custom(settings.fontFamily, size: 14))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9))
+                    .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
             .background(Color(uiColor: .secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-        .frame(minWidth: 56, idealWidth: 90, maxWidth: 110)
         .layoutPriority(1)
         .popover(isPresented: $showFontPickerPopover) {
             fontPickerPopover
-        }
-    }
-
-    private var sizeControl: some View {
-        HStack(spacing: 4) {
-            Slider(value: $settings.size, in: 1...500)
-                .frame(minWidth: 50, idealWidth: 80)
-                .layoutPriority(1)
-            Text(String(format: "%.0f pt", settings.size))
-                .font(.caption.monospacedDigit())
-                .foregroundColor(.secondary)
-                .frame(width: 38, alignment: .trailing)
         }
     }
 
@@ -223,7 +180,7 @@ struct TypeBarView: View {
         Button { showColorPickerPopover = true } label: {
             Circle()
                 .fill(Color(uiColor: settings.color))
-                .frame(width: 24, height: 24)
+                .frame(width: 26, height: 26)
                 .overlay(Circle().stroke(Color.gray.opacity(0.4), lineWidth: 1))
         }
         .buttonStyle(.plain)
@@ -233,37 +190,6 @@ struct TypeBarView: View {
                 .padding()
                 .presentationCompactAdaptation(.none)
         }
-    }
-
-    private var alignmentPicker: some View {
-        Picker("Alignment", selection: $settings.alignment) {
-            Image(systemName: "text.alignleft").tag(TextSettings.Alignment.leading)
-            Image(systemName: "text.aligncenter").tag(TextSettings.Alignment.center)
-            Image(systemName: "text.alignright").tag(TextSettings.Alignment.trailing)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 92)
-    }
-
-    private var moreButton: some View {
-        Button(action: onMore) {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 17))
-                .foregroundColor(.primary)
-                .frame(width: 28, height: 28)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var collapseButton: some View {
-        Button { isCollapsed = true } label: {
-            Image(systemName: "chevron.compact.down")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(.primary)
-                .frame(width: 24, height: 28)
-        }
-        .buttonStyle(.plain)
     }
 
     private var checkmarkButton: some View {
@@ -281,18 +207,22 @@ struct TypeBarView: View {
     private func sliderSnippet(label: String,
                                value: Binding<CGFloat>,
                                range: ClosedRange<CGFloat>,
-                               fmt: String) -> some View {
+                               fmt: String,
+                               unit: String?,
+                               labelWidth: CGFloat,
+                               valueWidth: CGFloat) -> some View {
         HStack(spacing: 6) {
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-                .frame(width: 32, alignment: .leading)
+                .frame(width: labelWidth, alignment: .leading)
             Slider(value: value, in: range)
                 .layoutPriority(1)
-            Text(String(format: fmt, value.wrappedValue))
+            Text(unit.map { String(format: "\(fmt) \($0)", value.wrappedValue) }
+                  ?? String(format: fmt, value.wrappedValue))
                 .font(.caption2.monospacedDigit())
                 .foregroundColor(.secondary)
-                .frame(width: 30, alignment: .trailing)
+                .frame(width: valueWidth, alignment: .trailing)
         }
     }
 
@@ -338,12 +268,6 @@ struct TypeBarView: View {
 
     // MARK: - Position
 
-    private var currentSize: CGSize {
-        isCollapsed
-            ? CGSize(width: collapsedWidth, height: collapsedHeight)
-            : CGSize(width: expandedWidth, height: expandedHeight)
-    }
-
     private func ensureInitialPosition(for size: CGSize) {
         guard position == nil else { return }
         if storedX >= 0, storedY >= 0 {
@@ -385,17 +309,16 @@ struct TypeBarView: View {
         DragGesture(coordinateSpace: .global)
             .onChanged { value in
                 guard let current = position else { return }
-                let size = currentSize
+                let size = CGSize(width: barWidth, height: barHeight)
                 let new = CGPoint(
                     x: current.x + value.translation.width,
                     y: current.y + value.translation.height
                 )
-                let clamped = clampPosition(new, size: size)
-                position = clamped
+                position = clampPosition(new, size: size)
             }
             .onEnded { value in
                 guard let current = position else { return }
-                let size = currentSize
+                let size = CGSize(width: barWidth, height: barHeight)
                 let new = CGPoint(
                     x: current.x + value.translation.width,
                     y: current.y + value.translation.height
@@ -421,8 +344,8 @@ struct TypeBarView: View {
         let kbFrame = frameValue.cgRectValue
 
         // Hardware-keyboard attached: iOS reports a keyboard frame whose
-        // top is below the screen bottom. Treat that as "no keyboard,
-        // don't move."
+        // top is at or below the screen bottom (height 0 or off-screen).
+        // Treat that as "no keyboard, don't move."
         guard kbFrame.height > 0,
               kbFrame.minY < canvasSize.height - 1 else {
             return

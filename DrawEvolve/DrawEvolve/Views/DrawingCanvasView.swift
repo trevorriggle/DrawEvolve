@@ -44,13 +44,15 @@ struct DrawingCanvasView: View {
     @StateObject private var poseOverlayManager = PoseOverlayManager()
     @State private var poseDetectionRequest: PoseSkeletonKind?
 
-    // Type session (Tier-1.2). The bar appears when the Type tool is
+    // Type session (Tier-1.4). The bar appears when the Type tool is
     // selected and persists until the user taps the checkmark or selects
-    // another tool. The half-sheet inspector that PR #52 auto-presented
-    // is now opt-in via the bar's More button (`showInspectorSheet`).
-    // `previousNonTypeTool` is the tool the checkmark restores when
-    // ending the Type session.
-    @State private var showInspectorSheet = false
+    // another tool. Tier-1.4 dropped the More inspector; the checkmark
+    // also no longer commits the float — it just stops the typing portion
+    // of the session and hides the bar, leaving the float alive with its
+    // existing transform handles. `typeBarSuspended` gates the bar after
+    // a checkmark so it stays hidden until either the float commits (tap
+    // outside in .text) or a brand-new float begins.
+    @State private var typeBarSuspended = false
     @State private var previousNonTypeTool: DrawingTool = .brush
 
     // Toolbar collapse state
@@ -110,14 +112,27 @@ struct DrawingCanvasView: View {
                 padBody
             }
         }
+        .overlay(typingPathOverlay)
         .overlay(typeBarOverlay)
         .onChange(of: canvasState.currentTool) { newTool in
-            // Capture the last non-Type tool so the bar's checkmark can
-            // restore it when the Type session ends. Switching away from
-            // Type also clears any inspector sheet that was open.
+            // Capture the last non-Type tool so future restoration knows
+            // where to return. Re-entering a Type tool resets the bar's
+            // suspended flag so a fresh tap on the canvas brings it back.
             if newTool != .text && newTool != .textOnPath {
                 previousNonTypeTool = newTool
-                showInspectorSheet = false
+            } else {
+                typeBarSuspended = false
+            }
+        }
+        .onChange(of: canvasState.floatingText == nil) { isNil in
+            // Brand-new float created → bar should re-show on next render.
+            // (Going to nil means tap-outside committed; suspended flag
+            // doesn't need a reset there because the bar is already
+            // hidden by `shouldShowTypeBar`'s float check on `.textOnPath`
+            // and a fresh `.text` tap will create a new float and trigger
+            // this same handler with `isNil == false`.)
+            if !isNil {
+                typeBarSuspended = false
             }
         }
         .sheet(isPresented: $showColorPicker) {
@@ -183,20 +198,12 @@ struct DrawingCanvasView: View {
                     }
             }
         }
-        // MARK: - Type Inspector (Tier 1.2)
-        // Opt-in only via the bar's More button. PR #52's auto-presenting
-        // sheet was wrong-shape on iPhone (covered the canvas); the bar
-        // now hosts the everyday controls and the inspector only surfaces
-        // when the user explicitly asks for the deeper settings.
-        .sheet(isPresented: $showInspectorSheet) {
-            TypeInspectorView(
-                settings: $canvasState.textSettings,
-                canvasState: canvasState
-            )
-            .presentationDetents([.fraction(0.42), .large])
-            .presentationBackgroundInteraction(.enabled)
-            .presentationDragIndicator(.visible)
-        }
+        // Tier-1.4: the More-button half-sheet (italic, kerning kind,
+        // manual kern, on-path toggles) was retired alongside the bar's
+        // More button. If those controls return they'll mount through a
+        // different surface; for now they're simply unreachable from the
+        // bar — TypeInspectorView.swift remains in the project for that
+        // future re-wiring.
         .sheet(isPresented: $showSymmetrySettings) {
             NavigationView {
                 SymmetrySettingsView(symmetry: symmetry)
@@ -1041,14 +1048,15 @@ struct DrawingCanvasView: View {
         // re-add them here — they'd double-fire.
     }
 
-    // MARK: - Type Bar overlay (Tier 1.2)
+    // MARK: - Type Bar overlay (Tier 1.4)
     //
     // The bar is the Type tool's session controller. It appears whenever
     // the user is in a Type session — `.text` selected, OR `.textOnPath`
-    // with a path-bearing FloatingText already on canvas — and persists
-    // until the checkmark is tapped or the user picks another tool. The
-    // GeometryReader provides screen-space bounds for drag-clamping and
-    // the default first-launch position.
+    // with a path-bearing FloatingText already on canvas — AND
+    // `typeBarSuspended` is false (set true by the checkmark to hide the
+    // bar without ending the float). The GeometryReader provides
+    // screen-space bounds for drag-clamping and the default first-launch
+    // position.
 
     @ViewBuilder
     private var typeBarOverlay: some View {
@@ -1058,7 +1066,6 @@ struct DrawingCanvasView: View {
                     settings: $canvasState.textSettings,
                     canvasState: canvasState,
                     canvasSize: geo.size,
-                    onMore: { showInspectorSheet = true },
                     onCheckmark: { handleTypeCheckmark() }
                 )
             }
@@ -1067,6 +1074,7 @@ struct DrawingCanvasView: View {
     }
 
     private var shouldShowTypeBar: Bool {
+        guard !typeBarSuspended else { return false }
         switch canvasState.currentTool {
         case .text:
             return true
@@ -1077,20 +1085,60 @@ struct DrawingCanvasView: View {
         }
     }
 
-    /// End the Type session: commit any non-empty float, silently cancel
-    /// an empty one, then restore the previous non-Type tool. The bar's
-    /// own visibility is driven by `shouldShowTypeBar` so it disappears
-    /// automatically once `currentTool` is no longer a Type tool.
-    private func handleTypeCheckmark() {
-        if let ft = canvasState.floatingText {
-            if ft.content.isEmpty {
-                canvasState.cancelFloatingText()
-            } else {
-                canvasState.commitFloatingText()
+    // MARK: - Path overlay during Type session (Tier 1.4)
+    //
+    // While the user is in an active typing session on a path-bearing
+    // float, render the smoothed path as a faint gray polyline so the
+    // user sees the curve their text is following. The overlay vanishes
+    // when the user taps the bar's checkmark (which sets
+    // `typeBarSuspended` and hides the path) or when the float commits.
+
+    @ViewBuilder
+    private var typingPathOverlay: some View {
+        if !typeBarSuspended,
+           let ft = canvasState.floatingText,
+           let cgPath = ft.path {
+            Path { p in
+                cgPath.applyWithBlock { elPtr in
+                    let el = elPtr.pointee
+                    switch el.type {
+                    case .moveToPoint:
+                        p.move(to: canvasState.documentToScreen(el.points[0]))
+                    case .addLineToPoint:
+                        p.addLine(to: canvasState.documentToScreen(el.points[0]))
+                    default:
+                        break
+                    }
+                }
             }
+            .stroke(Color.gray.opacity(0.45), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            .allowsHitTesting(false)
+            .ignoresSafeArea()
         }
-        showInspectorSheet = false
-        canvasState.currentTool = previousNonTypeTool
+    }
+
+    /// End the typing portion of the Type session. Tier-1.4 keeps the
+    /// float alive so the user can drag / scale / rotate via the existing
+    /// transform handles; the actual commit-into-layer happens later when
+    /// the user taps outside (existing .text-tool behavior). Path
+    /// overlay disappears via the same `typeBarSuspended` flag.
+    private func handleTypeCheckmark() {
+        // Empty float → no point keeping a zero-glyph float around. Treat
+        // checkmark on an empty float as a quiet cancel.
+        if let ft = canvasState.floatingText, ft.content.isEmpty {
+            canvasState.cancelFloatingText()
+            canvasState.currentTool = previousNonTypeTool
+            return
+        }
+        // Dismiss the soft keyboard (if any) by resigning the current
+        // first responder app-wide. The TextEntryOverlay's UITextView
+        // receives the resign and the keyboard slides down. The float
+        // itself remains alive — `floatingText` is unchanged.
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil, from: nil, for: nil
+        )
+        typeBarSuspended = true
     }
 
     // MARK: - Blur Adjustment HUD overlay
