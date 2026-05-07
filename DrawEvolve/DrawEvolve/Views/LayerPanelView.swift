@@ -29,10 +29,10 @@ struct LayerPanelView: View {
 
     @State private var pendingPoseDiscard: PoseSkeletonKind?
 
-    // Used both for the drag-displacement math and as a visual rhythm.
-    // Chosen by eyeballing the collapsed row + spacing; if you change row
-    // padding, adjust here so drop-target math still lines up.
-    private let collapsedRowHeight: CGFloat = 60
+    // Live row-height measurement (collapsed). Seeded with a sane default so
+    // pre-measurement drags still work; PreferenceKey converges on the real
+    // height as soon as the first row renders.
+    @State private var measuredRowHeight: CGFloat = 60
     private let rowSpacing: CGFloat = 6
 
     var body: some View {
@@ -73,6 +73,17 @@ struct LayerPanelView: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: draggingLayerId)
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: expandedLayerIds)
         }
+        // Lock the ScrollView while a row is picked up so its pan recognizer
+        // can't steal the drag mid-gesture and so the underlying scroll
+        // position doesn't shift under the user's finger (which would skew
+        // the drop math). Released as soon as the row drops.
+        .scrollDisabled(draggingLayerId != nil)
+        .onPreferenceChange(CollapsedRowHeightKey.self) { value in
+            // Ignore the seed value (.infinity) and any stray zero readings.
+            if value.isFinite && value > 0 {
+                measuredRowHeight = value
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button(action: onAddLayer) {
@@ -102,14 +113,21 @@ struct LayerPanelView: View {
     private func rowView(index: Int, layer: DrawingLayer) -> some View {
         let isDragging = draggingLayerId == layer.id
         let displacement = displacementOffset(for: index, layer: layer)
+        let isExpanded = expandedLayerIds.contains(layer.id)
 
         LayerRow(
             layer: layer,
             isSelected: selectedIndex == index,
-            isExpanded: expandedLayerIds.contains(layer.id),
+            isExpanded: isExpanded,
             isDragging: isDragging,
             isOnlyLayer: layers.count <= 1,
-            onTapRow: { selectedIndex = index },
+            onTapRow: {
+                // Suppress selection-tap if this row was just picked up by
+                // a long-press; otherwise tapping after a release would
+                // change the selection unexpectedly.
+                guard draggingLayerId != layer.id else { return }
+                selectedIndex = index
+            },
             onToggleExpand: {
                 if expandedLayerIds.contains(layer.id) {
                     expandedLayerIds.remove(layer.id)
@@ -123,6 +141,9 @@ struct LayerPanelView: View {
             onCommitRename: { onCommitRename(index) },
             onDelete: { onDeleteLayer(index) }
         )
+        // Only collapsed rows contribute to the measured row height — see
+        // CollapsedRowHeightKey for why.
+        .background(rowHeightProbe(isExpanded: isExpanded))
         .offset(y: isDragging ? dragTranslation : displacement)
         .scaleEffect(isDragging ? 1.02 : 1.0)
         .shadow(color: isDragging ? Color.black.opacity(0.25) : .clear,
@@ -131,7 +152,27 @@ struct LayerPanelView: View {
                 y: isDragging ? 4 : 0)
         .opacity(isDragging ? 0.95 : 1.0)
         .zIndex(isDragging ? 1 : 0)
-        .gesture(longPressDragGesture(index: index, layer: layer))
+        // Two independent gestures instead of LongPressGesture.sequenced(
+        // before: DragGesture). The sequenced form was losing arbitration
+        // to the parent ScrollView's pan after sheet dismiss/reopen,
+        // causing pickup to silently fail. Splitting them lets the long
+        // press detect pickup on its own; the drag gesture only acts when
+        // the @State pickup flag is set for this row.
+        .simultaneousGesture(pickupGesture(layer: layer))
+        .simultaneousGesture(dragTrackingGesture(index: index, layer: layer))
+    }
+
+    @ViewBuilder
+    private func rowHeightProbe(isExpanded: Bool) -> some View {
+        if isExpanded {
+            Color.clear
+        } else {
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: CollapsedRowHeightKey.self,
+                                value: proxy.size.height)
+            }
+        }
     }
 
     /// Compute the y-offset to shift a non-dragging row to make room for the
@@ -142,7 +183,7 @@ struct LayerPanelView: View {
               let draggingIndex = layers.firstIndex(where: { $0.id == draggingId }),
               draggingId != layer.id else { return 0 }
 
-        let stride = collapsedRowHeight + rowSpacing
+        let stride = measuredRowHeight + rowSpacing
         // Visual position in the reversed list (0 = topmost).
         let visualDragOrigin = layers.count - 1 - draggingIndex
         let myVisualPos = layers.count - 1 - index
@@ -158,37 +199,36 @@ struct LayerPanelView: View {
         return 0
     }
 
-    private func longPressDragGesture(index: Int, layer: DrawingLayer) -> some Gesture {
+    private func pickupGesture(layer: DrawingLayer) -> some Gesture {
         LongPressGesture(minimumDuration: 0.25)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+            .onEnded { _ in
+                guard draggingLayerId == nil else { return }
+                draggingLayerId = layer.id
+                dragTranslation = 0
+                // Collapse expanded rows so heights stay uniform — otherwise
+                // the displacement math (which assumes a single row stride)
+                // shifts rows by the wrong amount.
+                expandedLayerIds.removeAll()
+            }
+    }
+
+    private func dragTrackingGesture(index: Int, layer: DrawingLayer) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                switch value {
-                case .first(true):
-                    if draggingLayerId == nil {
-                        draggingLayerId = layer.id
-                        // Collapse expanded rows so heights stay uniform —
-                        // otherwise the displacement math (which assumes a
-                        // single row stride) lies and rows snap to wrong slots.
-                        expandedLayerIds.removeAll()
-                    }
-                case .second(true, let drag):
-                    if let drag = drag {
-                        dragTranslation = drag.translation.height
-                    }
-                default:
-                    break
-                }
+                // Only act on this row if it's the one currently picked up.
+                // Dragging an un-picked-up row does nothing.
+                guard draggingLayerId == layer.id else { return }
+                dragTranslation = value.translation.height
             }
             .onEnded { value in
+                guard draggingLayerId == layer.id else { return }
                 defer {
                     draggingLayerId = nil
                     dragTranslation = 0
                 }
-                guard draggingLayerId == layer.id else { return }
-                guard case .second(true, let drag?) = value else { return }
 
-                let stride = collapsedRowHeight + rowSpacing
-                let rowsMovedVisually = Int((drag.translation.height / stride).rounded())
+                let stride = measuredRowHeight + rowSpacing
+                let rowsMovedVisually = Int((value.translation.height / stride).rounded())
                 guard rowsMovedVisually != 0 else { return }
 
                 // Reversed display: dragging visually DOWN (positive y) means
@@ -204,6 +244,20 @@ struct LayerPanelView: View {
                 let destIndex = targetArrayIndex > index ? targetArrayIndex + 1 : targetArrayIndex
                 onMoveLayer(index, destIndex)
             }
+    }
+}
+
+/// Captures the actual rendered height of a collapsed layer row. Reduced
+/// with `min` so an expanded row's larger height never overwrites the
+/// collapsed measurement; the seed of `.infinity` makes the first real
+/// reading win immediately.
+private struct CollapsedRowHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = .infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 {
+            value = min(value, next)
+        }
     }
 }
 
