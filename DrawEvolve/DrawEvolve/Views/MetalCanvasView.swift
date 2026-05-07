@@ -217,6 +217,21 @@ struct MetalCanvasView: UIViewRepresentable {
         private var smudgePendingTouchdown: BrushStroke.StrokePoint?
         private var smudgeBeforeSnapshot: Data?
 
+        // Eraser real-time commit (Tier 1.5). The gray-ghost preview is
+        // gone — eraser stamps now write straight into the active layer
+        // texture as they arrive, and the every-frame layer composite
+        // picks up the cuts. We capture `eraserBeforeSnapshot` once at
+        // touchesBegan so undo and touchesCancelled have an authoritative
+        // pre-stroke state to roll back to (the layer mutates throughout
+        // the stroke, so capturing at touchesEnded — like the brush path
+        // does — would record post-mutation pixels).
+        // `eraserCommittedPointCount` tracks how many points of
+        // `currentStroke` have already been rendered into the layer, so
+        // each touchesMoved only flushes the *new* sub-stroke instead of
+        // re-rendering the whole accumulated stroke.
+        private var eraserBeforeSnapshot: Data?
+        private var eraserCommittedPointCount: Int = 0
+
         // FloatingText body-drag state. The transform handles overlay (a
         // SwiftUI sibling) handles scale/rotate via .gesture; this path
         // covers the body-drag (move) gesture inside the canvas's MTKView.
@@ -500,7 +515,12 @@ struct MetalCanvasView: UIViewRepresentable {
             // Skip the preview for the blur tool — its in-progress stamps don't
             // produce visible color (the blur output materialises only on commit).
             // The stamp cursor SwiftUI overlay handles user feedback during the drag.
-            if let stroke = currentStroke, !stroke.points.isEmpty, stroke.tool != .blur {
+            // Skip the eraser too (Tier-1.5): eraser stamps now write straight
+            // into the active layer texture in `touchesMoved`, and the every-
+            // frame layer composite picks up the cuts — there's no separate
+            // preview to draw on the drawable.
+            if let stroke = currentStroke, !stroke.points.isEmpty,
+               stroke.tool != .blur, stroke.tool != .eraser {
                 let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
                 let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
                 let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
@@ -1010,6 +1030,20 @@ struct MetalCanvasView: UIViewRepresentable {
             lastTimestamp = timestamp
             print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
 
+            // Tier-1.5 eraser real-time commit. Capture the pre-stroke
+            // snapshot here (not in touchesEnded — by the time the user
+            // lifts, the layer is already mutated by mid-stroke writes
+            // and a fresh capture would be the post-stroke state). Then
+            // immediately flush the initial stamps so the very first dot
+            // shows up on the layer without waiting for the next move.
+            if currentTool == .eraser,
+               let texture = layers[selectedLayerIndex].texture,
+               let renderer = renderer {
+                eraserBeforeSnapshot = renderer.captureSnapshot(of: texture)
+                eraserCommittedPointCount = 0
+                flushEraserSubStroke(view: view)
+            }
+
             // Cache the selection mask for the wet-ink preview. Rasterised
             // once here and reused for every preview frame for the duration
             // of the drag — selection geometry is immutable mid-stroke
@@ -1481,6 +1515,14 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 currentStroke = stroke
 
+                // Tier-1.5 eraser real-time commit: flush the new sub-stroke
+                // (points appended this batch) into the layer texture so the
+                // erase shows up live as the user drags, instead of waiting
+                // for touchesEnded.
+                if currentTool == .eraser {
+                    flushEraserSubStroke(view: view)
+                }
+
                 // Print every 10th point to avoid spam
                 if stroke.points.count % 10 == 0 {
                     print("touchesMoved: stroke has \(stroke.points.count) points (coalesced samples: \(samples.count))")
@@ -1488,6 +1530,46 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             // No need to call setNeedsDisplay - continuous drawing is enabled
+        }
+
+        // Flush any new eraser sub-stroke points (those past
+        // `eraserCommittedPointCount`) into the active layer texture via
+        // the real eraser pipeline. Each call is one async render-pass —
+        // the GPU rate-limits via PR #54's stroke command-buffer
+        // semaphore. Completion fires on main once the GPU pass is done;
+        // pass `nil` for callers that just want to fire-and-forget.
+        // See touchesBegan / touchesMoved / touchesEnded for the live-
+        // commit lifecycle around this helper.
+        private func flushEraserSubStroke(view: MTKView, completion: (() -> Void)? = nil) {
+            let onDone = completion ?? {}
+            guard let stroke = currentStroke,
+                  stroke.tool == .eraser,
+                  stroke.points.count > eraserCommittedPointCount,
+                  selectedLayerIndex < layers.count,
+                  let texture = layers[selectedLayerIndex].texture,
+                  let renderer = renderer else {
+                onDone()
+                return
+            }
+            let documentSize = MainActor.assumeIsolated {
+                canvasState?.documentSize ?? view.bounds.size
+            }
+            let selPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+            let newPoints = Array(stroke.points[eraserCommittedPointCount..<stroke.points.count])
+            let subStroke = BrushStroke(
+                points: newPoints,
+                settings: stroke.settings,
+                tool: .eraser,
+                layerId: stroke.layerId
+            )
+            eraserCommittedPointCount = stroke.points.count
+            renderer.renderStroke(
+                subStroke,
+                to: texture,
+                screenSize: documentSize,
+                selectionPath: selPath,
+                completion: onDone
+            )
         }
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -1735,6 +1817,68 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure textures are initialized before committing
             ensureLayerTextures()
 
+            // Tier-1.5 eraser real-time commit fast path: the layer texture
+            // was already mutated incrementally during touchesMoved. Final
+            // flush of any straggler points, capture the after-snapshot,
+            // record history with the touchesBegan-captured before-snapshot,
+            // and bail before the standard brush commit path runs (which
+            // would re-render the entire stroke and double-erase).
+            if stroke.tool == .eraser {
+                guard selectedLayerIndex < layers.count,
+                      let texture = layers[selectedLayerIndex].texture,
+                      let renderer = renderer else {
+                    currentStroke = nil
+                    lastPoint = nil
+                    shapeStartPoint = nil
+                    shapeStartScreen = nil
+                    eraserBeforeSnapshot = nil
+                    eraserCommittedPointCount = 0
+                    renderer?.endPreviewMask()
+                    return
+                }
+                let beforeSnapshot = eraserBeforeSnapshot
+                let layerId = stroke.layerId
+                let currentLayerIndex = selectedLayerIndex
+                let capturedCanvasState = canvasState
+                flushEraserSubStroke(view: view) { [weak self] in
+                    let afterSnapshot = renderer.captureSnapshot(of: texture)
+                    if let before = beforeSnapshot,
+                       let after = afterSnapshot,
+                       let cs = capturedCanvasState {
+                        cs.historyManager.record(.stroke(
+                            layerId: layerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                        print("Recorded eraser stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
+                    }
+                    DispatchQueue.global(qos: .utility).async {
+                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                            DispatchQueue.main.async {
+                                guard let self = self,
+                                      currentLayerIndex < self.layers.count else { return }
+                                self.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                            }
+                        }
+                    }
+                }
+                currentStroke = nil
+                lastPoint = nil
+                shapeStartPoint = nil
+                shapeStartScreen = nil
+                eraserBeforeSnapshot = nil
+                eraserCommittedPointCount = 0
+                renderer.endPreviewMask()
+                resetSnapToLineState()
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.stampCursorCenter = nil
+                        cs.stampCursorDiameter = 0
+                    }
+                }
+                return
+            }
+
             // Commit stroke to layer
             guard selectedLayerIndex < layers.count else {
                 print("ERROR: Invalid layer index \(selectedLayerIndex)")
@@ -1834,6 +1978,23 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
+            // Tier-1.5 eraser: the layer texture was mutated mid-stroke, so
+            // a system-cancel needs to roll the layer back to its pre-stroke
+            // state. Brush doesn't need this — its preview path doesn't
+            // touch the layer, so its layer is already in the pre-stroke
+            // state and the standard "discard currentStroke" cleanup below
+            // is sufficient.
+            if currentTool == .eraser,
+               let beforeSnapshot = eraserBeforeSnapshot,
+               selectedLayerIndex < layers.count,
+               let texture = layers[selectedLayerIndex].texture,
+               let renderer = renderer {
+                renderer.restoreSnapshot(beforeSnapshot, to: texture)
+                print("Eraser cancelled — restored layer to pre-stroke snapshot")
+            }
+            eraserBeforeSnapshot = nil
+            eraserCommittedPointCount = 0
+
             currentStroke = nil
             lastPoint = nil
             shapeStartPoint = nil

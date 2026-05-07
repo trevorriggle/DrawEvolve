@@ -1182,11 +1182,12 @@ class CanvasRenderer: NSObject {
         flipHorizontal: Bool = false,
         flipVertical: Bool = false
     ) {
-        // The eraser pipeline zeroes out destination alpha, which on the drawable
-        // would erase the composited image itself. Instead, render the eraser
-        // preview as a ghost trail via the brush pipeline: semi-transparent gray
-        // so the user sees the path being erased without destroying the preview.
-        let isEraser = stroke.tool == .eraser
+        // Tier-1.5: eraser previews are no longer routed through this path.
+        // The eraser writes its stamps live into the active layer texture
+        // via `renderStroke` per touchesMoved (see MetalCanvasView), and
+        // the every-frame layer composite picks up the cuts immediately.
+        // The gray-ghost workaround that used to live here for `.eraser`
+        // is gone — `renderStrokePreview` now serves only the brush.
         guard let pipelineState = brushPipelineState else { return }
 
         renderEncoder.setRenderPipelineState(pipelineState)
@@ -1223,10 +1224,8 @@ class CanvasRenderer: NSObject {
         let drawableFit = max(drawableSize.width, drawableSize.height)
         let textureToScreen = canvasSize.width > 0 ? drawableFit / canvasSize.width : 1.0
 
-        let previewColor: UIColor = isEraser
-            ? UIColor(white: 0.55, alpha: 0.45)
-            : stroke.settings.color
-        let previewOpacity: Double = isEraser ? 1.0 : stroke.settings.opacity
+        let previewColor: UIColor = stroke.settings.color
+        let previewOpacity: Double = stroke.settings.opacity
 
         // Clamp the preview's base size to Apple GPU's point sprite cap
         // (~511 px on A-series). Past this, Metal silently fails to render
