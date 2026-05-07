@@ -288,6 +288,123 @@ enum PathSmoothing {
         return a + delta * t
     }
 
+    // MARK: - Curvature
+
+    /// Half-width (in LUT indices) of the tangent finite-difference
+    /// stencil used to estimate κ. Small enough to capture local
+    /// curvature; large enough to ignore the residual jitter that
+    /// survived `buildArcLengthLUT`'s windowed tangent stencil. Locked
+    /// constant; document inline like the others.
+    private static let curvatureWindowRadius: Int = 3
+
+    /// Strength of curvature compensation in `curvatureScale`. 0.5
+    /// widens / narrows advance by half the signed `κ × glyphHeight`
+    /// factor — empirically matches Procreate's visual spacing on
+    /// hand-drawn S-curves. Lower = less compensation (more overlap on
+    /// tight curves). Higher = more compensation (visible spacing
+    /// stretch on tight curves). Locked-spec.
+    private static let curvatureShapeFactor: CGFloat = 0.5
+
+    /// Signed local curvature κ = dθ/ds at arclength `distance` along
+    /// the LUT. Computed via finite difference of tangents over a small
+    /// window of LUT entries; same closed-path wrap and open-path clamp
+    /// semantics as `point(at:in:isClosed:)`.
+    ///
+    /// Returns 0 for LUTs too small for a meaningful difference, paths
+    /// of zero total length, or zero arclength spans (e.g. duplicate
+    /// samples inside the window).
+    ///
+    /// Sign convention: κ > 0 when the path's tangent angle (under
+    /// `atan2(Δy, Δx)`) increases as arclength increases. In the
+    /// renderer's screen-space (Y-down) coordinates that means a path
+    /// turning clockwise visually has κ > 0. Consumers should verify
+    /// the sign empirically and flip if their compensation acts in the
+    /// wrong direction — the underlying math is just dθ/ds.
+    static func curvature(
+        at distance: CGFloat,
+        in lut: [PathArcLengthSample],
+        isClosed: Bool = false
+    ) -> CGFloat {
+        let n = lut.count
+        guard n >= 3 else { return 0 }
+
+        let total = lut.last!.distance
+        guard total > 0 else { return 0 }
+
+        var d = distance
+        if isClosed {
+            d = d.truncatingRemainder(dividingBy: total)
+            if d < 0 { d += total }
+        } else {
+            d = max(0, min(total, d))
+        }
+
+        // Binary search for the entry whose distance bracket contains
+        // `d`. Mirrors the lookup in `point(at:in:isClosed:)`.
+        var lo = 0
+        var hi = n - 1
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2
+            if lut[mid].distance <= d {
+                lo = mid
+            } else {
+                hi = mid
+            }
+        }
+
+        let w = curvatureWindowRadius
+        let aIdx: Int
+        let bIdx: Int
+        if isClosed {
+            aIdx = ((lo - w) % n + n) % n
+            bIdx = (hi + w) % n
+        } else {
+            aIdx = max(0, lo - w)
+            bIdx = min(n - 1, hi + w)
+        }
+
+        // Shortest signed angular delta from tangent[aIdx] to
+        // tangent[bIdx], handling the ±π seam.
+        var dTheta = lut[bIdx].tangent - lut[aIdx].tangent
+        while dTheta > .pi { dTheta -= 2 * .pi }
+        while dTheta < -.pi { dTheta += 2 * .pi }
+
+        // Arclength difference along the path between the two indices.
+        // If the closed-path window wrapped across the seam, the
+        // forward arc is `(total - aDist) + bDist`; otherwise it's the
+        // straight `bDist - aDist`.
+        let aDist = lut[aIdx].distance
+        let bDist = lut[bIdx].distance
+        let ds: CGFloat
+        if isClosed && bIdx < aIdx {
+            ds = (total - aDist) + bDist
+        } else {
+            ds = bDist - aDist
+        }
+
+        return ds > 0 ? dTheta / ds : 0
+    }
+
+    /// Scaling factor for per-glyph advance to compensate for path
+    /// curvature. On tight curves, glyphs sitting at uniform arclength
+    /// would visually overlap (their rotated bounding boxes intersect
+    /// even though arclength centers are spaced correctly); modulating
+    /// advance by `(1 + κ · glyphHeight · shapeFactor)` widens spacing
+    /// where the path turns one way and narrows it where it turns the
+    /// other, producing more even visual spacing and preventing
+    /// overlap on inside curves.
+    ///
+    /// Clamped to `[0.5, 2.0]` so a single tight cusp doesn't crash
+    /// glyphs together (`< 0`) or stretch them past recognition.
+    /// `glyphHeight` is in the same units as the LUT's distances
+    /// (doc-space points if the LUT was built from doc-space samples,
+    /// which it is).
+    static func curvatureScale(_ kappa: CGFloat,
+                               glyphHeight: CGFloat) -> CGFloat {
+        let raw = 1 + kappa * glyphHeight * curvatureShapeFactor
+        return max(0.5, min(2.0, raw))
+    }
+
     // MARK: - Closure detection
 
     /// True when the path's endpoints are within `screenPtThreshold` of
