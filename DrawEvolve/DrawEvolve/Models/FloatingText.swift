@@ -88,6 +88,16 @@ struct FloatingText {
     /// (sustained negative cos of tangent direction). Toggle to disable.
     var autoFlipEnabled: Bool = true
 
+    /// Runtime cache (Tier-1.5): the doc-space origin where the most
+    /// recent rasterise placed the path-laid glyphs. Used by
+    /// `CanvasStateManager.rasterizeFloatingTextNow` to preserve a
+    /// user-set body-drag offset across re-rasterises (e.g., when a
+    /// corner-handle scale bakes into `settings.size` and triggers a
+    /// re-layout). Without this, path text would snap back to its
+    /// path-natural origin every time the user did anything that
+    /// triggered a rasterise. Always nil for plain text. Not Codable.
+    var pathNaturalAnchor: CGPoint? = nil
+
     init(
         id: UUID = UUID(),
         content: String,

@@ -520,16 +520,18 @@ struct TransformHandlesOverlay: View {
     @ViewBuilder
     private func floatingTextContent() -> some View {
         if let ft = canvasState.floatingText, ft.bounds.size != .zero {
-            // Path-bearing text doesn't get scale/rotate handles —
-            // the path is fixed, scale/rotate aren't meaningful.
-            // The path-start handle (rendered separately by
-            // PathStartHandle in DrawingCanvasView) is the only
-            // path-text affordance.
-            if ft.path != nil {
-                EmptyView()
-            } else {
-                plainFloatingTextHandles(ft: ft)
-            }
+            // Tier-1.5 cleanup: path-bearing floats now get the same
+            // corner+rotation handles as plain text. Earlier the design
+            // skipped them on the theory that the path is fixed and
+            // scale/rotate aren't meaningful — but in the Tier-1.4 model
+            // the user is editing a *rasterised glyph image* (the
+            // cached path-laid texture), and treating that image as a
+            // movable / scalable / rotatable rectangle matches the
+            // plain-text experience the user expects post-checkmark.
+            // The path-start drag handle (PathStartHandle in
+            // DrawingCanvasView) is rendered alongside, so users can
+            // still slide text along the path while it's a float.
+            plainFloatingTextHandles(ft: ft)
         }
     }
 

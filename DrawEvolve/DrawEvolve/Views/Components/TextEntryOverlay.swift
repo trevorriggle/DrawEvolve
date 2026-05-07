@@ -18,8 +18,10 @@
 //    • Newlines flow through `canvasState.setFloatingTextContent` and
 //      the existing rasterise pipeline (paragraphStyle.lineSpacing
 //      already handles multi-line layout).
-//    • inputAccessoryView surfaces Done / Cancel buttons that route to
-//      `commitFloatingText` and `cancelFloatingText` respectively.
+//    • Tier-1.5 dropped the inputAccessoryView entirely. The floating
+//      Type Bar's ✓ checkmark is the commit affordance and the existing
+//      cancel pill handles cancel; a Done/Cancel toolbar above the
+//      keyboard duplicated both. Return key remains as newline.
 //
 
 import SwiftUI
@@ -62,7 +64,6 @@ private struct TextEntryHost: UIViewRepresentable {
         tv.smartQuotesType = .no
         tv.smartInsertDeleteType = .no
         tv.isScrollEnabled = false
-        tv.inputAccessoryView = context.coordinator.makeAccessoryBar()
         // Defer to next runloop so SwiftUI's view-mount transaction
         // completes first; calling on the same tick can race with the
         // ZStack's responder management and the keyboard fails to rise.
@@ -97,32 +98,6 @@ private struct TextEntryHost: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             canvasState?.setFloatingTextContent(textView.text)
-        }
-
-        @objc func doneTapped() {
-            canvasState?.commitFloatingText()
-        }
-
-        @objc func cancelTapped() {
-            canvasState?.cancelFloatingText()
-        }
-
-        func makeAccessoryBar() -> UIView {
-            let bar = UIToolbar()
-            bar.sizeToFit()
-            let cancel = UIBarButtonItem(title: "Cancel",
-                                         style: .plain,
-                                         target: self,
-                                         action: #selector(cancelTapped))
-            let flex = UIBarButtonItem(barButtonSystemItem: .flexibleSpace,
-                                       target: nil,
-                                       action: nil)
-            let done = UIBarButtonItem(title: "Done",
-                                       style: .done,
-                                       target: self,
-                                       action: #selector(doneTapped))
-            bar.items = [cancel, flex, done]
-            return bar
         }
     }
 }

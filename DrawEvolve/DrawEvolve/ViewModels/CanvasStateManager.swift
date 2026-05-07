@@ -809,13 +809,31 @@ class CanvasStateManager: ObservableObject {
 
         ft.cachedImage = result.image
         ft.cachedTexture = renderer.makeTexture(from: result.image)
-        // For on-path text, docBounds.origin may live wherever the path
-        // sent the glyphs — anchor follows so displayedRect math (which
-        // assumes anchor = bounds.origin) keeps working for the
-        // transform handles. For plain text, docBounds.origin already
-        // equals ft.anchor so this is a no-op.
         ft.bounds = result.docBounds
-        ft.anchor = result.docBounds.origin
+        if ft.path != nil {
+            // Path text: `result.docBounds.origin` is the *natural* origin
+            // produced by the current path-layout pass. To match
+            // plain-text body-drag behavior (which survives re-rasterise
+            // because plain text's docBounds.origin == ft.anchor), we
+            // preserve the user's drag offset across re-rasterises.
+            //
+            //   newAnchor = newNatural + (oldAnchor - oldNatural)
+            //
+            // First rasterise after `beginTextOnPath` has no
+            // pathNaturalAnchor yet, so the offset is zero and we land
+            // at the natural origin (existing v1 behavior).
+            let newNatural = result.docBounds.origin
+            let offset: CGPoint = ft.pathNaturalAnchor.map { old in
+                CGPoint(x: ft.anchor.x - old.x, y: ft.anchor.y - old.y)
+            } ?? .zero
+            ft.pathNaturalAnchor = newNatural
+            ft.anchor = CGPoint(x: newNatural.x + offset.x,
+                                y: newNatural.y + offset.y)
+        } else {
+            // Plain text: docBounds.origin already equals ft.anchor; this
+            // is a no-op assignment that keeps the contract explicit.
+            ft.anchor = result.docBounds.origin
+        }
         floatingText = ft
     }
 
