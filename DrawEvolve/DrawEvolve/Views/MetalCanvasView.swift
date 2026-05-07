@@ -57,14 +57,29 @@ struct MetalCanvasView: UIViewRepresentable {
 
     var canvasState: CanvasStateManager? // For sharing renderer/screen size
     var onTextRequest: ((CGPoint) -> Void)? // Callback for text tool
-    /// Callback for the .textOnPath tool. Fires on touchesEnded with the
-    /// raw doc-space stroke samples plus the screen-space first/last
-    /// touch points (used by `PathSmoothing.isClosedByEndpoint` and the
-    /// 30pt closed-loop threshold). Owner shows a text input alert and
-    /// calls `canvasState.beginTextOnPath(...)` on Add.
+    /// Callback for the .textOnPath tool **in freehand mode**. Fires on
+    /// touchesEnded with the raw doc-space stroke samples plus the
+    /// screen-space first/last touch points (used by
+    /// `PathSmoothing.isClosedByEndpoint` and the 30pt closed-loop
+    /// threshold). Owner calls `canvasState.beginTextOnPath(...)`.
     var onTextOnPathRequest: ((_ rawPoints: [CGPoint],
                                _ firstScreen: CGPoint,
                                _ lastScreen: CGPoint) -> Void)?
+
+    /// Callback for the .textOnPath tool **in circle mode**. Fires on
+    /// touchesEnded with the doc-space center (touchdown location) and
+    /// radius (Euclidean distance from center to lift location). Owner
+    /// calls `canvasState.beginTextOnPathCircle(...)`.
+    var onTextOnPathCircleRequest: ((_ center: CGPoint,
+                                     _ radius: CGFloat) -> Void)?
+
+    /// Which input mode the .textOnPath tool currently uses. Toggled by
+    /// the user via the top-center pill in DrawingCanvasView. Read by
+    /// the touch handlers to branch between freehand polyline capture
+    /// and tap-center / drag-radius capture. Defaults to `.freehand`
+    /// so the iPhone caller (which doesn't expose path-text input) can
+    /// omit the parameter.
+    var typeOnPathMode: TypeOnPathPathMode = .freehand
 
     /// Global symmetry / mirror config. Plain reference (not @ObservedObject)
     /// — the touch handlers read `symmetry.mode` per-stamp; we don't need
@@ -130,6 +145,12 @@ struct MetalCanvasView: UIViewRepresentable {
         // IMPORTANT: Don't modify @Binding values here - causes infinite loop!
         // Coordinator already has access to bindings via init
 
+        // Push the latest typeOnPathMode value into the Coordinator on
+        // every render. The pill toggle in DrawingCanvasView updates an
+        // @AppStorage-backed value passed in here; the Coordinator
+        // branches on this in the .textOnPath touch handlers.
+        context.coordinator.typeOnPathMode = typeOnPathMode
+
         // Just trigger a redraw when something changes
         uiView.setNeedsDisplay()
     }
@@ -143,6 +164,8 @@ struct MetalCanvasView: UIViewRepresentable {
             canvasState: canvasState,
             onTextRequest: onTextRequest,
             onTextOnPathRequest: onTextOnPathRequest,
+            onTextOnPathCircleRequest: onTextOnPathCircleRequest,
+            typeOnPathMode: typeOnPathMode,
             symmetry: symmetry
         )
     }
@@ -168,7 +191,19 @@ struct MetalCanvasView: UIViewRepresentable {
         private var onTextOnPathRequest: ((_ rawPoints: [CGPoint],
                                           _ firstScreen: CGPoint,
                                           _ lastScreen: CGPoint) -> Void)?
+        private var onTextOnPathCircleRequest: ((_ center: CGPoint,
+                                                _ radius: CGFloat) -> Void)?
+        /// Updated from `MetalCanvasView.updateUIView` so the Coordinator
+        /// always sees the live mode value. Read in the .textOnPath
+        /// touch handlers to branch between freehand polyline capture
+        /// and tap-center / drag-radius capture.
+        var typeOnPathMode: TypeOnPathPathMode = .freehand
         private let symmetry: SymmetryConfig
+
+        // textOnPath circle-mode state. `circleDrawingCenter` is the
+        // touch-down location (doc space); set in touchesBegan when the
+        // mode is `.circle`. Cleared on touchesEnded / Cancelled.
+        private var circleDrawingCenter: CGPoint?
 
         // textOnPath path-drawing state. Populated during touchesMoved while
         // the .textOnPath tool is active; flushed to onTextOnPathRequest in
@@ -269,6 +304,9 @@ struct MetalCanvasView: UIViewRepresentable {
             onTextOnPathRequest: ((_ rawPoints: [CGPoint],
                                   _ firstScreen: CGPoint,
                                   _ lastScreen: CGPoint) -> Void)?,
+            onTextOnPathCircleRequest: ((_ center: CGPoint,
+                                        _ radius: CGFloat) -> Void)?,
+            typeOnPathMode: TypeOnPathPathMode,
             symmetry: SymmetryConfig
         ) {
             _layers = layers
@@ -278,6 +316,8 @@ struct MetalCanvasView: UIViewRepresentable {
             self.canvasState = canvasState
             self.onTextRequest = onTextRequest
             self.onTextOnPathRequest = onTextOnPathRequest
+            self.onTextOnPathCircleRequest = onTextOnPathCircleRequest
+            self.typeOnPathMode = typeOnPathMode
             self.symmetry = symmetry
 
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
@@ -825,13 +865,31 @@ struct MetalCanvasView: UIViewRepresentable {
                         return
                     }
                 }
-                // Begin a new path-drawing session.
-                textOnPathRawPoints = [location]
-                textOnPathFirstScreen = screenLocation
-                textOnPathLastScreen = screenLocation
-                if let cs = canvasState {
-                    MainActor.assumeIsolated {
-                        cs.previewTextOnPathPoints = [location]
+                // Begin a new path-drawing session. Branch on the
+                // current input mode (set by the toggle pill in
+                // DrawingCanvasView).
+                switch typeOnPathMode {
+                case .freehand:
+                    textOnPathRawPoints = [location]
+                    textOnPathFirstScreen = screenLocation
+                    textOnPathLastScreen = screenLocation
+                    if let cs = canvasState {
+                        MainActor.assumeIsolated {
+                            cs.previewTextOnPathPoints = [location]
+                        }
+                    }
+                case .circle:
+                    // Touch-down records the circle center; touchesMoved
+                    // updates the radius in the preview; touchesEnded
+                    // commits via onTextOnPathCircleRequest.
+                    circleDrawingCenter = location
+                    if let cs = canvasState {
+                        MainActor.assumeIsolated {
+                            cs.previewTextOnPathCircle = TypeOnPathCirclePreview(
+                                center: location,
+                                radius: 0
+                            )
+                        }
                     }
                 }
                 return
@@ -1256,6 +1314,24 @@ struct MetalCanvasView: UIViewRepresentable {
                     let copy = textOnPathRawPoints
                     MainActor.assumeIsolated {
                         cs.previewTextOnPathPoints = copy
+                    }
+                }
+                return
+            }
+
+            // textOnPath circle-mode: update the radius preview as the
+            // user drags away from the touch-down center. `latestLocation`
+            // is already in doc-space (computed at the top of
+            // touchesMoved).
+            if currentTool == .textOnPath, let center = circleDrawingCenter {
+                let radius = hypot(latestLocation.x - center.x,
+                                   latestLocation.y - center.y)
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.previewTextOnPathCircle = TypeOnPathCirclePreview(
+                            center: center,
+                            radius: radius
+                        )
                     }
                 }
                 return
@@ -1690,6 +1766,28 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // textOnPath circle mode: lift commits the (center, radius)
+            // pair. Sub-4pt radii are bailed silently in
+            // `beginTextOnPathCircle` so the callback can fire
+            // unconditionally. Preview cleared here so the gray-circle
+            // overlay vanishes on lift regardless of whether the radius
+            // qualified.
+            if currentTool == .textOnPath, let center = circleDrawingCenter {
+                circleDrawingCenter = nil
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.previewTextOnPathCircle = nil
+                    }
+                }
+                if let touch = touches.first {
+                    let screenLoc = touch.location(in: view)
+                    let docPoint = canvasState?.screenToDocument(screenLoc) ?? screenLoc
+                    let radius = hypot(docPoint.x - center.x, docPoint.y - center.y)
+                    onTextOnPathCircleRequest?(center, radius)
+                }
+                return
+            }
+
             // Handle ending a selection drag
             if isDraggingSelection {
                 print("Finished dragging selection, committing to layer")
@@ -2043,9 +2141,11 @@ struct MetalCanvasView: UIViewRepresentable {
             floatingTextDragStartDoc = nil
             floatingTextDragOriginAnchor = nil
             textOnPathRawPoints = []
+            circleDrawingCenter = nil
             if let cs = canvasState {
                 Task { @MainActor in
                     cs.previewTextOnPathPoints = nil
+                    cs.previewTextOnPathCircle = nil
                 }
             }
             resetSnapToLineState()

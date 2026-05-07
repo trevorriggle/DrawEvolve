@@ -10,6 +10,16 @@
 //  from the start?" in O(log N), which is what the per-glyph layout walk
 //  needs hundreds of times per rasterise.
 //
+//  Tangent computation uses the **analytic Catmull-Rom derivative** —
+//  closed-form, exact at every t. The earlier finite-difference
+//  approaches (one-segment forward in v1, windowed central in PR1)
+//  inherited residual position-jitter from the smoothed polyline; the
+//  derivative doesn't. Pro tools (Adobe Illustrator, SVG textPath,
+//  Procreate) all rely on analytic tangents from smooth curves; this
+//  matches that approach. PR #61's curvature-modulated advance was
+//  removed at the same time — pro tools don't compensate for curvature
+//  either, so neither do we.
+//
 //  Critical: build the LUT ONCE when the path is finalised. Looking up
 //  by re-walking the path per glyph is O(glyphs × samples) and visibly
 //  chugs on long text or tight curves. The LUT pays for itself after
@@ -19,9 +29,21 @@
 import Foundation
 import CoreGraphics
 
+/// One sample along a smoothed path, with its analytic tangent angle.
+/// Used as the shared input to `buildArcLengthLUT` so the LUT can carry
+/// noise-free tangents derived from the spline's closed-form derivative
+/// rather than reconstructing them via finite differences on the
+/// resulting polyline.
+struct PathPointSample: Equatable {
+    let point: CGPoint
+    /// Tangent angle in radians, `atan2(dp/dt.y, dp/dt.x)`. Range
+    /// `(-π, π]`.
+    let tangent: CGFloat
+}
+
 /// One sample on the smoothed path, in doc-space coordinates.
 /// `tangent` is the angle (radians) of the path's direction at this
-/// sample, measured by `atan2(Δy, Δx)` of the segment leaving this point.
+/// sample, copied from the source `PathPointSample`.
 struct PathArcLengthSample: Equatable {
     let distance: CGFloat
     let point: CGPoint
@@ -33,7 +55,8 @@ enum PathSmoothing {
     // MARK: - Catmull-Rom
 
     /// Smooth a polyline through the supplied control points using
-    /// Catmull-Rom interpolation.
+    /// Catmull-Rom interpolation, returning per-sample position AND
+    /// analytic tangent.
     ///
     /// - Parameters:
     ///   - points: raw stroke samples in doc space.
@@ -43,15 +66,23 @@ enum PathSmoothing {
     ///   - samplesPerSegment: subdivisions inserted between each pair of
     ///     adjacent control points. 12 produces a curve that reads as
     ///     smooth at typical zoom levels without bloating the LUT.
-    /// - Returns: dense polyline approximating the smoothed curve.
-    ///   `points` is returned unchanged for fewer than 2 inputs.
+    /// - Returns: dense polyline approximating the smoothed curve, with
+    ///   analytic tangents at each sample. `points` is returned as a
+    ///   single zero-tangent sample for fewer than 2 inputs (degenerate).
     static func catmullRom(
         _ points: [CGPoint],
         tension: CGFloat = 0.5,
         samplesPerSegment: Int = 12
-    ) -> [CGPoint] {
-        guard points.count >= 2 else { return points }
-        guard samplesPerSegment >= 1 else { return points }
+    ) -> [PathPointSample] {
+        guard points.count >= 2 else {
+            if let only = points.first {
+                return [PathPointSample(point: only, tangent: 0)]
+            }
+            return []
+        }
+        guard samplesPerSegment >= 1 else {
+            return points.map { PathPointSample(point: $0, tangent: 0) }
+        }
 
         // Reflect the endpoints so the first/last spline segments are
         // well-defined without "phantom" tangent direction. Without this,
@@ -66,7 +97,7 @@ enum PathSmoothing {
         let secondLast = points[points.count - 2]
         pts.append(CGPoint(x: 2 * last.x - secondLast.x, y: 2 * last.y - secondLast.y))
 
-        var result: [CGPoint] = []
+        var result: [PathPointSample] = []
         result.reserveCapacity(samplesPerSegment * (pts.count - 3) + 1)
 
         let s = (1 - tension) / 2
@@ -78,22 +109,39 @@ enum PathSmoothing {
             let p3 = pts[i + 2]
             for j in 0..<samplesPerSegment {
                 let t = CGFloat(j) / CGFloat(samplesPerSegment)
-                result.append(catmullRomPoint(p0: p0, p1: p1, p2: p2, p3: p3, t: t, s: s))
+                let point = catmullRomPoint(p0: p0, p1: p1, p2: p2, p3: p3, t: t, s: s)
+                let deriv = catmullRomDerivative(p0: p0, p1: p1, p2: p2, p3: p3, t: t, s: s)
+                let tangent = atan2(deriv.dy, deriv.dx)
+                result.append(PathPointSample(point: point, tangent: tangent))
             }
         }
-        result.append(last)
+
+        // Final point at t=1 of the last segment. Position is the
+        // user's last raw sample; tangent is the analytic derivative of
+        // the last spline segment evaluated at t=1.
+        let lastIdx = pts.count - 3
+        let lp0 = pts[lastIdx - 1]
+        let lp1 = pts[lastIdx]
+        let lp2 = pts[lastIdx + 1]
+        let lp3 = pts[lastIdx + 2]
+        let endDeriv = catmullRomDerivative(p0: lp0, p1: lp1, p2: lp2, p3: lp3, t: 1.0, s: s)
+        let endTangent = atan2(endDeriv.dy, endDeriv.dx)
+        result.append(PathPointSample(point: last, tangent: endTangent))
+
         return result
     }
 
+    /// Catmull-Rom position at parameter t in [0, 1] for the segment
+    /// bracketed by p1 → p2 with neighbouring control points p0, p3.
+    /// Hermite-form basis with tension weight `s = (1 - tension) / 2`.
     private static func catmullRomPoint(
         p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint,
         t: CGFloat, s: CGFloat
     ) -> CGPoint {
         let t2 = t * t
         let t3 = t2 * t
-        // Hermite-form basis with tension weight `s`. At t=0 yields p1, at t=1
-        // yields p2. Derivatives at endpoints are scaled by s, which gives a
-        // tighter curve as tension → 1.
+        // At t=0 yields p1, at t=1 yields p2. Derivatives at endpoints
+        // are scaled by s, which gives a tighter curve as tension → 1.
         let h0 = -s * t3 + 2 * s * t2 - s * t
         let h1 = (2 - s) * t3 + (s - 3) * t2 + 1
         let h2 = (s - 2) * t3 + (3 - 2 * s) * t2 + s * t
@@ -104,125 +152,90 @@ enum PathSmoothing {
         )
     }
 
+    /// Analytic derivative of the Catmull-Rom basis above. Differentiate
+    /// each `h_i(t)` polynomial with respect to t:
+    ///
+    ///     h0'(t) = -3s·t² + 4s·t - s
+    ///     h1'(t) = 3(2-s)·t² + 2(s-3)·t
+    ///     h2'(t) = 3(s-2)·t² + 2(3-2s)·t + s
+    ///     h3'(t) = 3s·t² - 2s·t
+    ///
+    /// Returns the 2D tangent vector dp/dt at parameter t. The
+    /// instantaneous direction-of-travel along the curve is
+    /// `atan2(dp/dt.y, dp/dt.x)`. This is mathematically exact at every
+    /// t — no finite-difference noise, no smoothing pass needed. Pro
+    /// tools rely on the same closed-form derivative idea (theirs comes
+    /// from Bezier-curve derivatives instead of Catmull-Rom; the
+    /// principle is identical).
+    private static func catmullRomDerivative(
+        p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint,
+        t: CGFloat, s: CGFloat
+    ) -> CGVector {
+        let t2 = t * t
+        let h0p = -3 * s * t2 + 4 * s * t - s
+        let h1p = 3 * (2 - s) * t2 + 2 * (s - 3) * t
+        let h2p = 3 * (s - 2) * t2 + 2 * (3 - 2 * s) * t + s
+        let h3p = 3 * s * t2 - 2 * s * t
+        return CGVector(
+            dx: h0p * p0.x + h1p * p1.x + h2p * p2.x + h3p * p3.x,
+            dy: h0p * p0.y + h1p * p1.y + h2p * p2.y + h3p * p3.y
+        )
+    }
+
     // MARK: - CGPath
 
-    /// Build a CGPath from the smoothed polyline.
-    static func cgPath(from smoothed: [CGPoint]) -> CGPath {
+    /// Build a CGPath from a polyline of `PathPointSample`s. Tangents
+    /// are not used by the path-rendering API; this just walks the
+    /// `point` field. Used for the visible path-overlay during typing.
+    static func cgPath(from samples: [PathPointSample]) -> CGPath {
         let path = CGMutablePath()
-        guard let first = smoothed.first else { return path }
-        path.move(to: first)
-        for p in smoothed.dropFirst() {
-            path.addLine(to: p)
+        guard let first = samples.first else { return path }
+        path.move(to: first.point)
+        for s in samples.dropFirst() {
+            path.addLine(to: s.point)
         }
         return path
     }
 
     // MARK: - Arc-length LUT
 
-    /// Half-width of the windowed central-difference stencil used for
-    /// LUT tangents. For a Catmull-Rom polyline at 12 sub-samples per
-    /// raw segment, k=5 averages over ~one raw stroke segment of jitter
-    /// without spanning across legitimate sharp corners (those rotate
-    /// over 2-3 LUT entries, much smaller than k). Locked-spec
-    /// constant; document inline rather than expose as a parameter.
-    private static let tangentStencilHalfWidth: Int = 5
-
     /// Build the arc-length parameterisation table from the smoothed
-    /// polyline. Each entry stores the cumulative distance from the start
-    /// plus the path's tangent at that sample, computed via a windowed
-    /// central difference (`atan2(p[i+k] − p[i−k])`) so per-glyph rotation
-    /// doesn't inherit residual position jitter from the smoother.
+    /// polyline. Each entry stores the cumulative distance from the
+    /// start plus the path's analytic tangent at that sample. Tangents
+    /// come straight from the input (computed by `catmullRom` via the
+    /// closed-form derivative); no finite-difference reconstruction
+    /// happens here.
     ///
-    /// `isClosed` controls boundary handling for the tangent stencil:
-    /// open paths clamp to the widest one-sided stencil at the endpoints;
-    /// closed paths wrap modulo `n` so the seam doesn't have a tangent
-    /// discontinuity. Distance bookkeeping ignores closure (the LUT's
-    /// `total` excludes the seam-closing segment); `point(at:in:isClosed:)`
-    /// applies modulo wrap on lookup, matching this convention.
-    ///
-    /// Take the polyline directly; spec lists CGPath as the input but the
-    /// caller already has the points and converting back via
-    /// `path.applyWithBlock` is wasteful. Use the polyline path API only
-    /// for rendering / hit-testing.
-    static func buildArcLengthLUT(_ smoothed: [CGPoint],
+    /// `isClosed` is preserved on the API for caller clarity (the
+    /// matching `point(at:in:isClosed:)` lookup wraps differently for
+    /// closed paths). LUT *construction* doesn't currently need it —
+    /// analytic tangents are already correct at every sample regardless
+    /// of closure — but the parameter stays so call sites are explicit
+    /// about closed/open intent and future construction-time changes
+    /// (e.g. seam tangent normalisation) have somewhere to live.
+    static func buildArcLengthLUT(_ samples: [PathPointSample],
                                   isClosed: Bool = false) -> [PathArcLengthSample] {
-        guard smoothed.count >= 2 else {
-            if let only = smoothed.first {
-                return [PathArcLengthSample(distance: 0, point: only, tangent: 0)]
+        _ = isClosed  // reserved; see doc comment
+        guard samples.count >= 2 else {
+            if let only = samples.first {
+                return [PathArcLengthSample(distance: 0, point: only.point, tangent: only.tangent)]
             }
             return []
         }
 
-        let n = smoothed.count
-        let k = tangentStencilHalfWidth
-        // For paths shorter than 2k+1 samples the windowed stencil would
-        // self-overlap (i+k and i-k landing on the same or near-same
-        // index → atan2 of zero-vector). Fall back to the original
-        // one-segment forward difference in that case — which is what
-        // the pre-Tier-1.5 code did and worked fine for tiny paths.
-        let useWindowed = n >= (2 * k + 1)
-
         var lut: [PathArcLengthSample] = []
-        lut.reserveCapacity(n)
+        lut.reserveCapacity(samples.count)
 
         var dist: CGFloat = 0
-        for i in 0..<n {
-            let p = smoothed[i]
-            let tangent: CGFloat = useWindowed
-                ? windowedTangent(at: i, smoothed: smoothed, k: k, isClosed: isClosed)
-                : forwardTangent(at: i, smoothed: smoothed)
-            lut.append(PathArcLengthSample(distance: dist, point: p, tangent: tangent))
-            if i + 1 < n {
-                let nxt = smoothed[i + 1]
-                dist += hypot(nxt.x - p.x, nxt.y - p.y)
+        for i in 0..<samples.count {
+            let s = samples[i]
+            lut.append(PathArcLengthSample(distance: dist, point: s.point, tangent: s.tangent))
+            if i + 1 < samples.count {
+                let nxt = samples[i + 1]
+                dist += hypot(nxt.point.x - s.point.x, nxt.point.y - s.point.y)
             }
         }
         return lut
-    }
-
-    /// Tiny-path fallback: outgoing-segment tangent for non-final samples,
-    /// incoming-segment tangent for the final sample. Same behaviour as
-    /// the pre-Tier-1.5 code path. Only invoked when the polyline is
-    /// shorter than the windowed stencil.
-    private static func forwardTangent(at i: Int, smoothed: [CGPoint]) -> CGFloat {
-        let p = smoothed[i]
-        if i + 1 < smoothed.count {
-            let nxt = smoothed[i + 1]
-            return atan2(nxt.y - p.y, nxt.x - p.x)
-        } else {
-            let prv = smoothed[i - 1]
-            return atan2(p.y - prv.y, p.x - prv.x)
-        }
-    }
-
-    /// Windowed central difference. For closed paths the index wraps
-    /// modulo n so the seam doesn't produce a tangent jump; for open
-    /// paths the indices clamp to `[0, n-1]` (degenerating to a one-sided
-    /// stencil at the endpoints). Caller has already verified `n ≥ 2k+1`,
-    /// so for closed paths `(i+k) mod n` and `(i-k+n) mod n` always land
-    /// on distinct samples.
-    private static func windowedTangent(at i: Int,
-                                        smoothed: [CGPoint],
-                                        k: Int,
-                                        isClosed: Bool) -> CGFloat {
-        let n = smoothed.count
-        let prvIdx: Int
-        let nxtIdx: Int
-        if isClosed {
-            nxtIdx = (i + k) % n
-            // Swift's `%` keeps the sign of the dividend; offset by `n`
-            // to land in `[0, n)` for negative inputs.
-            prvIdx = ((i - k) % n + n) % n
-        } else {
-            prvIdx = max(0, i - k)
-            nxtIdx = min(n - 1, i + k)
-        }
-        if nxtIdx == prvIdx {
-            return 0
-        }
-        let nxt = smoothed[nxtIdx]
-        let prv = smoothed[prvIdx]
-        return atan2(nxt.y - prv.y, nxt.x - prv.x)
     }
 
     /// Look up the (point, tangent) at arc-length `distance` along the LUT
@@ -288,123 +301,6 @@ enum PathSmoothing {
         return a + delta * t
     }
 
-    // MARK: - Curvature
-
-    /// Half-width (in LUT indices) of the tangent finite-difference
-    /// stencil used to estimate κ. Small enough to capture local
-    /// curvature; large enough to ignore the residual jitter that
-    /// survived `buildArcLengthLUT`'s windowed tangent stencil. Locked
-    /// constant; document inline like the others.
-    private static let curvatureWindowRadius: Int = 3
-
-    /// Strength of curvature compensation in `curvatureScale`. 0.5
-    /// widens / narrows advance by half the signed `κ × glyphHeight`
-    /// factor — empirically matches Procreate's visual spacing on
-    /// hand-drawn S-curves. Lower = less compensation (more overlap on
-    /// tight curves). Higher = more compensation (visible spacing
-    /// stretch on tight curves). Locked-spec.
-    private static let curvatureShapeFactor: CGFloat = 0.5
-
-    /// Signed local curvature κ = dθ/ds at arclength `distance` along
-    /// the LUT. Computed via finite difference of tangents over a small
-    /// window of LUT entries; same closed-path wrap and open-path clamp
-    /// semantics as `point(at:in:isClosed:)`.
-    ///
-    /// Returns 0 for LUTs too small for a meaningful difference, paths
-    /// of zero total length, or zero arclength spans (e.g. duplicate
-    /// samples inside the window).
-    ///
-    /// Sign convention: κ > 0 when the path's tangent angle (under
-    /// `atan2(Δy, Δx)`) increases as arclength increases. In the
-    /// renderer's screen-space (Y-down) coordinates that means a path
-    /// turning clockwise visually has κ > 0. Consumers should verify
-    /// the sign empirically and flip if their compensation acts in the
-    /// wrong direction — the underlying math is just dθ/ds.
-    static func curvature(
-        at distance: CGFloat,
-        in lut: [PathArcLengthSample],
-        isClosed: Bool = false
-    ) -> CGFloat {
-        let n = lut.count
-        guard n >= 3 else { return 0 }
-
-        let total = lut.last!.distance
-        guard total > 0 else { return 0 }
-
-        var d = distance
-        if isClosed {
-            d = d.truncatingRemainder(dividingBy: total)
-            if d < 0 { d += total }
-        } else {
-            d = max(0, min(total, d))
-        }
-
-        // Binary search for the entry whose distance bracket contains
-        // `d`. Mirrors the lookup in `point(at:in:isClosed:)`.
-        var lo = 0
-        var hi = n - 1
-        while hi - lo > 1 {
-            let mid = (lo + hi) / 2
-            if lut[mid].distance <= d {
-                lo = mid
-            } else {
-                hi = mid
-            }
-        }
-
-        let w = curvatureWindowRadius
-        let aIdx: Int
-        let bIdx: Int
-        if isClosed {
-            aIdx = ((lo - w) % n + n) % n
-            bIdx = (hi + w) % n
-        } else {
-            aIdx = max(0, lo - w)
-            bIdx = min(n - 1, hi + w)
-        }
-
-        // Shortest signed angular delta from tangent[aIdx] to
-        // tangent[bIdx], handling the ±π seam.
-        var dTheta = lut[bIdx].tangent - lut[aIdx].tangent
-        while dTheta > .pi { dTheta -= 2 * .pi }
-        while dTheta < -.pi { dTheta += 2 * .pi }
-
-        // Arclength difference along the path between the two indices.
-        // If the closed-path window wrapped across the seam, the
-        // forward arc is `(total - aDist) + bDist`; otherwise it's the
-        // straight `bDist - aDist`.
-        let aDist = lut[aIdx].distance
-        let bDist = lut[bIdx].distance
-        let ds: CGFloat
-        if isClosed && bIdx < aIdx {
-            ds = (total - aDist) + bDist
-        } else {
-            ds = bDist - aDist
-        }
-
-        return ds > 0 ? dTheta / ds : 0
-    }
-
-    /// Scaling factor for per-glyph advance to compensate for path
-    /// curvature. On tight curves, glyphs sitting at uniform arclength
-    /// would visually overlap (their rotated bounding boxes intersect
-    /// even though arclength centers are spaced correctly); modulating
-    /// advance by `(1 + κ · glyphHeight · shapeFactor)` widens spacing
-    /// where the path turns one way and narrows it where it turns the
-    /// other, producing more even visual spacing and preventing
-    /// overlap on inside curves.
-    ///
-    /// Clamped to `[0.5, 2.0]` so a single tight cusp doesn't crash
-    /// glyphs together (`< 0`) or stretch them past recognition.
-    /// `glyphHeight` is in the same units as the LUT's distances
-    /// (doc-space points if the LUT was built from doc-space samples,
-    /// which it is).
-    static func curvatureScale(_ kappa: CGFloat,
-                               glyphHeight: CGFloat) -> CGFloat {
-        let raw = 1 + kappa * glyphHeight * curvatureShapeFactor
-        return max(0.5, min(2.0, raw))
-    }
-
     // MARK: - Closure detection
 
     /// True when the path's endpoints are within `screenPtThreshold` of
@@ -421,5 +317,75 @@ enum PathSmoothing {
         screenPtThreshold: CGFloat = 30
     ) -> Bool {
         hypot(firstScreen.x - lastScreen.x, firstScreen.y - lastScreen.y) <= screenPtThreshold
+    }
+
+    // MARK: - Circle path mode
+
+    /// Default doc-space spacing between samples on a generated circle.
+    /// At 4pt spacing a 100pt-radius circle gets ~157 samples; well
+    /// above the 64-sample floor and dense enough that even tight
+    /// portions of the LUT have fine angular resolution.
+    private static let circleDefaultSampleSpacingDoc: CGFloat = 4
+
+    /// Build the arc-length LUT for a perfect circle directly, without
+    /// going through Catmull-Rom. A circle is already analytically
+    /// smooth at every point — feeding it through spline interpolation
+    /// adds nothing and risks artefacts at the seam. We compute
+    /// position, tangent, and cumulative arclength from parametric
+    /// circle math.
+    ///
+    /// Parameterisation: angle θ ∈ [0, 2π) maps to
+    ///
+    ///     point   = center + (R·sin θ, -R·cos θ)
+    ///     tangent = atan2(sin θ, cos θ) ≡ θ (normalised to (-π, π])
+    ///
+    /// At θ=0 the sample is at the **top** of the circle and the
+    /// tangent points right (+x). Increasing θ traces visually
+    /// clockwise in screen-Y-down. With `autoFlipEnabled=false` (PR1
+    /// default) this means text starts at the top reading left-to-right
+    /// and reads upside-down on the bottom — same as Adobe Illustrator
+    /// circle text.
+    ///
+    /// Caller should set `floatingText.isClosed = true` so the LUT
+    /// lookup wraps the seam continuously.
+    static func circleArcLengthLUT(
+        center: CGPoint,
+        radius: CGFloat,
+        sampleSpacingDoc: CGFloat = circleDefaultSampleSpacingDoc
+    ) -> [PathArcLengthSample] {
+        guard radius > 0 else { return [] }
+        let circumference = 2 * .pi * radius
+        let n = max(64, Int(ceil(circumference / max(sampleSpacingDoc, 0.5))))
+        var lut: [PathArcLengthSample] = []
+        lut.reserveCapacity(n)
+        for i in 0..<n {
+            let theta = 2 * .pi * CGFloat(i) / CGFloat(n)
+            let point = CGPoint(
+                x: center.x + radius * sin(theta),
+                y: center.y - radius * cos(theta)
+            )
+            // Normalise to (-π, π] to match `atan2`'s range and the
+            // tangent values produced by Catmull-Rom samples.
+            var tangent = theta
+            if tangent > .pi { tangent -= 2 * .pi }
+            let distance = circumference * CGFloat(i) / CGFloat(n)
+            lut.append(PathArcLengthSample(distance: distance, point: point, tangent: tangent))
+        }
+        return lut
+    }
+
+    /// CGPath for a circle, used as the visible path-overlay during
+    /// typing. Doc-space coordinates, matches the LUT's parameterisation
+    /// (top-most point, traced visually clockwise).
+    static func cgPath(forCircleAt center: CGPoint, radius: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        guard radius > 0 else { return path }
+        path.addEllipse(in: CGRect(
+            x: center.x - radius,
+            y: center.y - radius,
+            width: 2 * radius,
+            height: 2 * radius
+        ))
+        return path
     }
 }
