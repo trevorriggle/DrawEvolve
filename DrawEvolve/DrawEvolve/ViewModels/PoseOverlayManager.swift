@@ -246,6 +246,27 @@ final class PoseOverlayManager: ObservableObject {
         bodyState = .activeVisible(.body(pose))
     }
 
+    // MARK: - Commit to trace (PR 5)
+
+    /// Bake the active skeleton of the given kind into the active layer's
+    /// texture via `CanvasStateManager.commitPoseToTrace`. On success,
+    /// discards the skeleton — overlay clears, ghost row goes away — so
+    /// the user can immediately start tracing without dismissing extra
+    /// UI. On failure (no layer / layer locked / no skeleton), the
+    /// skeleton is left in place.
+    @discardableResult
+    func commitToTrace(
+        kind: PoseSkeletonKind,
+        opacity: CGFloat,
+        canvasState: CanvasStateManager
+    ) -> Bool {
+        guard case .activeVisible(let skeleton) = state(for: kind) else { return false }
+        let committed = canvasState.commitPoseToTrace(skeleton: skeleton, opacity: opacity)
+        guard committed else { return false }
+        discard(kind)
+        return true
+    }
+
     // MARK: - Bbox active state (PR 4)
 
     /// Mark a skeleton's transform bbox as active and (re)start the 4-second
