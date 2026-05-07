@@ -288,8 +288,33 @@ struct PoseDetectionSheet: View {
             // Sheet was dismissed mid-detection; nothing to surface.
             return
         } catch {
-            detectionState = .failure(reason: nil)
+            // Surface the underlying reason in both UI and console.
+            // Vision's perform path can throw a few distinct errors
+            // (image-encoding, request-failed wrapping a VNError,
+            // etc.); a single generic line buries the diagnostic.
+            let reason = describe(error: error)
+            print("⚠️ Pose detection failed: \(reason)")
+            detectionState = .failure(reason: reason)
         }
+    }
+
+    /// Best-effort human-readable rendering of a detection error. Pulls
+    /// the underlying NSError when wrapped in `VisionServiceError
+    /// .requestFailed`; otherwise returns `localizedDescription`.
+    private func describe(error: Error) -> String {
+        if let vse = error as? VisionServiceError {
+            switch vse {
+            case .imageEncodingFailed:
+                return "The photo couldn't be converted into a format Vision can read."
+            case .cancelled:
+                return "Detection was cancelled."
+            case .requestFailed(let underlying):
+                let ns = underlying as NSError
+                return "Vision request failed: \(ns.localizedDescription) (\(ns.domain) #\(ns.code))"
+            }
+        }
+        let ns = error as NSError
+        return "\(ns.localizedDescription) (\(ns.domain) #\(ns.code))"
     }
 
     private func filteredSkeletons(in result: PoseDetectionResult) -> [PoseSkeleton] {
