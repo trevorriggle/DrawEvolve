@@ -558,9 +558,16 @@ struct DrawingCanvasView: View {
                 .ignoresSafeArea()
 
             // Pose-reference skeleton(s). Sibling to TransformHandlesOverlay
-            // (Decision 4 — no Metal layer, no DrawingLayer subtype). PR 2
-            // is read-only; per-joint editing arrives in PR 3.
+            // (Decision 4 — no Metal layer, no DrawingLayer subtype).
             PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
+                .ignoresSafeArea()
+
+            // Whole-skeleton transform handles (PR 4). Renders dashed
+            // bbox + corner / edge / rotation handles when the
+            // skeleton's bbox is armed; auto-deselects after 4s.
+            // Above the joint dots in Z so handle hit zones can compete
+            // when they overlap with extremity joints.
+            PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
                 .ignoresSafeArea()
 
             // Floating chip per active skeleton — Hide / Discard for the
