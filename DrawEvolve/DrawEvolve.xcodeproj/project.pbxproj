@@ -76,6 +76,11 @@
 		DE000074 /* ToolGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100074 /* ToolGroup.swift */; };
 		DE000075 /* GroupedToolButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100075 /* GroupedToolButton.swift */; };
 		DE000076 /* ToolGroupPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100076 /* ToolGroupPopover.swift */; };
+		DE000077 /* VisionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100077 /* VisionService.swift */; };
+		DE000078 /* VisionPoseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100078 /* VisionPoseService.swift */; };
+		DE000079 /* PoseSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100079 /* PoseSkeleton.swift */; };
+		DE000080 /* PoseTopology.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100080 /* PoseTopology.swift */; };
+		DE000081 /* PoseDetectionResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100081 /* PoseDetectionResult.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -151,6 +156,11 @@
 		DE100074 /* ToolGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroup.swift; sourceTree = "<group>"; };
 		DE100075 /* GroupedToolButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupedToolButton.swift; sourceTree = "<group>"; };
 		DE100076 /* ToolGroupPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroupPopover.swift; sourceTree = "<group>"; };
+		DE100077 /* VisionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionService.swift; sourceTree = "<group>"; };
+		DE100078 /* VisionPoseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionPoseService.swift; sourceTree = "<group>"; };
+		DE100079 /* PoseSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseSkeleton.swift; sourceTree = "<group>"; };
+		DE100080 /* PoseTopology.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseTopology.swift; sourceTree = "<group>"; };
+		DE100081 /* PoseDetectionResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseDetectionResult.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -253,6 +263,7 @@
 				DE100067 /* TextSettings.swift */,
 				DE100068 /* FloatingText.swift */,
 				DE100070 /* CodableColor.swift */,
+				DE000319 /* Pose */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -276,8 +287,28 @@
 				DE100066 /* DeviceIdiom.swift */,
 				DE100071 /* PathSmoothing.swift */,
 				DE100072 /* TextOnPathRenderer.swift */,
+				DE000318 /* Vision */,
 			);
 			path = Services;
+			sourceTree = "<group>";
+		};
+		DE000318 /* Vision */ = {
+			isa = PBXGroup;
+			children = (
+				DE100077 /* VisionService.swift */,
+				DE100078 /* VisionPoseService.swift */,
+			);
+			path = Vision;
+			sourceTree = "<group>";
+		};
+		DE000319 /* Pose */ = {
+			isa = PBXGroup;
+			children = (
+				DE100079 /* PoseSkeleton.swift */,
+				DE100080 /* PoseTopology.swift */,
+				DE100081 /* PoseDetectionResult.swift */,
+			);
+			path = Pose;
 			sourceTree = "<group>";
 		};
 		DE000313 /* Config */ = {
@@ -478,6 +509,11 @@
 				DE000074 /* ToolGroup.swift in Sources */,
 				DE000075 /* GroupedToolButton.swift in Sources */,
 				DE000076 /* ToolGroupPopover.swift in Sources */,
+				DE000077 /* VisionService.swift in Sources */,
+				DE000078 /* VisionPoseService.swift in Sources */,
+				DE000079 /* PoseSkeleton.swift in Sources */,
+				DE000080 /* PoseTopology.swift in Sources */,
+				DE000081 /* PoseDetectionResult.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
