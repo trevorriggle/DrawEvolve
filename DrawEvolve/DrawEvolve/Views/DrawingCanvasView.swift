@@ -55,6 +55,15 @@ struct DrawingCanvasView: View {
     @State private var typeBarSuspended = false
     @State private var previousNonTypeTool: DrawingTool = .brush
 
+    // Path mode for the .textOnPath tool. Persisted across launches so
+    // the user's last choice is the default next session. Toggled by
+    // the top-center pill that's visible only while .textOnPath is the
+    // active tool AND no float / preview is in progress.
+    @AppStorage("typeOnPath.pathMode") private var typeOnPathPathModeRaw: String = TypeOnPathPathMode.freehand.rawValue
+    private var typeOnPathPathMode: TypeOnPathPathMode {
+        TypeOnPathPathMode(rawValue: typeOnPathPathModeRaw) ?? .freehand
+    }
+
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
 
@@ -416,6 +425,14 @@ struct DrawingCanvasView: View {
                         content: ""
                     )
                 },
+                onTextOnPathCircleRequest: { center, radius in
+                    canvasState.beginTextOnPathCircle(
+                        center: center,
+                        radius: radius,
+                        content: ""
+                    )
+                },
+                typeOnPathMode: typeOnPathPathMode,
                 symmetry: symmetry
             )
             .ignoresSafeArea() // Full screen, edge to edge
@@ -595,6 +612,8 @@ struct DrawingCanvasView: View {
 
             pathStartHandleOverlay
             textOnPathPreviewOverlay
+            textOnPathCirclePreviewOverlay
+            typeOnPathModeTogglePill
             cancelPillOverlay
             TextEntryOverlay(canvasState: canvasState)
 
@@ -1231,6 +1250,87 @@ struct DrawingCanvasView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
         }
+    }
+
+    /// Live circle outline shown while the user is dragging in
+    /// type-on-path circle mode. Same gray-stroke styling as the
+    /// freehand preview so the user sees a consistent path-in-progress
+    /// affordance.
+    @ViewBuilder
+    private var textOnPathCirclePreviewOverlay: some View {
+        if let preview = canvasState.previewTextOnPathCircle, preview.radius >= 1 {
+            let centerScreen = canvasState.documentToScreen(preview.center)
+            // Convert doc-space radius to screen via the existing
+            // doc→screen helper. Compute it as the screen distance
+            // between the doc-space center and a doc-space point at
+            // (center.x + radius, center.y) — matches whatever pan /
+            // zoom transforms the canvas applies.
+            let edgeScreen = canvasState.documentToScreen(
+                CGPoint(x: preview.center.x + preview.radius, y: preview.center.y)
+            )
+            let screenRadius = hypot(edgeScreen.x - centerScreen.x, edgeScreen.y - centerScreen.y)
+            Path { p in
+                p.addEllipse(in: CGRect(
+                    x: centerScreen.x - screenRadius,
+                    y: centerScreen.y - screenRadius,
+                    width: 2 * screenRadius,
+                    height: 2 * screenRadius
+                ))
+            }
+            .stroke(Color.gray.opacity(0.55), lineWidth: 1.5)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Top-center capsule pill that toggles the .textOnPath input mode
+    /// between Freehand and Circle. Visible only when the user has the
+    /// Type-on-Path tool selected, no float is currently active, and no
+    /// path-drawing preview is in progress (the pill vanishes the
+    /// moment the user begins dragging).
+    @ViewBuilder
+    private var typeOnPathModeTogglePill: some View {
+        if canvasState.currentTool == .textOnPath
+            && canvasState.floatingText == nil
+            && canvasState.previewTextOnPathPoints == nil
+            && canvasState.previewTextOnPathCircle == nil {
+            VStack {
+                HStack {
+                    Spacer()
+                    HStack(spacing: 0) {
+                        modeSegment(.freehand, label: "Freehand")
+                        modeSegment(.circle,   label: "Circle")
+                    }
+                    .background(Color.black.opacity(0.75))
+                    .clipShape(Capsule())
+                    .shadow(radius: 3)
+                    Spacer()
+                }
+                .padding(.top, 60)
+                Spacer()
+            }
+            .ignoresSafeArea()
+            .transition(.opacity)
+        }
+    }
+
+    /// One segment of the toggle pill. Selected segment darkens; tapping
+    /// an unselected segment switches the mode (writes through the
+    /// `@AppStorage`-backed `typeOnPathPathModeRaw`).
+    @ViewBuilder
+    private func modeSegment(_ mode: TypeOnPathPathMode, label: String) -> some View {
+        let isSelected = typeOnPathPathMode == mode
+        Button {
+            typeOnPathPathModeRaw = mode.rawValue
+        } label: {
+            Text(label)
+                .font(.subheadline.weight(.medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(isSelected ? Color.white.opacity(0.22) : Color.clear)
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder

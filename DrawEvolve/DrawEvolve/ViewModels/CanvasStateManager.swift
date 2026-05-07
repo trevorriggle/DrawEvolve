@@ -147,9 +147,17 @@ class CanvasStateManager: ObservableObject {
     @Published var floatingText: FloatingText? = nil
 
     /// Live preview of the user's in-progress path drawing during the
-    /// .textOnPath touch session. Doc-space points; nil when no draw is
-    /// active. DrawingCanvasView renders this as a thin guide line.
+    /// .textOnPath touch session in **freehand** mode. Doc-space points;
+    /// nil when no draw is active. DrawingCanvasView renders this as a
+    /// thin guide line.
     @Published var previewTextOnPathPoints: [CGPoint]? = nil
+
+    /// Live preview of the user's in-progress path drawing during the
+    /// .textOnPath touch session in **circle** mode. `(center, radius)`
+    /// in doc-space; nil when no draw is active or the user is in
+    /// freehand mode. DrawingCanvasView renders this as a thin gray
+    /// circle outline.
+    @Published var previewTextOnPathCircle: TypeOnPathCirclePreview? = nil
 
     /// Cancellable rasterise debounce (~16ms). Re-armed on every settings or
     /// content change so rapid slider drags coalesce into one rasterise.
@@ -676,13 +684,15 @@ class CanvasStateManager: ObservableObject {
         // Below ~3 raw samples there's nothing to smooth — bail silently.
         guard rawPoints.count >= 3 else { return }
 
+        // Smooth the raw freehand polyline. Each output sample carries
+        // both position and the analytic Catmull-Rom tangent — no
+        // finite-difference reconstruction in the LUT (Tier-1.5 third
+        // audit).
         let smoothed = PathSmoothing.catmullRom(rawPoints)
         let path = PathSmoothing.cgPath(from: smoothed)
         // Closure is detected from raw screen-space endpoints (locked
-        // 30pt threshold) and threaded into LUT construction so the
-        // tangent stencil wraps the seam continuously for closed paths.
-        // Open paths fall through with isClosed=false and clamp at the
-        // boundaries.
+        // 30pt threshold). The lookup wraps modulo for closed paths so
+        // text crosses the seam continuously.
         let isClosed = PathSmoothing.isClosedByEndpoint(
             firstScreen: firstScreen,
             lastScreen: lastScreen
@@ -692,17 +702,55 @@ class CanvasStateManager: ObservableObject {
         var ft = FloatingText(
             content: content,
             settings: textSettings,
-            anchor: smoothed.first ?? .zero
+            anchor: smoothed.first?.point ?? .zero
         )
         ft.path = path
         ft.pathLUT = lut
         ft.isClosed = isClosed
         ft.pathStartOffset = 0
         ft.baselineOffset = 0
-        // autoFlipEnabled left at the model default (false post-Tier-1.5
-        // re-audit). Users with heart-shape / closed-loop paths who want
-        // the v1 flip behaviour can toggle the field — UI surface for
-        // the toggle is deferred until the inspector half-sheet returns.
+        // autoFlipEnabled left at the model default (false post-PR1).
+        // Users with heart-shape / closed-loop paths who want flip
+        // behaviour can toggle the field — UI surface for the toggle
+        // is deferred until the inspector half-sheet returns.
+        floatingText = ft
+        rasterizeFloatingTextNow()
+    }
+
+    /// Type-on-path entry point for circle mode. Center is where the
+    /// user touched down; radius is the drag distance at lift. The LUT
+    /// is generated parametrically (no Catmull-Rom — a circle is
+    /// already smooth). `isClosed = true` so the LUT lookup wraps
+    /// continuously around the circle.
+    func beginTextOnPathCircle(
+        center: CGPoint,
+        radius: CGFloat,
+        content: String
+    ) {
+        if floatingText != nil {
+            commitFloatingText()
+        }
+        previewTextOnPathPoints = nil
+
+        // Sanity floor — sub-pixel circles produce degenerate LUTs.
+        guard radius >= 4 else { return }
+
+        let lut = PathSmoothing.circleArcLengthLUT(center: center, radius: radius)
+        let path = PathSmoothing.cgPath(forCircleAt: center, radius: radius)
+
+        var ft = FloatingText(
+            content: content,
+            settings: textSettings,
+            // Anchor at the LUT's first sample (top of the circle in
+            // the parameterisation; matches where pathStartOffset = 0
+            // lands).
+            anchor: lut.first?.point ?? center
+        )
+        ft.path = path
+        ft.pathLUT = lut
+        ft.isClosed = true
+        ft.pathStartOffset = 0
+        ft.baselineOffset = 0
         floatingText = ft
         rasterizeFloatingTextNow()
     }

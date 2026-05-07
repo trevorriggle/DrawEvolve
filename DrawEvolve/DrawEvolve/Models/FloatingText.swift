@@ -27,6 +27,28 @@ import SwiftUI
 import UIKit
 import Metal
 
+/// The two ways the user can lay down a path for the type-on-path tool.
+/// Persisted between sessions via `@AppStorage` in `DrawingCanvasView`
+/// so the user's last choice is the next-launch default. The path-mode
+/// toggle pill (top-center, mounted in `DrawingCanvasView` when the
+/// type-on-path tool is selected and no float exists yet) writes this.
+enum TypeOnPathPathMode: String, CaseIterable {
+    /// User drags a freehand polyline; smoothed via Catmull-Rom on lift.
+    case freehand
+    /// User taps a center, drag distance becomes radius, lift commits
+    /// a perfect circle as the path.
+    case circle
+}
+
+/// Live-drag state for the `.circle` mode of the type-on-path tool.
+/// Set by `MetalCanvasView`'s touch handler during the drag and read
+/// by `DrawingCanvasView`'s preview overlay so the user sees a faint
+/// circle outline tracking their finger before lift.
+struct TypeOnPathCirclePreview: Equatable {
+    let center: CGPoint
+    let radius: CGFloat
+}
+
 struct FloatingText {
     let id: UUID
     var content: String
