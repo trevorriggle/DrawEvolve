@@ -137,6 +137,11 @@ struct DrawingCanvasView: View {
                     selectedIndex: $canvasState.selectedLayerIndex,
                     onAddLayer: { canvasState.addLayer() },
                     onDeleteLayer: { index in canvasState.deleteLayer(at: index) },
+                    onMoveLayer: { from, to in canvasState.moveLayer(from: from, to: to) },
+                    onBeginOpacityDrag: { index in canvasState.beginOpacityDrag(forLayerAt: index) },
+                    onEndOpacityDrag: { index in canvasState.endOpacityDrag(forLayerAt: index) },
+                    onBeginRename: { index in canvasState.beginLayerRename(forLayerAt: index) },
+                    onCommitRename: { index in canvasState.commitLayerRename(forLayerAt: index) },
                     poseManager: poseOverlayManager
                 )
                 .navigationTitle("Layers")

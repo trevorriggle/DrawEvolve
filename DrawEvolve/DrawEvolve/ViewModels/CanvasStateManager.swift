@@ -314,6 +314,83 @@ class CanvasStateManager: ObservableObject {
         historyManager.record(.layerRemoved(layer, index: index))
     }
 
+    /// Reorder a layer within the stack. `destIndex` is interpreted as an
+    /// insertion point in the *original* array (i.e. the index where the
+    /// caller wants the layer to land before removal); we adjust for the
+    /// remove-then-insert ordering internally so callers don't have to.
+    /// The active selection follows the moved layer by id, so dragging the
+    /// currently-selected layer keeps it selected after drop.
+    func moveLayer(from sourceIndex: Int, to destIndex: Int) {
+        guard layers.indices.contains(sourceIndex),
+              (0...layers.count).contains(destIndex),
+              sourceIndex != destIndex,
+              destIndex != sourceIndex + 1 else { return }
+
+        let layer = layers.remove(at: sourceIndex)
+        let insertAt = destIndex > sourceIndex ? destIndex - 1 : destIndex
+        layers.insert(layer, at: insertAt)
+
+        selectedLayerIndex = layers.firstIndex(where: { $0.id == layer.id }) ?? selectedLayerIndex
+
+        historyManager.record(.layerMoved(from: sourceIndex, to: insertAt))
+    }
+
+    // MARK: - Opacity slider history bracketing
+    //
+    // The slider mutates `layer.opacity` directly (via SwiftUI binding) so
+    // the canvas updates live. We bracket the drag with begin/end so undo
+    // gets one entry per gesture instead of one per intermediate value.
+    private var opacityDragStartValue: [UUID: Float] = [:]
+
+    func beginOpacityDrag(forLayerAt index: Int) {
+        guard layers.indices.contains(index) else { return }
+        opacityDragStartValue[layers[index].id] = layers[index].opacity
+    }
+
+    func endOpacityDrag(forLayerAt index: Int) {
+        guard layers.indices.contains(index) else { return }
+        let layer = layers[index]
+        guard let oldValue = opacityDragStartValue.removeValue(forKey: layer.id),
+              oldValue != layer.opacity else { return }
+        historyManager.record(.layerPropertyChanged(
+            layerId: layer.id,
+            property: .opacity(old: oldValue, new: layer.opacity)
+        ))
+    }
+
+    // MARK: - Layer rename history bracketing
+    //
+    // Same pattern as opacity. TextField binds directly to `layer.name`;
+    // begin captures the pre-edit name, commit trims/caps and records one
+    // history entry. Empty/whitespace-only commits revert to the old name.
+    private var renameStartValue: [UUID: String] = [:]
+    private static let layerNameMaxLength = 64
+
+    func beginLayerRename(forLayerAt index: Int) {
+        guard layers.indices.contains(index) else { return }
+        renameStartValue[layers[index].id] = layers[index].name
+    }
+
+    func commitLayerRename(forLayerAt index: Int) {
+        guard layers.indices.contains(index) else { return }
+        let layer = layers[index]
+        guard let oldName = renameStartValue.removeValue(forKey: layer.id) else { return }
+
+        let trimmed = String(layer.name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.layerNameMaxLength))
+        if trimmed.isEmpty {
+            layer.name = oldName
+            return
+        }
+        layer.name = trimmed
+
+        if oldName != layer.name {
+            historyManager.record(.layerPropertyChanged(
+                layerId: layer.id,
+                property: .name(old: oldName, new: layer.name)
+            ))
+        }
+    }
+
     func clearCanvas() {
         layers.removeAll()
         addLayer()
