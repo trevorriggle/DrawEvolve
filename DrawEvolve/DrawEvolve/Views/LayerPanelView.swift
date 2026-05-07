@@ -12,9 +12,35 @@ struct LayerPanelView: View {
     @Binding var selectedIndex: Int
     let onAddLayer: () -> Void
     let onDeleteLayer: (Int) -> Void
+    /// Optional pose-overlay manager — when present, the panel shows a
+    /// pinned ghost row at the top for each active skeleton (Decision 6).
+    /// Optional so callers that don't need pose UI (previews, future
+    /// surfaces) can omit it without changing the call signature.
+    @ObservedObject var poseManager: PoseOverlayManager
+    @State private var pendingPoseDiscard: PoseSkeletonKind?
 
     var body: some View {
         List {
+            ForEach(poseManager.activeSkeletons.map(\.kind)) { kind in
+                PoseGhostRow(
+                    kind: kind,
+                    state: poseManager.state(for: kind),
+                    onToggleVisibility: {
+                        let visible = poseManager.state(for: kind).isVisible
+                        poseManager.setVisible(!visible, for: kind)
+                    },
+                    onDismiss: {
+                        if poseManager.hasManualEdits(for: kind) {
+                            pendingPoseDiscard = kind
+                        } else {
+                            poseManager.discard(kind)
+                        }
+                    }
+                )
+                .listRowBackground(Color(uiColor: .secondarySystemBackground))
+                .listRowSeparator(.visible)
+            }
+
             ForEach(Array(layers.enumerated().reversed()), id: \.element.id) { index, layer in
                 Button(action: {
                     // index already has the correct layer index from enumerated()
@@ -47,6 +73,72 @@ struct LayerPanelView: View {
                 }
             }
         }
+        .alert(
+            "Discard pose reference?",
+            isPresented: Binding(
+                get: { pendingPoseDiscard != nil },
+                set: { if !$0 { pendingPoseDiscard = nil } }
+            ),
+            presenting: pendingPoseDiscard
+        ) { kind in
+            Button("Discard", role: .destructive) {
+                poseManager.discard(kind)
+                pendingPoseDiscard = nil
+            }
+            Button("Cancel", role: .cancel) { pendingPoseDiscard = nil }
+        } message: { _ in
+            Text("You've manually moved joints. Discarding can't be undone.")
+        }
+    }
+}
+
+/// Ghost row pinned at the top of the layer list when a skeleton is
+/// active. Visually distinguished from real layer rows: italic name,
+/// muted fill, no opacity / blend / alpha-lock controls.
+private struct PoseGhostRow: View {
+    let kind: PoseSkeletonKind
+    let state: PoseOverlayManager.SlotState
+    let onToggleVisibility: () -> Void
+    let onDismiss: () -> Void
+
+    private var isVisible: Bool { state.isVisible }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onToggleVisibility) {
+                Image(systemName: isVisible ? "eye.fill" : "eye.slash.fill")
+                    .foregroundColor(isVisible ? .accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            Image(systemName: kind.icon)
+                .font(.title3)
+                .foregroundColor(.accentColor)
+                .frame(width: 44, height: 44)
+                .background(Color.accentColor.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(kind.displayLabel)
+                    .font(.subheadline.weight(.medium))
+                    .italic()
+                    .foregroundColor(.primary)
+                Text("Reference overlay — not saved with the drawing")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss \(kind.displayLabel)")
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
     }
 }
 
@@ -132,7 +224,8 @@ struct LayerRow: View {
             ]),
             selectedIndex: .constant(1),
             onAddLayer: {},
-            onDeleteLayer: { _ in }
+            onDeleteLayer: { _ in },
+            poseManager: PoseOverlayManager()
         )
         .navigationTitle("Layers")
     }
