@@ -191,8 +191,45 @@ enum TextOnPathRenderer {
             glyphCluster[gI] = cIdx
         }
 
+        // Tier-1.5 PR2: per-glyph arclength accumulator with
+        // curvature-modulated advance. Replaces the previous
+        // `g.positionLineX + g.advanceX/2` flat-layout lookup, which
+        // placed glyphs at uniform centerline arclength regardless of
+        // curve. On tight curves that produced rotated-bbox overlap on
+        // the inside (Symptom 2) and visibly uneven spacing (Symptom 4).
+        // The new walk samples κ at each glyph's segment start,
+        // modulates `advanceX` by `PathSmoothing.curvatureScale`, and
+        // accumulates the result. Glyph height for the curvature
+        // formula is `ft.settings.size` (doc-space) — must match the
+        // LUT's distance units, which are doc-space.
+        let glyphHeightDoc = ft.settings.size
+
+        var glyphCenterArcDoc = [CGFloat](repeating: 0, count: glyphRecords.count)
+        var cumulativeArcTex: CGFloat = 0
+        for (gI, g) in glyphRecords.enumerated() {
+            let segmentStartArcDoc = ft.pathStartOffset + cumulativeArcTex / scale
+            let kappa = PathSmoothing.curvature(
+                at: segmentStartArcDoc,
+                in: lut,
+                isClosed: ft.isClosed
+            )
+            let advanceScaleFactor = PathSmoothing.curvatureScale(
+                kappa,
+                glyphHeight: glyphHeightDoc
+            )
+            let scaledAdvanceTex = g.advanceX * advanceScaleFactor
+            let centerArcTex = cumulativeArcTex + scaledAdvanceTex / 2
+            glyphCenterArcDoc[gI] = ft.pathStartOffset + centerArcTex / scale
+            cumulativeArcTex += scaledAdvanceTex
+        }
+
         // Pre-pass: per-cluster flip eligibility based on the tangent at
-        // the cluster's center on the line (mapped to the path).
+        // the cluster's center on the path. Cluster center is the
+        // midpoint between the first and last glyph's curvature-modulated
+        // arclength positions — same scheme as glyph placement so the
+        // flip-eligibility lookup never disagrees with the per-glyph
+        // placement lookup. Auto-flip is off by default post-PR1; this
+        // loop is mostly inert unless the user has toggled it on.
         var clusterFlipEligible = [Bool](repeating: false, count: clusterRanges.count)
         for cI in 0..<clusterRanges.count {
             // Find the first / last glyph belonging to this cluster.
@@ -203,11 +240,8 @@ enum TextOnPathRenderer {
                 endG = gI
             }
             guard let sG = startG else { continue }
-            let startLine = glyphRecords[sG].positionLineX
-            let endLine = glyphRecords[endG].positionLineX + glyphRecords[endG].advanceX
-            let centerLineTex = (startLine + endLine) / 2
-            let distDoc = ft.pathStartOffset + centerLineTex / scale
-            guard let look = PathSmoothing.point(at: distDoc, in: lut, isClosed: ft.isClosed) else {
+            let centerArcDoc = (glyphCenterArcDoc[sG] + glyphCenterArcDoc[endG]) / 2
+            guard let look = PathSmoothing.point(at: centerArcDoc, in: lut, isClosed: ft.isClosed) else {
                 continue
             }
             clusterFlipEligible[cI] = ft.autoFlipEnabled
@@ -228,15 +262,14 @@ enum TextOnPathRenderer {
             clusterFlip[c] = prev || next
         }
 
-        // Per-glyph placement: each glyph looks up its own (point, tangent)
-        // at its center distance. See header doc on the per-glyph vs
-        // per-cluster trade-off.
+        // Per-glyph placement uses the curvature-modulated arclengths
+        // computed in the accumulator pass above. See header doc on the
+        // per-glyph vs per-cluster path-lookup trade-off.
         var placements: [GlyphPlacement] = []
         placements.reserveCapacity(glyphRecords.count)
         for (gI, g) in glyphRecords.enumerated() {
-            let glyphCenterTex = g.positionLineX + g.advanceX / 2
-            let distDoc = ft.pathStartOffset + glyphCenterTex / scale
-            guard let look = PathSmoothing.point(at: distDoc, in: lut, isClosed: ft.isClosed) else {
+            let centerArcDoc = glyphCenterArcDoc[gI]
+            guard let look = PathSmoothing.point(at: centerArcDoc, in: lut, isClosed: ft.isClosed) else {
                 continue
             }
             let texAnchor = CGPoint(x: look.point.x * scale, y: look.point.y * scale)
