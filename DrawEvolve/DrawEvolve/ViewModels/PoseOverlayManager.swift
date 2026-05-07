@@ -152,6 +152,39 @@ final class PoseOverlayManager: ObservableObject {
         manuallyEditedJointKeys = manuallyEditedJointKeys.filter { !$0.hasPrefix(prefix) }
     }
 
+    // MARK: - Joint mutation (PR 3)
+
+    /// Reposition a single hand joint and mark it as manually moved.
+    /// `position` is in canvas-document space. No-op if the active hand
+    /// skeleton's id doesn't match — guards against stale gesture
+    /// callbacks that arrive after the user has discarded / replaced
+    /// the skeleton.
+    func updateHandJoint(skeletonID: UUID, joint: HandJoint, to position: CGPoint) {
+        guard case .activeVisible(let skeleton) = handState,
+              case .hand(var pose) = skeleton,
+              pose.id == skeletonID else { return }
+        guard var sample = pose.joints[joint] else { return }
+        sample.position = position
+        sample.isManuallyMoved = true
+        pose.joints[joint] = sample
+        handState = .activeVisible(.hand(pose))
+        manuallyEditedJointKeys.insert("\(skeletonID.uuidString):\(joint.rawValue)")
+    }
+
+    /// Reposition a single body joint and mark it as manually moved.
+    /// Same staleness gate as `updateHandJoint`.
+    func updateBodyJoint(skeletonID: UUID, joint: BodyJoint, to position: CGPoint) {
+        guard case .activeVisible(let skeleton) = bodyState,
+              case .body(var pose) = skeleton,
+              pose.id == skeletonID else { return }
+        guard var sample = pose.joints[joint] else { return }
+        sample.position = position
+        sample.isManuallyMoved = true
+        pose.joints[joint] = sample
+        bodyState = .activeVisible(.body(pose))
+        manuallyEditedJointKeys.insert("\(skeletonID.uuidString):\(joint.rawValue)")
+    }
+
     // MARK: - Tap cycle (Decision 7)
 
     /// Resolve a slot tap into a high-level outcome. The toolbar wrapper
