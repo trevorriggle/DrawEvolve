@@ -17,6 +17,17 @@ class CanvasRenderer: NSObject {
     // can reuse it instead of allocating a fresh queue per frame — a queue is
     // meant to live for the device's lifetime.
     let commandQueue: MTLCommandQueue
+
+    // Stroke-path command-buffer rate limiter. Metal's command queue caps
+    // in-flight buffers at 64 per queue; past that, makeCommandBuffer()
+    // returns nil and the touch loop's stamp is silently dropped. Big
+    // erases / fast brush sweeps at 240 Hz used to hit the cap and leak
+    // stamps. We hold a semaphore at 60 (under the hard cap, leaves a
+    // few slots for non-stroke Metal work — composite, blur preview,
+    // smudge), wait before makeCommandBuffer, and signal in the
+    // completion handler. Block-on-saturation is intentional: brief
+    // back-pressure on the touch loop is preferable to silent data loss.
+    private let strokeCommandSlots = DispatchSemaphore(value: 60)
     private var brushPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
@@ -419,8 +430,18 @@ class CanvasRenderer: NSObject {
         print("  Brush size: \(stroke.settings.size)")
         #endif
 
+        // Acquire a stroke command-buffer slot. Blocks the caller (touch
+        // loop) when the GPU has 60 stroke buffers in flight, releasing
+        // as soon as one completes via the addCompletedHandler below.
+        // Brief back-pressure under heavy load is the trade-off for
+        // never silently dropping a stamp on Metal saturation.
+        strokeCommandSlots.wait()
+
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            #if DEBUG
             print("CanvasRenderer: Failed to create command buffer")
+            #endif
+            strokeCommandSlots.signal()
             completion?()
             return
         }
@@ -431,7 +452,10 @@ class CanvasRenderer: NSObject {
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            #if DEBUG
             print("CanvasRenderer: Failed to create render encoder")
+            #endif
+            strokeCommandSlots.signal()
             completion?()
             return
         }
@@ -439,8 +463,11 @@ class CanvasRenderer: NSObject {
         // Select pipeline based on tool
         let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
         guard let pipelineState = pipeline else {
+            #if DEBUG
             print("CanvasRenderer: No pipeline state available")
+            #endif
             renderEncoder.endEncoding()
+            strokeCommandSlots.signal()
             completion?()
             return
         }
@@ -522,7 +549,13 @@ class CanvasRenderer: NSObject {
             // thumbnail) inside `completion`, which fires on main once the GPU
             // pass is finished. Lets the touch loop / preview keep running
             // instead of stalling on `waitUntilCompleted` after every commit.
-            commandBuffer.addCompletedHandler { _ in
+            // The slot signal happens INSIDE addCompletedHandler (on Metal's
+            // completion callback queue) rather than waiting for the
+            // dispatched main-thread block — that frees the slot the moment
+            // the GPU finishes, which is what makes the cap actually breathe
+            // under touch-loop pressure.
+            commandBuffer.addCompletedHandler { [weak self] _ in
+                self?.strokeCommandSlots.signal()
                 DispatchQueue.main.async {
                     #if DEBUG
                     print("CanvasRenderer: Stroke completed on GPU (async)")
@@ -538,6 +571,7 @@ class CanvasRenderer: NSObject {
             // passes a completion now.
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
+            strokeCommandSlots.signal()
             #if DEBUG
             print("CanvasRenderer: Stroke completed on GPU")
             #endif
