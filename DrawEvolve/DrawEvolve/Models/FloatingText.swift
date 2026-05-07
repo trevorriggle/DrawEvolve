@@ -81,7 +81,7 @@ struct FloatingText {
     /// control (locked spec).
     var baselineOffset: CGFloat = 0
     /// True when the user's draw closed the loop (endpoints within 30 pt
-    /// screen-space at lift). Auto-detected; the toggle in TextSettingsView
+    /// screen-space at lift). Auto-detected; the toggle in TypeInspectorView
     /// lets the user override.
     var isClosed: Bool = false
     /// True ⇒ TextOnPathRenderer flips glyphs in upside-down sections
