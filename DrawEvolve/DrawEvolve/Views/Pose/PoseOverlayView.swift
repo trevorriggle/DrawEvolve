@@ -108,6 +108,10 @@ private struct HandSkeletonView: View {
                                 joint: joint,
                                 to: docPoint
                             )
+                            // Refresh the 4s bbox-active timer so the
+                            // transform handles stay armed while the
+                            // user is mid-edit (audit §6.3).
+                            poseManager.activate(skeletonID: pose.id)
                         }
                     )
                 }
@@ -165,6 +169,7 @@ private struct BodySkeletonView: View {
                                 joint: joint,
                                 to: docPoint
                             )
+                            poseManager.activate(skeletonID: pose.id)
                         }
                     )
                 }
@@ -233,31 +238,42 @@ private struct PoseJointDot: View {
     /// Per-joint drag.
     ///
     /// **Pose-overlay gesture priority chain** (audit §6.4 — applies
-    /// to the entire pose feature, not just this handler):
+    /// to the entire pose feature). Last reviewed end of PR 4.
     ///
-    ///   1. **Joint dot** — `.highPriorityGesture` claims the touch as
+    ///   1. **Two-finger pinch / rotate on the bbox** (PR 4) — attached
+    ///      to the transparent bbox-pan rectangle in
+    ///      `PoseTransformHandlesView`. Distinct gesture *type* from the
+    ///      single-finger drags below, so SwiftUI's gesture engine
+    ///      routes two-finger sequences to it without conflicting with
+    ///      joint / handle / bbox-pan single-finger drags.
+    ///   2. **Joint dot** — `.highPriorityGesture` claims the touch as
     ///      soon as it lands inside the 44pt hit zone. ← THIS HANDLER.
-    ///      Highest priority because the joint dot is the smallest,
-    ///      most-specific target; missing it should have low cost.
-    ///   2. **Bone segment** (PR 4) — will attach `.highPriorityGesture`
-    ///      on a hit-test capsule along the bone. Lower priority than
-    ///      joints because bone capsules pass over joint centers; we
-    ///      want the joint to win when both could match.
-    ///   3. **Inside-bbox-pan** (PR 4) — will attach `.gesture` (regular
-    ///      priority) on a transparent rectangle covering the
-    ///      skeleton's bounding box. Catches drags that miss both
-    ///      joints and bones — translates the whole skeleton.
-    ///   4. **Fall-through to canvas** — touches that miss every
-    ///      pose-owned view land on `MetalCanvasView` underneath, where
-    ///      the user's current paint tool runs. This level requires
-    ///      no code: SwiftUI passes touches through any region that
-    ///      contains no hit-testing view (`Path` bones above set
-    ///      `.allowsHitTesting(false)`; the bbox interior is empty
-    ///      SwiftUI space until PR 4).
+    ///      Highest single-finger priority because the joint dot is
+    ///      the smallest, most-specific target.
+    ///   3. **Transform handle** (PR 4) — corner / edge / rotation
+    ///      handles in `PoseTransformHandlesView`. Lower priority than
+    ///      joints because corner-handle hit zones at the bbox extents
+    ///      can sit close to extremity joints (wrist, fingertips,
+    ///      ankles); we want the joint to win when their hit zones
+    ///      overlap. The bbox is padded outward to widen the gap.
+    ///   4. **Bone segment** (DEFERRED past PR 4) — would attach
+    ///      `.highPriorityGesture` on a hit-test capsule along the
+    ///      bone to drag both endpoint joints together. Not shipping
+    ///      in v1 of the pose feature; if added later, slot here.
+    ///   5. **Inside-bbox-pan** (PR 4) — `.gesture` (regular priority)
+    ///      on the transparent rectangle covering the skeleton's
+    ///      bounding box, gated on bbox-active. Catches single-finger
+    ///      drags that miss every joint and handle — translates the
+    ///      whole skeleton.
+    ///   6. **Fall-through to canvas** — touches that miss every
+    ///      pose-owned view land on `MetalCanvasView` underneath. This
+    ///      level requires no code: bones set `.allowsHitTesting(false)`
+    ///      and the bbox interior is non-hit-testing once the 4-second
+    ///      auto-deselect timer fires.
     ///
     /// **Why no flag-based cooperation.** A `@State var isDraggingJoint`
-    /// gate that the bone-drag handler reads would race on touch-up:
-    /// the joint's `onEnded` and the bone's `onChanged` can interleave
+    /// gate that the handle-drag handler reads would race on touch-up:
+    /// the joint's `onEnded` and the handle's `onChanged` can interleave
     /// across run-loop boundaries, and the bug only reproduces on real
     /// hardware (where touch events come from the digitizer at a
     /// different cadence than synthetic simulator events). The
