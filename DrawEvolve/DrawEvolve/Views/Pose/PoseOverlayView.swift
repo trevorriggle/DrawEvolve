@@ -30,8 +30,12 @@ struct PoseOverlayView: View {
                     canvasState: canvasState,
                     interactive: DeviceIdiom.isPad
                 )
+                // Smooth in/out as skeletons appear (place / show) and
+                // disappear (hide / discard / commit). PR 6 polish.
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
+        .animation(.easeInOut(duration: 0.22), value: poseManager.renderableSkeletons.map(\.id))
         // No top-level allowsHitTesting modifier — interactivity is
         // gated per-joint inside PoseJointDot. Bones are explicitly
         // non-interactive (allowsHitTesting(false) on the Path), and

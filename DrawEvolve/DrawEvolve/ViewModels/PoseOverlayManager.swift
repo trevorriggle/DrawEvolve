@@ -77,6 +77,24 @@ final class PoseOverlayManager: ObservableObject {
     /// `activate(_:)` call.
     private var deactivationTasks: [UUID: Task<Void, Never>] = [:]
 
+    /// Currently-displayed low-confidence banner, if any. Replaced on
+    /// each detection-place that produces low-confidence joints; auto-
+    /// cleared after `bannerVisibleDuration`. PR 6.
+    @Published private(set) var lowConfidenceBanner: BannerEntry?
+
+    /// Banner visible duration (audit §4.2 — "show ... for ~5 seconds").
+    static let bannerVisibleDuration: Duration = .seconds(5)
+
+    private var bannerDismissTask: Task<Void, Never>?
+
+    /// Single banner descriptor. `id` lets the auto-dismiss task no-op
+    /// when the banner has already been replaced by a newer detection.
+    struct BannerEntry: Equatable, Identifiable {
+        let id: UUID
+        let kind: PoseSkeletonKind
+        let lowConfidenceCount: Int
+    }
+
     init() {}
 
     // MARK: - Reads
@@ -134,6 +152,32 @@ final class PoseOverlayManager: ObservableObject {
         case .body: bodyState = .activeVisible(skeleton)
         }
         activate(skeletonID: skeleton.id)
+        surfaceLowConfidenceBannerIfNeeded(for: skeleton)
+    }
+
+    /// Build a default (manually-placed) skeleton fitted into a
+    /// centered half-canvas rect and place it. Covers audit Risk 1 —
+    /// when Vision fails to find a pose, or when the user wants to
+    /// start without a photo, this gives them a draggable starting
+    /// skeleton at canvas center.
+    func placeDefault(kind: PoseSkeletonKind, canvasSize: CGSize) {
+        let target = centeredHalfCanvasRect(canvasSize: canvasSize)
+        let skeleton: PoseSkeleton
+        switch kind {
+        case .hand: skeleton = .hand(HandPose.defaultPose(in: target))
+        case .body: skeleton = .body(BodyPose.defaultPose(in: target))
+        }
+        place(skeleton)
+    }
+
+    private func centeredHalfCanvasRect(canvasSize: CGSize) -> CGRect {
+        let target = CGSize(width: canvasSize.width * 0.5, height: canvasSize.height * 0.5)
+        return CGRect(
+            x: (canvasSize.width - target.width) / 2,
+            y: (canvasSize.height - target.height) / 2,
+            width: target.width,
+            height: target.height
+        )
     }
 
     func setVisible(_ visible: Bool, for kind: PoseSkeletonKind) {
@@ -163,6 +207,10 @@ final class PoseOverlayManager: ObservableObject {
         case .hand: handState = .none
         case .body: bodyState = .none
         }
+        // Clear the banner if it was attached to the discarded skeleton.
+        if lowConfidenceBanner?.kind == kind {
+            dismissLowConfidenceBanner()
+        }
     }
 
     func discardAll() {
@@ -172,6 +220,7 @@ final class PoseOverlayManager: ObservableObject {
         manuallyEditedJointKeys.removeAll()
         handState = .none
         bodyState = .none
+        dismissLowConfidenceBanner()
     }
 
     private func clearManualEdits(for kind: PoseSkeletonKind) {
@@ -294,6 +343,43 @@ final class PoseOverlayManager: ObservableObject {
     private func cancelDeactivation(for skeletonID: UUID) {
         deactivationTasks[skeletonID]?.cancel()
         deactivationTasks[skeletonID] = nil
+    }
+
+    // MARK: - Low-confidence banner (PR 6)
+
+    /// Manual dismiss — fired when the user taps the X on the banner.
+    func dismissLowConfidenceBanner() {
+        bannerDismissTask?.cancel()
+        bannerDismissTask = nil
+        lowConfidenceBanner = nil
+    }
+
+    private func surfaceLowConfidenceBannerIfNeeded(for skeleton: PoseSkeleton) {
+        let count = skeleton.lowConfidenceUnmovedCount
+        guard count > 0 else { return }
+        let entry = BannerEntry(
+            id: UUID(),
+            kind: PoseSkeletonKind(skeleton: skeleton),
+            lowConfidenceCount: count
+        )
+        lowConfidenceBanner = entry
+        scheduleBannerDismiss(forID: entry.id)
+    }
+
+    private func scheduleBannerDismiss(forID id: UUID) {
+        bannerDismissTask?.cancel()
+        bannerDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.bannerVisibleDuration)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                // Only clear if the banner hasn't been replaced by a
+                // newer detection (which would have its own ID).
+                if self.lowConfidenceBanner?.id == id {
+                    self.lowConfidenceBanner = nil
+                }
+            }
+        }
     }
 
     // MARK: - Tap cycle (Decision 7)
