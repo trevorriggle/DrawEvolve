@@ -81,6 +81,14 @@
 		DE000079 /* PoseSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100079 /* PoseSkeleton.swift */; };
 		DE000080 /* PoseTopology.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100080 /* PoseTopology.swift */; };
 		DE000081 /* PoseDetectionResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100081 /* PoseDetectionResult.swift */; };
+		DE000082 /* PoseOverlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100082 /* PoseOverlayManager.swift */; };
+		DE000083 /* PoseOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100083 /* PoseOverlayView.swift */; };
+		DE000084 /* PoseDetectionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100084 /* PoseDetectionSheet.swift */; };
+		DE000085 /* PoseReferenceToolSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100085 /* PoseReferenceToolSlot.swift */; };
+		DE000086 /* PoseSkeletonChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100086 /* PoseSkeletonChip.swift */; };
+		DE000087 /* PoseTransformHandlesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100087 /* PoseTransformHandlesView.swift */; };
+		DE000088 /* PoseRasterizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100088 /* PoseRasterizer.swift */; };
+		DE000089 /* PoseLowConfidenceBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100089 /* PoseLowConfidenceBanner.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -161,6 +169,14 @@
 		DE100079 /* PoseSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseSkeleton.swift; sourceTree = "<group>"; };
 		DE100080 /* PoseTopology.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseTopology.swift; sourceTree = "<group>"; };
 		DE100081 /* PoseDetectionResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseDetectionResult.swift; sourceTree = "<group>"; };
+		DE100082 /* PoseOverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseOverlayManager.swift; sourceTree = "<group>"; };
+		DE100083 /* PoseOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseOverlayView.swift; sourceTree = "<group>"; };
+		DE100084 /* PoseDetectionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseDetectionSheet.swift; sourceTree = "<group>"; };
+		DE100085 /* PoseReferenceToolSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseReferenceToolSlot.swift; sourceTree = "<group>"; };
+		DE100086 /* PoseSkeletonChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseSkeletonChip.swift; sourceTree = "<group>"; };
+		DE100087 /* PoseTransformHandlesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseTransformHandlesView.swift; sourceTree = "<group>"; };
+		DE100088 /* PoseRasterizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseRasterizer.swift; sourceTree = "<group>"; };
+		DE100089 /* PoseLowConfidenceBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseLowConfidenceBanner.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -244,6 +260,7 @@
 				DE100069 /* TextSettingsView.swift */,
 				DE000317 /* Evolution */,
 				DE000316 /* Components */,
+				DE000320 /* Pose */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -288,6 +305,7 @@
 				DE100071 /* PathSmoothing.swift */,
 				DE100072 /* TextOnPathRenderer.swift */,
 				DE000318 /* Vision */,
+				DE000321 /* Pose */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -333,6 +351,7 @@
 			children = (
 				DE100037 /* CanvasStateManager.swift */,
 				DE100055 /* EvolutionViewModel.swift */,
+				DE100082 /* PoseOverlayManager.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -361,6 +380,27 @@
 				DE100062 /* EvolutionEmptyStateCTA.swift */,
 			);
 			path = Evolution;
+			sourceTree = "<group>";
+		};
+		DE000320 /* Pose */ = {
+			isa = PBXGroup;
+			children = (
+				DE100083 /* PoseOverlayView.swift */,
+				DE100084 /* PoseDetectionSheet.swift */,
+				DE100085 /* PoseReferenceToolSlot.swift */,
+				DE100086 /* PoseSkeletonChip.swift */,
+				DE100087 /* PoseTransformHandlesView.swift */,
+				DE100089 /* PoseLowConfidenceBanner.swift */,
+			);
+			path = Pose;
+			sourceTree = "<group>";
+		};
+		DE000321 /* Pose */ = {
+			isa = PBXGroup;
+			children = (
+				DE100088 /* PoseRasterizer.swift */,
+			);
+			path = Pose;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -514,6 +554,14 @@
 				DE000079 /* PoseSkeleton.swift in Sources */,
 				DE000080 /* PoseTopology.swift in Sources */,
 				DE000081 /* PoseDetectionResult.swift in Sources */,
+				DE000082 /* PoseOverlayManager.swift in Sources */,
+				DE000083 /* PoseOverlayView.swift in Sources */,
+				DE000084 /* PoseDetectionSheet.swift in Sources */,
+				DE000085 /* PoseReferenceToolSlot.swift in Sources */,
+				DE000086 /* PoseSkeletonChip.swift in Sources */,
+				DE000087 /* PoseTransformHandlesView.swift in Sources */,
+				DE000088 /* PoseRasterizer.swift in Sources */,
+				DE000089 /* PoseLowConfidenceBanner.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

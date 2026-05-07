@@ -848,6 +848,76 @@ class CanvasStateManager: ObservableObject {
         }
     }
 
+    // MARK: - Pose reference (commit-to-trace)
+
+    /// Bake `skeleton` into the active layer at the user-chosen
+    /// `opacity` (0…1). Records a reversible `HistoryAction.stroke` so
+    /// undo restores the pre-trace pixels.
+    ///
+    /// Returns `false` (without writing or recording history) when:
+    ///   • there is no selected layer, or
+    ///   • the active layer is locked (`isLocked` — layer-level lock,
+    ///     not alpha-lock).
+    ///
+    /// Alpha-lock interaction (Stream 1D): not yet shipped. When 1D
+    /// adds an `alphaLocked` flag on `DrawingLayer` and a corresponding
+    /// branch in `CanvasRenderer.renderImage`, this commit will respect
+    /// it automatically (renderImage is the single blit path here). If
+    /// 1D wires alpha-lock as a per-stamp branch instead, mirror it
+    /// here against the rasterized image's alpha buffer before the
+    /// renderImage call.
+    @discardableResult
+    func commitPoseToTrace(skeleton: PoseSkeleton, opacity: CGFloat) -> Bool {
+        guard selectedLayerIndex >= 0, selectedLayerIndex < layers.count else { return false }
+        let layer = layers[selectedLayerIndex]
+        guard !layer.isLocked else { return false }
+        guard let texture = layer.texture else { return false }
+        guard let renderer = renderer else { return false }
+        guard let image = PoseRasterizer.rasterize(
+            skeleton: skeleton,
+            canvasSize: documentSize,
+            opacity: max(0, min(1, opacity))
+        ) else { return false }
+
+        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+
+        // The rasterized image is at canvas-doc native pixel resolution
+        // and the texture is the same; passing rect = full doc and
+        // screenSize = documentSize means renderImage's scaleX/scaleY
+        // become texture.width / documentSize.width — exactly the doc-
+        // pixel-to-texture-pixel ratio (1.0 in practice). The blit ends
+        // up pixel-aligned.
+        let fullRect = CGRect(origin: .zero, size: documentSize)
+        renderer.renderImage(image, at: fullRect, to: texture, screenSize: documentSize)
+
+        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        if let before = beforeSnapshot, let after = afterSnapshot {
+            historyManager.record(.stroke(
+                layerId: layer.id,
+                beforeSnapshot: before,
+                afterSnapshot: after
+            ))
+        }
+
+        // Refresh the layer thumbnail off-main, same pattern as
+        // commitFloatingText / renderStroke.
+        let currentLayerIndex = selectedLayerIndex
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTexture = texture
+        let layerId = layer.id
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run { [weak self] in
+                    guard let self = self,
+                          currentLayerIndex < self.layers.count,
+                          self.layers[currentLayerIndex].id == layerId else { return }
+                    self.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                }
+            }
+        }
+        return true
+    }
+
     // MARK: - Layered load (ONLINELAYERSTORE.md §6)
 
     /// Outcome of `loadLayered` — most are non-fatal "we still loaded the

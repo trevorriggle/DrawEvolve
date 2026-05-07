@@ -17,13 +17,17 @@ struct LayerPanelView: View {
     let onEndOpacityDrag: (Int) -> Void
     let onBeginRename: (Int) -> Void
     let onCommitRename: (Int) -> Void
+    @ObservedObject var poseManager: PoseOverlayManager
 
     // Per-row expand state. Resets on view dismiss (transient).
     @State private var expandedLayerIds: Set<UUID> = []
 
-    // Long-press-drag-to-reorder state.
+    // Long-press-drag-to-reorder state. Only attached to real layer rows —
+    // pose ghost rows aren't reorderable.
     @State private var draggingLayerId: UUID? = nil
     @State private var dragTranslation: CGFloat = 0
+
+    @State private var pendingPoseDiscard: PoseSkeletonKind?
 
     // Used both for the drag-displacement math and as a visual rhythm.
     // Chosen by eyeballing the collapsed row + spacing; if you change row
@@ -34,6 +38,28 @@ struct LayerPanelView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: rowSpacing) {
+                // Pose ghost rows pinned at the top — read-only references,
+                // not part of the reorderable layer stack.
+                ForEach(poseManager.activeSkeletons.map(\.kind)) { kind in
+                    PoseGhostRow(
+                        kind: kind,
+                        state: poseManager.state(for: kind),
+                        onToggleVisibility: {
+                            let visible = poseManager.state(for: kind).isVisible
+                            poseManager.setVisible(!visible, for: kind)
+                        },
+                        onDismiss: {
+                            if poseManager.hasManualEdits(for: kind) {
+                                pendingPoseDiscard = kind
+                            } else {
+                                poseManager.discard(kind)
+                            }
+                        }
+                    )
+                    .background(Color(uiColor: .secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+
                 // Reverse so the visual top of the panel matches the top of
                 // the layer stack (Procreate-style). Index is the original
                 // bottom-up array index — the same value used everywhere
@@ -53,6 +79,22 @@ struct LayerPanelView: View {
                     Image(systemName: "plus")
                 }
             }
+        }
+        .alert(
+            "Discard pose reference?",
+            isPresented: Binding(
+                get: { pendingPoseDiscard != nil },
+                set: { if !$0 { pendingPoseDiscard = nil } }
+            ),
+            presenting: pendingPoseDiscard
+        ) { kind in
+            Button("Discard", role: .destructive) {
+                poseManager.discard(kind)
+                pendingPoseDiscard = nil
+            }
+            Button("Cancel", role: .cancel) { pendingPoseDiscard = nil }
+        } message: { _ in
+            Text("You've manually moved joints. Discarding can't be undone.")
         }
     }
 
@@ -162,6 +204,56 @@ struct LayerPanelView: View {
                 let destIndex = targetArrayIndex > index ? targetArrayIndex + 1 : targetArrayIndex
                 onMoveLayer(index, destIndex)
             }
+    }
+}
+
+/// Ghost row pinned at the top of the layer list when a skeleton is
+/// active. Visually distinguished from real layer rows: italic name,
+/// muted fill, no opacity / blend / alpha-lock controls.
+private struct PoseGhostRow: View {
+    let kind: PoseSkeletonKind
+    let state: PoseOverlayManager.SlotState
+    let onToggleVisibility: () -> Void
+    let onDismiss: () -> Void
+
+    private var isVisible: Bool { state.isVisible }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onToggleVisibility) {
+                Image(systemName: isVisible ? "eye.fill" : "eye.slash.fill")
+                    .foregroundColor(isVisible ? .accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            Image(systemName: kind.icon)
+                .font(.title3)
+                .foregroundColor(.accentColor)
+                .frame(width: 44, height: 44)
+                .background(Color.accentColor.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(kind.displayLabel)
+                    .font(.subheadline.weight(.medium))
+                    .italic()
+                    .foregroundColor(.primary)
+                Text("Reference overlay — not saved with the drawing")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss \(kind.displayLabel)")
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
     }
 }
 
@@ -362,7 +454,8 @@ private struct LayerRow: View {
             onBeginOpacityDrag: { _ in },
             onEndOpacityDrag: { _ in },
             onBeginRename: { _ in },
-            onCommitRename: { _ in }
+            onCommitRename: { _ in },
+            poseManager: PoseOverlayManager()
         )
         .navigationTitle("Layers")
     }
