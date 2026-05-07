@@ -90,6 +90,7 @@
 		DE000089 /* PoseLowConfidenceBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100089 /* PoseLowConfidenceBanner.swift */; };
 		DE000090 /* TypeInspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100090 /* TypeInspectorView.swift */; };
 		DE000091 /* TextEntryOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100091 /* TextEntryOverlay.swift */; };
+		DE000092 /* TypeBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100092 /* TypeBarView.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -179,6 +180,7 @@
 		DE100089 /* PoseLowConfidenceBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoseLowConfidenceBanner.swift; sourceTree = "<group>"; };
 		DE100090 /* TypeInspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeInspectorView.swift; sourceTree = "<group>"; };
 		DE100091 /* TextEntryOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEntryOverlay.swift; sourceTree = "<group>"; };
+		DE100092 /* TypeBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeBarView.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -368,6 +370,7 @@
 				DE100075 /* GroupedToolButton.swift */,
 				DE100076 /* ToolGroupPopover.swift */,
 				DE100091 /* TextEntryOverlay.swift */,
+				DE100092 /* TypeBarView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -566,6 +569,7 @@
 				DE000089 /* PoseLowConfidenceBanner.swift in Sources */,
 				DE000090 /* TypeInspectorView.swift in Sources */,
 				DE000091 /* TextEntryOverlay.swift in Sources */,
+				DE000092 /* TypeBarView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

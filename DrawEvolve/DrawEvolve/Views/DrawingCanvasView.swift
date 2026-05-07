@@ -44,13 +44,14 @@ struct DrawingCanvasView: View {
     @StateObject private var poseOverlayManager = PoseOverlayManager()
     @State private var poseDetectionRequest: PoseSkeletonKind?
 
-    // Type Inspector (Tier-1). Auto-presents whenever a FloatingText is
-    // active. iPad landscape: side column inside `padBodyMaybeWithInspector`
-    // (canvas reflows). iPad portrait + iPhone: half-sheet with detents.
-    // The collapse-to-pill state lets the user keep editing without the
-    // inspector taking up space; tapping the pill re-expands.
-    @State private var isInspectorCollapsed = false
-    @State private var iPadIsLandscape = false
+    // Type session (Tier-1.2). The bar appears when the Type tool is
+    // selected and persists until the user taps the checkmark or selects
+    // another tool. The half-sheet inspector that PR #52 auto-presented
+    // is now opt-in via the bar's More button (`showInspectorSheet`).
+    // `previousNonTypeTool` is the tool the checkmark restores when
+    // ending the Type session.
+    @State private var showInspectorSheet = false
+    @State private var previousNonTypeTool: DrawingTool = .brush
 
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
@@ -106,7 +107,17 @@ struct DrawingCanvasView: View {
             if DeviceIdiom.isPhone {
                 phoneBody
             } else {
-                padBodyMaybeWithInspector
+                padBody
+            }
+        }
+        .overlay(typeBarOverlay)
+        .onChange(of: canvasState.currentTool) { newTool in
+            // Capture the last non-Type tool so the bar's checkmark can
+            // restore it when the Type session ends. Switching away from
+            // Type also clears any inspector sheet that was open.
+            if newTool != .text && newTool != .textOnPath {
+                previousNonTypeTool = newTool
+                showInspectorSheet = false
             }
         }
         .sheet(isPresented: $showColorPicker) {
@@ -172,15 +183,12 @@ struct DrawingCanvasView: View {
                     }
             }
         }
-        // MARK: - Type Inspector (Tier 1)
-        // Half-sheet variant — fires on iPhone always and on iPad portrait.
-        // iPad landscape uses an inline side column inside
-        // `padBodyMaybeWithInspector`. The two presentations are mutually
-        // exclusive (gated by `iPadIsLandscape`), so only one is on screen
-        // at a time. Swipe-to-dismiss collapses to a pill rather than
-        // discarding the float; commit/cancel go through the inspector
-        // footer or the existing TransformCancelPill.
-        .sheet(isPresented: inspectorSheetBinding) {
+        // MARK: - Type Inspector (Tier 1.2)
+        // Opt-in only via the bar's More button. PR #52's auto-presenting
+        // sheet was wrong-shape on iPhone (covered the canvas); the bar
+        // now hosts the everyday controls and the inspector only surfaces
+        // when the user explicitly asks for the deeper settings.
+        .sheet(isPresented: $showInspectorSheet) {
             TypeInspectorView(
                 settings: $canvasState.textSettings,
                 canvasState: canvasState
@@ -312,7 +320,6 @@ struct DrawingCanvasView: View {
                 .ignoresSafeArea()
                 .background(Color(uiColor: .systemGray6))
 
-                collapsePillOverlay
                 TextEntryOverlay(canvasState: canvasState)
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -582,7 +589,6 @@ struct DrawingCanvasView: View {
             pathStartHandleOverlay
             textOnPathPreviewOverlay
             cancelPillOverlay
-            collapsePillOverlay
             TextEntryOverlay(canvasState: canvasState)
 
             blurAdjustmentHUDOverlay
@@ -1035,109 +1041,56 @@ struct DrawingCanvasView: View {
         // re-add them here — they'd double-fire.
     }
 
-    // MARK: - Type Inspector mounting (Tier 1)
+    // MARK: - Type Bar overlay (Tier 1.2)
     //
-    // Wraps `padBody` in an HStack on iPad landscape so the inspector can
-    // dock as a 280pt right-edge column with the canvas reflowing into the
-    // remaining width. iPad portrait + iPhone use the half-sheet variant
-    // attached at body level. The two presentations are mutually exclusive
-    // — `iPadIsLandscape` is updated from the GeometryReader below and
-    // gates `inspectorSheetBinding` so a sheet is never on screen at the
-    // same time as the side column.
-
-    private var padBodyMaybeWithInspector: some View {
-        GeometryReader { geo in
-            let landscape = geo.size.width > geo.size.height
-            HStack(spacing: 0) {
-                padBody
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if landscape && inspectorOpen {
-                    TypeInspectorView(
-                        settings: $canvasState.textSettings,
-                        canvasState: canvasState
-                    )
-                    .frame(width: 280)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            }
-            .animation(.spring(response: 0.35, dampingFraction: 0.85),
-                       value: landscape && inspectorOpen)
-            .onAppear { iPadIsLandscape = landscape }
-            .onChange(of: landscape) { newValue in
-                iPadIsLandscape = newValue
-            }
-        }
-    }
-
-    private var hasFloatingText: Bool {
-        canvasState.floatingText != nil
-    }
-
-    private var inspectorOpen: Bool {
-        hasFloatingText && !isInspectorCollapsed
-    }
-
-    /// Sheet fires on iPhone always, and on iPad only when the device is
-    /// not in landscape (because landscape uses the inline side column).
-    /// Setter handles user-initiated swipe-dismiss: if the float is still
-    /// alive we treat the gesture as collapse-to-pill rather than discard.
-    private var inspectorSheetBinding: Binding<Bool> {
-        Binding(
-            get: {
-                inspectorOpen && (DeviceIdiom.isPhone || !iPadIsLandscape)
-            },
-            set: { newValue in
-                if !newValue && canvasState.floatingText != nil {
-                    isInspectorCollapsed = true
-                }
-            }
-        )
-    }
-
-    // MARK: - Collapse-to-pill overlay (Tier 1)
-    //
-    // Bottom-trailing floating pill, shown when the user has collapsed the
-    // inspector but the FloatingText is still alive. Tap to re-expand. On
-    // iPad landscape it anchors inside the canvas area (HStack child); on
-    // iPhone / iPad portrait it sits above where the sheet would have been.
+    // The bar is the Type tool's session controller. It appears whenever
+    // the user is in a Type session — `.text` selected, OR `.textOnPath`
+    // with a path-bearing FloatingText already on canvas — and persists
+    // until the checkmark is tapped or the user picks another tool. The
+    // GeometryReader provides screen-space bounds for drag-clamping and
+    // the default first-launch position.
 
     @ViewBuilder
-    private var collapsePillOverlay: some View {
-        if hasFloatingText && isInspectorCollapsed {
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    Button {
-                        isInspectorCollapsed = false
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "textformat")
-                            Text(collapsePillTitle)
-                                .lineLimit(1)
-                        }
-                        .font(.caption.weight(.medium))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Color.black.opacity(0.78))
-                        .clipShape(Capsule())
-                        .shadow(radius: 3)
-                    }
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 80)
-                }
+    private var typeBarOverlay: some View {
+        GeometryReader { geo in
+            if shouldShowTypeBar {
+                TypeBarView(
+                    settings: $canvasState.textSettings,
+                    canvasState: canvasState,
+                    canvasSize: geo.size,
+                    onMore: { showInspectorSheet = true },
+                    onCheckmark: { handleTypeCheckmark() }
+                )
             }
-            .ignoresSafeArea()
+        }
+        .ignoresSafeArea(.keyboard)
+    }
+
+    private var shouldShowTypeBar: Bool {
+        switch canvasState.currentTool {
+        case .text:
+            return true
+        case .textOnPath:
+            return canvasState.floatingText?.path != nil
+        default:
+            return false
         }
     }
 
-    private var collapsePillTitle: String {
-        let face = canvasState.textSettings.fontFace
-        let family = canvasState.textSettings.fontFamily
-        let name = face.isEmpty ? family : face
-        let size = Int(canvasState.textSettings.size)
-        return "\(name) · \(size)pt"
+    /// End the Type session: commit any non-empty float, silently cancel
+    /// an empty one, then restore the previous non-Type tool. The bar's
+    /// own visibility is driven by `shouldShowTypeBar` so it disappears
+    /// automatically once `currentTool` is no longer a Type tool.
+    private func handleTypeCheckmark() {
+        if let ft = canvasState.floatingText {
+            if ft.content.isEmpty {
+                canvasState.cancelFloatingText()
+            } else {
+                canvasState.commitFloatingText()
+            }
+        }
+        showInspectorSheet = false
+        canvasState.currentTool = previousNonTypeTool
     }
 
     // MARK: - Blur Adjustment HUD overlay
