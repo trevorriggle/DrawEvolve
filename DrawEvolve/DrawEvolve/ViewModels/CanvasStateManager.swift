@@ -136,7 +136,7 @@ class CanvasStateManager: ObservableObject {
     // resize, and rotate mutate `floatingText` directly. Commit blits the
     // rasterised image into the active layer and clears the float.
 
-    /// Persisted typographic defaults. Sliders/pickers in TextSettingsView
+    /// Persisted typographic defaults. Sliders/pickers in TypeInspectorView
     /// bind to this; the didSet sink saves to UserDefaults and pushes a
     /// debounced re-rasterise of the active FloatingText (if any).
     @Published var textSettings: TextSettings = TextSettings.loadPersisted()
@@ -718,7 +718,7 @@ class CanvasStateManager: ObservableObject {
         scheduleRasterizeFloatingText()
     }
 
-    /// Set the perpendicular baseline shift (TextSettingsView slider).
+    /// Set the perpendicular baseline shift (TypeInspectorView slider).
     /// Positive = above the path, negative = below.
     func setBaselineOffset(_ offset: CGFloat) {
         guard var ft = floatingText, ft.path != nil else { return }
@@ -728,7 +728,7 @@ class CanvasStateManager: ObservableObject {
         scheduleRasterizeFloatingText()
     }
 
-    /// Override the auto-detected closed flag (TextSettingsView toggle).
+    /// Override the auto-detected closed flag (TypeInspectorView toggle).
     /// Re-rasterises so the lookup wraps (or clamps) accordingly.
     func setPathClosed(_ closed: Bool) {
         guard var ft = floatingText, ft.path != nil else { return }

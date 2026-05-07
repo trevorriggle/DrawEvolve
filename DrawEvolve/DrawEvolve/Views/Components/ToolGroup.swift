@@ -10,25 +10,23 @@
 
 import Foundation
 
-/// One option inside a grouped tool slot. Most variants map to a
-/// `DrawingTool`; the Text group also exposes a "settings opener" entry
-/// which activates `.text` AND opens the text-settings sheet on
-/// selection (semantics confirmed for both popover-pick and slot-tap).
+/// One option inside a grouped tool slot. Currently all variants are
+/// `DrawingTool` cases — the `.textSettings` opener that used to live
+/// here was retired in the Tier-1 type-tools overhaul (the modal sheet
+/// became an inline inspector that auto-presents whenever a floating
+/// text is active, so a separate opener variant is unnecessary).
 enum ToolVariant: Hashable {
     case tool(DrawingTool)
-    case textSettings
 
     var icon: String {
         switch self {
         case .tool(let t): return t.icon
-        case .textSettings: return "textformat.size"
         }
     }
 
     var accessibilityLabel: String {
         switch self {
         case .tool(let t): return t.name
-        case .textSettings: return "Text Settings"
         }
     }
 
@@ -37,13 +35,16 @@ enum ToolVariant: Hashable {
     var storageString: String {
         switch self {
         case .tool(let t): return "tool:" + t.storageKey
-        case .textSettings: return "textSettings"
         }
     }
 
     init?(storageString: String) {
+        // Legacy migration: older builds persisted "textSettings" as the
+        // last-selected variant of the Text group (it opened the modal
+        // settings sheet). The sheet is gone; map any persisted value
+        // onto `.tool(.text)` so launches with stale storage don't crash.
         if storageString == "textSettings" {
-            self = .textSettings
+            self = .tool(.text)
             return
         }
         let prefix = "tool:"
@@ -149,7 +150,7 @@ struct ToolGroup {
 
     static let text = ToolGroup(
         name: "Text",
-        variants: [.tool(.text), .textSettings, .tool(.textOnPath)],
+        variants: [.tool(.text), .tool(.textOnPath)],
         storageKey: "toolGroup.text.lastSelected",
         defaultVariant: .tool(.text)
     )

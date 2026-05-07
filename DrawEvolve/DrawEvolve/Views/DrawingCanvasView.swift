@@ -44,20 +44,13 @@ struct DrawingCanvasView: View {
     @StateObject private var poseOverlayManager = PoseOverlayManager()
     @State private var poseDetectionRequest: PoseSkeletonKind?
 
-    // Text tool
-    @State private var showTextInput = false
-    @State private var textInputLocation: CGPoint = .zero
-    @State private var textToRender = ""
-    @State private var showTextSettings = false
-
-    // Text-on-path tool. The user draws a path with the tool active; on
-    // lift the alert below pops up to capture text. The pendingTextOnPath
-    // tuple holds the smoothed-input data between lift and "Add".
-    @State private var showTextOnPathInput = false
-    @State private var pendingTextOnPathRawPoints: [CGPoint] = []
-    @State private var pendingTextOnPathFirstScreen: CGPoint = .zero
-    @State private var pendingTextOnPathLastScreen: CGPoint = .zero
-    @State private var textOnPathToRender = ""
+    // Type Inspector (Tier-1). Auto-presents whenever a FloatingText is
+    // active. iPad landscape: side column inside `padBodyMaybeWithInspector`
+    // (canvas reflows). iPad portrait + iPhone: half-sheet with detents.
+    // The collapse-to-pill state lets the user keep editing without the
+    // inspector taking up space; tapping the pill re-expands.
+    @State private var isInspectorCollapsed = false
+    @State private var iPadIsLandscape = false
 
     // Toolbar collapse state
     @State private var isToolbarCollapsed = false
@@ -113,7 +106,7 @@ struct DrawingCanvasView: View {
             if DeviceIdiom.isPhone {
                 phoneBody
             } else {
-                padBody
+                padBodyMaybeWithInspector
             }
         }
         .sheet(isPresented: $showColorPicker) {
@@ -179,22 +172,22 @@ struct DrawingCanvasView: View {
                     }
             }
         }
-        .sheet(isPresented: $showTextSettings) {
-            NavigationView {
-                TextSettingsView(
-                    settings: $canvasState.textSettings,
-                    canvasState: canvasState
-                )
-                    .navigationTitle("Text Settings")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                showTextSettings = false
-                            }
-                        }
-                    }
-            }
+        // MARK: - Type Inspector (Tier 1)
+        // Half-sheet variant — fires on iPhone always and on iPad portrait.
+        // iPad landscape uses an inline side column inside
+        // `padBodyMaybeWithInspector`. The two presentations are mutually
+        // exclusive (gated by `iPadIsLandscape`), so only one is on screen
+        // at a time. Swipe-to-dismiss collapses to a pill rather than
+        // discarding the float; commit/cancel go through the inspector
+        // footer or the existing TransformCancelPill.
+        .sheet(isPresented: inspectorSheetBinding) {
+            TypeInspectorView(
+                settings: $canvasState.textSettings,
+                canvasState: canvasState
+            )
+            .presentationDetents([.fraction(0.42), .large])
+            .presentationBackgroundInteraction(.enabled)
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showSymmetrySettings) {
             NavigationView {
@@ -218,17 +211,6 @@ struct DrawingCanvasView: View {
         } message: {
             Text(canvasState.errorMessage)
         }
-        .modifier(TextInputAlerts(
-            showText: $showTextInput,
-            textToRender: $textToRender,
-            textInputLocation: textInputLocation,
-            showTextOnPath: $showTextOnPathInput,
-            textOnPathToRender: $textOnPathToRender,
-            pendingRawPoints: $pendingTextOnPathRawPoints,
-            pendingFirstScreen: pendingTextOnPathFirstScreen,
-            pendingLastScreen: pendingTextOnPathLastScreen,
-            canvasState: canvasState
-        ))
         .alert("Save Drawing", isPresented: $showSaveDialog) {
             TextField("Title", text: $drawingTitle)
             Button("Cancel", role: .cancel) {}
@@ -323,14 +305,15 @@ struct DrawingCanvasView: View {
                     selectedLayerIndex: $canvasState.selectedLayerIndex,
                     canvasState: canvasState,
                     onTextRequest: { location in
-                        textInputLocation = location
-                        textToRender = ""
-                        showTextInput = true
+                        canvasState.beginText(at: location, content: "")
                     },
                     symmetry: symmetry
                 )
                 .ignoresSafeArea()
                 .background(Color(uiColor: .systemGray6))
+
+                collapsePillOverlay
+                TextEntryOverlay(canvasState: canvasState)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -406,16 +389,18 @@ struct DrawingCanvasView: View {
                 selectedLayerIndex: $canvasState.selectedLayerIndex,
                 canvasState: canvasState,
                 onTextRequest: { location in
-                    textInputLocation = location
-                    textToRender = ""
-                    showTextInput = true
+                    // Tier-1 inline input: begin a FloatingText with empty
+                    // content; the TextEntryOverlay rises immediately and
+                    // every keystroke flows through setFloatingTextContent.
+                    canvasState.beginText(at: location, content: "")
                 },
                 onTextOnPathRequest: { rawPoints, firstScreen, lastScreen in
-                    pendingTextOnPathRawPoints = rawPoints
-                    pendingTextOnPathFirstScreen = firstScreen
-                    pendingTextOnPathLastScreen = lastScreen
-                    textOnPathToRender = ""
-                    showTextOnPathInput = true
+                    canvasState.beginTextOnPath(
+                        rawPoints: rawPoints,
+                        firstScreen: firstScreen,
+                        lastScreen: lastScreen,
+                        content: ""
+                    )
                 },
                 symmetry: symmetry
             )
@@ -597,6 +582,8 @@ struct DrawingCanvasView: View {
             pathStartHandleOverlay
             textOnPathPreviewOverlay
             cancelPillOverlay
+            collapsePillOverlay
+            TextEntryOverlay(canvasState: canvasState)
 
             blurAdjustmentHUDOverlay
 
@@ -745,27 +732,23 @@ struct DrawingCanvasView: View {
                                 }
                             )
 
-                            // Row 4: Text (text / settings opener / text-on-path), Move
+                            // Row 4: Text (text / text-on-path), Move
                             //
-                            // The textSettings variant activates .text AND
-                            // opens the settings sheet. Same on slot-tap
-                            // and on popover-pick — re-activating .text
-                            // when it's already current is a no-op.
+                            // The settings opener variant retired in the
+                            // Tier-1 type-tools overhaul — settings are now
+                            // an inline inspector that auto-presents while
+                            // a floating text is active.
                             GroupedToolButton(
                                 group: .text,
                                 isSelected: { v in
                                     switch v {
                                     case .tool(let t): return canvasState.currentTool == t
-                                    case .textSettings: return showTextSettings
                                     }
                                 },
                                 onActivate: { v in
                                     switch v {
                                     case .tool(let t):
                                         canvasState.currentTool = t
-                                    case .textSettings:
-                                        canvasState.currentTool = .text
-                                        showTextSettings = true
                                     }
                                 }
                             )
@@ -1050,6 +1033,111 @@ struct DrawingCanvasView: View {
         // PR #33 (iPhone Phase 2 / C1) lifted them onto the outer Group
         // wrapper in `body` so phoneBody and padBody share them. Don't
         // re-add them here — they'd double-fire.
+    }
+
+    // MARK: - Type Inspector mounting (Tier 1)
+    //
+    // Wraps `padBody` in an HStack on iPad landscape so the inspector can
+    // dock as a 280pt right-edge column with the canvas reflowing into the
+    // remaining width. iPad portrait + iPhone use the half-sheet variant
+    // attached at body level. The two presentations are mutually exclusive
+    // — `iPadIsLandscape` is updated from the GeometryReader below and
+    // gates `inspectorSheetBinding` so a sheet is never on screen at the
+    // same time as the side column.
+
+    private var padBodyMaybeWithInspector: some View {
+        GeometryReader { geo in
+            let landscape = geo.size.width > geo.size.height
+            HStack(spacing: 0) {
+                padBody
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if landscape && inspectorOpen {
+                    TypeInspectorView(
+                        settings: $canvasState.textSettings,
+                        canvasState: canvasState
+                    )
+                    .frame(width: 280)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85),
+                       value: landscape && inspectorOpen)
+            .onAppear { iPadIsLandscape = landscape }
+            .onChange(of: landscape) { newValue in
+                iPadIsLandscape = newValue
+            }
+        }
+    }
+
+    private var hasFloatingText: Bool {
+        canvasState.floatingText != nil
+    }
+
+    private var inspectorOpen: Bool {
+        hasFloatingText && !isInspectorCollapsed
+    }
+
+    /// Sheet fires on iPhone always, and on iPad only when the device is
+    /// not in landscape (because landscape uses the inline side column).
+    /// Setter handles user-initiated swipe-dismiss: if the float is still
+    /// alive we treat the gesture as collapse-to-pill rather than discard.
+    private var inspectorSheetBinding: Binding<Bool> {
+        Binding(
+            get: {
+                inspectorOpen && (DeviceIdiom.isPhone || !iPadIsLandscape)
+            },
+            set: { newValue in
+                if !newValue && canvasState.floatingText != nil {
+                    isInspectorCollapsed = true
+                }
+            }
+        )
+    }
+
+    // MARK: - Collapse-to-pill overlay (Tier 1)
+    //
+    // Bottom-trailing floating pill, shown when the user has collapsed the
+    // inspector but the FloatingText is still alive. Tap to re-expand. On
+    // iPad landscape it anchors inside the canvas area (HStack child); on
+    // iPhone / iPad portrait it sits above where the sheet would have been.
+
+    @ViewBuilder
+    private var collapsePillOverlay: some View {
+        if hasFloatingText && isInspectorCollapsed {
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button {
+                        isInspectorCollapsed = false
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "textformat")
+                            Text(collapsePillTitle)
+                                .lineLimit(1)
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.78))
+                        .clipShape(Capsule())
+                        .shadow(radius: 3)
+                    }
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 80)
+                }
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private var collapsePillTitle: String {
+        let face = canvasState.textSettings.fontFace
+        let family = canvasState.textSettings.fontFamily
+        let name = face.isEmpty ? family : face
+        let size = Int(canvasState.textSettings.size)
+        return "\(name) · \(size)pt"
     }
 
     // MARK: - Blur Adjustment HUD overlay
@@ -1929,64 +2017,6 @@ struct DrawingCanvasView: View {
 
     private static func defaultSketchTitle(for date: Date) -> String {
         "Sketch · \(sketchTitleFormatter.string(from: date))"
-    }
-}
-
-// MARK: - Text input alerts ViewModifier
-//
-// Pulled out into its own type so SwiftUI's type-checker doesn't have to
-// inline both TextField+Button alert subgraphs into DrawingCanvasView's
-// already-saturated body modifier chain. With ~17 chained modifiers + a
-// large ZStack, leaving the alerts inline tipped the heuristic over —
-// visible as cascading "Cannot find type" errors in SourceKit even though
-// xcodebuild succeeded. Moving heavy modifiers behind a struct hands the
-// type-checker a smaller subgraph and breaks the cascade.
-
-private struct TextInputAlerts: ViewModifier {
-    @Binding var showText: Bool
-    @Binding var textToRender: String
-    let textInputLocation: CGPoint
-
-    @Binding var showTextOnPath: Bool
-    @Binding var textOnPathToRender: String
-    @Binding var pendingRawPoints: [CGPoint]
-    let pendingFirstScreen: CGPoint
-    let pendingLastScreen: CGPoint
-
-    let canvasState: CanvasStateManager
-
-    func body(content: Content) -> some View {
-        content
-            .alert("Add Text on Path", isPresented: $showTextOnPath) {
-                TextField("Enter text", text: $textOnPathToRender)
-                Button("Cancel", role: .cancel) {
-                    pendingRawPoints = []
-                }
-                Button("Add") {
-                    if !textOnPathToRender.isEmpty {
-                        canvasState.beginTextOnPath(
-                            rawPoints: pendingRawPoints,
-                            firstScreen: pendingFirstScreen,
-                            lastScreen: pendingLastScreen,
-                            content: textOnPathToRender
-                        )
-                    }
-                    pendingRawPoints = []
-                }
-            } message: {
-                Text("Text will follow the path you drew.")
-            }
-            .alert("Add Text", isPresented: $showText) {
-                TextField("Enter text", text: $textToRender)
-                Button("Cancel", role: .cancel) {}
-                Button("Add") {
-                    if !textToRender.isEmpty {
-                        canvasState.beginText(at: textInputLocation, content: textToRender)
-                    }
-                }
-            } message: {
-                Text("Enter the text you want to add to the canvas")
-            }
     }
 }
 
