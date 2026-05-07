@@ -771,6 +771,15 @@ struct MetalCanvasView: UIViewRepresentable {
                         }
                         return
                     } else {
+                        // Multi-finger touchesBegan is the leading edge of an
+                        // incoming pinch / two-finger-pan / rotation gesture
+                        // — the gesture recognizers haven't claimed the
+                        // touches yet, but the user clearly wants to
+                        // navigate, not commit the float. Bail before the
+                        // tap-outside-commit fires.
+                        if (event?.allTouches?.count ?? 1) > 1 {
+                            return
+                        }
                         // Tap outside the float bakes it into the layer.
                         // The tap itself is consumed — the user has to tap
                         // again to start a new text.
@@ -801,6 +810,14 @@ struct MetalCanvasView: UIViewRepresentable {
                     if ft.containsDocPoint(location) {
                         return
                     } else {
+                        // Same multi-finger guard as the .text branch above —
+                        // pinch / two-finger-pan / rotation begin with one
+                        // touch landing before their recognizers claim, and
+                        // we don't want that leading-edge touchesBegan to
+                        // commit the path-text float.
+                        if (event?.allTouches?.count ?? 1) > 1 {
+                            return
+                        }
                         print("Text-on-path: tap outside → commit")
                         if let cs = canvasState {
                             MainActor.assumeIsolated { cs.commitFloatingText() }
