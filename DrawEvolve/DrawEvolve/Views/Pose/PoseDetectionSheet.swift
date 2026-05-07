@@ -52,7 +52,14 @@ struct PoseDetectionSheet: View {
                     }
                 }
         }
-        .presentationDetents([.medium, .large])
+        // Open at full height by default. The medium detent was added in
+        // PR 2 ("Decision 10 / matching FloatingFeedbackPanel") but in
+        // practice the sheet's photo preview + status block always wants
+        // the full height — opening at medium just forced the user to
+        // pull up before they could see the place CTA. Single .large
+        // detent lets the user scroll inside the sheet instead of
+        // resizing it.
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .onChange(of: photoItem) { _, newItem in
             guard let newItem else { return }
