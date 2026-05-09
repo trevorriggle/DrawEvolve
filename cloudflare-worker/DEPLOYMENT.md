@@ -217,7 +217,7 @@ they go in `[vars]` (committed) — not `wrangler secret put`.
 | Var | Value | Where to find it |
 |---|---|---|
 | `APP_ATTEST_TEAM_ID` | Your 10-character Apple Team ID (e.g. `ABCDE12345`) | Apple Developer Portal → Membership → Team ID |
-| `APP_ATTEST_BUNDLE_ID` | iOS bundle identifier (default `com.drawevolve.app`) | Xcode → DrawEvolve target → General → Bundle Identifier |
+| `APP_ATTEST_BUNDLE_ID` | iOS bundle identifier — MUST match the iOS target's `PRODUCT_BUNDLE_IDENTIFIER` (currently `com.rigtech.drawevolve`). Mismatch surfaces as `attestation_invalid` HTTP 400 on every `/attest/register` because the rpId hash won't match the device's authenticatorData. | Xcode → DrawEvolve target → General → Bundle Identifier |
 | `APP_ATTEST_ENV` | `development` or `production` — must match the iOS entitlement value | `DrawEvolve.entitlements` → `com.apple.developer.devicecheck.appattest-environment` |
 
 `APP_ATTEST_TEAM_ID` **must** be set in `wrangler.toml` before any

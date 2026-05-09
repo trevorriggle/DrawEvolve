@@ -62,9 +62,9 @@ id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 # bundled with worker code so a deploy can never accidentally pair the
 # wrong root with the wrong worker version. See DEPLOYMENT.md Phase 5f.
 [vars]
-APP_ATTEST_TEAM_ID = "S2RDF2D29N"     # 10-char Apple Team ID
-APP_ATTEST_BUNDLE_ID = "com.drawevolve.app"
-APP_ATTEST_ENV = "development"       # "development" | "production"
+APP_ATTEST_TEAM_ID = "S2RDF2D29N"          # 10-char Apple Team ID
+APP_ATTEST_BUNDLE_ID = "com.rigtech.drawevolve"  # MUST match iOS PRODUCT_BUNDLE_IDENTIFIER
+APP_ATTEST_ENV = "development"             # "development" | "production"
 
 # Workers Logs — without this, console.log output is silently dropped at the
 # Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for
