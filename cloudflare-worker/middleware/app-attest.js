@@ -329,7 +329,7 @@ async function verifyCertSignature(cert, issuerPubKeyRaw) {
 // dev/test loop trivial. appID = "<TEAM>.<BUNDLE>".
 function appAttestAppId(env) {
   const teamId = env.APP_ATTEST_TEAM_ID || '';
-  const bundleId = env.APP_ATTEST_BUNDLE_ID || 'com.drawevolve.app';
+  const bundleId = env.APP_ATTEST_BUNDLE_ID || 'com.rigtech.drawevolve';
   if (!teamId) throw new Error('APP_ATTEST_TEAM_ID not configured');
   return `${teamId}.${bundleId}`;
 }
