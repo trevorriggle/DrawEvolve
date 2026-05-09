@@ -6,7 +6,7 @@ Onboarding doc for Claude (or any new contributor). Code-derivable facts are del
 
 ## What DrawEvolve is
 
-iOS drawing app (iPad-primary, iPhone-secondary) with AI feedback. The user draws on a Metal-backed canvas, fills out a short questionnaire (subject, style, skill level, focus areas), and receives an iterative GPT-4o Vision critique that **remembers prior critiques on the same drawing** and continues a coaching relationship rather than re-critiquing from scratch.
+iOS drawing app — Universal target (iPad and iPhone), iPad-primary by design — with AI feedback. The user draws on a Metal-backed canvas, fills out a short questionnaire (subject, style, skill level, focus areas), and receives an iterative GPT-4o Vision critique that **remembers prior critiques on the same drawing** and continues a coaching relationship rather than re-critiquing from scratch.
 
 The "iterative coaching" behavior is the core product differentiator. Don't break it without reading `MEMORY.md` first.
 
@@ -48,7 +48,7 @@ DrawEvolve.entitlements      Sign in with Apple capability
 
 | Layer | Tech |
 |---|---|
-| iOS UI | SwiftUI, iOS 15+ deployment target |
+| iOS UI | SwiftUI, iOS 17+ deployment target, Universal device family (1,2) |
 | Canvas | Metal + MetalKit (MTKView), 2048² texture (4096² on iPad Pro) |
 | Auth | Supabase Auth — Sign in with Apple + email magic-link OTP |
 | Storage | Supabase Storage (private `drawings` bucket) + local `Documents/DrawEvolveCache/` |
