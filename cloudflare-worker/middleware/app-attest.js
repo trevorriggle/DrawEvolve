@@ -308,13 +308,40 @@ export function ecdsaDerToRaw(der, curveByteLength) {
   return concatBytes(trim(rNode), trim(sNode));
 }
 
-// Verify a cert's signature against an issuer's raw uncompressed EC point.
-// Auto-detects P-256 (65-byte point) vs P-384 (97-byte point).
+// Map an ECDSA signature-algorithm OID to its WebCrypto hash name.
+// Hash and curve are INDEPENDENT in ECDSA; Apple's App Attest leaf
+// cert is signed with ecdsa-with-SHA256 (1.2.840.10045.4.3.2) by the
+// P-384 intermediate, so the hash CAN'T be inferred from the issuer's
+// curve.
+function hashFromSigAlgOid(oid) {
+  switch (oid) {
+    case '1.2.840.10045.4.3.2': return 'SHA-256';
+    case '1.2.840.10045.4.3.3': return 'SHA-384';
+    case '1.2.840.10045.4.3.4': return 'SHA-512';
+    default: throw new Error(`unsupported_cert_sigalg:${oid}`);
+  }
+}
+
+// Verify a cert's signature against an issuer's raw uncompressed EC
+// point.
+//
+// Curve is selected from the issuer's pubkey length (65 → P-256, 97 →
+// P-384). That's correct because ECDSA r/s components are sized to the
+// curve order, which matches the signing key's curve.
+//
+// Hash is selected from `cert.sigAlgOid` (the cert's own
+// signatureAlgorithm field), NOT from the issuer's curve. ECDSA
+// permits any (curve, hash) combination, and Apple uses
+// ecdsa-with-SHA256 for App Attest leaf certs even though the issuing
+// intermediate is P-384. An earlier revision tied hash to curve and
+// always tried SHA-384 against a SHA-256-signed leaf, which produced
+// `attest_leaf_sig_invalid` on every real-device registration.
 async function verifyCertSignature(cert, issuerPubKeyRaw) {
-  let namedCurve, byteLen, hash;
-  if (issuerPubKeyRaw.length === 65) { namedCurve = 'P-256'; byteLen = 32; hash = 'SHA-256'; }
-  else if (issuerPubKeyRaw.length === 97) { namedCurve = 'P-384'; byteLen = 48; hash = 'SHA-384'; }
+  let namedCurve, byteLen;
+  if (issuerPubKeyRaw.length === 65) { namedCurve = 'P-256'; byteLen = 32; }
+  else if (issuerPubKeyRaw.length === 97) { namedCurve = 'P-384'; byteLen = 48; }
   else throw new Error(`unsupported issuer pubkey length: ${issuerPubKeyRaw.length}`);
+  const hash = hashFromSigAlgOid(cert.sigAlgOid);
   const key = await crypto.subtle.importKey(
     'raw', issuerPubKeyRaw, { name: 'ECDSA', namedCurve }, false, ['verify'],
   );
