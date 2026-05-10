@@ -41,14 +41,65 @@ struct EvolutionView: View {
     @StateObject private var viewModel = EvolutionViewModel()
     @Environment(\.dismiss) private var dismiss
 
+    /// "Show preview" toggle. When on, EvolutionContentView renders the
+    /// hardcoded EvolutionData.preview payload — same illustrative chart
+    /// the server sends in `.example` state for accounts with zero
+    /// critiques, but available on demand so users with non-zero
+    /// critique history can see what the panel will look like once their
+    /// data matures.
+    @State private var showingPreview: Bool = false
+
     var body: some View {
-        content
-            .task { await viewModel.load() }
-            .refreshable { await viewModel.load() }
+        VStack(spacing: 0) {
+            previewToggleBar
+            content
+        }
+        .task { await viewModel.load() }
+        .refreshable { await viewModel.load() }
+    }
+
+    private var previewToggleBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: showingPreview ? "eye.fill" : "eye")
+                .font(.subheadline)
+                .foregroundStyle(showingPreview ? Color.accentColor : .secondary)
+            Text(showingPreview ? "Showing preview" : "Show preview")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(showingPreview ? Color.accentColor : .secondary)
+            Spacer()
+            Toggle("", isOn: $showingPreview)
+                .labelsHidden()
+                .tint(.accentColor)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Show preview of mature evolution state")
+        .accessibilityAddTraits(.isButton)
     }
 
     @ViewBuilder
     private var content: some View {
+        if showingPreview {
+            // Use the live streak from real data when available so the
+            // user's actual drawing/critique counts stay accurate even
+            // while the rest of the panel renders preview data.
+            let realStreak: StreakData? = {
+                if case .loaded(let data) = viewModel.loadState { return data.streak }
+                return nil
+            }()
+            EvolutionContentView(
+                data: EvolutionData.preview(realStreak: realStreak),
+                onDismiss: { dismiss() }
+            )
+        } else {
+            loadStateView
+        }
+    }
+
+    @ViewBuilder
+    private var loadStateView: some View {
         switch viewModel.loadState {
         case .idle, .loading:
             loadingView
