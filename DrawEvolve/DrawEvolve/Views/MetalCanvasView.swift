@@ -2456,7 +2456,8 @@ struct MetalCanvasView: UIViewRepresentable {
         /// selection / fill / eyedropper / text don't produce strokes at all.
         private var canSnapToLine: Bool {
             switch currentTool {
-            case .brush, .eraser, .blur:
+            case .brush, .eraser, .blur,
+                 .pencil, .inkPen, .marker, .airbrush, .charcoal:
                 return true
             default:
                 return false

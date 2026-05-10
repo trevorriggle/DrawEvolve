@@ -15,6 +15,18 @@ enum DrawingTool {
     case paintBucket
     case eyeDropper
 
+    // Experimental brush variants (experiment/brush-variety-v1). Each is a
+    // stamp-pipeline tool that rides on the same point-sprite vertex shader
+    // and `BrushUniforms` as `.brush`/`.eraser`; only the fragment shader
+    // and per-tool defaults differ. Snap-to-line and symmetry handle these
+    // automatically because they mutate `stroke.points` upstream of the
+    // render dispatch.
+    case pencil
+    case inkPen
+    case marker
+    case airbrush
+    case charcoal
+
     // Shape tools
     case line
     case rectangle
@@ -51,6 +63,11 @@ enum DrawingTool {
         case .eraser: return "eraser.fill"
         case .paintBucket: return "drop.fill"
         case .eyeDropper: return "eyedropper"
+        case .pencil: return "pencil"
+        case .inkPen: return "pencil.tip"
+        case .marker: return "highlighter"
+        case .airbrush: return "wind"
+        case .charcoal: return "scribble.variable"
         case .line: return "line.diagonal"
         case .rectangle: return "rectangle"
         case .circle: return "circle"
@@ -75,6 +92,11 @@ enum DrawingTool {
         case .eraser: return "Eraser"
         case .paintBucket: return "Fill"
         case .eyeDropper: return "Pick Color"
+        case .pencil: return "Pencil"
+        case .inkPen: return "Ink Pen"
+        case .marker: return "Marker"
+        case .airbrush: return "Airbrush"
+        case .charcoal: return "Charcoal"
         case .line: return "Line"
         case .rectangle: return "Rectangle"
         case .circle: return "Circle"
@@ -117,6 +139,12 @@ struct BrushSettings {
 
     // Smudge brush (PR 2): pickup/deposit weight in the patch-update pass.
     var smudgeStrength: Float = 0.5
+
+    // Charcoal grain density (experiment/brush-variety-v1). Multiplied into
+    // the procedural `hash(fragCoord)` term inside `charcoalFragmentShader`;
+    // 0 = smooth (no grain), 1 = fully speckled. Only surfaced in the
+    // settings UI when activeTool is `.charcoal`.
+    var grainDensity: Float = 0.5
 }
 
 /// Represents a single brush stroke
