@@ -1373,6 +1373,14 @@ struct DrawingCanvasView: View {
             HStack {
                 Spacer()
                 VStack(spacing: 12) {
+                    // Procreate-style brush size rail. Sits above the
+                    // action buttons and collapses with the rest of the
+                    // tool chrome when the toolbar is hidden — same gate
+                    // as `settingsGearButton` / `betaInfoButton`.
+                    if !isToolbarCollapsed {
+                        BrushSizeRail(size: $canvasState.brushSettings.size)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
                     saveToGalleryButton
                     getFeedbackButton
                 }
