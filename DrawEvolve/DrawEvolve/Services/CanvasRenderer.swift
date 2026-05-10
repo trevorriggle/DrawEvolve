@@ -1102,7 +1102,13 @@ class CanvasRenderer: NSObject {
             height: h,
             mipmapped: false
         )
-        descriptor.usage = [.shaderRead]
+        // Must match `createLayerTexture`'s usage flags — this codepath
+        // restores layer textures from saved PNGs on reopen, and those
+        // textures get used as render targets the moment the user makes
+        // their next stroke. iOS 26 simulator's MTLDebug validation
+        // makes a missing .renderTarget bit fatal (earlier OSes silently
+        // tolerated it for some configurations).
+        descriptor.usage = [.renderTarget, .shaderRead, .shaderWrite]
         descriptor.storageMode = .shared
 
         guard let texture = device.makeTexture(descriptor: descriptor) else {
