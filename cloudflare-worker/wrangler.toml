@@ -65,6 +65,16 @@ id = "c0e8b7f10d7348d1b3844036cc7f18ed"
 APP_ATTEST_TEAM_ID = "S2RDF2D29N"          # 10-char Apple Team ID
 APP_ATTEST_BUNDLE_ID = "com.rigtech.drawevolve"  # MUST match iOS PRODUCT_BUNDLE_IDENTIFIER
 APP_ATTEST_ENV = "development"             # "development" | "production"
+# Kill-switch: when "false" the protected routes (feedback, prompts)
+# skip the App Attest gate entirely and run on Supabase JWT + per-user
+# spend caps alone. iOS-side counterpart:
+# AppAttestManager.isEnforcementEnabled — must agree, or the iOS side
+# will keep round-tripping a doomed registration. Default in this file
+# is "false" because the cert-chain validation hit a dead-end against
+# real-device attestations during the initial real-hardware test pass;
+# re-flip to "true" once `wrangler tail` shows a clean register +
+# protected-route round-trip end-to-end.
+APP_ATTEST_REQUIRED = "false"              # "true" | "false"
 
 # Workers Logs — without this, console.log output is silently dropped at the
 # Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for

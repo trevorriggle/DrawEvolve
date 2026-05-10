@@ -30,6 +30,7 @@ import {
   getUserTier,
 } from '../middleware/auth.js';
 import {
+  isAppAttestRequired,
   readAppAttestHeaders,
   getAttestedKey,
   computeAppAttestClientDataHash,
@@ -489,51 +490,59 @@ export async function handleFeedback(request, env, ctx) {
     // unattested devices can't probe other endpoint behavior). Failures
     // return 401 with a stable error code — clients use the code to decide
     // whether to wipe their cached keyId and re-register.
-    const attestHeaders = readAppAttestHeaders(request);
-    if (!attestHeaders) {
-      console.log('[attest] missing headers from authed user', userId);
-      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
-      return jsonResponse({ error: 'attest_headers_missing' }, 401);
-    }
-    const stored = await getAttestedKey(attestHeaders.keyId, env);
-    if (!stored) {
-      // Either the device never registered, or its TTL expired in KV.
-      // A distinct code lets the client wipe + re-register without
-      // confusing this with a JWT failure.
-      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
-      return jsonResponse({ error: 'attest_key_unknown' }, 401);
-    }
-    // Production env keys must not be accepted in development (or vice
-    // versa) — they're cryptographically distinguishable via AAGUID at
-    // registration, but cross-env replay is still worth gating here.
-    const expectedEnv = env.APP_ATTEST_ENV === 'production' ? 'production' : 'development';
-    if (stored.env !== expectedEnv) {
-      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
-      return jsonResponse({ error: 'attest_env_mismatch' }, 401);
-    }
-    const expectedClientDataHash = await computeAppAttestClientDataHash(
-      request.method,
-      new URL(request.url).pathname || '/',
-      rawBody,
-    );
-    try {
-      const { newCounter } = await verifyAppAttestAssertion({
-        assertionB64: attestHeaders.assertion,
-        storedPubKey: stored.pub,
-        storedCounter: stored.counter,
-        expectedClientDataHash,
-        env,
-      });
-      // Fire-and-forget the counter update so a KV blip doesn't block the
-      // user. A counter that fails to persist just means the next request
-      // will see the same storedCounter — assertion verification still
-      // requires newCounter > storedCounter, so the worst case is a one-
-      // request replay window which the IP/user rate limits already bound.
-      ctx.waitUntil(updateAttestedKeyCounter(attestHeaders.keyId, newCounter, env));
-    } catch (err) {
-      console.log('[attest] assertion failed', err?.message);
-      ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
-      return jsonResponse({ error: 'attest_assertion_invalid' }, 401);
+    //
+    // Kill-switch: when APP_ATTEST_REQUIRED="false" the entire gate is
+    // skipped. Per-user + global OpenAI spend caps still apply; JWT auth
+    // is unchanged. See middleware/app-attest.js → isAppAttestRequired.
+    if (isAppAttestRequired(env)) {
+      const attestHeaders = readAppAttestHeaders(request);
+      if (!attestHeaders) {
+        console.log('[attest] missing headers from authed user', userId);
+        ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+        return jsonResponse({ error: 'attest_headers_missing' }, 401);
+      }
+      const stored = await getAttestedKey(attestHeaders.keyId, env);
+      if (!stored) {
+        // Either the device never registered, or its TTL expired in KV.
+        // A distinct code lets the client wipe + re-register without
+        // confusing this with a JWT failure.
+        ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+        return jsonResponse({ error: 'attest_key_unknown' }, 401);
+      }
+      // Production env keys must not be accepted in development (or vice
+      // versa) — they're cryptographically distinguishable via AAGUID at
+      // registration, but cross-env replay is still worth gating here.
+      const expectedEnv = env.APP_ATTEST_ENV === 'production' ? 'production' : 'development';
+      if (stored.env !== expectedEnv) {
+        ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+        return jsonResponse({ error: 'attest_env_mismatch' }, 401);
+      }
+      const expectedClientDataHash = await computeAppAttestClientDataHash(
+        request.method,
+        new URL(request.url).pathname || '/',
+        rawBody,
+      );
+      try {
+        const { newCounter } = await verifyAppAttestAssertion({
+          assertionB64: attestHeaders.assertion,
+          storedPubKey: stored.pub,
+          storedCounter: stored.counter,
+          expectedClientDataHash,
+          env,
+        });
+        // Fire-and-forget the counter update so a KV blip doesn't block the
+        // user. A counter that fails to persist just means the next request
+        // will see the same storedCounter — assertion verification still
+        // requires newCounter > storedCounter, so the worst case is a one-
+        // request replay window which the IP/user rate limits already bound.
+        ctx.waitUntil(updateAttestedKeyCounter(attestHeaders.keyId, newCounter, env));
+      } catch (err) {
+        console.log('[attest] assertion failed', err?.message);
+        ctx.waitUntil(logRequest({ env, status: REQUEST_STATUS.AUTH_FAILED, userId, ipHash }));
+        return jsonResponse({ error: 'attest_assertion_invalid' }, 401);
+      }
+    } else {
+      console.log('[attest] enforcement disabled — request accepted on JWT alone', userId);
     }
 
     const { image, context, drawingId, client_request_id: clientRequestIdRaw } = body;

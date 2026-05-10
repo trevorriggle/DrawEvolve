@@ -361,6 +361,30 @@ function appAttestAppId(env) {
   return `${teamId}.${bundleId}`;
 }
 
+/**
+ * Kill-switch read on every protected route. Defaults to TRUE (enforcement
+ * on) — the only way to disable is to explicitly set
+ * APP_ATTEST_REQUIRED="false" in wrangler.toml.
+ *
+ * Disabled state means: routes that would otherwise return
+ * attest_headers_missing / attest_key_unknown / attest_assertion_invalid
+ * skip those checks entirely. Devices that send headers anyway are still
+ * logged but not validated — they pass through.
+ *
+ * Use case: iOS-side cert-chain bug or Apple-side regression has broken
+ * registration on real hardware. Per-user + global OpenAI spend caps
+ * (PER_USER_DAILY_TOKEN_CAP, OPENAI_DAILY_SPEND_CAP_USD) plus Supabase
+ * JWT auth cover the threat model in the meantime. Flip back to
+ * required once `wrangler tail` has shown a clean registration round-
+ * trip end-to-end.
+ *
+ * iOS counterpart: `AppAttestManager.isEnforcementEnabled`. Both must
+ * agree — Worker required + iOS off → all requests blocked.
+ */
+export function isAppAttestRequired(env) {
+  return env.APP_ATTEST_REQUIRED !== 'false';
+}
+
 function appAttestExpectedAaguid(env) {
   const mode = env.APP_ATTEST_ENV === 'production' ? 'production' : 'development';
   return mode === 'production' ? APP_ATTEST_AAGUID_PROD : APP_ATTEST_AAGUID_DEV;

@@ -112,6 +112,17 @@ Paste `supabase/migrations/000X_*.sql` into the Supabase SQL Editor and Run. Mig
 
 `AppConfig.swift` returns nil when keys still contain placeholder values, which surfaces as a "Couldn't configure Supabase" error rather than a crash.
 
+### App Attest is currently DISABLED end-to-end
+
+Two coordinated kill-switches:
+
+- iOS: `AppAttestManager.isEnforcementEnabled = false` in `Services/AppAttestManager.swift`. `attestedHeaders(...)` short-circuits to `[:]` — no Apple round-trip, no register, no assertions.
+- Worker: `APP_ATTEST_REQUIRED = "false"` in `cloudflare-worker/wrangler.toml`. `routes/feedback.js` and `routes/prompts.js` skip the assertion gate when this is `"false"` (or any value other than `"true"`).
+
+Why disabled: cert-chain validation against real-device attestations hit a dead-end on the initial real-hardware test pass. The Worker side fixed two real bugs (PR #64 bundle-ID mismatch, PR #65 leaf-cert hash inferred from issuer curve) before we cut bait. Per-user + global OpenAI spend caps (`PER_USER_DAILY_TOKEN_CAP`, `OPENAI_DAILY_SPEND_CAP_USD`) plus Supabase JWT auth cover the threat model while disabled.
+
+Re-enable: flip BOTH flags to true (or remove `APP_ATTEST_REQUIRED` from wrangler.toml — defaults to required when missing), `wrangler deploy`, ship a new iOS build. Pre-flight: `wrangler tail` should show a clean register round-trip on a real device before flipping enforcement back on. Worker required + iOS off → all requests blocked, so iOS must flip first OR both at once.
+
 ---
 
 ## Conventions worth knowing

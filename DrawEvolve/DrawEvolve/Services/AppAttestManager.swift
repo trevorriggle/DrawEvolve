@@ -64,6 +64,21 @@ enum AppAttestError: LocalizedError {
 actor AppAttestManager {
     static let shared = AppAttestManager()
 
+    /// Kill-switch for App Attest. When `false`, `attestedHeaders(...)`
+    /// short-circuits and returns an empty dictionary — no Apple round-
+    /// trip, no /attest/challenge, no /attest/register, no assertions.
+    /// The Worker MUST be configured with `APP_ATTEST_REQUIRED = "false"`
+    /// in wrangler.toml or the resulting unattested requests fail closed
+    /// with HTTP 401 attest_headers_missing.
+    ///
+    /// Disabled because the cert-chain validation against real-device
+    /// attestations hit a dead-end on the initial real-hardware test
+    /// pass. Per-user + global OpenAI spend caps and Supabase JWT auth
+    /// cover the threat model in the meantime. Re-enable once
+    /// `wrangler tail` shows a clean register + protected-route round-
+    /// trip end-to-end.
+    static let isEnforcementEnabled = false
+
     /// Backend base URL. MUST match OpenAIManager.backendURL — they hit the
     /// same Worker. Kept as a single constant here so /attest/challenge and
     /// /attest/register are derived from it.
@@ -99,6 +114,13 @@ actor AppAttestManager {
     /// re-serialization between this call and URLSession.dataTask will break
     /// verification.
     func attestedHeaders(method: String, path: String, body: Data) async throws -> [String: String] {
+        // Kill-switch: skip the entire flow when enforcement is off.
+        // Caller iterates the returned dict to attach request headers,
+        // so an empty map is a safe no-op — the request goes out with
+        // JWT only, and the Worker accepts it because its companion
+        // APP_ATTEST_REQUIRED flag is "false".
+        guard Self.isEnforcementEnabled else { return [:] }
+
         guard service.isSupported else { throw AppAttestError.notSupported }
 
         let keyId = try await ensureRegisteredKeyId()
