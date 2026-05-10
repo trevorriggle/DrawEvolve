@@ -921,14 +921,12 @@ struct DrawingCanvasView: View {
                             // a flip is on without having to mentally check
                             // "is this canvas mirrored?" — same pattern as
                             // the Symmetry button.
-                            ToolButton(
-                                icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
-                                isSelected: canvasState.flipHorizontal
-                            ) {
-                                canvasState.toggleFlipHorizontal()
-                            }
-                            .help("Flip canvas horizontally")
-
+                            // Reordered to keep flips column-adjacent: row N
+                            // is [Y-flip, recenter], row N+1 is [X-flip,
+                            // sparkles]. X-flip drops one row to sit
+                            // directly under Y-flip; recenter rises into
+                            // Y-flip's old right-column slot. Source-order
+                            // is what drives the LazyVGrid 2-column flow.
                             ToolButton(
                                 icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
                                 isSelected: canvasState.flipVertical
@@ -950,6 +948,14 @@ struct DrawingCanvasView: View {
                                       && canvasState.canvasRotation == .zero
                                       && !canvasState.flipHorizontal
                                       && !canvasState.flipVertical)
+
+                            ToolButton(
+                                icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                                isSelected: canvasState.flipHorizontal
+                            ) {
+                                canvasState.toggleFlipHorizontal()
+                            }
+                            .help("Flip canvas horizontally")
 
                             // AI Feedback button
                             ToolButton(icon: "sparkles", isSelected: showFeedback) {
