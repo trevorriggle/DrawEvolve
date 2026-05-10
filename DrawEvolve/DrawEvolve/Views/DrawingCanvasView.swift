@@ -846,10 +846,20 @@ struct DrawingCanvasView: View {
                             // pre-refactor relative order. Behavior
                             // unchanged.
 
-                            // Clear button
-                            ToolButton(icon: "trash", isSelected: false) {
-                                showClearConfirmation = true
+                            // AI Feedback panel toggle. Was at the bottom of
+                            // the iPad slot grid; swapped with the trash
+                            // slot to put the destructive action at the
+                            // bottom corner (less likely to be tapped by
+                            // accident) and the everyday Feedback toggle
+                            // up here next to the brush controls.
+                            ToolButton(icon: "sparkles", isSelected: showFeedback) {
+                                if canvasState.feedback != nil {
+                                    showFeedback.toggle()
+                                } else {
+                                    requestFeedback()
+                                }
                             }
+                            .disabled(canvasState.isEmpty)
 
                             // Color picker swatch. Grayed (not hidden) when
                             // blur, blurAdjustment, or smudge is the active
@@ -957,17 +967,14 @@ struct DrawingCanvasView: View {
                             }
                             .help("Flip canvas horizontally")
 
-                            // AI Feedback button
-                            ToolButton(icon: "sparkles", isSelected: showFeedback) {
-                                if canvasState.feedback != nil {
-                                    // Toggle the panel visibility
-                                    showFeedback.toggle()
-                                } else {
-                                    // If no feedback yet, request it
-                                    requestFeedback()
-                                }
+                            // Clear (trash) button. Lives in the bottom
+                            // corner of the iPad slot grid — destructive
+                            // action sits as far as possible from the
+                            // everyday tools above. Confirmation alert
+                            // (`showClearConfirmation`) gates the wipe.
+                            ToolButton(icon: "trash", isSelected: false) {
+                                showClearConfirmation = true
                             }
-                            .disabled(canvasState.isEmpty)
                         }
                         .padding(.top, 12)
                         .padding(.horizontal, 8)
@@ -1838,10 +1845,15 @@ struct DrawingCanvasView: View {
                     collapsePhoneToolPanel()
                 }
                 .disabled(isSavingToPhotos)
-                ToolButton(icon: "trash", isSelected: false) {
-                    showClearConfirmation = true
+                ToolButton(icon: "sparkles", isSelected: showFeedback) {
+                    if canvasState.feedback != nil {
+                        showFeedback.toggle()
+                    } else {
+                        requestFeedback()
+                    }
                     collapsePhoneToolPanel()
                 }
+                .disabled(canvasState.isEmpty)
                 Button(action: {
                     guard canvasState.currentTool != .blur,
                           canvasState.currentTool != .blurAdjustment,
@@ -1922,15 +1934,10 @@ struct DrawingCanvasView: View {
                           && canvasState.canvasRotation == .zero
                           && !canvasState.flipHorizontal
                           && !canvasState.flipVertical)
-                ToolButton(icon: "sparkles", isSelected: showFeedback) {
-                    if canvasState.feedback != nil {
-                        showFeedback.toggle()
-                    } else {
-                        requestFeedback()
-                    }
+                ToolButton(icon: "trash", isSelected: false) {
+                    showClearConfirmation = true
                     collapsePhoneToolPanel()
                 }
-                .disabled(canvasState.isEmpty)
             }
         }
         .padding(.horizontal, 16)
