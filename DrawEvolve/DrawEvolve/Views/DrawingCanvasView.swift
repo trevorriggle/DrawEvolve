@@ -1387,19 +1387,21 @@ struct DrawingCanvasView: View {
             Spacer()
             HStack {
                 Spacer()
-                VStack(spacing: 12) {
-                    // Procreate-style brush size rail. Sits above the
-                    // action buttons and collapses with the rest of the
-                    // tool chrome when the toolbar is hidden — same gate
-                    // as `settingsGearButton` / `betaInfoButton`.
+                // Rail hugs the trailing edge (no horizontal padding) while
+                // Save / Get Feedback keep their 12pt inset for tap-target
+                // safety. Procreate keeps the size slider flush against
+                // the canvas edge — matching that.
+                VStack(alignment: .trailing, spacing: 12) {
                     if !isToolbarCollapsed {
                         BrushSizeRail(size: $canvasState.brushSettings.size)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
-                    saveToGalleryButton
-                    getFeedbackButton
+                    VStack(spacing: 12) {
+                        saveToGalleryButton
+                        getFeedbackButton
+                    }
+                    .padding(.trailing, 12)
                 }
-                .padding(.trailing, 12)
                 .padding(.bottom, 12)
             }
         }
