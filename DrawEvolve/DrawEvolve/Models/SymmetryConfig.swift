@@ -75,7 +75,17 @@ final class SymmetryConfig: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.mode = Self.readMode(from: defaults)
+        // Symmetry mode is session-only: a stale "axisY" / "radial" mode
+        // auto-resuming on launch surprised users coming back to a fresh
+        // canvas with mirroring already on. Always start at .off and
+        // overwrite any prior persisted value so the picker reflects the
+        // actual session state.
+        //
+        // `radialSections` is intentionally still preserved — that's a
+        // preference for the next time the user picks Radial mode, not
+        // an active-state flag. Same for `guideHidden`.
+        self.mode = .off
+        Self.write(mode: .off, to: defaults)
         self.guideHidden = defaults.bool(forKey: Keys.guideHidden)
     }
 
