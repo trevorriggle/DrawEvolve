@@ -54,7 +54,7 @@ DrawEvolve.entitlements      Sign in with Apple capability
 | Storage | Supabase Storage (private `drawings` bucket) + local `Documents/DrawEvolveCache/` |
 | DB | Supabase Postgres — tables: `drawings`, `feedback_requests`, `account_deletions` |
 | Backend proxy | Cloudflare Worker (`drawevolve-backend.trevorriggle.workers.dev`) |
-| AI | OpenAI GPT-4o Vision (gpt-5.1 was attempted, returned 400 — see MEMORY.md) |
+| AI | OpenAI `gpt-5.1` for critiques, `gpt-5.1-mini` for the classifier. `reasoning_effort: 'none'` is wired on the chat/completions body. |
 | iOS deps (SPM) | supabase-swift 2.34.0, swift-asn1, swift-crypto |
 | Worker tests | Node `--test` (`cloudflare-worker/test.mjs`) |
 
@@ -161,7 +161,7 @@ When the user asks about anything in those buckets, **read the doc** rather than
 4. **`skillLevel` default divergence.** iOS defaults to `"Beginner"`, Worker fallback uses `"Intermediate"`. Harmless today (UI always sets a value) but a trap for future API consumers. See `KNOWN_ISSUES.md`.
 5. **Don't migrate legacy `Documents/Drawings/*.json` yet.** That's Phase 4 work. Phase 3 ignores those files on purpose; deleting them now would lose pre-auth drawings.
 6. **`CanvasRenderer.getBytes` reads the full 4096² texture in 7 places** even when the work region is small (~64MB per call). Logged in `PERF_ISSUES.md`. If you touch the renderer, fix this in passing only with sign-off — brush/canvas/Metal pipeline is TestFlight-blocker territory.
-7. **gpt-5.1 doesn't accept the `reasoning` field** the way gpt-4o doesn't. The `OPENAI_REASONING_EFFORT = 'none'` constant is parked but **not wired into the request body**. If you swap to a reasoning-capable model, restore `reasoning: { effort: ... }` alongside the model swap. See MEMORY.md.
+7. **gpt-5.1 wants `reasoning_effort` flat, not nested.** Chat/completions takes `reasoning_effort: 'none' | 'low' | 'medium' | 'high'` as a top-level body field; the nested `reasoning: { effort: ... }` shape is the /v1/responses endpoint's API and OpenAI 400s if you send it to /v1/chat/completions. `'minimal'` is also rejected (gpt-5.1-specific). Current production: `OPENAI_REASONING_EFFORT = 'none'`, wired at `routes/feedback.js:720`.
 
 ---
 
