@@ -141,6 +141,20 @@ struct DrawingCanvasView: View {
             } else {
                 typeBarSuspended = false
             }
+            // Selecting the Text tool with no float in flight auto-creates
+            // an empty placeholder at canvas center. The TextEntryOverlay
+            // mounts immediately, raises the system keyboard, and the
+            // FloatingTextCaretIndicator renders a blinking blue caret at
+            // the anchor — so the user knows exactly where text will land
+            // without having to tap first. textOnPath is excluded because
+            // it requires the user to draw a path before any text exists.
+            if newTool == .text && canvasState.floatingText == nil {
+                let docSize = canvasState.documentSize
+                canvasState.beginText(
+                    at: CGPoint(x: docSize.width / 2, y: docSize.height / 2),
+                    content: ""
+                )
+            }
         }
         .onChange(of: canvasState.floatingText == nil) { isNil in
             // Brand-new float created → bar should re-show on next render.
@@ -352,6 +366,7 @@ struct DrawingCanvasView: View {
                 .background(Color(uiColor: .systemGray6))
 
                 TextEntryOverlay(canvasState: canvasState)
+                FloatingTextCaretIndicator(canvasState: canvasState)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -643,6 +658,7 @@ struct DrawingCanvasView: View {
             typeOnPathModeTogglePill
             cancelPillOverlay
             TextEntryOverlay(canvasState: canvasState)
+            FloatingTextCaretIndicator(canvasState: canvasState)
 
             blurAdjustmentHUDOverlay
 
