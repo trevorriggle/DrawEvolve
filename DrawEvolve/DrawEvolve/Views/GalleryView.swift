@@ -41,7 +41,14 @@ struct GalleryView: View {
     private enum Tab: Hashable { case drawings, prompts, evolution }
 
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
+    @ObservedObject private var customPromptManager = CustomPromptManager.shared
     @Environment(\.dismiss) private var dismiss
+
+    /// Sheet trigger for the bounded-knobs prompt editor. Used by the
+    /// inline "Saved Prompts" section in myPromptsView so the user can
+    /// author + save without descending into a sub-navigation.
+    @State private var showPromptEditor = false
+    @State private var editingPrompt: CustomPrompt?
 
     @State private var selectedTab: Tab = .drawings
     @State private var showNewDrawing = false
@@ -282,29 +289,122 @@ struct GalleryView: View {
                 Text("This voice is used for every Get Feedback request. You can switch any time.")
             }
 
-            // Bounded-knobs custom prompts. Tapping the row pushes
-            // PromptListView, which is the authoring surface for
-            // focus/tone/depth/technique knobs (CUSTOMPROMPTSPLAN.md).
+            // Bounded-knobs custom prompts — inlined into the My Prompts
+            // tab so saved prompts show up directly here without
+            // descending into a sub-navigation. Empty state surfaces a
+            // "New Prompt" CTA; populated state lists each row with the
+            // standard preset-selection check + swipe-to-edit/delete
+            // affordances.
             Section {
-                NavigationLink {
-                    PromptListView()
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "wand.and.stars")
-                            .foregroundColor(.accentColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Saved prompts")
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            Text("Tune focus, tone, depth, and techniques")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                if customPromptManager.prompts.isEmpty {
+                    Button {
+                        editingPrompt = nil
+                        showPromptEditor = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "plus.circle.fill")
+                                .foregroundColor(.accentColor)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("New saved prompt")
+                                    .font(.headline)
+                                    .foregroundColor(.primary)
+                                Text("Tune focus, tone, depth, and techniques")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
+                    .buttonStyle(.plain)
+                } else {
+                    ForEach(customPromptManager.prompts) { prompt in
+                        Button {
+                            selectedPresetID = "custom:\(prompt.id.uuidString.lowercased())"
+                        } label: {
+                            savedPromptRow(prompt)
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                Task {
+                                    try? await customPromptManager.delete(id: prompt.id)
+                                    if selectedPresetID == "custom:\(prompt.id.uuidString.lowercased())" {
+                                        selectedPresetID = "studio_mentor"
+                                    }
+                                }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            Button {
+                                editingPrompt = prompt
+                                showPromptEditor = true
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            .tint(.blue)
+                        }
+                    }
+                    Button {
+                        editingPrompt = nil
+                        showPromptEditor = true
+                    } label: {
+                        Label("New saved prompt", systemImage: "plus.circle.fill")
+                            .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            } header: {
+                Text("Your Saved Prompts")
+            } footer: {
+                if let err = customPromptManager.lastError {
+                    Text(err).foregroundColor(.red)
+                } else {
+                    Text("Custom voices are synced across your devices via Supabase.")
                 }
             }
         }
         .listStyle(.insetGrouped)
+        .task { await customPromptManager.refresh() }
+        .refreshable { await customPromptManager.refresh() }
+        .sheet(isPresented: $showPromptEditor) {
+            NavigationStack {
+                PromptEditView(editing: editingPrompt)
+            }
+        }
+    }
+
+    /// Compact row for a saved bounded-knobs prompt — name + a one-line
+    /// summary of the set knobs, with a checkmark when this row is the
+    /// currently-selected preset.
+    private func savedPromptRow(_ prompt: CustomPrompt) -> some View {
+        let presetID = "custom:\(prompt.id.uuidString.lowercased())"
+        return HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(prompt.name)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Text(savedPromptSummary(prompt.parameters))
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            if selectedPresetID == presetID {
+                Image(systemName: "checkmark")
+                    .foregroundColor(.accentColor)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func savedPromptSummary(_ p: PromptParameters) -> String {
+        var parts: [String] = []
+        if let f = p.focus { parts.append(f.displayName) }
+        if let t = p.tone, t != .balanced { parts.append(t.displayName) }
+        if let d = p.depth, d != .standard { parts.append(d.displayName) }
+        if let techniques = p.techniques, !techniques.isEmpty {
+            parts.append("\(techniques.count) technique\(techniques.count == 1 ? "" : "s")")
+        }
+        return parts.isEmpty ? "Default settings" : parts.joined(separator: " · ")
     }
 
     // MARK: - Empty State
