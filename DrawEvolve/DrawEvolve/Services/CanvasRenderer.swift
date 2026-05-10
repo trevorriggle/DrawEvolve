@@ -2742,6 +2742,231 @@ class CanvasRenderer: NSObject {
         blurAdjustmentLayerId = nil
     }
 
+    // MARK: - Real-time Blur Stroke (PR experimental — see DEPLOYMENT note)
+    //
+    // Per-stamp dispatch path that mirrors `renderBlurStroke` but spreads
+    // the work across multiple command buffers so the blurred deposits
+    // appear under the user's finger instead of all at once on lift.
+    //
+    // Lifecycle (caller-driven from MetalCanvasView's blur-stroke path):
+    //   • `beginBlurStroke(...)` snapshots the layer + allocates the two
+    //     intermediate textures (scratchH, scratchV). Snapshot is the
+    //     stable source for every subsequent stamp — same invariant as
+    //     the deferred path: stamps re-blur PRE-stroke pixels, never
+    //     each other's deposits, so the final result matches.
+    //   • `appendBlurStrokeStamps(_:)` runs the same H+V Gaussian +
+    //     stamp deposit math as the deferred loop, but for ONE batch
+    //     of new stamps at a time, on a fresh command buffer. Async
+    //     commit (no waitUntilCompleted) — the GPU pipelines the work.
+    //   • `endBlurStroke(completion:)` clears session state and fires
+    //     the optional completion after the GPU drains.
+    //   • `cancelBlurStroke()` clears session state without committing
+    //     a finalisation buffer (called from touchesCancelled).
+    //
+    // The legacy `renderBlurStroke(...)` below is unchanged; non-blur
+    // tools and the existing test surface still go through that path.
+
+    private struct BlurStrokeSession {
+        let layerTexture: MTLTexture
+        let snapshot: MTLTexture
+        let scratchH: MTLTexture
+        let scratchV: MTLTexture
+        let selectionMask: MTLTexture
+        let settings: BrushSettings
+        let viewport: SIMD2<Float>
+        let sigma: Float
+        let kernelHalfWidth: Int32
+        let blurStrength: Float
+    }
+
+    private var activeBlurStrokeSession: BlurStrokeSession?
+
+    /// Begin a real-time blur stroke. Snapshots `layerTexture`, allocates
+    /// the two intermediate scratch textures used for the H+V Gaussian
+    /// passes, and rasterises the selection mask once for the whole
+    /// stroke. Returns false if any GPU resource isn't available — caller
+    /// should fall back to the deferred `renderBlurStroke` path.
+    @discardableResult
+    func beginBlurStroke(
+        to layerTexture: MTLTexture,
+        settings: BrushSettings,
+        screenSize: CGSize,
+        selectionPath: [CGPoint]?
+    ) -> Bool {
+        // Defensive: end any prior session that didn't get cleaned up
+        // (tool change mid-stroke, view teardown, etc.).
+        activeBlurStrokeSession = nil
+
+        guard stampBlurDepositPipelineState != nil,
+              let snapshot = makeBlurIntermediateTexture(),
+              let scratchH = makeBlurIntermediateTexture(),
+              let scratchV = makeBlurIntermediateTexture(),
+              let cb = commandQueue.makeCommandBuffer() else {
+            print("⚠️ beginBlurStroke: pipeline or intermediate textures unavailable")
+            return false
+        }
+
+        let mask = selectionMaskTexture(for: selectionPath, documentSize: screenSize) ?? noMaskTexture
+        guard let selectionMask = mask else {
+            print("⚠️ beginBlurStroke: selection mask unavailable")
+            return false
+        }
+
+        // Snapshot layer → scratch source. waitUntilCompleted ensures the
+        // first appendBlurStrokeStamps sees the pre-stroke pixels even
+        // if it follows immediately on the same run loop.
+        blitCopy(commandBuffer: cb, source: layerTexture, dest: snapshot)
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let sigma = max(0.0, Float(settings.size) * 0.5)
+        let halfWidth = Self.gaussianHalfWidth(for: sigma)
+        let blurStrength = max(0.0, min(1.0, settings.blurStrength))
+        let viewport = SIMD2<Float>(Float(layerTexture.width), Float(layerTexture.height))
+
+        activeBlurStrokeSession = BlurStrokeSession(
+            layerTexture: layerTexture,
+            snapshot: snapshot,
+            scratchH: scratchH,
+            scratchV: scratchV,
+            selectionMask: selectionMask,
+            settings: settings,
+            viewport: viewport,
+            sigma: sigma,
+            kernelHalfWidth: halfWidth,
+            blurStrength: blurStrength
+        )
+        return true
+    }
+
+    /// Run H+V Gaussian + stamp deposit for each point in `points` on
+    /// a single fresh command buffer, async-committed. No-op if there's
+    /// no active session (caller bailed before begin succeeded).
+    func appendBlurStrokeStamps(_ points: [BrushStroke.StrokePoint]) {
+        guard !points.isEmpty,
+              let s = activeBlurStrokeSession,
+              let depositPipeline = stampBlurDepositPipelineState,
+              let cb = commandQueue.makeCommandBuffer() else {
+            return
+        }
+
+        var uniforms = BrushUniforms(
+            color: s.settings.color,
+            size: Float(s.settings.size),
+            opacity: Float(s.settings.opacity),
+            hardness: Float(s.settings.hardness)
+        )
+        var blurStrength = s.blurStrength
+        var viewportCopy = s.viewport
+
+        let layerWidth = s.layerTexture.width
+        let layerHeight = s.layerTexture.height
+
+        for point in points {
+            let safePressure: CGFloat = {
+                guard point.pressure.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressure))
+            }()
+            uniforms.pressure = Float(safePressure)
+
+            let radiusOnLayer = max(1, Int(ceil(s.settings.size * 0.5 * safePressure)))
+            let kernelMargin = Int(s.kernelHalfWidth) + 4
+            let footprint = radiusOnLayer + kernelMargin
+
+            let cx = Int(point.location.x.rounded())
+            let cy = Int(point.location.y.rounded())
+
+            let x0 = max(0, cx - footprint)
+            let y0 = max(0, cy - footprint)
+            let x1 = min(layerWidth, cx + footprint)
+            let y1 = min(layerHeight, cy + footprint)
+            let rectW = x1 - x0
+            let rectH = y1 - y0
+            if rectW <= 0 || rectH <= 0 { continue }
+            let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
+
+            // Pass 1: horizontal Gaussian, scissored.
+            runGaussianPass(
+                commandBuffer: cb,
+                target: s.scratchH,
+                source: s.snapshot,
+                direction: SIMD2<Float>(1.0 / Float(s.snapshot.width), 0),
+                sigma: s.sigma,
+                kernelHalfWidth: s.kernelHalfWidth,
+                scissorRect: scissor
+            )
+
+            // Pass 2: vertical Gaussian, scissored.
+            runGaussianPass(
+                commandBuffer: cb,
+                target: s.scratchV,
+                source: s.scratchH,
+                direction: SIMD2<Float>(0, 1.0 / Float(s.scratchH.height)),
+                sigma: s.sigma,
+                kernelHalfWidth: s.kernelHalfWidth,
+                scissorRect: scissor
+            )
+
+            // Pass 3: stamp deposit into the live layer.
+            let depositDescriptor = MTLRenderPassDescriptor()
+            depositDescriptor.colorAttachments[0].texture = s.layerTexture
+            depositDescriptor.colorAttachments[0].loadAction = .load
+            depositDescriptor.colorAttachments[0].storeAction = .store
+            guard let depositEncoder = cb.makeRenderCommandEncoder(descriptor: depositDescriptor) else {
+                continue
+            }
+            depositEncoder.setRenderPipelineState(depositPipeline)
+            depositEncoder.setScissorRect(scissor)
+            depositEncoder.setFragmentTexture(s.scratchV, index: 0)
+            depositEncoder.setFragmentTexture(s.selectionMask, index: 2)
+
+            var stampPosition = SIMD2<Float>(Float(point.location.x), Float(point.location.y))
+            depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            depositEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            depositEncoder.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            depositEncoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            depositEncoder.setFragmentBytes(&blurStrength, length: MemoryLayout<Float>.stride, index: 1)
+            depositEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+            depositEncoder.endEncoding()
+        }
+
+        cb.commit()
+        // No waitUntilCompleted — let the GPU pipeline this batch behind
+        // any prior appendBlurStrokeStamps batch on the same queue.
+    }
+
+    /// Tear down the session. If `completion` is provided, fires after
+    /// the GPU drains via a no-op finalisation buffer; the caller (the
+    /// touch handler that records HistoryAction.stroke) needs that
+    /// drain to happen before calling captureSnapshot or the AFTER
+    /// snapshot races against in-flight stamp deposits.
+    func endBlurStroke(completion: (() -> Void)? = nil) {
+        guard activeBlurStrokeSession != nil else {
+            completion?()
+            return
+        }
+        activeBlurStrokeSession = nil
+
+        if let completion = completion, let cb = commandQueue.makeCommandBuffer() {
+            cb.addCompletedHandler { _ in
+                DispatchQueue.main.async { completion() }
+            }
+            cb.commit()
+        } else {
+            completion?()
+        }
+    }
+
+    /// Free the in-progress session without firing any finalisation
+    /// buffer. Called from touchesCancelled / tool-change paths.
+    func cancelBlurStroke() {
+        activeBlurStrokeSession = nil
+    }
+
+    var hasActiveBlurStroke: Bool {
+        activeBlurStrokeSession != nil
+    }
+
     // MARK: - Brush-blur Stroke (paints Gaussian blur freeform)
 
     /// Per-stroke blur dispatch — mirrors `renderStroke` but performs a
