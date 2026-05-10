@@ -89,6 +89,10 @@ struct DrawingCanvasView: View {
     /// (!) info button below the gear — see `betaInfoButton` and the
     /// iPhone toolbar item near the settings gear.
     @State private var showBetaInfo = false
+    /// Opt-in trigger for the onboarding walkthrough. Same pattern as
+    /// `showBetaInfo` — auto-trigger killed in ContentView; surfaced
+    /// via the (?) button under the (!) info button.
+    @State private var showOnboardingInfo = false
     @StateObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
@@ -238,6 +242,9 @@ struct DrawingCanvasView: View {
         .sheet(isPresented: $showBetaInfo) {
             BetaTransparencyPopup(isPresented: $showBetaInfo)
         }
+        .sheet(isPresented: $showOnboardingInfo) {
+            OnboardingPopup(isPresented: $showOnboardingInfo)
+        }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -365,6 +372,12 @@ struct DrawingCanvasView: View {
                         Image(systemName: "exclamationmark.circle")
                     }
                     .accessibilityLabel("Beta information")
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showOnboardingInfo = true }) {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .accessibilityLabel("How DrawEvolve works")
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -1060,6 +1073,8 @@ struct DrawingCanvasView: View {
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
                             betaInfoButton
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
+                            onboardingInfoButton
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
                         }
                     }
                     .padding(.top, 12)
@@ -1420,6 +1435,22 @@ struct DrawingCanvasView: View {
                 .shadow(radius: 4)
         }
         .accessibilityLabel("Beta information")
+    }
+
+    /// Opt-in trigger for the onboarding walkthrough — "how DrawEvolve
+    /// works" content. Sits directly under `betaInfoButton`, mirroring
+    /// its style with a (?) glyph instead of (!).
+    private var onboardingInfoButton: some View {
+        Button(action: { showOnboardingInfo = true }) {
+            Image(systemName: "questionmark.circle")
+                .font(.system(size: 22))
+                .foregroundColor(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                .clipShape(Circle())
+                .shadow(radius: 4)
+        }
+        .accessibilityLabel("How DrawEvolve works")
     }
 
     // saveToGalleryButton and getFeedbackButton scale themselves down on

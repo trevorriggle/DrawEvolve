@@ -102,15 +102,21 @@ private struct SignedInRoot: View {
         hasCompletedPrompt = false
         #endif
 
-        // Beta transparency notice is now opt-in via the (!) info button
-        // below the canvas's settings gear — not auto-presented on first
-        // launch. Mark as seen up-front so the cascade onChange handler
-        // doesn't re-arm it. Onboarding still fires for fresh users.
+        // Beta transparency notice and onboarding walkthrough are both
+        // opt-in via the (!) and (?) buttons under the canvas's
+        // settings gear — neither auto-presents on first launch. Mark
+        // both as seen up-front so the cascade onChange handlers don't
+        // re-arm them.
+        //
+        // Prompt input still auto-fires for fresh users: it captures
+        // the drawing context (subject / style / focus) that Get
+        // Feedback needs to run, so it's a required gate, not optional
+        // chrome.
         hasSeenBetaTransparency = true
+        hasSeenOnboarding = true
 
-        if !hasSeenOnboarding {
-            showOnboarding = true
-            hasSeenOnboarding = true
+        if !hasCompletedPrompt {
+            showPromptInput = true
         }
     }
 }
