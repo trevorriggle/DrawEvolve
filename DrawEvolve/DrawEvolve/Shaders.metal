@@ -582,8 +582,23 @@ fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
     float2 uv = in.position.xy / layerSize;
     float4 blurred = blurredTexture.sample(s, uv);
 
-    // Premultiplied output for the standard sourceAlpha blend.
-    return float4(blurred.rgb * alpha, alpha);
+    // Gate the deposit's alpha by the blurred sample's own alpha. Without
+    // this, stamping over a transparent region of the snapshot writes
+    // `(0,0,0, alpha)` premultiplied — i.e. fully-opaque transparent
+    // black — which the standard sourceAlpha blend renders as a darkening
+    // wipe over the destination. The visible artefact: blur brush leaves
+    // a black tint on empty areas. Multiplying by `blurred.a` makes the
+    // deposit transparent where there was nothing to blur, while leaving
+    // the math correct for fully-opaque samples (effectiveAlpha == alpha
+    // when blurred.a == 1.0). RGB stays scaled by `alpha` because
+    // blurred.rgb is already premultiplied; the resulting `(blurred.rgb
+    // * alpha, blurred.a * alpha)` is itself a valid premultiplied
+    // source for the blend pipeline.
+    float effectiveAlpha = alpha * blurred.a;
+    if (effectiveAlpha <= 0.0) {
+        discard_fragment();
+    }
+    return float4(blurred.rgb * alpha, effectiveAlpha);
 }
 
 // MARK: - Smudge (PR 2)
