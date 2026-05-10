@@ -30,6 +30,15 @@ class CanvasRenderer: NSObject {
     private let strokeCommandSlots = DispatchSemaphore(value: 60)
     private var brushPipelineState: MTLRenderPipelineState?
     private var eraserPipelineState: MTLRenderPipelineState?
+    // Experimental brush variants (experiment/brush-variety-v1). Each is
+    // the same brush vertex shader + standard alpha blend as
+    // `brushPipelineState`; only the fragment function differs. Selected
+    // by `pipelineState(forTool:)`.
+    private var pencilPipelineState: MTLRenderPipelineState?
+    private var inkPenPipelineState: MTLRenderPipelineState?
+    private var markerPipelineState: MTLRenderPipelineState?
+    private var airbrushPipelineState: MTLRenderPipelineState?
+    private var charcoalPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
@@ -174,6 +183,11 @@ class CanvasRenderer: NSObject {
         guard let brushVertex = library.makeFunction(name: "brushVertexShader"),
               let brushFragment = library.makeFunction(name: "brushFragmentShader"),
               let eraserFragment = library.makeFunction(name: "eraserFragmentShader"),
+              let pencilFragment = library.makeFunction(name: "pencilFragmentShader"),
+              let inkPenFragment = library.makeFunction(name: "inkPenFragmentShader"),
+              let markerFragment = library.makeFunction(name: "markerFragmentShader"),
+              let airbrushFragment = library.makeFunction(name: "airbrushFragmentShader"),
+              let charcoalFragment = library.makeFunction(name: "charcoalFragmentShader"),
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
               let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
               let quadVertexForRect = library.makeFunction(name: "quadVertexShaderForRect"),
@@ -213,6 +227,31 @@ class CanvasRenderer: NSObject {
         eraserDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .zero
         eraserDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         eraserDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
+        // Experimental brush-variant pipelines (experiment/brush-variety-v1).
+        // Each clones the brush descriptor's blend setup and only swaps the
+        // fragment function. A single helper closure keeps the five
+        // descriptors honest with the brush descriptor — if `brushDescriptor`
+        // ever changes its blend setup, these inherit it for free.
+        func makeBrushVariantDescriptor(_ fragment: MTLFunction) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = brushVertex
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = brushDescriptor.colorAttachments[0].pixelFormat
+            d.colorAttachments[0].isBlendingEnabled = brushDescriptor.colorAttachments[0].isBlendingEnabled
+            d.colorAttachments[0].sourceRGBBlendFactor = brushDescriptor.colorAttachments[0].sourceRGBBlendFactor
+            d.colorAttachments[0].destinationRGBBlendFactor = brushDescriptor.colorAttachments[0].destinationRGBBlendFactor
+            d.colorAttachments[0].rgbBlendOperation = brushDescriptor.colorAttachments[0].rgbBlendOperation
+            d.colorAttachments[0].sourceAlphaBlendFactor = brushDescriptor.colorAttachments[0].sourceAlphaBlendFactor
+            d.colorAttachments[0].destinationAlphaBlendFactor = brushDescriptor.colorAttachments[0].destinationAlphaBlendFactor
+            d.colorAttachments[0].alphaBlendOperation = brushDescriptor.colorAttachments[0].alphaBlendOperation
+            return d
+        }
+        let pencilDescriptor = makeBrushVariantDescriptor(pencilFragment)
+        let inkPenDescriptor = makeBrushVariantDescriptor(inkPenFragment)
+        let markerDescriptor = makeBrushVariantDescriptor(markerFragment)
+        let airbrushDescriptor = makeBrushVariantDescriptor(airbrushFragment)
+        let charcoalDescriptor = makeBrushVariantDescriptor(charcoalFragment)
 
         // Composite pipeline
         let compositeDescriptor = MTLRenderPipelineDescriptor()
@@ -331,6 +370,11 @@ class CanvasRenderer: NSObject {
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
+            pencilPipelineState = try device.makeRenderPipelineState(descriptor: pencilDescriptor)
+            inkPenPipelineState = try device.makeRenderPipelineState(descriptor: inkPenDescriptor)
+            markerPipelineState = try device.makeRenderPipelineState(descriptor: markerDescriptor)
+            airbrushPipelineState = try device.makeRenderPipelineState(descriptor: airbrushDescriptor)
+            charcoalPipelineState = try device.makeRenderPipelineState(descriptor: charcoalDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
@@ -460,8 +504,22 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // Select pipeline based on tool
-        let pipeline = stroke.tool == .eraser ? eraserPipelineState : brushPipelineState
+        // Select pipeline based on tool. Default brush, eraser, and shape
+        // tools all share `brushPipelineState` (the shape tools dispatch
+        // through their own renderer paths and never reach this branch);
+        // the experimental brush variants each have their own pipeline
+        // state with the matching fragment shader.
+        let pipeline: MTLRenderPipelineState? = {
+            switch stroke.tool {
+            case .eraser:   return eraserPipelineState
+            case .pencil:   return pencilPipelineState
+            case .inkPen:   return inkPenPipelineState
+            case .marker:   return markerPipelineState
+            case .airbrush: return airbrushPipelineState
+            case .charcoal: return charcoalPipelineState
+            default:        return brushPipelineState
+            }
+        }()
         guard let pipelineState = pipeline else {
             #if DEBUG
             print("CanvasRenderer: No pipeline state available")
@@ -489,7 +547,8 @@ class CanvasRenderer: NSObject {
             color: stroke.settings.color,
             size: Float(stroke.settings.size),
             opacity: Float(stroke.settings.opacity),
-            hardness: Float(stroke.settings.hardness)
+            hardness: Float(stroke.settings.hardness),
+            grainDensity: stroke.settings.grainDensity
         )
 
         // CRITICAL FIX: Stroke points are already in document/texture coordinate space
@@ -585,8 +644,9 @@ class CanvasRenderer: NSObject {
         var opacity: Float
         var hardness: Float
         var pressure: Float
+        var grainDensity: Float
 
-        init(color: UIColor, size: Float, opacity: Float, hardness: Float) {
+        init(color: UIColor, size: Float, opacity: Float, hardness: Float, grainDensity: Float = 0.5) {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
             color.getRed(&r, green: &g, blue: &b, alpha: &a)
             self.color = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
@@ -594,6 +654,7 @@ class CanvasRenderer: NSObject {
             self.opacity = opacity
             self.hardness = hardness
             self.pressure = 1.0
+            self.grainDensity = grainDensity
         }
     }
 
@@ -1187,8 +1248,20 @@ class CanvasRenderer: NSObject {
         // via `renderStroke` per touchesMoved (see MetalCanvasView), and
         // the every-frame layer composite picks up the cuts immediately.
         // The gray-ghost workaround that used to live here for `.eraser`
-        // is gone — `renderStrokePreview` now serves only the brush.
-        guard let pipelineState = brushPipelineState else { return }
+        // is gone — `renderStrokePreview` now serves the brush plus the
+        // experimental brush variants. Each variant gets its real shader
+        // mid-drag so the wet-ink preview matches the committed look.
+        let previewPipeline: MTLRenderPipelineState? = {
+            switch stroke.tool {
+            case .pencil:   return pencilPipelineState
+            case .inkPen:   return inkPenPipelineState
+            case .marker:   return markerPipelineState
+            case .airbrush: return airbrushPipelineState
+            case .charcoal: return charcoalPipelineState
+            default:        return brushPipelineState
+            }
+        }()
+        guard let pipelineState = previewPipeline else { return }
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
@@ -1248,7 +1321,8 @@ class CanvasRenderer: NSObject {
             color: previewColor,
             size: Float(safePreviewSize),
             opacity: Float(previewOpacity),
-            hardness: Float(stroke.settings.hardness)
+            hardness: Float(stroke.settings.hardness),
+            grainDensity: stroke.settings.grainDensity
         )
 
         // Transform document-space points to UIKit-screen-space points, matching

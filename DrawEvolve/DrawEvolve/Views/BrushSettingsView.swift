@@ -46,6 +46,29 @@ struct BrushSettingsView: View {
                 }
             }
 
+            // Charcoal — procedural grain density. Multiplied into the
+            // hash term inside `charcoalFragmentShader`. 0 = no grain
+            // (effectively a soft brush), 1 = fully speckled. Only
+            // surfaced when the charcoal variant is active; mirrors the
+            // blur/smudge strength pattern.
+            if activeTool == .charcoal {
+                Section("Grain") {
+                    HStack {
+                        Text("Density")
+                        Spacer()
+                        Text(String(format: "%.0f%%", settings.grainDensity * 100))
+                            .foregroundColor(.primary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.grainDensity) },
+                            set: { settings.grainDensity = Float($0) }
+                        ),
+                        in: 0...1
+                    )
+                }
+            }
+
             // Smudge — pickup/deposit weight. Drives the patch-update mix
             // (strength * pressure) at every stamp; lower = the same
             // pigment carries longer along the drag, higher = each stamp

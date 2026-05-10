@@ -67,6 +67,11 @@ extension DrawingTool {
         case .eraser: return "eraser"
         case .paintBucket: return "paintBucket"
         case .eyeDropper: return "eyeDropper"
+        case .pencil: return "pencil"
+        case .inkPen: return "inkPen"
+        case .marker: return "marker"
+        case .airbrush: return "airbrush"
+        case .charcoal: return "charcoal"
         case .line: return "line"
         case .rectangle: return "rectangle"
         case .circle: return "circle"
@@ -91,6 +96,11 @@ extension DrawingTool {
         case "eraser": self = .eraser
         case "paintBucket": self = .paintBucket
         case "eyeDropper": self = .eyeDropper
+        case "pencil": self = .pencil
+        case "inkPen": self = .inkPen
+        case "marker": self = .marker
+        case "airbrush": self = .airbrush
+        case "charcoal": self = .charcoal
         case "line": self = .line
         case "rectangle": self = .rectangle
         case "circle": self = .circle
@@ -119,6 +129,24 @@ struct ToolGroup {
     let variants: [ToolVariant]
     let storageKey: String
     let defaultVariant: ToolVariant
+
+    /// Brush category — six paint variants behind a long-press popover.
+    /// Default `.brush` preserves first-launch muscle memory; users who
+    /// settled on a different variant get their last selection back via
+    /// `storageKey`. Eraser stays a separate top-level slot (audit §6).
+    static let brushes = ToolGroup(
+        name: "Brushes",
+        variants: [
+            .tool(.pencil),
+            .tool(.brush),
+            .tool(.inkPen),
+            .tool(.marker),
+            .tool(.airbrush),
+            .tool(.charcoal),
+        ],
+        storageKey: "toolGroup.brushes.lastSelected",
+        defaultVariant: .tool(.brush)
+    )
 
     static let effects = ToolGroup(
         name: "Effects",

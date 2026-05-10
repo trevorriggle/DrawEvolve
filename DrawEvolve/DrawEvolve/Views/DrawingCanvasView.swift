@@ -736,10 +736,26 @@ struct DrawingCanvasView: View {
                         // tile-mirroring comment on phoneToolPanel is
                         // therefore stale by design for v1.1+.
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
-                            // Row 1: Brush, Eraser
-                            ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
-                                canvasState.currentTool = .brush
-                            }
+                            // Row 1: Brushes (grouped — pencil / brush /
+                            // ink pen / marker / airbrush / charcoal),
+                            // Eraser (standalone). Eraser stays its own
+                            // top-level slot per audit §6 — it's the
+                            // most-reached-for tool after brush, so
+                            // muscle memory wins over slot economy.
+                            GroupedToolButton(
+                                group: .brushes,
+                                isSelected: { v in
+                                    if case .tool(let t) = v {
+                                        return canvasState.currentTool == t
+                                    }
+                                    return false
+                                },
+                                onActivate: { v in
+                                    if case .tool(let t) = v {
+                                        canvasState.currentTool = t
+                                    }
+                                }
+                            )
 
                             ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
                                 canvasState.currentTool = .eraser
