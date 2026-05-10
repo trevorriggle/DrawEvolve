@@ -58,12 +58,14 @@ private struct TextEntryHost: UIViewRepresentable {
         tv.tintColor = .clear
         tv.text = canvasState.floatingText?.content ?? ""
         tv.delegate = context.coordinator
-        tv.autocorrectionType = .no
-        tv.spellCheckingType = .no
-        tv.smartDashesType = .no
-        tv.smartQuotesType = .no
-        tv.smartInsertDeleteType = .no
         tv.isScrollEnabled = false
+        // Autocorrect / spell-check / smart-dashes / smart-quotes /
+        // smart-insert-delete left at the platform defaults so the user
+        // sees the standard iOS keyboard (QuickType bar included). The
+        // earlier `.no` settings made the keyboard look stripped down
+        // vs. every other text input on the device. If a user wants a
+        // strict-typing mode for artistic intent, that becomes a
+        // TextSettings preference — not a hidden compile-time default.
         // Defer to next runloop so SwiftUI's view-mount transaction
         // completes first; calling on the same tick can race with the
         // ZStack's responder management and the keyboard fails to rise.
