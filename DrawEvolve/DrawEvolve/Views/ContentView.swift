@@ -102,10 +102,13 @@ private struct SignedInRoot: View {
         hasCompletedPrompt = false
         #endif
 
-        if !hasSeenBetaTransparency {
-            showBetaTransparency = true
-            hasSeenBetaTransparency = true
-        } else if !hasSeenOnboarding {
+        // Beta transparency notice is now opt-in via the (!) info button
+        // below the canvas's settings gear — not auto-presented on first
+        // launch. Mark as seen up-front so the cascade onChange handler
+        // doesn't re-arm it. Onboarding still fires for fresh users.
+        hasSeenBetaTransparency = true
+
+        if !hasSeenOnboarding {
             showOnboarding = true
             hasSeenOnboarding = true
         }
