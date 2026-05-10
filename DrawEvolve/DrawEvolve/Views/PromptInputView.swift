@@ -162,10 +162,16 @@ struct PromptInputView: View {
     /// pre-iPhone-strategy main.
     private var padBody: some View {
         ZStack {
-            // Dimmed background
+            // Dimmed background. Default Color hit-testing is enabled so
+            // taps that miss the card get absorbed here (no action) —
+            // the user can't draw on the canvas behind the modal or
+            // sneak a tool change through the toolbar. With
+            // `.allowsHitTesting(false)` the dim BG was visually present
+            // but every touch passed straight through to the canvas
+            // chrome underneath, which let the user draw / switch tools
+            // / interact with the toolbar while the prompt was up.
             Color.black.opacity(0.4)
                 .ignoresSafeArea()
-                .allowsHitTesting(false)
 
             // Card — sits in a VStack with a top Spacer so the keyboard
             // pushes it upward instead of hiding the active field
