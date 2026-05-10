@@ -40,6 +40,7 @@ struct PoseSkeletonChipsOverlay: View {
                     skeleton: skeleton,
                     canvasState: canvasState,
                     isHidden: false, // chip only renders for visible skeletons
+                    isLocked: poseManager.isLocked(PoseSkeletonKind(skeleton: skeleton)),
                     onReplacePhoto: {
                         let kind = PoseSkeletonKind(skeleton: skeleton)
                         onRequestReplace(kind)
@@ -53,6 +54,10 @@ struct PoseSkeletonChipsOverlay: View {
                         let kind = PoseSkeletonKind(skeleton: skeleton)
                         let visible = poseManager.state(for: kind).isVisible
                         poseManager.setVisible(!visible, for: kind)
+                    },
+                    onToggleLock: {
+                        let kind = PoseSkeletonKind(skeleton: skeleton)
+                        poseManager.toggleLocked(for: kind)
                     },
                     onManuallyPlace: {
                         let kind = PoseSkeletonKind(skeleton: skeleton)
@@ -131,61 +136,95 @@ private struct PoseSkeletonChip: View {
     let skeleton: PoseSkeleton
     @ObservedObject var canvasState: CanvasStateManager
     let isHidden: Bool
+    let isLocked: Bool
     let onReplacePhoto: () -> Void
     let onCommit: () -> Void
     let onToggleVisibility: () -> Void
+    let onToggleLock: () -> Void
     let onManuallyPlace: () -> Void
     let onDiscard: () -> Void
 
     var body: some View {
         let anchor = chipAnchorScreen()
-        Menu {
-            Button {
-                onReplacePhoto()
-            } label: {
-                Label("Replace Photo", systemImage: "photo.badge.plus")
-            }
-            Button {
-                onCommit()
-            } label: {
-                Label("Commit to Trace", systemImage: "paintbrush.pointed")
-            }
-            Button {
-                onToggleVisibility()
-            } label: {
-                Label(
-                    isHidden ? "Show Skeleton" : "Hide Skeleton",
-                    systemImage: isHidden ? "eye" : "eye.slash"
-                )
-            }
-            Button {
-                onManuallyPlace()
-            } label: {
-                Label("Manually Place", systemImage: "hand.draw")
-            }
-            Divider()
-            Button(role: .destructive) {
-                onDiscard()
-            } label: {
-                Label("Discard", systemImage: "trash")
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: skeleton.iconName)
+        HStack(spacing: 0) {
+            // Lock toggle — primary affordance for "I want to paint near
+            // this skeleton without dragging joints." Locked = joint
+            // dots and transform handles disable hit-testing; bones
+            // and joints remain rendered as a reference overlay only.
+            Button(action: onToggleLock) {
+                Image(systemName: isLocked ? "lock.fill" : "lock.open")
                     .font(.callout)
-                Text(skeleton.shortLabel)
-                    .font(.subheadline.weight(.medium))
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(isLocked ? .yellow : .white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
             }
-            .foregroundColor(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.78))
-            .clipShape(Capsule())
-            .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 1)
+            .buttonStyle(.borderless)
+            .accessibilityLabel(isLocked ? "Unlock skeleton" : "Lock skeleton (reference-only)")
+
+            // Subtle vertical divider so the lock and chevron read as
+            // two distinct controls inside the same capsule.
+            Rectangle()
+                .fill(Color.white.opacity(0.18))
+                .frame(width: 1, height: 18)
+
+            Menu {
+                Button {
+                    onReplacePhoto()
+                } label: {
+                    Label("Replace Photo", systemImage: "photo.badge.plus")
+                }
+                Button {
+                    onCommit()
+                } label: {
+                    Label("Commit to Trace", systemImage: "paintbrush.pointed")
+                }
+                Button {
+                    onToggleVisibility()
+                } label: {
+                    Label(
+                        isHidden ? "Show Skeleton" : "Hide Skeleton",
+                        systemImage: isHidden ? "eye" : "eye.slash"
+                    )
+                }
+                Button {
+                    onToggleLock()
+                } label: {
+                    Label(
+                        isLocked ? "Unlock Skeleton" : "Lock Skeleton",
+                        systemImage: isLocked ? "lock.open" : "lock"
+                    )
+                }
+                Button {
+                    onManuallyPlace()
+                } label: {
+                    Label("Manually Place", systemImage: "hand.draw")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    onDiscard()
+                } label: {
+                    Label("Discard", systemImage: "trash")
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: skeleton.iconName)
+                        .font(.callout)
+                    Text(skeleton.shortLabel)
+                        .font(.subheadline.weight(.medium))
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel("\(skeleton.shortLabel) actions")
         }
-        .accessibilityLabel("\(skeleton.shortLabel) actions")
+        .background(Color.black.opacity(0.78))
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.2), radius: 3, x: 0, y: 1)
         .position(anchor)
     }
 

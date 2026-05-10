@@ -43,9 +43,14 @@ struct PoseTransformHandlesView: View {
 
     /// Snapshot of skeletons whose transform bbox is currently armed.
     /// Reads `activeBboxSkeletons` (publishes from PoseOverlayManager).
+    /// Locked skeletons drop out — when the user has flipped the chip's
+    /// lock toggle, the skeleton is reference-only and the handles
+    /// should not render at all (no visual clutter, no hit-testable
+    /// surface near the canvas).
     private var activeSkeletons: [PoseSkeleton] {
         poseManager.renderableSkeletons.filter {
             poseManager.activeBboxSkeletons.contains($0.id)
+                && !poseManager.isLocked(PoseSkeletonKind(skeleton: $0))
         }
     }
 
