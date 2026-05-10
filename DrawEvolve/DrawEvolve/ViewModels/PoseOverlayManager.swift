@@ -67,6 +67,14 @@ final class PoseOverlayManager: ObservableObject {
     /// (audit §6.3).
     @Published private(set) var activeBboxSkeletons: Set<UUID> = []
 
+    /// Per-kind "skeleton is reference-only" lock. When a kind is locked,
+    /// every interactive layer of that kind's skeleton (joint dots,
+    /// transform handles) disables itself and lets paint touches fall
+    /// through to the canvas underneath. The bones / joints stay
+    /// rendered — the lock controls touch routing, not visibility.
+    /// Toggled from the chip's lock icon.
+    @Published private(set) var lockedKinds: Set<PoseSkeletonKind> = []
+
     /// Auto-deselect timeout for the bbox handles. Audit §10 Risk 2's
     /// mitigation: gestures inside the bbox interior should fall through
     /// to the canvas after this timeout so the user can paint without
@@ -203,6 +211,7 @@ final class PoseOverlayManager: ObservableObject {
             activeBboxSkeletons.remove(id)
         }
         clearManualEdits(for: kind)
+        lockedKinds.remove(kind)
         switch kind {
         case .hand: handState = .none
         case .body: bodyState = .none
@@ -213,11 +222,32 @@ final class PoseOverlayManager: ObservableObject {
         }
     }
 
+    // MARK: - Lock (reference-only mode)
+
+    func isLocked(_ kind: PoseSkeletonKind) -> Bool {
+        lockedKinds.contains(kind)
+    }
+
+    func setLocked(_ locked: Bool, for kind: PoseSkeletonKind) {
+        if locked {
+            lockedKinds.insert(kind)
+        } else {
+            lockedKinds.remove(kind)
+        }
+    }
+
+    func toggleLocked(for kind: PoseSkeletonKind) {
+        setLocked(!isLocked(kind), for: kind)
+    }
+
+    // MARK: - Discard
+
     func discardAll() {
         for task in deactivationTasks.values { task.cancel() }
         deactivationTasks.removeAll()
         activeBboxSkeletons.removeAll()
         manuallyEditedJointKeys.removeAll()
+        lockedKinds.removeAll()
         handState = .none
         bodyState = .none
         dismissLowConfidenceBanner()

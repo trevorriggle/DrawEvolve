@@ -28,7 +28,13 @@ struct PoseOverlayView: View {
                     skeleton: skeleton,
                     poseManager: poseManager,
                     canvasState: canvasState,
+                    // iPad joints are interactive by default (Decision 10),
+                    // BUT when the skeleton is locked the user has opted
+                    // into reference-only mode — joints stop responding to
+                    // touch so paint near a joint paints instead of
+                    // dragging the joint.
                     interactive: DeviceIdiom.isPad
+                        && !poseManager.isLocked(PoseSkeletonKind(skeleton: skeleton))
                 )
                 // Smooth in/out as skeletons appear (place / show) and
                 // disappear (hide / discard / commit). PR 6 polish.
