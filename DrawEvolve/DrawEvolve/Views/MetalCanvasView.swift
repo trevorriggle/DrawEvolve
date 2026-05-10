@@ -267,6 +267,18 @@ struct MetalCanvasView: UIViewRepresentable {
         private var eraserBeforeSnapshot: Data?
         private var eraserCommittedPointCount: Int = 0
 
+        // Real-time blur stroke session (experiment/blur-brush-realtime).
+        // Mirrors the eraser substroke flush pattern: capture before-snapshot
+        // at touchesBegan, peel off newly-arrived points each touchesMoved
+        // and dispatch them via the renderer's persistent blur session,
+        // finalize at touchesEnded with the same after-snapshot + history
+        // recording the deferred path uses.
+        private var blurStrokeActive = false
+        private var blurStrokeBeforeSnapshot: Data?
+        private var blurStrokeLayerIndex: Int?
+        private var blurStrokeLayerId: UUID?
+        private var blurCommittedPointCount: Int = 0
+
         // FloatingText body-drag state. The transform handles overlay (a
         // SwiftUI sibling) handles scale/rotate via .gesture; this path
         // covers the body-drag (move) gesture inside the canvas's MTKView.
@@ -1119,6 +1131,35 @@ struct MetalCanvasView: UIViewRepresentable {
                 flushEraserSubStroke(view: view)
             }
 
+            // Real-time blur stroke: snapshot the layer + open a renderer
+            // session here so subsequent touchesMoved can deposit blurred
+            // stamps under the user's finger instead of waiting for
+            // touchesEnded. If beginBlurStroke fails (intermediate
+            // textures unavailable), blurStrokeActive stays false and
+            // the deferred dispatchStroke path at touchesEnded still
+            // runs as a fallback.
+            if currentTool == .blur,
+               let texture = layers[selectedLayerIndex].texture,
+               let renderer = renderer {
+                let blurSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+                let blurDocSize = MainActor.assumeIsolated {
+                    canvasState?.documentSize ?? view.bounds.size
+                }
+                blurStrokeBeforeSnapshot = renderer.captureSnapshot(of: texture)
+                blurStrokeLayerIndex = selectedLayerIndex
+                blurStrokeLayerId = layers[selectedLayerIndex].id
+                blurCommittedPointCount = 0
+                blurStrokeActive = renderer.beginBlurStroke(
+                    to: texture,
+                    settings: brushSettings,
+                    screenSize: blurDocSize,
+                    selectionPath: blurSelectionPath
+                )
+                if blurStrokeActive {
+                    flushBlurSubStroke()
+                }
+            }
+
             // Cache the selection mask for the wet-ink preview. Rasterised
             // once here and reused for every preview frame for the duration
             // of the drag — selection geometry is immutable mid-stroke
@@ -1615,6 +1656,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 if currentTool == .eraser {
                     flushEraserSubStroke(view: view)
                 }
+                // Real-time blur stroke (experiment/blur-brush-realtime):
+                // peel off the new points and dispatch them through the
+                // active blur session. No-op when the session never
+                // started (intermediate-texture allocation failed in
+                // touchesBegan); deferred-path fallback at touchesEnded
+                // still runs in that case.
+                if currentTool == .blur {
+                    flushBlurSubStroke()
+                }
 
                 // Print every 10th point to avoid spam
                 if stroke.points.count % 10 == 0 {
@@ -1663,6 +1713,23 @@ struct MetalCanvasView: UIViewRepresentable {
                 selectionPath: selPath,
                 completion: onDone
             )
+        }
+
+        /// Real-time blur substroke flush — peels off any points appended
+        /// to `currentStroke.points` since the last call and hands them to
+        /// the renderer's active blur session. Idempotent / no-op when
+        /// the session isn't active or no new points have arrived.
+        private func flushBlurSubStroke() {
+            guard blurStrokeActive,
+                  let stroke = currentStroke,
+                  stroke.tool == .blur,
+                  let renderer = renderer,
+                  stroke.points.count > blurCommittedPointCount else {
+                return
+            }
+            let newPoints = Array(stroke.points[blurCommittedPointCount..<stroke.points.count])
+            blurCommittedPointCount = stroke.points.count
+            renderer.appendBlurStrokeStamps(newPoints)
         }
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -2005,6 +2072,65 @@ struct MetalCanvasView: UIViewRepresentable {
 
             let layer = layers[selectedLayerIndex]
 
+            // Real-time blur stroke finalisation: stamps were already
+            // deposited during touchesMoved via the renderer's blur
+            // session, so all that's left is to drain the GPU queue,
+            // capture the AFTER snapshot, record HistoryAction.stroke
+            // using the BEFORE snapshot we took at touchesBegan, and
+            // refresh the layer thumbnail. This branch returns early
+            // and skips the deferred dispatchStroke path below.
+            if blurStrokeActive,
+               stroke.tool == .blur,
+               let texture = layer.texture,
+               let renderer = renderer {
+                flushBlurSubStroke()  // final tail of points
+                let beforeSnapshot = blurStrokeBeforeSnapshot
+                let strokeLayerIndex = blurStrokeLayerIndex ?? selectedLayerIndex
+                let strokeLayerId = blurStrokeLayerId ?? layer.id
+                let capturedCanvasState = canvasState
+                blurStrokeActive = false
+                blurStrokeBeforeSnapshot = nil
+                blurStrokeLayerIndex = nil
+                blurStrokeLayerId = nil
+                blurCommittedPointCount = 0
+
+                renderer.endBlurStroke { [weak self] in
+                    let afterSnapshot = renderer.captureSnapshot(of: texture)
+                    if let before = beforeSnapshot,
+                       let after = afterSnapshot,
+                       let cs = capturedCanvasState {
+                        cs.historyManager.record(.stroke(
+                            layerId: strokeLayerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                    }
+                    DispatchQueue.global(qos: .utility).async {
+                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                            DispatchQueue.main.async {
+                                guard let self = self,
+                                      strokeLayerIndex < self.layers.count else { return }
+                                self.layers[strokeLayerIndex].updateThumbnail(thumbnail)
+                            }
+                        }
+                    }
+                }
+
+                currentStroke = nil
+                lastPoint = nil
+                shapeStartPoint = nil
+                shapeStartScreen = nil
+                renderer.endPreviewMask()
+                resetSnapToLineState()
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.stampCursorCenter = nil
+                        cs.stampCursorDiameter = 0
+                    }
+                }
+                return
+            }
+
             if let texture = layer.texture, let renderer = renderer {
                 // Stroke points are in document space which matches texture space
                 // IMPORTANT: Pass document size (not texture size) to ensure 1:1 coordinate mapping
@@ -2109,6 +2235,26 @@ struct MetalCanvasView: UIViewRepresentable {
             }
             eraserBeforeSnapshot = nil
             eraserCommittedPointCount = 0
+
+            // Real-time blur stroke: same rollback semantics as eraser.
+            // Stamps were deposited mid-stroke, so a system-cancel must
+            // restore the pre-stroke layer. The renderer session's
+            // scratch textures get released via cancelBlurStroke (no
+            // finalisation buffer).
+            if blurStrokeActive,
+               let beforeSnapshot = blurStrokeBeforeSnapshot,
+               let li = blurStrokeLayerIndex, li < layers.count,
+               let texture = layers[li].texture,
+               let renderer = renderer {
+                renderer.restoreSnapshot(beforeSnapshot, to: texture)
+                renderer.cancelBlurStroke()
+                print("Blur cancelled — restored layer to pre-stroke snapshot")
+            }
+            blurStrokeActive = false
+            blurStrokeBeforeSnapshot = nil
+            blurStrokeLayerIndex = nil
+            blurStrokeLayerId = nil
+            blurCommittedPointCount = 0
 
             currentStroke = nil
             lastPoint = nil
