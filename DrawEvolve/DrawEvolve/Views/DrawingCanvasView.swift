@@ -887,11 +887,22 @@ struct DrawingCanvasView: View {
                             // button reflects EITHER the sheet being open OR the
                             // mode being active, so the user can tell at a glance
                             // whether symmetry is on without opening the sheet.
+                            //
+                            // Tap behavior is mode-dependent:
+                            //   • Symmetry currently ON → tap turns it off.
+                            //   • Symmetry off → tap opens the settings sheet
+                            //     so the user can pick a mode to enable.
+                            // Matches every other modal toggle in the toolbar
+                            // (Selection, Move, etc.) — second tap exits.
                             ToolButton(
                                 icon: "square.split.2x1",
                                 isSelected: showSymmetrySettings || symmetry.mode != .off
                             ) {
-                                showSymmetrySettings.toggle()
+                                if symmetry.mode != .off {
+                                    symmetry.mode = .off
+                                } else {
+                                    showSymmetrySettings.toggle()
+                                }
                             }
 
                             // Dark mode toggle
@@ -1858,7 +1869,11 @@ struct DrawingCanvasView: View {
                     icon: "square.split.2x1",
                     isSelected: showSymmetrySettings || symmetry.mode != .off
                 ) {
-                    showSymmetrySettings.toggle()
+                    if symmetry.mode != .off {
+                        symmetry.mode = .off
+                    } else {
+                        showSymmetrySettings.toggle()
+                    }
                     collapsePhoneToolPanel()
                 }
                 ToolButton(
