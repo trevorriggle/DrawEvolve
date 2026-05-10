@@ -290,7 +290,7 @@ private struct PoseGhostRow: View {
                 Image(systemName: isVisible ? "eye.fill" : "eye.slash.fill")
                     .foregroundColor(isVisible ? .accentColor : .secondary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
 
             Image(systemName: kind.icon)
                 .font(.title3)
@@ -315,7 +315,7 @@ private struct PoseGhostRow: View {
                 Image(systemName: "xmark")
                     .foregroundColor(.secondary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .accessibilityLabel("Dismiss \(kind.displayLabel)")
         }
         .padding(.vertical, 8)
@@ -384,7 +384,7 @@ private struct LayerRow: View {
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
 
             thumbnail
 
@@ -405,7 +405,7 @@ private struct LayerRow: View {
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
 
             Button(action: onToggleExpand) {
                 Image(systemName: "chevron.right")
@@ -415,7 +415,7 @@ private struct LayerRow: View {
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
         }
     }
 
@@ -497,7 +497,7 @@ private struct LayerRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .padding(.top, 2)
             }
         }
