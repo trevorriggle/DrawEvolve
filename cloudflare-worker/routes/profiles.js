@@ -23,6 +23,7 @@ import {
   getUserTier,
 } from '../middleware/auth.js';
 import {
+  isAppAttestRequired,
   readAppAttestHeaders,
   getAttestedKey,
   computeAppAttestClientDataHash,
@@ -85,35 +86,44 @@ export async function requireAuth(request, env, ctx) {
   // and PATCH/POST handlers want to JSON.parse the same bytes.
   const rawBody = new Uint8Array(await request.arrayBuffer());
 
-  const attestHeaders = readAppAttestHeaders(request);
-  if (!attestHeaders) {
-    return { ok: false, response: jsonResponse({ error: 'attest_headers_missing' }, 401) };
-  }
-  const stored = await getAttestedKey(attestHeaders.keyId, env);
-  if (!stored) {
-    return { ok: false, response: jsonResponse({ error: 'attest_key_unknown' }, 401) };
-  }
-  const expectedEnv = env.APP_ATTEST_ENV === 'production' ? 'production' : 'development';
-  if (stored.env !== expectedEnv) {
-    return { ok: false, response: jsonResponse({ error: 'attest_env_mismatch' }, 401) };
-  }
-  const expectedClientDataHash = await computeAppAttestClientDataHash(
-    request.method,
-    new URL(request.url).pathname || '/',
-    rawBody,
-  );
-  try {
-    const { newCounter } = await verifyAppAttestAssertion({
-      assertionB64: attestHeaders.assertion,
-      storedPubKey: stored.pub,
-      storedCounter: stored.counter,
-      expectedClientDataHash,
-      env,
-    });
-    ctx.waitUntil(updateAttestedKeyCounter(attestHeaders.keyId, newCounter, env));
-  } catch (err) {
-    console.log('[profiles] App Attest assertion failed', err?.message);
-    return { ok: false, response: jsonResponse({ error: 'attest_assertion_invalid' }, 401) };
+  // Kill-switch: when APP_ATTEST_REQUIRED="false" the gate is skipped
+  // and this shared helper falls back to JWT auth alone. Mirrors the
+  // pattern in feedback.js / prompts.js. requireAuth is the single
+  // gate for /v1/me, /v1/me/evolution, /v1/profiles/* — wrapping here
+  // covers all of them.
+  if (isAppAttestRequired(env)) {
+    const attestHeaders = readAppAttestHeaders(request);
+    if (!attestHeaders) {
+      return { ok: false, response: jsonResponse({ error: 'attest_headers_missing' }, 401) };
+    }
+    const stored = await getAttestedKey(attestHeaders.keyId, env);
+    if (!stored) {
+      return { ok: false, response: jsonResponse({ error: 'attest_key_unknown' }, 401) };
+    }
+    const expectedEnv = env.APP_ATTEST_ENV === 'production' ? 'production' : 'development';
+    if (stored.env !== expectedEnv) {
+      return { ok: false, response: jsonResponse({ error: 'attest_env_mismatch' }, 401) };
+    }
+    const expectedClientDataHash = await computeAppAttestClientDataHash(
+      request.method,
+      new URL(request.url).pathname || '/',
+      rawBody,
+    );
+    try {
+      const { newCounter } = await verifyAppAttestAssertion({
+        assertionB64: attestHeaders.assertion,
+        storedPubKey: stored.pub,
+        storedCounter: stored.counter,
+        expectedClientDataHash,
+        env,
+      });
+      ctx.waitUntil(updateAttestedKeyCounter(attestHeaders.keyId, newCounter, env));
+    } catch (err) {
+      console.log('[profiles] App Attest assertion failed', err?.message);
+      return { ok: false, response: jsonResponse({ error: 'attest_assertion_invalid' }, 401) };
+    }
+  } else {
+    console.log('[profiles] attest enforcement disabled — request on JWT alone', userId);
   }
 
   return { ok: true, userId, payload, rawBody };
