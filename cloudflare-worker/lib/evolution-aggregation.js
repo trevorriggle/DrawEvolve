@@ -106,6 +106,14 @@ function mean(arr) {
  * entries (no tags) and malformed-tag entries, return the remainder sorted
  * by created_at DESC. Pure: takes the array shape returned by Supabase
  * REST and returns a normalized array.
+ *
+ * Carries `drawing_id` so downstream consumers (notably the v2 reel) can
+ * join each critique back to its source drawing's title / thumbnail /
+ * subject without re-traversing the drawings array. Also carries the
+ * critique `id` and `content` for excerpt extraction. The original
+ * chart-aggregation path (aggregateCategories + determineStatus) only
+ * reads created_ts + tags, so the extra fields are free for legacy
+ * callers.
  */
 export function flattenCritiques(drawings) {
   if (!Array.isArray(drawings)) return [];
@@ -119,6 +127,9 @@ export function flattenCritiques(drawings) {
       const ts = entry.created_at ? Date.parse(entry.created_at) : NaN;
       if (!Number.isFinite(ts)) continue;
       out.push({
+        critique_id: entry.id ?? null,
+        drawing_id: d?.id ?? null,
+        content: typeof entry.content === 'string' ? entry.content : '',
         created_at: entry.created_at,
         created_ts: ts,
         tags: entry.tags,
@@ -510,3 +521,335 @@ export const EXAMPLE_PAYLOAD = {
     { id: 'line', data_points: 2, needed: 5 },
   ],
 };
+
+// =============================================================================
+// v2 helpers — drawing reel, summary, stats
+// =============================================================================
+//
+// The v1 chart-based panel collapsed all critique data into per-category
+// trend lines. The v2 panel keeps the structured tags but reframes the
+// surface around concrete drawings + their critiques. These helpers
+// produce the new response sections; the chart-side helpers above remain
+// intact (and unused by the v2 route) for reference and in case we ever
+// want to A/B back to the chart presentation.
+
+// Excerpt cap. Long critiques are typical (gpt-5.1 outputs 2-4 paragraphs)
+// but the reel row should fit two lines on iPad. 240 chars is two visible
+// lines at the default body type size.
+const EXCERPT_MAX_CHARS = 240;
+
+// Heuristic markers — sentences containing any of these tokens are
+// preferred for the excerpt because they describe progress relative to
+// past critiques. Lowercased for case-insensitive match.
+const EXCERPT_PROGRESS_TOKENS = ['compared', 'previously', 'improv', 'since your last', 'since the last'];
+
+/**
+ * Deterministic excerpt picker. No LLM. Phase 2 will overlay an
+ * LLM-paraphrased version on top of this; Phase 1 ships with the raw
+ * sentence pick rendered to the reel.
+ *
+ * Algorithm:
+ *   1. Split critique text on sentence boundaries (`. `, `! `, `? `).
+ *   2. Prefer the first sentence containing any of EXCERPT_PROGRESS_TOKENS
+ *      (case-insensitive) — those sentences describe growth, which is the
+ *      reel's whole point.
+ *   3. Fall back to the first sentence.
+ *   4. Hard cap at EXCERPT_MAX_CHARS with single-character ellipsis.
+ *
+ * Pure function. Returns "" for empty/non-string input.
+ */
+export function extractExcerpt(text) {
+  if (typeof text !== 'string' || text.length === 0) return '';
+  // Split on sentence-end punctuation followed by whitespace. Preserves
+  // the punctuation. Anchors split on whitespace specifically so abbrev.
+  // dots (e.g. "Mr.") don't fragment sentences.
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (sentences.length === 0) return '';
+
+  const lower = sentences.map((s) => s.toLowerCase());
+  let pick = sentences[0];
+  for (let i = 0; i < sentences.length; i += 1) {
+    if (EXCERPT_PROGRESS_TOKENS.some((tok) => lower[i].includes(tok))) {
+      pick = sentences[i];
+      break;
+    }
+  }
+  if (pick.length <= EXCERPT_MAX_CHARS) return pick;
+  return pick.slice(0, EXCERPT_MAX_CHARS - 1).trimEnd() + '…';
+}
+
+/**
+ * Build the v2 summary block. Inputs:
+ *   - drawings: raw Supabase rows (with `context` jsonb already parsed by
+ *     the route — the v2 SELECT pulls `context` alongside id/title/etc).
+ *   - streak: the same shape computeStreak returns; used for drawings_this_month
+ *     and to derive critiques_this_month.
+ *   - now: epoch ms; used to count critiques in the 30-day window.
+ *
+ * Returns { drawings_this_month, critiques_this_month, top_subjects,
+ *           insights_last_updated_at }.
+ *
+ * `critiques_this_month` counts critiques (not drawings) whose
+ * `created_at` falls in the last 30 days. This is a more honest "what
+ * have you been doing recently" signal than `critiques_total` (which is
+ * lifetime) or `drawings_this_month` (which doesn't reflect critique
+ * volume).
+ *
+ * `top_subjects` is up to 3 most-frequent `context.subject` strings
+ * across the drawings list, lowercased and pluralized via a tiny rule
+ * (append "s" unless already plural-looking). Stripped of empties.
+ *
+ * `insights_last_updated_at` is null in Phase 1 (no LLM cache yet);
+ * Phase 2 populates it from the KV synthesis cache.
+ */
+export function buildSummary(drawings, streak, { now }) {
+  const safeDrawings = Array.isArray(drawings) ? drawings : [];
+  const monthCutoff = now - 30 * MS_PER_DAY;
+
+  let critiquesThisMonth = 0;
+  const subjectCounts = new Map();
+  for (const d of safeDrawings) {
+    const entries = Array.isArray(d?.critique_history) ? d.critique_history : [];
+    for (const e of entries) {
+      const ts = e?.created_at ? Date.parse(e.created_at) : NaN;
+      if (Number.isFinite(ts) && ts >= monthCutoff) critiquesThisMonth += 1;
+    }
+    const subject = typeof d?.context?.subject === 'string'
+      ? d.context.subject.trim().toLowerCase()
+      : '';
+    if (subject.length > 0) {
+      subjectCounts.set(subject, (subjectCounts.get(subject) ?? 0) + 1);
+    }
+  }
+
+  const topSubjects = [...subjectCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .slice(0, 3)
+    .map(([s]) => pluralizeSubject(s));
+
+  return {
+    drawings_this_month: streak?.drawings_this_month ?? 0,
+    critiques_this_month: critiquesThisMonth,
+    top_subjects: topSubjects,
+    insights_last_updated_at: null,
+  };
+}
+
+// Tiny plural rule. Acceptable English imperfection for v1 — "still lifes"
+// is the right plural for "still life" but the rule below produces
+// "still lifes" too because the input is already lowercased. Edge cases
+// like "fish" / "person" don't appear in DrawEvolve's subject vocabulary
+// (the questionnaire surfaces typical art subjects).
+function pluralizeSubject(subject) {
+  if (subject.endsWith('s')) return subject;
+  return subject + 's';
+}
+
+/**
+ * Build the v2 reel. Inputs:
+ *   - critiques: oldest-first OR newest-first array of flattenCritiques
+ *     output (function reorders internally).
+ *   - drawingsById: Map<drawing_id, drawing row> for joining title/
+ *     storage_path/context.subject onto each row.
+ *   - limit: max rows to return (default 10 per proposal §4.5).
+ *
+ * Returns the array of reel rows, newest-first.
+ *
+ * Each row carries both `excerpt_paraphrase` and `excerpt_raw`. In
+ * Phase 1, `excerpt_paraphrase` is null (no LLM yet); Phase 2 populates
+ * it from the synthesis cache. The iOS reel renders paraphrase when
+ * present and falls back to raw.
+ */
+export function buildReel(critiques, drawingsById, { limit = 10 } = {}) {
+  if (!Array.isArray(critiques) || critiques.length === 0) return [];
+  const sorted = [...critiques].sort((a, b) => b.created_ts - a.created_ts);
+  const out = [];
+  for (const c of sorted) {
+    if (out.length >= limit) break;
+    if (!c.drawing_id) continue;
+    const drawing = drawingsById.get(c.drawing_id);
+    if (!drawing) continue;
+    const title = typeof drawing.title === 'string' && drawing.title.trim().length > 0
+      ? drawing.title.trim()
+      : null;
+    const subject = typeof drawing.context?.subject === 'string'
+      ? drawing.context.subject.trim()
+      : null;
+    out.push({
+      critique_id: c.critique_id,
+      drawing_id: c.drawing_id,
+      drawing_title: title,
+      drawing_subject: subject,
+      thumbnail_path: drawing.storage_path ?? null,
+      created_at: c.created_at,
+      excerpt_paraphrase: null,
+      excerpt_raw: extractExcerpt(c.content),
+      primary_category: c.tags?.primary_category ?? null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Build the v2 stats footer. Inputs:
+ *   - critiques: full flattenCritiques output (NOT windowed — stats are
+ *     lifetime-scoped within the fetched 50-drawing limit).
+ *
+ * Returns { total_critiques, most_discussed_category,
+ *           most_improved_category, current_focus_area }.
+ *
+ * `most_discussed_category` = category with the highest weighted mention
+ *   count (primary = 1, secondary = 0.5, same weighting as the legacy
+ *   chart aggregation). Single id or null if no critiques.
+ *
+ * `most_improved_category` = category with the largest negative delta
+ *   between first-half and second-half severity averages (lower severity
+ *   = better). Only computed when there are >= 4 critiques (need 2 per
+ *   half to be meaningful). null otherwise.
+ *
+ * `current_focus_area` = focus_area_text from the most-recent critique
+ *   that has one set. null if none.
+ */
+export function buildStats(critiques) {
+  const safe = Array.isArray(critiques) ? critiques : [];
+  const total = safe.length;
+  if (total === 0) {
+    return {
+      total_critiques: 0,
+      most_discussed_category: null,
+      most_improved_category: null,
+      current_focus_area: null,
+    };
+  }
+
+  // Most-discussed: weighted category mention counter.
+  const mentionWeight = new Map();
+  for (const cat of CRITIQUE_CATEGORIES) mentionWeight.set(cat, 0);
+  for (const c of safe) {
+    const t = c.tags;
+    if (!t) continue;
+    mentionWeight.set(t.primary_category,
+      (mentionWeight.get(t.primary_category) ?? 0) + PRIMARY_WEIGHT);
+    for (const sec of t.secondary_categories) {
+      if (sec === t.primary_category) continue;
+      mentionWeight.set(sec, (mentionWeight.get(sec) ?? 0) + SECONDARY_WEIGHT);
+    }
+  }
+  let mostDiscussed = null;
+  let mostDiscussedWeight = 0;
+  for (const [id, w] of mentionWeight) {
+    if (w > mostDiscussedWeight) {
+      mostDiscussedWeight = w;
+      mostDiscussed = id;
+    }
+  }
+
+  // Most-improved: per-category, average severity first half vs second half
+  // (oldest-first order). The strongest negative delta (= biggest drop in
+  // severity) wins. Need at least 4 critiques total AND the winning
+  // category needs at least 2 per half.
+  let mostImproved = null;
+  if (total >= 4) {
+    const ordered = [...safe].sort((a, b) => a.created_ts - b.created_ts);
+    const perCat = new Map();
+    for (const cat of CRITIQUE_CATEGORIES) perCat.set(cat, []);
+    for (const c of ordered) {
+      const t = c.tags;
+      if (!t) continue;
+      perCat.get(t.primary_category).push(t.severity);
+    }
+    let bestDelta = 0;
+    for (const [id, series] of perCat) {
+      if (series.length < 4) continue;
+      const half = Math.floor(series.length / 2);
+      const firstAvg = mean(series.slice(0, half));
+      const secondAvg = mean(series.slice(half));
+      const delta = secondAvg - firstAvg;     // negative = improving
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        mostImproved = id;
+      }
+    }
+  }
+
+  // Current focus area: most-recent critique with a non-empty
+  // focus_area_text. safe is newest-first per flattenCritiques.
+  let focusArea = null;
+  for (const c of safe) {
+    const f = c.tags?.focus_area_text;
+    if (typeof f === 'string' && f.trim().length > 0) {
+      focusArea = f.trim();
+      break;
+    }
+  }
+
+  return {
+    total_critiques: total,
+    most_discussed_category: mostDiscussed,
+    most_improved_category: mostImproved,
+    current_focus_area: focusArea,
+  };
+}
+
+/**
+ * Build the v2 Themes section. Phase 1: returns up to 3 categories with
+ * status chips + a deterministic placeholder synthesis ("N critiques
+ * discussed {category}."). Phase 2 swaps the synthesis string for the
+ * LLM-paraphrased version cached in KV.
+ *
+ * Inputs:
+ *   - critiques: full flattenCritiques output (NOT windowed; themes look
+ *     across the user's recent history).
+ *   - limit: max themes to return (default 3 per proposal §4.3).
+ *
+ * Returns array of { category_id, status, synthesis, data_points }.
+ *
+ * A theme appears when the category has at least 2 critique mentions
+ * (primary or secondary). Status is computed by determineStatus over
+ * the category's severity series, using MIN_DATA_POINTS_GROWING (=2) as
+ * the floor so themes can render with only a couple of critiques. When
+ * the series is below that floor, status falls back to null and the
+ * iOS chip renders neutrally.
+ */
+export function buildThemes(critiques, { limit = 3 } = {}) {
+  const safe = Array.isArray(critiques) ? critiques : [];
+  if (safe.length === 0) return [];
+  // oldest-first for determineStatus
+  const ordered = [...safe].sort((a, b) => a.created_ts - b.created_ts);
+
+  const buckets = new Map();
+  for (const cat of CRITIQUE_CATEGORIES) buckets.set(cat, []);
+  for (const c of ordered) {
+    const t = c.tags;
+    if (!t) continue;
+    buckets.get(t.primary_category).push(t.severity * PRIMARY_WEIGHT);
+    for (const sec of t.secondary_categories) {
+      if (sec === t.primary_category) continue;
+      buckets.get(sec).push(t.severity * SECONDARY_WEIGHT);
+    }
+  }
+
+  const themes = [];
+  for (const [id, series] of buckets) {
+    if (series.length < 2) continue;
+    themes.push({
+      category_id: id,
+      status: determineStatus(series, MIN_DATA_POINTS_GROWING),
+      synthesis: defaultThemeSynthesis(id, series.length),
+      data_points: series.length,
+    });
+  }
+  themes.sort((a, b) => b.data_points - a.data_points
+    || (a.category_id < b.category_id ? -1 : 1));
+  return themes.slice(0, limit);
+}
+
+// Phase 1 fallback synthesis text. Plain template. Phase 2 will replace
+// this string with an LLM-paraphrased sentence pulled from the actual
+// critique excerpts for that category.
+function defaultThemeSynthesis(categoryId, dataPoints) {
+  return `${dataPoints} recent critique${dataPoints === 1 ? '' : 's'} touched on ${categoryId}.`;
+}
