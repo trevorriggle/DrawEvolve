@@ -46,6 +46,50 @@ struct EvolutionData: Codable {
     }
 }
 
+// MARK: - Preview payload
+
+extension EvolutionData {
+    /// Hardcoded illustrative payload for the "Show preview" toggle.
+    /// Mirrors `EXAMPLE_PAYLOAD` in
+    /// cloudflare-worker/lib/evolution-aggregation.js — kept in sync by
+    /// hand. Renders against the same EvolutionContentView pipeline as
+    /// real data, so what users see in the preview is exactly what they
+    /// get once their critique count crosses the mature threshold.
+    static func preview(realStreak: StreakData? = nil) -> EvolutionData {
+        EvolutionData(
+            state: .example,
+            window: WindowData(
+                critiqueCount: 25,
+                earliestAt: Calendar.current.date(byAdding: .day, value: -45, to: Date()),
+                latestAt: Date(),
+                spanDays: 45
+            ),
+            // Use the real user's streak when available so the streak row
+            // doesn't lie — the user's actual drawing/critique counts are
+            // visible alongside the illustrative chart.
+            streak: realStreak ?? StreakData(
+                drawingsThisWeek: 3,
+                drawingsThisMonth: 12,
+                critiquesTotal: 25,
+                drawingsTotal: 14
+            ),
+            categories: [
+                CategoryData(id: .anatomy,     dataPoints: 8, currentValue: 2.0, series: [4, 4.5, 3.5, 4, 3, 2.5, 2, 2], status: .improving),
+                CategoryData(id: .composition, dataPoints: 7, currentValue: 4.0, series: [2, 2.5, 3, 2.5, 3.5, 4, 4],     status: .currentFocus),
+                CategoryData(id: .value,       dataPoints: 6, currentValue: 2.5, series: [3, 2.5, 3, 3.5, 3, 2.5],         status: .steady),
+                CategoryData(id: .perspective, dataPoints: 5, currentValue: 1.5, series: [1, 1.5, 1, 1, 1.5],              status: .solidFoundation),
+            ],
+            warmingUp: [
+                WarmingUpItem(id: .color, dataPoints: 3, needed: 5),
+                WarmingUpItem(id: .line,  dataPoints: 2, needed: 5),
+            ],
+            summaryText: nil,
+            exampleArtistLabel: "Preview: this is what your evolution will look like after about 25 critiques. Yours will keep growing from here.",
+            classifierVersion: "preview"
+        )
+    }
+}
+
 enum EvolutionState: String, Codable {
     case example
     case early
