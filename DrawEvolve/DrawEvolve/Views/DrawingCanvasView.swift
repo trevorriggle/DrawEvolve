@@ -84,6 +84,11 @@ struct DrawingCanvasView: View {
     @State private var showSavedConfirmation = false
     @State private var showGallery = false
     @State private var showSettings = false   // Phase 6 — gear in collapsible chrome
+    /// Opt-in trigger for the beta-transparency notice. Was auto-presented
+    /// on first launch via ContentView's cascade; replaced with a manual
+    /// (!) info button below the gear — see `betaInfoButton` and the
+    /// iPhone toolbar item near the settings gear.
+    @State private var showBetaInfo = false
     @StateObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
@@ -230,6 +235,9 @@ struct DrawingCanvasView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $showBetaInfo) {
+            BetaTransparencyPopup(isPresented: $showBetaInfo)
+        }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -351,6 +359,12 @@ struct DrawingCanvasView: View {
                         Image(systemName: "gearshape")
                     }
                     .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showBetaInfo = true }) {
+                        Image(systemName: "exclamationmark.circle")
+                    }
+                    .accessibilityLabel("Beta information")
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -1044,6 +1058,8 @@ struct DrawingCanvasView: View {
                         if !isToolbarCollapsed {
                             settingsGearButton
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
+                            betaInfoButton
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
                         }
                     }
                     .padding(.top, 12)
@@ -1378,6 +1394,24 @@ struct DrawingCanvasView: View {
                 .shadow(radius: 4)
         }
         .accessibilityLabel("Settings")
+    }
+
+    /// Opt-in trigger for the beta-transparency notice. Sits under the
+    /// settings gear in the floating chrome so the same place that
+    /// houses meta-info (settings) also surfaces meta-info (beta state).
+    /// The popup itself is presented via the `.sheet(isPresented:
+    /// $showBetaInfo)` binding on the body.
+    private var betaInfoButton: some View {
+        Button(action: { showBetaInfo = true }) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 22))
+                .foregroundColor(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                .clipShape(Circle())
+                .shadow(radius: 4)
+        }
+        .accessibilityLabel("Beta information")
     }
 
     // saveToGalleryButton and getFeedbackButton scale themselves down on
