@@ -66,7 +66,7 @@ actor EvolutionService {
 
     /// Fetches and decodes the evolution payload for the current user.
     /// Throws specific EvolutionError cases the view-model maps to UI states.
-    func fetchEvolution() async throws -> EvolutionData {
+    func fetchEvolution() async throws -> EvolutionFeed {
         // 1. Supabase access token — without one the Worker returns 401.
         guard let client = SupabaseManager.shared.client else {
             throw EvolutionError.notAuthenticated
@@ -150,7 +150,7 @@ actor EvolutionService {
         }
 
         do {
-            return try decoder.decode(EvolutionData.self, from: data)
+            return try decoder.decode(EvolutionFeed.self, from: data)
         } catch {
             throw EvolutionError.decoding
         }

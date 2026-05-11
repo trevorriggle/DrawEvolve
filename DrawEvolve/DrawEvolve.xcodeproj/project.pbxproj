@@ -56,12 +56,9 @@
 		DE000054 /* EvolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100054 /* EvolutionService.swift */; };
 		DE000055 /* EvolutionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100055 /* EvolutionViewModel.swift */; };
 		DE000056 /* EvolutionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100056 /* EvolutionView.swift */; };
-		DE000057 /* EvolutionContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100057 /* EvolutionContentView.swift */; };
-		DE000058 /* StreakRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100058 /* StreakRowView.swift */; };
-		DE000059 /* EvolutionChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100059 /* EvolutionChartView.swift */; };
-		DE000060 /* EvolutionLegendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100060 /* EvolutionLegendView.swift */; };
-		DE000061 /* WarmingUpRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100061 /* WarmingUpRowView.swift */; };
-		DE000062 /* EvolutionEmptyStateCTA.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100062 /* EvolutionEmptyStateCTA.swift */; };
+		DE000057 /* EvolutionPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100057 /* EvolutionPanelView.swift */; };
+		DE000058 /* CritiqueReelRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100058 /* CritiqueReelRowView.swift */; };
+		DE000059 /* EvolutionEmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100059 /* EvolutionEmptyStateView.swift */; };
 		DE000063 /* SymmetryConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100063 /* SymmetryConfig.swift */; };
 		DE000064 /* SymmetrySettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100064 /* SymmetrySettingsView.swift */; };
 		DE000065 /* SymmetryGuideOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100065 /* SymmetryGuideOverlay.swift */; };
@@ -148,12 +145,9 @@
 		DE100054 /* EvolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionService.swift; sourceTree = "<group>"; };
 		DE100055 /* EvolutionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionViewModel.swift; sourceTree = "<group>"; };
 		DE100056 /* EvolutionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionView.swift; sourceTree = "<group>"; };
-		DE100057 /* EvolutionContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionContentView.swift; sourceTree = "<group>"; };
-		DE100058 /* StreakRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreakRowView.swift; sourceTree = "<group>"; };
-		DE100059 /* EvolutionChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionChartView.swift; sourceTree = "<group>"; };
-		DE100060 /* EvolutionLegendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionLegendView.swift; sourceTree = "<group>"; };
-		DE100061 /* WarmingUpRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarmingUpRowView.swift; sourceTree = "<group>"; };
-		DE100062 /* EvolutionEmptyStateCTA.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionEmptyStateCTA.swift; sourceTree = "<group>"; };
+		DE100057 /* EvolutionPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionPanelView.swift; sourceTree = "<group>"; };
+		DE100058 /* CritiqueReelRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueReelRowView.swift; sourceTree = "<group>"; };
+		DE100059 /* EvolutionEmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionEmptyStateView.swift; sourceTree = "<group>"; };
 		DE100063 /* SymmetryConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SymmetryConfig.swift; sourceTree = "<group>"; };
 		DE100064 /* SymmetrySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SymmetrySettingsView.swift; sourceTree = "<group>"; };
 		DE100065 /* SymmetryGuideOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SymmetryGuideOverlay.swift; sourceTree = "<group>"; };
@@ -384,12 +378,9 @@
 		DE000317 /* Evolution */ = {
 			isa = PBXGroup;
 			children = (
-				DE100057 /* EvolutionContentView.swift */,
-				DE100058 /* StreakRowView.swift */,
-				DE100059 /* EvolutionChartView.swift */,
-				DE100060 /* EvolutionLegendView.swift */,
-				DE100061 /* WarmingUpRowView.swift */,
-				DE100062 /* EvolutionEmptyStateCTA.swift */,
+				DE100057 /* EvolutionPanelView.swift */,
+				DE100058 /* CritiqueReelRowView.swift */,
+				DE100059 /* EvolutionEmptyStateView.swift */,
 			);
 			path = Evolution;
 			sourceTree = "<group>";
@@ -541,12 +532,9 @@
 				DE000054 /* EvolutionService.swift in Sources */,
 				DE000055 /* EvolutionViewModel.swift in Sources */,
 				DE000056 /* EvolutionView.swift in Sources */,
-				DE000057 /* EvolutionContentView.swift in Sources */,
-				DE000058 /* StreakRowView.swift in Sources */,
-				DE000059 /* EvolutionChartView.swift in Sources */,
-				DE000060 /* EvolutionLegendView.swift in Sources */,
-				DE000061 /* WarmingUpRowView.swift in Sources */,
-				DE000062 /* EvolutionEmptyStateCTA.swift in Sources */,
+				DE000057 /* EvolutionPanelView.swift in Sources */,
+				DE000058 /* CritiqueReelRowView.swift in Sources */,
+				DE000059 /* EvolutionEmptyStateView.swift in Sources */,
 				DE000063 /* SymmetryConfig.swift in Sources */,
 				DE000064 /* SymmetrySettingsView.swift in Sources */,
 				DE000065 /* SymmetryGuideOverlay.swift in Sources */,
