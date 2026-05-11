@@ -279,6 +279,32 @@ class CanvasStateManager: ObservableObject {
                 if newTool == .blurAdjustment && !self.blurAdjustmentActive {
                     self.beginBlurAdjustment()
                 }
+
+                // Brush-variant calibration. Each variant (pencil / inkPen /
+                // marker / airbrush / charcoal / brush) has its own size /
+                // opacity / hardness / spacing / grainDensity defaults so a
+                // freshly-selected Charcoal actually LOOKS like charcoal —
+                // not like a default brush. Without this snap-back, all five
+                // shaders rendered against the same generic settings produce
+                // near-identical strokes (the user-visible "they all look
+                // the same" complaint).
+                //
+                // Preserves the color across the switch — only the brush-
+                // shape knobs reset. Pressure / minPressureSize / maxPressureSize
+                // also carry through since they're user-prefs, not per-brush.
+                if let defaults = BrushSettings.defaults(for: newTool) {
+                    var next = defaults
+                    next.color = self.brushSettings.color
+                    next.pressureSensitivity = self.brushSettings.pressureSensitivity
+                    next.minPressureSize = self.brushSettings.minPressureSize
+                    next.maxPressureSize = self.brushSettings.maxPressureSize
+                    // Don't disturb effect-tool params (blur / smudge) — they're
+                    // owned by their own tool sessions and shouldn't be wiped
+                    // when bouncing between brush variants.
+                    next.blurStrength = self.brushSettings.blurStrength
+                    next.smudgeStrength = self.brushSettings.smudgeStrength
+                    self.brushSettings = next
+                }
             }
 
         // Start with one layer. Inlined (rather than via `addLayer()`)

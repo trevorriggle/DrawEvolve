@@ -384,8 +384,9 @@ static float brushHash(float2 p) {
     return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
 }
 
-// 1. Pencil — sharp-ish edge, semi-transparent, light stochastic grain.
-// Mimics graphite: pressure drives darkness more than width.
+// 1. Pencil — sharp narrow edge with directional paper-tooth grain.
+// Mimics graphite on textured paper: pressure drives darkness more than
+// width, and the strokes show the paper texture as light streaks.
 fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
                                       float2 pointCoord [[point_coord]],
                                       constant BrushUniforms &uniforms [[buffer(0)]],
@@ -393,21 +394,27 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // Hard-ish edge by default; honours hardness if user softens it.
-    float softness = 1.0 - uniforms.hardness;
+    // Pencil edge is ALWAYS fairly sharp — even if the user softens
+    // hardness in the panel, force a floor of 0.85 so the look stays
+    // identifiably "pencil." Without this floor, pencil at hardness 0.5
+    // is indistinguishable from a default brush at hardness 0.5.
+    float hardness = max(uniforms.hardness, 0.85);
+    float softness = 1.0 - hardness;
     float edge = 1.0 - softness;
     float alpha = smoothstep(1.0, edge, dist);
 
-    // Procedural grain — multiplied into alpha so ridges show as lighter
-    // streaks, not color shifts. 0.6 baseline keeps it from reading as
-    // empty space when grain dips low.
-    float grain = mix(1.0, brushHash(in.position.xy), 0.4);
-    alpha *= grain;
+    // Paper-tooth grain — DIRECTIONAL hash anchored on (x, y/3) so the
+    // grain reads as horizontal streaks rather than isotropic speckle.
+    // Strength bumped from 0.4 → 0.7 mix so it's actually visible at
+    // default settings. Without this, pencil read as a soft solid disc.
+    float toothGrain = brushHash(float2(in.position.x, in.position.y * 0.33));
+    float grain = mix(0.3, 1.0, toothGrain);
+    alpha *= mix(1.0, grain, 0.7);
 
-    // Pressure curve: opacity-dominant. A heavier press should darken,
-    // not just widen, so square the pressure for opacity. Size still
-    // tracks pressure linearly via the vertex shader.
-    float pressureOpacity = uniforms.pressure * uniforms.pressure;
+    // Pressure curve: opacity-dominant. Cube the pressure (was square)
+    // so light strokes are noticeably lighter — pencil sketches build
+    // up density through repeated light strokes, not heavy single ones.
+    float pressureOpacity = uniforms.pressure * uniforms.pressure * uniforms.pressure;
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position);
@@ -438,9 +445,10 @@ fragment float4 inkPenFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
-// 3. Marker — semi-transparent stamps that overlap to deepen. Standard
-// alpha blend handles the deepening for free; the shader's job is just
-// to deposit a flat-edged, partially-transparent disc.
+// 3. Marker — flat-topped semi-transparent stamps that overlap to deepen.
+// Looks distinctly different from pencil/brush because the EDGE is tight
+// (no soft falloff) but the FILL is partial — like Copic / Tombow markers.
+// Overlapping strokes visibly accumulate via the standard alpha blend.
 fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
                                       float2 pointCoord [[point_coord]],
                                       constant BrushUniforms &uniforms [[buffer(0)]],
@@ -448,26 +456,26 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // Medium softness — softer than ink pen, harder than airbrush. Honours
-    // user's hardness setting but biases toward a flatter edge by mixing
-    // with a fixed 0.6 floor.
-    float effectiveHardness = max(uniforms.hardness, 0.55);
-    float softness = 1.0 - effectiveHardness;
-    float edge = 1.0 - softness;
-    float alpha = smoothstep(1.0, edge, dist);
+    // FLAT-TOPPED edge. Almost no falloff inside the disc — alpha is
+    // a hard 1.0 from 0 to 0.9, then a tight smoothstep to 0 between
+    // 0.9 and 1.0. This is the marker fingerprint: rectangular-looking
+    // strokes when the spacing is right, with sharp crisp edges.
+    float alpha = 1.0 - smoothstep(0.88, 1.0, dist);
 
-    // Pressure modulates opacity only. Size stays locked (vertex shader
-    // multiplies size by pressure; we counteract by dividing here? No —
-    // simpler to just let size track pressure subtly. The "feel" the
-    // audit calls out is opacity-driven deepening; size variation is OK.)
+    // Pressure modulates opacity. Light pressure → translucent stroke,
+    // hard pressure → near-solid. Markers should be ~40% per stamp by
+    // default so overlaps darken visibly without immediately saturating.
     alpha *= uniforms.opacity * uniforms.pressure;
 
     alpha *= sampleSelectionMask(selectionMask, in.position);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
-// 4. Airbrush — very soft falloff, low per-stamp opacity. The user's
-// stroke speed controls density (slow = many stamps overlap = dense).
+// 4. Airbrush — very soft Gaussian-bell falloff plus visible mist grain.
+// Differs from a soft brush in that the density CONCENTRATES in the
+// center and fades to nothing at the edge, with stochastic mist
+// speckle on top. Density builds via overlap, not single-stamp
+// opacity (defaults to 0.08 alpha per stamp).
 fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
                                         float2 pointCoord [[point_coord]],
                                         constant BrushUniforms &uniforms [[buffer(0)]],
@@ -475,19 +483,20 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // Quadratic falloff for a softer-than-Gaussian profile. Pure smoothstep
-    // from 0→1 is too flat in the middle; squaring the (1 - dist) term
-    // gives an actual airbrush bell curve.
+    // Quartic falloff (was quadratic). 4th power gives a sharper
+    // concentration at the center and a longer skirt — the visual
+    // hallmark of an airbrush pass vs a soft brush. Pure exp(-dist²)
+    // would be more accurate but the quartic is cheaper and very close.
     float falloff = 1.0 - clamp(dist, 0.0, 1.0);
-    float alpha = falloff * falloff;
+    float alpha = falloff * falloff * falloff * falloff;
 
-    // Light per-pixel grain (~10% modulation) gives the mist its
-    // characteristic uneven density without requiring a noise texture.
-    float grain = mix(1.0, brushHash(in.position.xy), 0.1);
+    // Mist grain — bumped from 10% → 25% modulation so the texture
+    // actually reads as airbrush mist, not a perfectly smooth halo.
+    float grain = mix(1.0, brushHash(in.position.xy * 2.0), 0.25);
     alpha *= grain;
 
-    // Pressure modulates opacity, not size. Squaring keeps light pressure
-    // genuinely faint.
+    // Pressure modulates opacity, not size. Square keeps light pressure
+    // genuinely faint so the airbrush "feathers in" as you press.
     float pressureOpacity = uniforms.pressure * uniforms.pressure;
     alpha *= uniforms.opacity * pressureOpacity;
 
@@ -495,10 +504,11 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
-// 5. Charcoal — soft edge plus heavy procedural grain. Drags pigment
-// unevenly. The grain term is gated by `uniforms.grainDensity` so the
-// settings panel can dial it from "smooth" (effectively a soft brush)
-// to "fully speckled".
+// 5. Charcoal — soft irregular edge plus VERY heavy procedural grain.
+// The grain term is gated by `uniforms.grainDensity` so the settings
+// panel can dial from smooth (effectively a soft brush) to fully
+// speckled. At the default density 0.9 set by BrushSettings.defaults,
+// it reads unmistakably as charcoal — rough, broken, textured.
 fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
                                         float2 pointCoord [[point_coord]],
                                         constant BrushUniforms &uniforms [[buffer(0)]],
@@ -510,17 +520,34 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     float edge = 1.0 - softness;
     float alpha = smoothstep(1.0, edge, dist);
 
-    // Heavy grain. Two-octave hash (offset coordinates) produces a more
-    // rocky/textured look than a single hash; charcoal benefits from
-    // higher-frequency variation than pencil.
-    float grain1 = brushHash(in.position.xy * 0.85);
-    float grain2 = brushHash(in.position.xy * 1.7 + float2(13.0, 7.0));
-    float grain = grain1 * 0.6 + grain2 * 0.4;
+    // Heavy three-octave grain — was two-octave. Each octave is the
+    // hash() at a different spatial frequency; summing makes the
+    // texture rocky and irregular rather than blocky or noisy.
+    float grain1 = brushHash(in.position.xy * 0.6);
+    float grain2 = brushHash(in.position.xy * 1.4 + float2(13.0, 7.0));
+    float grain3 = brushHash(in.position.xy * 3.1 + float2(31.0, 19.0));
+    float grain = grain1 * 0.5 + grain2 * 0.3 + grain3 * 0.2;
+
+    // Steepen the grain into a black/white speckle (was linear). This
+    // is what gives charcoal its broken edges and patchy fill — the
+    // pigment grabs the paper unevenly. smoothstep maps the noise into
+    // a high-contrast on/off pattern that reads as char fragments.
+    grain = smoothstep(0.25, 0.75, grain);
+
     // grainDensity 0 → no grain (multiplier = 1), 1 → full grain.
+    // At default density 0.9 the strokes are aggressively speckled.
     alpha *= mix(1.0, grain, clamp(uniforms.grainDensity, 0.0, 1.0));
 
-    // Pressure: moderate size effect (vertex shader handles size), light
-    // opacity floor — even soft strokes leave visible deposit.
+    // EDGE BREAKUP — multiply alpha by additional grain ONLY at the
+    // outer band of the disc, so the stroke's edge breaks up irregularly
+    // like a charcoal stick dragging across paper. The center stays
+    // mostly solid (or as speckled as grainDensity dictates).
+    float edgeBand = smoothstep(0.4, 1.0, dist);
+    float edgeBreakup = mix(1.0, brushHash(in.position.xy * 2.3 + float2(7.0, 5.0)), edgeBand * 0.6);
+    alpha *= edgeBreakup;
+
+    // Pressure: moderate. Even light strokes leave visible deposit
+    // (charcoal is sticky), so floor at 0.6.
     float pressureOpacity = mix(0.6, 1.0, uniforms.pressure);
     alpha *= uniforms.opacity * pressureOpacity;
 

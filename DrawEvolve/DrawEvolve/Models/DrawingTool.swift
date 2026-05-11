@@ -145,6 +145,53 @@ struct BrushSettings {
     // 0 = smooth (no grain), 1 = fully speckled. Only surfaced in the
     // settings UI when activeTool is `.charcoal`.
     var grainDensity: Float = 0.5
+
+    /// Calibrated per-brush starting values. Each brush variant has a
+    /// distinct design intent (graphite vs ink vs charcoal vs airbrush)
+    /// that's only legible at the right size + edge + grain. CanvasState
+    /// applies these on tool change so a fresh-out-of-the-tab Charcoal
+    /// doesn't look like a default Brush — they actually feel different
+    /// immediately. The user can still adjust within session via the
+    /// settings panel; the snap-back happens on the next tool switch.
+    static func defaults(for tool: DrawingTool) -> BrushSettings? {
+        var s = BrushSettings()
+        switch tool {
+        case .brush:
+            s.size = 10
+            s.opacity = 1.0
+            s.hardness = 0.8
+            s.spacing = 0.1
+        case .pencil:
+            s.size = 5            // graphite is narrow
+            s.opacity = 0.55      // strokes build up; not opaque per stamp
+            s.hardness = 0.95     // sharp edge
+            s.spacing = 0.05      // tight spacing for smooth lines
+        case .inkPen:
+            s.size = 7            // medium-thin
+            s.opacity = 1.0       // confident solid lines
+            s.hardness = 1.0      // hard edge (the shader enforces this too)
+            s.spacing = 0.04      // very tight spacing — no gaps in a line
+        case .marker:
+            s.size = 14           // wider than brush
+            s.opacity = 0.45      // semi-transparent; overlapping deepens
+            s.hardness = 0.6      // soft-ish but flat-topped
+            s.spacing = 0.05
+        case .airbrush:
+            s.size = 65           // big mist
+            s.opacity = 0.08      // very light per-stamp
+            s.hardness = 0.0      // soft falloff (shader uses quadratic anyway)
+            s.spacing = 0.02      // tight overlap for density build
+        case .charcoal:
+            s.size = 24           // wide charcoal stick
+            s.opacity = 0.85      // heavy deposit
+            s.hardness = 0.4      // soft-ish edge
+            s.spacing = 0.06
+            s.grainDensity = 0.9  // very speckled by default
+        default:
+            return nil            // non-brush tools — caller does nothing
+        }
+        return s
+    }
 }
 
 /// Represents a single brush stroke
