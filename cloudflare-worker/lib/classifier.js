@@ -130,16 +130,35 @@ export async function classifyCritique({ feedback, env, fetcher = fetch }) {
           { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
           { role: 'user', content: feedback },
         ],
-        temperature: 0,
-        seed: 42,
-        max_completion_tokens: 300,
+        // gpt-5 series is a reasoning model — it spends tokens on
+        // internal chain-of-thought BEFORE producing visible output.
+        // max_completion_tokens has to cover BOTH reasoning + output.
+        // 300 was enough for gpt-4o (non-reasoning) but starved gpt-5-mini
+        // → response.content came back empty every time. Bumped to 2000.
+        max_completion_tokens: 2000,
+        // gpt-5 series accepts: 'none' | 'low' | 'medium' | 'high' as a
+        // FLAT field on chat/completions. 'none' tells the model "do as
+        // little reasoning as possible" — perfect for a classifier whose
+        // job is pure JSON schema fill-in, not deep analysis. Also cuts
+        // token cost dramatically (most cost in reasoning models is the
+        // internal reasoning tokens). See CLAUDE.md gotcha #7 — the
+        // nested `reasoning: { effort }` shape is the /v1/responses
+        // endpoint and 400s here; flat is the chat/completions form.
+        reasoning_effort: 'none',
+        // gpt-5 series only accepts the default temperature (1) and
+        // rejects the `seed` field. Both omitted; determinism is
+        // shoulderable since json_schema constrains the response shape.
         response_format: { type: 'json_schema', json_schema: CLASSIFIER_JSON_SCHEMA },
       }),
     });
     if (!res.ok) {
       let body = '<unavailable>';
       try { body = await res.text(); } catch {}
-      console.error('[classifier] non-ok status', res.status, 'body:', body);
+      // Flatten whitespace so the whole error fits one tail line —
+      // OpenAI's JSON error bodies span 4-5 lines and break grep
+      // filters in wrangler tail.
+      const flat = body.replace(/\s+/g, ' ').slice(0, 500);
+      console.error('[classifier] non-ok status', res.status, 'body:', flat);
       return null;
     }
     const data = await res.json();

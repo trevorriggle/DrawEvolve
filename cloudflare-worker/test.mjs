@@ -3652,11 +3652,16 @@ test('classifyCritique returns parsed tags with classifier_version stamped on su
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'https://api.openai.com/v1/chat/completions');
   assert.equal(calls[0].init.headers.Authorization, 'Bearer sk-test-classifier');
-  // Body shape contract: model swap, deterministic params, json_schema strict.
+  // Body shape contract: model swap + json_schema strict.
+  // temperature/seed dropped 2026-05-11 — gpt-5-mini rejects custom
+  // temperature and the seed field outright. max_completion_tokens
+  // bumped 300 → 2000 to cover gpt-5's internal reasoning tokens;
+  // reasoning_effort: 'none' added to keep that overhead minimal.
   assert.equal(calls[0].body.model, 'gpt-5-mini');
-  assert.equal(calls[0].body.temperature, 0);
-  assert.equal(calls[0].body.seed, 42);
-  assert.equal(calls[0].body.max_completion_tokens, 300);
+  assert.equal(calls[0].body.temperature, undefined);
+  assert.equal(calls[0].body.seed, undefined);
+  assert.equal(calls[0].body.max_completion_tokens, 2000);
+  assert.equal(calls[0].body.reasoning_effort, 'none');
   assert.equal(calls[0].body.response_format.type, 'json_schema');
   assert.equal(calls[0].body.response_format.json_schema.strict, true);
   assert.deepEqual(calls[0].body.response_format.json_schema.schema.properties.primary_category.enum, CRITIQUE_CATEGORIES);

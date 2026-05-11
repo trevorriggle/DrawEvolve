@@ -196,7 +196,14 @@ export async function handleEvolution(request, env, ctx, fetcher = fetch) {
 // taps), the window is small enough to accept. A migration adding an
 // `update_critique_entry_tags(uuid, uuid, jsonb)` RPC would close it.
 
-const REFRESH_BACKFILL_CAP = 100;
+// Cap on classifier calls per refresh tap. Sized against Cloudflare's
+// 50-subrequest-per-invocation limit (drawings fetch + PATCHes consume
+// some, leaving headroom for classifier fan-out) and the ~30s wall-
+// clock budget. Classifier calls run in parallel via Promise.all so
+// the total wall-clock is roughly the slowest single call, not the
+// sum — without parallelism, 40 sequential calls at 2-3s each would
+// blow the worker timeout.
+const REFRESH_BACKFILL_CAP = 40;
 
 async function patchDrawingCritiqueHistory({ env, drawingId, history, fetcher = fetch }) {
   const url = `${env.SUPABASE_URL}/rest/v1/drawings?id=eq.${encodeURIComponent(drawingId)}`;
@@ -260,49 +267,67 @@ export async function handleEvolutionRefresh(request, env, ctx, fetcher = fetch)
       'empty_content', emptyContent);
   }
 
-  // First pass: count what's missing, decide how many to backfill in
-  // this call. We work in chronological order (oldest first) so a
-  // capped backfill makes progress on the longest-untagged entries
-  // first; users see their full history fill in across taps.
-  let scanned = 0;
-  let backfilled = 0;
-  let classifierNulls = 0;
-  let capReached = false;
-  const drawingsToPatch = new Map();   // drawing_id → updated critique_history array
-
-  outer: for (const d of drawings) {
+  // Build a flat list of entries-to-classify across all drawings.
+  // We need to remember each entry's drawing + array position so we
+  // can put the classified tags back in the right slot after the
+  // parallel fan-out. Chronological order across drawings so a
+  // capped backfill progresses oldest-first; users see their full
+  // history fill in across taps.
+  const work = [];       // { drawingId, entryIndex, entry, content }
+  const sortedByDrawing = new Map();  // drawing_id → sorted entries array
+  for (const d of drawings) {
     const entries = Array.isArray(d?.critique_history) ? d.critique_history : [];
     if (entries.length === 0) continue;
-    // Chronological copy so partial backfills are progressive.
     const sorted = [...entries].sort((a, b) => {
       const ta = a?.created_at ? Date.parse(a.created_at) : 0;
       const tb = b?.created_at ? Date.parse(b.created_at) : 0;
       return ta - tb;
     });
-    let mutated = false;
+    sortedByDrawing.set(d.id, sorted);
     for (let i = 0; i < sorted.length; i += 1) {
       const entry = sorted[i];
       if (!entry || typeof entry !== 'object') continue;
-      if (entry.tags) continue;        // already classified — skip
-      scanned += 1;
-      if (backfilled >= REFRESH_BACKFILL_CAP) {
-        capReached = true;
-        break outer;
-      }
+      if (entry.tags) continue;
       const content = typeof entry.content === 'string' ? entry.content : '';
       if (content.trim().length === 0) continue;
-      const tags = await classifyCritique({ feedback: content, env, fetcher });
-      if (!tags) {
-        classifierNulls += 1;
-        continue;
-      }
-      sorted[i] = { ...entry, tags };
-      mutated = true;
-      backfilled += 1;
+      work.push({ drawingId: d.id, entryIndex: i, entry, content });
     }
-    if (mutated) {
-      drawingsToPatch.set(d.id, sorted);
+  }
+  // Cross-drawing chronological order: oldest first.
+  work.sort((a, b) => {
+    const ta = a.entry?.created_at ? Date.parse(a.entry.created_at) : 0;
+    const tb = b.entry?.created_at ? Date.parse(b.entry.created_at) : 0;
+    return ta - tb;
+  });
+  const scanned = work.length;
+  const capReached = scanned > REFRESH_BACKFILL_CAP;
+  const todo = work.slice(0, REFRESH_BACKFILL_CAP);
+
+  // PARALLEL classifier fan-out. Sequential calls would blow CF's ~30s
+  // wall-clock budget (~3s/call × 40 calls = 120s). Promise.all caps
+  // at the slowest single call — typically 5-8 seconds for gpt-5-mini
+  // with json_schema. OpenAI's rate limits absorb 40 simultaneous
+  // requests comfortably for the small-model tier.
+  const tagsResults = await Promise.all(
+    todo.map((w) => classifyCritique({ feedback: w.content, env, fetcher }))
+  );
+
+  // Apply tags into the sorted arrays, track patches per drawing.
+  let backfilled = 0;
+  let classifierNulls = 0;
+  const drawingsToPatch = new Map();
+  for (let i = 0; i < todo.length; i += 1) {
+    const w = todo[i];
+    const tags = tagsResults[i];
+    if (!tags) {
+      classifierNulls += 1;
+      continue;
     }
+    const sorted = sortedByDrawing.get(w.drawingId);
+    if (!sorted) continue;
+    sorted[w.entryIndex] = { ...w.entry, tags };
+    drawingsToPatch.set(w.drawingId, sorted);
+    backfilled += 1;
   }
   console.log('[evolution-refresh] summary',
     'scanned', scanned,
