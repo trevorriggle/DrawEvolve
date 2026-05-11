@@ -121,7 +121,14 @@ export function buildEvolutionResponseV2(drawings, { windowCritiques, windowDays
     themes: buildThemes(windowCritiquesEntries),
     highlight: null,                        // Phase 3 — same-subject pair
     reel: buildReel(allReelCritiques, drawingsById, { limit: REEL_PAGE_SIZE }),
-    stats: buildStats(taggedCritiques),
+    // Stats's `total_critiques` should reflect ALL critiques, not
+    // just classified ones — otherwise a user with 41 pre-classifier
+    // critiques sees "Total critiques: 0" until they backfill, which
+    // contradicts the header's "41 critiques" line. The category-
+    // based stats (most_discussed, most_improved, current_focus) all
+    // safely skip untagged entries via internal `if (!c.tags) continue`
+    // guards, so passing the unfiltered list is safe.
+    stats: buildStats(allReelCritiques),
     // v3 (Studio Wall + Skill Radar): every classified critique with
     // its drawing's metadata + full severity tag set. Oldest-first;
     // iOS renders newest on the right of the wall.
