@@ -90,15 +90,32 @@ struct PromptParameters: Codable, Equatable {
     var tone: PromptTone?
     var depth: PromptDepth?
     var techniques: [PromptTechnique]?
+    /// Freeform user-authored voice description. Optional. When set, the
+    /// Worker uses this text as the system voice (wrapped in a safety
+    /// preamble that defangs obvious prompt-injection attempts), instead
+    /// of falling back to the selected preset. 280-char cap enforced
+    /// both client-side (TextEditor binding) and server-side
+    /// (validatePromptParameters).
+    var customVoice: String?
 
     init(focus: PromptFocus? = nil,
          tone: PromptTone? = nil,
          depth: PromptDepth? = nil,
-         techniques: [PromptTechnique]? = nil) {
+         techniques: [PromptTechnique]? = nil,
+         customVoice: String? = nil) {
         self.focus = focus
         self.tone = tone
         self.depth = depth
         self.techniques = techniques
+        self.customVoice = customVoice
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case focus
+        case tone
+        case depth
+        case techniques
+        case customVoice = "custom_voice"
     }
 
     init(from decoder: Decoder) throws {
@@ -107,14 +124,19 @@ struct PromptParameters: Codable, Equatable {
         // shipped in a newer Worker) decodes as nil rather than throwing.
         // This mirrors the Worker's validate-and-narrow posture so old
         // clients never fail to render newer rows.
-        focus      = (try? container.decodeIfPresent(PromptFocus.self,        forKey: .focus))      ?? nil
-        tone       = (try? container.decodeIfPresent(PromptTone.self,         forKey: .tone))       ?? nil
-        depth      = (try? container.decodeIfPresent(PromptDepth.self,        forKey: .depth))      ?? nil
-        techniques = (try? container.decodeIfPresent([PromptTechnique].self,  forKey: .techniques)) ?? nil
+        focus       = (try? container.decodeIfPresent(PromptFocus.self,        forKey: .focus))       ?? nil
+        tone        = (try? container.decodeIfPresent(PromptTone.self,         forKey: .tone))        ?? nil
+        depth       = (try? container.decodeIfPresent(PromptDepth.self,        forKey: .depth))       ?? nil
+        techniques  = (try? container.decodeIfPresent([PromptTechnique].self,  forKey: .techniques))  ?? nil
+        customVoice = (try? container.decodeIfPresent(String.self,             forKey: .customVoice)) ?? nil
     }
 
     var isEmpty: Bool {
-        focus == nil && tone == nil && depth == nil && (techniques?.isEmpty ?? true)
+        focus == nil
+            && tone == nil
+            && depth == nil
+            && (techniques?.isEmpty ?? true)
+            && (customVoice?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 }
 

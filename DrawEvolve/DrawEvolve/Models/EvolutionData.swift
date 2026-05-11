@@ -41,6 +41,12 @@ struct EvolutionFeed: Codable {
     let highlight: EvolutionHighlight?
     let reel: [CritiqueReelRow]
     let stats: EvolutionStats
+    /// v3: every classified critique with its drawing's metadata +
+    /// full severity tag set. Powers EvolutionStudioWallView and
+    /// EvolutionSkillRadarView. Oldest-first (worker promises). The
+    /// older `reel` and `themes` fields remain in the payload for
+    /// back-compat but are no longer rendered in v3.
+    let taggedCritiques: [TaggedCritique]
     let streak: StreakData
     let classifierVersion: String
 
@@ -51,8 +57,89 @@ struct EvolutionFeed: Codable {
         case highlight
         case reel
         case stats
+        case taggedCritiques = "tagged_critiques"
         case streak
         case classifierVersion = "classifier_version"
+    }
+
+    // Explicit memberwise init — Swift's synthesized one is suppressed
+    // because we provide a custom `init(from:)` below for lenient
+    // decoding. Used by `EvolutionFeed.preview()` and any future
+    // ad-hoc construction.
+    init(summary: EvolutionSummary,
+         digestSentence: String?,
+         themes: [EvolutionTheme],
+         highlight: EvolutionHighlight?,
+         reel: [CritiqueReelRow],
+         stats: EvolutionStats,
+         taggedCritiques: [TaggedCritique],
+         streak: StreakData,
+         classifierVersion: String) {
+        self.summary = summary
+        self.digestSentence = digestSentence
+        self.themes = themes
+        self.highlight = highlight
+        self.reel = reel
+        self.stats = stats
+        self.taggedCritiques = taggedCritiques
+        self.streak = streak
+        self.classifierVersion = classifierVersion
+    }
+
+    // Lenient decoder so older worker responses (pre-tagged_critiques)
+    // still decode without crashing the panel.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        summary           = try container.decode(EvolutionSummary.self, forKey: .summary)
+        digestSentence    = try container.decodeIfPresent(String.self, forKey: .digestSentence)
+        themes            = (try? container.decodeIfPresent([EvolutionTheme].self,    forKey: .themes))           ?? []
+        highlight         = try? container.decodeIfPresent(EvolutionHighlight.self,   forKey: .highlight)
+        reel              = (try? container.decodeIfPresent([CritiqueReelRow].self,   forKey: .reel))             ?? []
+        stats             = try container.decode(EvolutionStats.self, forKey: .stats)
+        taggedCritiques   = (try? container.decodeIfPresent([TaggedCritique].self,    forKey: .taggedCritiques))  ?? []
+        streak            = try container.decode(StreakData.self, forKey: .streak)
+        classifierVersion = (try? container.decodeIfPresent(String.self, forKey: .classifierVersion)) ?? "unknown"
+    }
+}
+
+// MARK: - Tagged critique (v3 Studio Wall + Skill Radar)
+
+struct TaggedCritique: Codable, Identifiable, Hashable {
+    let critiqueId: UUID?
+    let drawingId: UUID
+    let drawingTitle: String?
+    let drawingSubject: String?
+    let thumbnailPath: String?
+    let createdAt: Date
+    let contentExcerpt: String
+    let primaryCategory: CategoryID
+    let secondaryCategories: [CategoryID]
+    /// 1 (minor refinement) – 5 (needs significant work). Studio Wall
+    /// renders dot brightness ∝ severity; Skill Radar averages by
+    /// category and maps `(5 - avg) / 4` to vertex radius.
+    let severity: Int
+
+    var id: String {
+        critiqueId?.uuidString ?? "\(drawingId.uuidString)-\(createdAt.timeIntervalSince1970)"
+    }
+
+    /// Every tag this critique carries — primary plus secondaries.
+    /// Studio Wall renders one dot per entry.
+    var allCategories: [CategoryID] {
+        [primaryCategory] + secondaryCategories
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case critiqueId = "critique_id"
+        case drawingId = "drawing_id"
+        case drawingTitle = "drawing_title"
+        case drawingSubject = "drawing_subject"
+        case thumbnailPath = "thumbnail_path"
+        case createdAt = "created_at"
+        case contentExcerpt = "content_excerpt"
+        case primaryCategory = "primary_category"
+        case secondaryCategories = "secondary_categories"
+        case severity
     }
 }
 
@@ -198,6 +285,7 @@ extension EvolutionFeed {
                 mostImprovedCategory: .value,
                 currentFocusArea: "eye placement and proportion"
             ),
+            taggedCritiques: previewTaggedCritiques,
             streak: StreakData(
                 drawingsThisWeek: 3,
                 drawingsThisMonth: 8,
@@ -206,6 +294,42 @@ extension EvolutionFeed {
             ),
             classifierVersion: "preview"
         )
+    }
+
+    private static var previewTaggedCritiques: [TaggedCritique] {
+        let now = Date()
+        // Trend over the last ~60 days for the Studio Wall + Skill
+        // Radar preview. Severity drops over time in `.anatomy` (the
+        // user's current focus that they're improving on) and stays
+        // steady in `.composition` (the existing strength). Two
+        // drawings get multiple critiques to demonstrate the dot-row
+        // stacking pattern.
+        func ts(_ daysAgo: Int) -> Date {
+            Calendar.current.date(byAdding: .day, value: -daysAgo, to: now) ?? now
+        }
+        let d1 = UUID(), d2 = UUID(), d3 = UUID(), d4 = UUID()
+        return [
+            TaggedCritique(critiqueId: nil, drawingId: d1, drawingTitle: "Self-portrait 1",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(56),
+                           contentExcerpt: "Anatomy reads heavy and the eye placement is off.",
+                           primaryCategory: .anatomy, secondaryCategories: [.value], severity: 4),
+            TaggedCritique(critiqueId: nil, drawingId: d2, drawingTitle: "Still life",
+                           drawingSubject: "still life", thumbnailPath: nil, createdAt: ts(42),
+                           contentExcerpt: "Composition is balanced; values compress in the midtones.",
+                           primaryCategory: .composition, secondaryCategories: [.value], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Self-portrait 2",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(28),
+                           contentExcerpt: "Eye placement has improved — proportion still drifts.",
+                           primaryCategory: .anatomy, secondaryCategories: [], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Self-portrait 2",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(27),
+                           contentExcerpt: "Revised version: composition reads better; value contrast widened.",
+                           primaryCategory: .composition, secondaryCategories: [.value], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d4, drawingTitle: "Self-portrait 3",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(7),
+                           contentExcerpt: "Eye placement is clean; proportion noticeably tighter.",
+                           primaryCategory: .anatomy, secondaryCategories: [], severity: 1),
+        ]
     }
 
     private static var previewReel: [CritiqueReelRow] {

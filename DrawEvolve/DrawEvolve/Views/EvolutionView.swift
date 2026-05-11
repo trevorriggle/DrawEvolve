@@ -33,18 +33,46 @@ struct EvolutionView: View {
     @State private var showingPreview: Bool = false
 
     var body: some View {
-        Group {
-            switch viewModel.loadState {
-            case .idle, .loading:
-                loadingView
-            case .loaded(let feed):
-                loadedView(feed)
-            case .error(let error):
-                errorView(error)
+        ZStack(alignment: .top) {
+            Group {
+                switch viewModel.loadState {
+                case .idle, .loading:
+                    loadingView
+                case .loaded(let feed):
+                    loadedView(feed)
+                case .error(let error):
+                    errorView(error)
+                }
+            }
+            // Toast banner for refresh outcome ("Tagged N critiques",
+            // "Already up to date"). Auto-dismisses after 3 seconds via
+            // the .onChange handler below.
+            if let outcome = viewModel.lastRefreshOutcome, let text = outcome.bannerText {
+                refreshBanner(text)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .task { await viewModel.load() }
         .refreshable { await viewModel.load() }
+        .onChange(of: viewModel.lastRefreshOutcome) { _, new in
+            guard new != nil else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                await MainActor.run {
+                    withAnimation { viewModel.dismissRefreshOutcome() }
+                }
+            }
+        }
+    }
+
+    private func refreshBanner(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Capsule().fill(Color.accentColor))
+            .padding(.top, 8)
     }
 
     @ViewBuilder

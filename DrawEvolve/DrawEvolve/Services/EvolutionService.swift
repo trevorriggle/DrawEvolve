@@ -61,8 +61,106 @@ actor EvolutionService {
     /// both should move to a shared config at the same time.
     private let backendURL = URL(string: "https://drawevolve-backend.trevorriggle.workers.dev")!
     private let path = "/v1/me/evolution"
+    private let refreshPath = "/v1/me/evolution/refresh"
 
     private init() {}
+
+    /// Force-refresh: classifies any pre-classifier critiques on the
+    /// server, writes the tags back to Supabase, and returns the
+    /// updated feed in one round-trip. Cost is bounded by a server-
+    /// side cap (~100 critiques per call); a power user with more
+    /// untagged history would hit refresh again to chip the backlog
+    /// down. The response body extends GET /v1/me/evolution with
+    /// `backfilled`, `scanned`, `cap_reached` for the iOS toast.
+    func refreshEvolution() async throws -> (feed: EvolutionFeed, backfilled: Int, capReached: Bool) {
+        let (data, _) = try await postJSON(path: refreshPath, body: Data())
+        do {
+            let decoded = try Self.makeDecoder().decode(EvolutionRefreshResponse.self, from: data)
+            return (decoded.feed, decoded.backfilled, decoded.capReached)
+        } catch {
+            throw EvolutionError.decoding
+        }
+    }
+
+    /// POST helper. Shape mirrors fetchEvolution's URLSession plumbing
+    /// — same JWT + App Attest header chain, same status-code mapping.
+    private func postJSON(path: String, body: Data) async throws -> (Data, HTTPURLResponse) {
+        guard let client = SupabaseManager.shared.client else {
+            throw EvolutionError.notAuthenticated
+        }
+        let accessToken: String
+        do {
+            let session = try await client.auth.session
+            accessToken = session.accessToken
+        } catch {
+            throw EvolutionError.notAuthenticated
+        }
+
+        let url = backendURL.appendingPathComponent(path.trimmingCharacters(in: ["/"]))
+        let attestHeaders: [String: String]
+        do {
+            attestHeaders = try await AppAttestManager.shared.attestedHeaders(
+                method: "POST", path: path, body: body,
+            )
+        } catch {
+            throw EvolutionError.deviceVerificationFailed
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        for (name, value) in attestHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        request.httpBody = body
+
+        // Backfill is OpenAI-heavy; give it a long timeout. The worker
+        // caps work at ~100 critiques per call, and gpt-5.1-mini at ~1s
+        // each puts the worst-case round-trip near 2 minutes.
+        request.timeoutInterval = 180
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw EvolutionError.network
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw EvolutionError.unknown
+        }
+        switch http.statusCode {
+        case 200..<300: return (data, http)
+        case 401:       throw EvolutionError.notAuthenticated
+        default:        throw EvolutionError.server(http.statusCode)
+        }
+    }
+
+    /// Wire shape: `{ ...EvolutionFeed fields, backfilled, scanned, cap_reached }`.
+    /// We decode the feed by leaning on EvolutionFeed's existing lenient
+    /// `init(from:)` and pluck the three top-level extras alongside.
+    private struct EvolutionRefreshResponse: Decodable {
+        let feed: EvolutionFeed
+        let backfilled: Int
+        let scanned: Int
+        let capReached: Bool
+
+        init(from decoder: Decoder) throws {
+            self.feed = try EvolutionFeed(from: decoder)
+            let extras = try decoder.container(keyedBy: ExtraKeys.self)
+            self.backfilled = (try? extras.decodeIfPresent(Int.self, forKey: .backfilled)) ?? 0
+            self.scanned    = (try? extras.decodeIfPresent(Int.self, forKey: .scanned))    ?? 0
+            self.capReached = (try? extras.decodeIfPresent(Bool.self, forKey: .capReached)) ?? false
+        }
+
+        enum ExtraKeys: String, CodingKey {
+            case backfilled
+            case scanned
+            case capReached = "cap_reached"
+        }
+    }
 
     /// Fetches and decodes the evolution payload for the current user.
     /// Throws specific EvolutionError cases the view-model maps to UI states.
@@ -128,15 +226,23 @@ actor EvolutionService {
             throw EvolutionError.server(http.statusCode)
         }
 
-        // 4. Decode. Same dual-formatter strategy used elsewhere in the app
-        //    (OpenAIManager.swift, CritiqueHistory) so fractional-second and
-        //    plain ISO8601 both parse without forcing the Worker to commit
-        //    to one form.
+        // 4. Decode via the shared dual-formatter decoder.
+        do {
+            return try Self.makeDecoder().decode(EvolutionFeed.self, from: data)
+        } catch {
+            throw EvolutionError.decoding
+        }
+    }
+
+    /// Shared JSONDecoder factory — dual ISO8601 formatter strategy
+    /// (fractional + plain seconds), mirroring OpenAIManager and the
+    /// CritiqueHistory model decoder. Used by both fetchEvolution and
+    /// refreshEvolution so date handling stays consistent.
+    private static func makeDecoder() -> JSONDecoder {
         let isoFractional = ISO8601DateFormatter()
         isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
         isoPlain.formatOptions = [.withInternetDateTime]
-
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { dec in
             let container = try dec.singleValueContainer()
@@ -148,11 +254,6 @@ actor EvolutionService {
                 debugDescription: "Unparseable evolution date: \(str)"
             )
         }
-
-        do {
-            return try decoder.decode(EvolutionFeed.self, from: data)
-        } catch {
-            throw EvolutionError.decoding
-        }
+        return decoder
     }
 }

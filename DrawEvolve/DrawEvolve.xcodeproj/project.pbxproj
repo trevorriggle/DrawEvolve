@@ -90,6 +90,8 @@
 		DE000092 /* TypeBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100092 /* TypeBarView.swift */; };
 		DE000093 /* BrushSizeRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100093 /* BrushSizeRail.swift */; };
 		DE000094 /* FloatingTextCaretIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100094 /* FloatingTextCaretIndicator.swift */; };
+		DE000101 /* EvolutionSkillRadarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100101 /* EvolutionSkillRadarView.swift */; };
+		DE000102 /* EvolutionStudioWallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100102 /* EvolutionStudioWallView.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -179,6 +181,8 @@
 		DE100092 /* TypeBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeBarView.swift; sourceTree = "<group>"; };
 		DE100093 /* BrushSizeRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSizeRail.swift; sourceTree = "<group>"; };
 		DE100094 /* FloatingTextCaretIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingTextCaretIndicator.swift; sourceTree = "<group>"; };
+		DE100101 /* EvolutionSkillRadarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionSkillRadarView.swift; sourceTree = "<group>"; };
+		DE100102 /* EvolutionStudioWallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionStudioWallView.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -381,6 +385,8 @@
 				DE100057 /* EvolutionPanelView.swift */,
 				DE100058 /* CritiqueReelRowView.swift */,
 				DE100059 /* EvolutionEmptyStateView.swift */,
+				DE100101 /* EvolutionSkillRadarView.swift */,
+				DE100102 /* EvolutionStudioWallView.swift */,
 			);
 			path = Evolution;
 			sourceTree = "<group>";
@@ -566,6 +572,8 @@
 				DE000092 /* TypeBarView.swift in Sources */,
 				DE000093 /* BrushSizeRail.swift in Sources */,
 				DE000094 /* FloatingTextCaretIndicator.swift in Sources */,
+				DE000101 /* EvolutionSkillRadarView.swift in Sources */,
+				DE000102 /* EvolutionStudioWallView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

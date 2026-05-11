@@ -24,16 +24,25 @@ struct PromptEditView: View {
     @State private var tone: PromptTone?
     @State private var depth: PromptDepth?
     @State private var techniques: Set<PromptTechnique>
+    @State private var customVoice: String
     @State private var isSaving = false
     @State private var errorMessage: String?
 
+    /// Character cap for the freeform custom voice. Mirrors the
+    /// server-side `CUSTOM_VOICE_MAX_LENGTH` in
+    /// cloudflare-worker/lib/prompt.js. 30 chars is enough for
+    /// "alien xenobiologist" / "1940s noir detective" — character
+    /// descriptions, not injection payloads.
+    private static let customVoiceMaxLength = 30
+
     init(editing: CustomPrompt? = nil) {
         self.editing = editing
-        _name       = State(initialValue: editing?.name ?? "")
-        _focus      = State(initialValue: editing?.parameters.focus)
-        _tone       = State(initialValue: editing?.parameters.tone)
-        _depth      = State(initialValue: editing?.parameters.depth)
-        _techniques = State(initialValue: Set(editing?.parameters.techniques ?? []))
+        _name        = State(initialValue: editing?.name ?? "")
+        _focus       = State(initialValue: editing?.parameters.focus)
+        _tone        = State(initialValue: editing?.parameters.tone)
+        _depth       = State(initialValue: editing?.parameters.depth)
+        _techniques  = State(initialValue: Set(editing?.parameters.techniques ?? []))
+        _customVoice = State(initialValue: editing?.parameters.customVoice ?? "")
     }
 
     var body: some View {
@@ -43,6 +52,30 @@ struct PromptEditView: View {
                     TextField("e.g. Anatomy drills", text: $name)
                         .textInputAutocapitalization(.sentences)
                         .submitLabel(.done)
+                }
+
+                Section {
+                    TextEditor(text: $customVoice)
+                        .frame(minHeight: 90)
+                        .onChange(of: customVoice) { _, newValue in
+                            // Hard cap. Truncate in-place to keep the
+                            // server validator (same cap) happy and to
+                            // bound prompt-injection surface area.
+                            if newValue.count > Self.customVoiceMaxLength {
+                                customVoice = String(newValue.prefix(Self.customVoiceMaxLength))
+                            }
+                        }
+                    HStack {
+                        Spacer()
+                        Text("\(customVoice.count) / \(Self.customVoiceMaxLength)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                } header: {
+                    Text("Custom voice")
+                } footer: {
+                    Text("Describe your coach in your own words — e.g. \"A retired Japanese sumi-e master who critiques in haiku.\" Leave empty to use the selected preset voice (Studio Mentor, The Crit, etc.).")
                 }
 
                 Section {
@@ -150,6 +183,7 @@ struct PromptEditView: View {
     private func save() async {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let trimmedVoice = customVoice.trimmingCharacters(in: .whitespacesAndNewlines)
         let params = PromptParameters(
             focus: focus,
             tone: tone,
@@ -157,6 +191,7 @@ struct PromptEditView: View {
             // Persist techniques in canonical TECHNIQUE_OPTIONS order so
             // two clients editing the same set produce equal payloads.
             techniques: techniques.isEmpty ? nil : PromptTechnique.allCases.filter { techniques.contains($0) },
+            customVoice: trimmedVoice.isEmpty ? nil : trimmedVoice,
         )
         isSaving = true
         defer { isSaving = false }

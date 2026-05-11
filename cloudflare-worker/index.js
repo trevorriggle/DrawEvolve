@@ -26,7 +26,7 @@ import {
   handleProfileSearch,
 } from './routes/profiles.js';
 import { handlePrompts } from './routes/prompts.js';
-import { handleEvolution } from './routes/evolution.js';
+import { handleEvolution, handleEvolutionRefresh } from './routes/evolution.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 // Methods allowed on the legacy POST-only routes (/, /attest/*). The new
@@ -50,6 +50,9 @@ export default {
     }
     if (method === 'GET' && pathname === '/v1/me/evolution') {
       return handleEvolution(request, env, ctx);
+    }
+    if (method === 'POST' && pathname === '/v1/me/evolution/refresh') {
+      return handleEvolutionRefresh(request, env, ctx);
     }
     if (method === 'PATCH' && pathname === '/v1/profiles/me') {
       return handlePatchMe(request, env, ctx);
@@ -229,6 +232,7 @@ export {
   buildReel,
   buildThemes,
   buildStats,
+  buildTaggedCritiques,
   extractExcerpt,
   SOLID_FOUNDATION_CEILING,
   MEANINGFUL_DELTA,

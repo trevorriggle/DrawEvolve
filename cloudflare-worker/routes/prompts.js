@@ -152,7 +152,14 @@ async function listPromptsForUser(env, userId) {
     + `&select=id,name,parameters,template_version,created_at,updated_at`
     + `&order=created_at.desc`;
   const res = await fetch(url, { headers: supabaseHeaders(env) });
-  if (!res.ok) throw new Error(`list HTTP ${res.status}`);
+  if (!res.ok) {
+    // Include Supabase's error body in the thrown message so the
+    // outer catch's console.error surfaces the real cause (e.g.,
+    // "column custom_prompts.parameters does not exist" → migration
+    // 0009 wasn't applied). Without this the 500 is opaque on tail.
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`list HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
   return res.json();
 }
 
@@ -164,7 +171,10 @@ async function fetchPromptForUser(env, userId, id) {
     + `&select=id,name,parameters,template_version,created_at,updated_at`
     + `&limit=1`;
   const res = await fetch(url, { headers: supabaseHeaders(env) });
-  if (!res.ok) throw new Error(`fetch HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`fetch HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
   const rows = await res.json();
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
@@ -184,7 +194,10 @@ async function insertPrompt(env, userId, { name, parameters }) {
       template_version: PROMPT_TEMPLATE_VERSION,
     }),
   });
-  if (!res.ok) throw new Error(`insert HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`insert HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
   const rows = await res.json();
   return rows[0];
 }
