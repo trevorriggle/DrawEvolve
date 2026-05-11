@@ -136,15 +136,16 @@ export async function classifyCritique({ feedback, env, fetcher = fetch }) {
         // 300 was enough for gpt-4o (non-reasoning) but starved gpt-5-mini
         // → response.content came back empty every time. Bumped to 2000.
         max_completion_tokens: 2000,
-        // gpt-5 series accepts: 'none' | 'low' | 'medium' | 'high' as a
-        // FLAT field on chat/completions. 'none' tells the model "do as
-        // little reasoning as possible" — perfect for a classifier whose
-        // job is pure JSON schema fill-in, not deep analysis. Also cuts
-        // token cost dramatically (most cost in reasoning models is the
-        // internal reasoning tokens). See CLAUDE.md gotcha #7 — the
+        // gpt-5-mini accepts: 'minimal' | 'low' | 'medium' | 'high' as
+        // a FLAT field on chat/completions. (gpt-5.1 takes 'none' —
+        // different model, different allowed values. CLAUDE.md gotcha
+        // #7 documented 'none' for gpt-5.1 and it doesn't carry over;
+        // OpenAI 400s on 'none' for gpt-5-mini.) 'minimal' tells the
+        // model "do as little reasoning as possible" — perfect for a
+        // classifier whose job is pure JSON schema fill-in. The
         // nested `reasoning: { effort }` shape is the /v1/responses
-        // endpoint and 400s here; flat is the chat/completions form.
-        reasoning_effort: 'none',
+        // endpoint; flat is the chat/completions form.
+        reasoning_effort: 'minimal',
         // gpt-5 series only accepts the default temperature (1) and
         // rejects the `seed` field. Both omitted; determinism is
         // shoulderable since json_schema constrains the response shape.

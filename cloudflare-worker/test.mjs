@@ -3661,7 +3661,7 @@ test('classifyCritique returns parsed tags with classifier_version stamped on su
   assert.equal(calls[0].body.temperature, undefined);
   assert.equal(calls[0].body.seed, undefined);
   assert.equal(calls[0].body.max_completion_tokens, 2000);
-  assert.equal(calls[0].body.reasoning_effort, 'none');
+  assert.equal(calls[0].body.reasoning_effort, 'minimal');
   assert.equal(calls[0].body.response_format.type, 'json_schema');
   assert.equal(calls[0].body.response_format.json_schema.strict, true);
   assert.deepEqual(calls[0].body.response_format.json_schema.schema.properties.primary_category.enum, CRITIQUE_CATEGORIES);
