@@ -942,29 +942,40 @@ struct DrawingCanvasView: View {
                             // Canvas flip — display-only mirrors around the
                             // viewport center. Layer textures unchanged. Used
                             // by artists to spot proportion errors the eye
-                            // gets used to. isSelected reflects active flip
-                            // state so the user can tell at a glance whether
-                            // a flip is on without having to mentally check
-                            // "is this canvas mirrored?" — same pattern as
-                            // the Symmetry button.
-                            // Reordered to keep flips column-adjacent: row N
-                            // is [Y-flip, recenter], row N+1 is [X-flip,
-                            // sparkles]. X-flip drops one row to sit
-                            // directly under Y-flip; recenter rises into
-                            // Y-flip's old right-column slot. Source-order
-                            // is what drives the LazyVGrid 2-column flow.
+                            // gets used to. The flip buttons are one-shot
+                            // actions, not toggles — tapping fires the flip
+                            // and the button visually "deselects" instantly.
+                            // (Was previously a sticky toggle showing
+                            // selected state while a flip was active; now
+                            // the button never reads as on. The flip state
+                            // itself is still toggled internally; the user
+                            // gets back to neutral via Recenter.)
+                            //
+                            // Source order: Y-flip then X-flip puts them on
+                            // the same row of the 2-column LazyVGrid so the
+                            // pair sits row-adjacent (was column-adjacent).
                             ToolButton(
                                 icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
-                                isSelected: canvasState.flipVertical
+                                isSelected: false
                             ) {
                                 canvasState.toggleFlipVertical()
                             }
                             .help("Flip canvas vertically")
 
+                            ToolButton(
+                                icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                                isSelected: false
+                            ) {
+                                canvasState.toggleFlipHorizontal()
+                            }
+                            .help("Flip canvas horizontally")
+
                             // Canvas Transform Controls
                             // Rotate L/R buttons removed Apr 16 — pinch-rotate
                             // covers the same case on device and these were
-                            // toolbar clutter. Recenter button stays.
+                            // toolbar clutter. Recenter button stays — also
+                            // the canonical way to undo a flip now that the
+                            // flip buttons don't show their toggle state.
                             ToolButton(icon: "viewfinder", isSelected: false) {
                                 canvasState.resetAllTransforms()
                             }
@@ -974,14 +985,6 @@ struct DrawingCanvasView: View {
                                       && canvasState.canvasRotation == .zero
                                       && !canvasState.flipHorizontal
                                       && !canvasState.flipVertical)
-
-                            ToolButton(
-                                icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
-                                isSelected: canvasState.flipHorizontal
-                            ) {
-                                canvasState.toggleFlipHorizontal()
-                            }
-                            .help("Flip canvas horizontally")
 
                             // Clear (trash) button. Lives in the bottom
                             // corner of the iPad slot grid — destructive
@@ -1927,16 +1930,18 @@ struct DrawingCanvasView: View {
                     collapsePhoneToolPanel()
                 }
                 .disabled(!canvasState.historyManager.canRedo)
+                // Flip buttons are one-shot actions, not sticky toggles —
+                // tap, canvas flips, button visually deselects.
                 ToolButton(
                     icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
-                    isSelected: canvasState.flipHorizontal
+                    isSelected: false
                 ) {
                     canvasState.toggleFlipHorizontal()
                     collapsePhoneToolPanel()
                 }
                 ToolButton(
                     icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
-                    isSelected: canvasState.flipVertical
+                    isSelected: false
                 ) {
                     canvasState.toggleFlipVertical()
                     collapsePhoneToolPanel()
