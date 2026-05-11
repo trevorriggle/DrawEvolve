@@ -112,6 +112,10 @@ struct TaggedCritique: Codable, Identifiable, Hashable {
     let thumbnailPath: String?
     let createdAt: Date
     let contentExcerpt: String
+    /// Full markdown-formatted critique body. Optional because older
+    /// worker deploys don't include it. The detail sheet renders this
+    /// when present, falling back to `contentExcerpt` otherwise.
+    let content: String?
     let primaryCategory: CategoryID
     let secondaryCategories: [CategoryID]
     /// 1 (minor refinement) – 5 (needs significant work). Studio Wall
@@ -137,6 +141,7 @@ struct TaggedCritique: Codable, Identifiable, Hashable {
         case thumbnailPath = "thumbnail_path"
         case createdAt = "created_at"
         case contentExcerpt = "content_excerpt"
+        case content
         case primaryCategory = "primary_category"
         case secondaryCategories = "secondary_categories"
         case severity
@@ -312,22 +317,27 @@ extension EvolutionFeed {
             TaggedCritique(critiqueId: nil, drawingId: d1, drawingTitle: "Self-portrait 1",
                            drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(56),
                            contentExcerpt: "Anatomy reads heavy and the eye placement is off.",
+                           content: nil,
                            primaryCategory: .anatomy, secondaryCategories: [.value], severity: 4),
             TaggedCritique(critiqueId: nil, drawingId: d2, drawingTitle: "Still life",
                            drawingSubject: "still life", thumbnailPath: nil, createdAt: ts(42),
                            contentExcerpt: "Composition is balanced; values compress in the midtones.",
+                           content: nil,
                            primaryCategory: .composition, secondaryCategories: [.value], severity: 2),
             TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Self-portrait 2",
                            drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(28),
                            contentExcerpt: "Eye placement has improved — proportion still drifts.",
+                           content: nil,
                            primaryCategory: .anatomy, secondaryCategories: [], severity: 3),
             TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Self-portrait 2",
                            drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(27),
                            contentExcerpt: "Revised version: composition reads better; value contrast widened.",
+                           content: nil,
                            primaryCategory: .composition, secondaryCategories: [.value], severity: 2),
             TaggedCritique(critiqueId: nil, drawingId: d4, drawingTitle: "Self-portrait 3",
                            drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(7),
                            contentExcerpt: "Eye placement is clean; proportion noticeably tighter.",
+                           content: nil,
                            primaryCategory: .anatomy, secondaryCategories: [], severity: 1),
         ]
     }

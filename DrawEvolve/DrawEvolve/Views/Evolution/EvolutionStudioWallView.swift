@@ -314,9 +314,7 @@ struct CritiqueDetailSheet: View {
                     Divider()
                     Text("Coach said")
                         .font(.headline)
-                    Text(critique.contentExcerpt)
-                        .font(.body)
-                        .fixedSize(horizontal: false, vertical: true)
+                    coachSaidBody
                 }
                 .padding(20)
             }
@@ -372,6 +370,68 @@ struct CritiqueDetailSheet: View {
             }
         } catch {
             // silent
+        }
+    }
+
+    /// Renders the full critique body with markdown formatting. Falls
+    /// back to the single-sentence excerpt when the worker hasn't
+    /// shipped `content` yet (older deploys). Block-level markdown
+    /// (headers, bullet lists) is rendered by manual paragraph
+    /// splitting + per-line styling so SwiftUI's inline-only
+    /// Text(LocalizedStringKey:) can still pick up bold/italic/links
+    /// inside each paragraph. Never truncates: `.fixedSize(vertical:)`
+    /// lets every line breathe to its full height regardless of
+    /// length, fixing the "Coach said" sentence-cut-off report.
+    @ViewBuilder
+    fileprivate var coachSaidBody: some View {
+        let raw = (critique.content?.isEmpty == false) ? critique.content! : critique.contentExcerpt
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(coachSaidLines(raw).enumerated()), id: \.offset) { _, line in
+                coachSaidLine(line)
+            }
+        }
+    }
+
+    private func coachSaidLines(_ text: String) -> [String] {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    @ViewBuilder
+    private func coachSaidLine(_ line: String) -> some View {
+        if line.hasPrefix("### ") {
+            Text(line.dropFirst(4))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if line.hasPrefix("## ") {
+            Text(line.dropFirst(3))
+                .font(.headline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+        } else if line.hasPrefix("# ") {
+            Text(line.dropFirst(2))
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
+            let body = String(line.dropFirst(2))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("•").foregroundStyle(.secondary)
+                Text(LocalizedStringKey(body))
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            // Regular paragraph. LocalizedStringKey gives inline
+            // markdown (bold, italic, links, inline code) for free.
+            Text(LocalizedStringKey(line))
+                .font(.body)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

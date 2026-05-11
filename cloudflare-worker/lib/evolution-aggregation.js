@@ -949,6 +949,12 @@ export function buildTaggedCritiques(critiques, drawingsById) {
       thumbnail_path: drawing.storage_path ?? null,
       created_at: c.created_at,
       content_excerpt: extractExcerpt(c.content),
+      // Full markdown-formatted critique body, surfaced to the iOS
+      // CritiqueDetailSheet so the "Coach said" expansion can show
+      // the entire critique without truncating a sentence mid-flow.
+      // The timeline still uses content_excerpt (single sentence,
+      // 240-char cap) — only the detail view reads `content`.
+      content: c.content ?? '',
       primary_category: c.tags.primary_category,
       secondary_categories: Array.isArray(c.tags.secondary_categories)
         ? c.tags.secondary_categories
