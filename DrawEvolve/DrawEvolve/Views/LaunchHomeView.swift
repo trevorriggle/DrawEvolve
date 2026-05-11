@@ -21,7 +21,7 @@ struct LaunchHomeView: View {
             Image("DrawEvolveLogo")
                 .resizable()
                 .scaledToFit()
-                .frame(width: 200, height: 200)
+                .frame(width: 320, height: 320)
 
             VStack(spacing: 8) {
                 Text("Welcome to DrawEvolve")
