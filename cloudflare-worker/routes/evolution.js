@@ -23,7 +23,7 @@
 import { validateWorkerConfig } from '../middleware/auth.js';
 import { jsonResponse } from '../lib/http.js';
 import { requireAuth } from './profiles.js';
-import { CLASSIFIER_VERSION } from '../lib/classifier.js';
+import { CLASSIFIER_VERSION, classifyCritique } from '../lib/classifier.js';
 import {
   flattenCritiques,
   flattenCritiquesForReel,
@@ -164,4 +164,147 @@ export async function handleEvolution(request, env, ctx, fetcher = fetch) {
     windowDays,
     now: Date.now(),
   }));
+}
+
+// =============================================================================
+// POST /v1/me/evolution/refresh — backfill missing tags + reload
+// =============================================================================
+//
+// Walks the user's critique_history and classifies every entry whose
+// `tags` field is missing (pre-classifier critiques + classifier-failed
+// rows). Writes the newly-tagged history back via PATCH on the drawing
+// row. Caps the per-call work at REFRESH_BACKFILL_CAP entries so a power
+// user with hundreds of untagged critiques doesn't blow the OpenAI
+// budget in a single tap — they'd hit Refresh again to chip down the
+// backlog.
+//
+// On the wire:
+//   - 200 → { backfilled, scanned, cap_reached, ...full GET /v1/me/evolution body }
+//   - 401/403/500 → standard error envelope
+//
+// Race-safe-enough: the PATCH writes the entire critique_history array
+// for each drawing whose entries were tagged. If a fresh critique lands
+// from the feedback path BETWEEN our read and write, the fresh entry
+// gets clobbered. For backfill (rare, manual trigger, no concurrent
+// taps), the window is small enough to accept. A migration adding an
+// `update_critique_entry_tags(uuid, uuid, jsonb)` RPC would close it.
+
+const REFRESH_BACKFILL_CAP = 100;
+
+async function patchDrawingCritiqueHistory({ env, drawingId, history, fetcher = fetch }) {
+  const url = `${env.SUPABASE_URL}/rest/v1/drawings?id=eq.${encodeURIComponent(drawingId)}`;
+  const res = await fetcher(url, {
+    method: 'PATCH',
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ critique_history: history }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`patch drawing HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+}
+
+export async function handleEvolutionRefresh(request, env, ctx, fetcher = fetch) {
+  const configErr = validateWorkerConfig(env);
+  if (configErr) return jsonResponse({ error: configErr }, 500);
+
+  const auth = await requireAuth(request, env, ctx);
+  if (!auth.ok) return auth.response;
+  const { userId } = auth;
+
+  let drawings;
+  try {
+    drawings = await fetchUserDrawings({ env, userId, fetcher });
+  } catch (err) {
+    console.error('[evolution-refresh] fetch drawings failed', err?.message);
+    return jsonResponse({ error: 'evolution_unavailable' }, 502);
+  }
+
+  // First pass: count what's missing, decide how many to backfill in
+  // this call. We work in chronological order (oldest first) so a
+  // capped backfill makes progress on the longest-untagged entries
+  // first; users see their full history fill in across taps.
+  let scanned = 0;
+  let backfilled = 0;
+  let capReached = false;
+  const drawingsToPatch = new Map();   // drawing_id → updated critique_history array
+
+  outer: for (const d of drawings) {
+    const entries = Array.isArray(d?.critique_history) ? d.critique_history : [];
+    if (entries.length === 0) continue;
+    // Chronological copy so partial backfills are progressive.
+    const sorted = [...entries].sort((a, b) => {
+      const ta = a?.created_at ? Date.parse(a.created_at) : 0;
+      const tb = b?.created_at ? Date.parse(b.created_at) : 0;
+      return ta - tb;
+    });
+    let mutated = false;
+    for (let i = 0; i < sorted.length; i += 1) {
+      const entry = sorted[i];
+      if (!entry || typeof entry !== 'object') continue;
+      if (entry.tags) continue;        // already classified — skip
+      scanned += 1;
+      if (backfilled >= REFRESH_BACKFILL_CAP) {
+        capReached = true;
+        break outer;
+      }
+      const content = typeof entry.content === 'string' ? entry.content : '';
+      if (content.trim().length === 0) continue;
+      const tags = await classifyCritique({ feedback: content, env, fetcher });
+      if (!tags) continue;              // classifier failed or returned null — skip silently
+      sorted[i] = { ...entry, tags };
+      mutated = true;
+      backfilled += 1;
+    }
+    if (mutated) {
+      drawingsToPatch.set(d.id, sorted);
+    }
+  }
+
+  // Write back. Each PATCH is its own request — if one fails, the rest
+  // still land. The catch logs but doesn't fail the response; the user
+  // sees a partial backfill which is better than an all-or-nothing
+  // 500 that reverts everything.
+  for (const [drawingId, history] of drawingsToPatch) {
+    try {
+      await patchDrawingCritiqueHistory({ env, drawingId, history, fetcher });
+    } catch (err) {
+      console.error('[evolution-refresh] patch failed', drawingId, err?.message);
+    }
+  }
+
+  // After backfill, re-read drawings and return the full evolution
+  // payload so the iOS client doesn't need a second round-trip.
+  let freshDrawings;
+  try {
+    freshDrawings = await fetchUserDrawings({ env, userId, fetcher });
+  } catch (err) {
+    console.error('[evolution-refresh] post-backfill fetch failed', err?.message);
+    // Even if the re-read fails, we still report the backfill count.
+    return jsonResponse({
+      backfilled,
+      scanned,
+      cap_reached: capReached,
+      classifier_version: CLASSIFIER_VERSION,
+      error: 'reload_failed',
+    }, 200);
+  }
+
+  const body = buildEvolutionResponseV2(freshDrawings, {
+    windowCritiques: DEFAULT_WINDOW_CRITIQUES,
+    windowDays: DEFAULT_WINDOW_DAYS,
+    now: Date.now(),
+  });
+
+  return jsonResponse({
+    ...body,
+    backfilled,
+    scanned,
+    cap_reached: capReached,
+  });
 }

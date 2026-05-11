@@ -33,7 +33,12 @@ struct EvolutionPanelView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                HeaderStrip(summary: feed.summary)
+                HeaderStrip(
+                    summary: feed.summary,
+                    canRefresh: canRefresh,
+                    isRefreshing: isRefreshing,
+                    onRefresh: onRefresh
+                )
 
                 // v3 — Skill Radar (compact) + Studio Wall (hero).
                 // The radar shows shape change ("Then vs Now"); the
@@ -56,19 +61,48 @@ struct EvolutionPanelView: View {
 
 private struct HeaderStrip: View {
     let summary: EvolutionSummary
+    let canRefresh: Bool
+    let isRefreshing: Bool
+    let onRefresh: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("My Evolution")
-                .font(.title2.weight(.bold))
-                .foregroundStyle(.primary)
-            Text(line1)
-                .font(.subheadline)
-                .foregroundStyle(.primary)
-            if let l2 = line2 {
-                Text(l2)
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("My Evolution")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.primary)
+                Text(line1)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
+                if let l2 = line2 {
+                    Text(l2)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            // Refresh button — server backfills any untagged critiques
+            // then re-loads. Always visible on a loaded feed; spinner
+            // replaces the icon while in-flight to prevent re-taps.
+            if canRefresh {
+                Button(action: onRefresh) {
+                    Group {
+                        if isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.body.weight(.semibold))
+                        }
+                    }
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.accentColor.opacity(0.12)))
+                    .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .accessibilityLabel("Refresh evolution")
+                .accessibilityHint("Re-classifies any older critiques and reloads the panel.")
             }
         }
     }

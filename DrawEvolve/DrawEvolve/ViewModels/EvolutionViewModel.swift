@@ -55,36 +55,61 @@ final class EvolutionViewModel: ObservableObject {
     /// Alias for clarity at error-state retry call sites.
     func retry() async { await load() }
 
-    /// User tapped "Refresh insights". Phase 1: just re-runs `load()`
-    /// (cache invalidation is server-side once Phase 2 lands; for now
-    /// the worker re-aggregates from DB every call, so this is honest).
-    /// The button stays present but visually disabled (`canRefresh ==
-    /// false`) when there's no LLM-synthesized content to refresh,
-    /// avoiding the wrong promise.
+    /// Last refresh outcome — set by `refreshInsights()` and consumed
+    /// by the view to show a toast/banner ("Backfilled 12 critiques",
+    /// "Up to date", etc.). Cleared by the next refresh or load.
+    @Published private(set) var lastRefreshOutcome: RefreshOutcome?
+
+    struct RefreshOutcome: Equatable {
+        let backfilled: Int
+        let capReached: Bool
+
+        var bannerText: String? {
+            if backfilled == 0 { return "Already up to date." }
+            let unit = backfilled == 1 ? "critique" : "critiques"
+            if capReached {
+                return "Tagged \(backfilled) more \(unit). Tap again to keep going."
+            }
+            return "Tagged \(backfilled) \(unit) from your earlier history."
+        }
+    }
+
+    /// Force refresh. Calls `POST /v1/me/evolution/refresh`, which on
+    /// the server classifies any pre-classifier (or classifier-failed)
+    /// critiques and writes the tags back to Supabase. Then re-loads
+    /// the feed from the response. Bounded server-side at ~100
+    /// classifier calls per tap.
     func refreshInsights() async {
         guard !isRefreshingInsights else { return }
         isRefreshingInsights = true
+        lastRefreshOutcome = nil
         defer { isRefreshingInsights = false }
-        await load()
+        do {
+            let result = try await service.refreshEvolution()
+            loadState = .loaded(result.feed)
+            lastRefreshOutcome = RefreshOutcome(
+                backfilled: result.backfilled,
+                capReached: result.capReached
+            )
+        } catch let error as EvolutionError {
+            loadState = .error(error)
+        } catch {
+            loadState = .error(.unknown)
+        }
     }
 
-    /// Phase 1: the button shows but is disabled. Once Phase 2 wires
-    /// gpt-5.1-mini synthesis behind a 24h cache, this gates on whether
-    /// there's anything to refresh (digest_sentence non-null OR themes
-    /// non-empty OR highlight non-null). Today nothing is LLM-synthesized,
-    /// so the button is always disabled with the "coming soon" subtitle.
+    /// Refresh is always available once data has loaded. The button is
+    /// hidden in error / loading states because there's nothing
+    /// meaningful to refresh from.
     var canRefresh: Bool {
-        guard case .loaded(let feed) = loadState else { return false }
-        if feed.digestSentence != nil { return true }
-        if !feed.themes.isEmpty && feed.themes.contains(where: { $0.synthesis.isEmpty == false }) {
-            // Phase 1 ships deterministic theme synthesis ("N recent
-            // critiques touched on anatomy.") which technically counts;
-            // gate on whether the worker has populated
-            // insightsLastUpdatedAt to distinguish "real synthesis"
-            // from "placeholder synthesis."
-            if feed.summary.insightsLastUpdatedAt != nil { return true }
-        }
-        if feed.highlight != nil { return true }
+        if case .loaded = loadState { return true }
         return false
+    }
+
+    /// Called by the view after the banner has been shown for ~3
+    /// seconds. Auto-clears the toast so it doesn't linger on subsequent
+    /// loads.
+    func dismissRefreshOutcome() {
+        lastRefreshOutcome = nil
     }
 }
