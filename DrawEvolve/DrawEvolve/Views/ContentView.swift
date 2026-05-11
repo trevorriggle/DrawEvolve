@@ -80,9 +80,21 @@ private struct SignedInRoot: View {
             LaunchHomeView(
                 onNewCanvas: {
                     primeFlagsIfNeeded()
-                    if !hasCompletedPrompt {
-                        showPromptInput = true
-                    }
+                    // ALWAYS fire the prompt input for "Set up a new
+                    // canvas" — the button name promises a fresh setup
+                    // and the canvas needs a fresh DrawingContext to
+                    // run Get Feedback against. Reset both the
+                    // completion flag (so the PopupPresentation's
+                    // hasCompletedPrompt gate doesn't suppress the
+                    // overlay) and the context itself (so the prompt
+                    // sheet starts blank instead of pre-filled with
+                    // the previous drawing's subject/style). The
+                    // existing onChange handler on showPromptInput
+                    // will flip hasCompletedPrompt back to true once
+                    // the user finishes the form.
+                    drawingContext = DrawingContext()
+                    hasCompletedPrompt = false
+                    showPromptInput = true
                     route = .canvas(openGallery: false)
                 },
                 onOpenGallery: {
