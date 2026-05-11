@@ -26,6 +26,7 @@ import { requireAuth } from './profiles.js';
 import { CLASSIFIER_VERSION } from '../lib/classifier.js';
 import {
   flattenCritiques,
+  flattenCritiquesForReel,
   selectWindow,
   computeStreak,
   buildSummary,
@@ -101,8 +102,16 @@ export function buildEvolutionResponseV2(drawings, { windowCritiques, windowDays
     if (d?.id) drawingsById.set(d.id, d);
   }
 
-  const allCritiques = flattenCritiques(safeDrawings);
-  const windowCritiquesEntries = selectWindow(allCritiques, { windowCritiques, windowDays, now });
+  // Two flatteners:
+  //   - `flattenCritiques` requires classifier tags (drops pre-Phase-1
+  //     and classifier-failed entries). Themes + stats depend on the
+  //     structured tags so they use this strict view.
+  //   - `flattenCritiquesForReel` includes every critique with non-empty
+  //     content. The reel is "show me my recent work" and shouldn't
+  //     disappear just because the classifier didn't run.
+  const taggedCritiques = flattenCritiques(safeDrawings);
+  const allReelCritiques = flattenCritiquesForReel(safeDrawings);
+  const windowCritiquesEntries = selectWindow(taggedCritiques, { windowCritiques, windowDays, now });
   const streak = computeStreak(safeDrawings, { now });
 
   return {
@@ -110,8 +119,8 @@ export function buildEvolutionResponseV2(drawings, { windowCritiques, windowDays
     digest_sentence: null,                  // Phase 2 — LLM synthesis
     themes: buildThemes(windowCritiquesEntries),
     highlight: null,                        // Phase 3 — same-subject pair
-    reel: buildReel(allCritiques, drawingsById, { limit: REEL_PAGE_SIZE }),
-    stats: buildStats(allCritiques),
+    reel: buildReel(allReelCritiques, drawingsById, { limit: REEL_PAGE_SIZE }),
+    stats: buildStats(taggedCritiques),
     streak,                                  // retained for callers that want raw counts
     classifier_version: CLASSIFIER_VERSION,
   };

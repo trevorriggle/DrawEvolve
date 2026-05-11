@@ -221,6 +221,7 @@ export {
 
 export {
   flattenCritiques,
+  flattenCritiquesForReel,
   selectWindow,
   determineStatus,
   computeStreak,

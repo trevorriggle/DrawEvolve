@@ -132,7 +132,51 @@ export function flattenCritiques(drawings) {
         content: typeof entry.content === 'string' ? entry.content : '',
         created_at: entry.created_at,
         created_ts: ts,
+        has_tags: true,
         tags: entry.tags,
+      });
+    }
+  }
+  out.sort((a, b) => b.created_ts - a.created_ts);
+  return out;
+}
+
+/**
+ * Variant for the v2 reel: returns every critique with valid metadata,
+ * regardless of whether it carries classifier tags. Pre-Phase-1
+ * critiques predate the classifier; later critiques where the
+ * classifier silently failed also lack tags. Either way they belong
+ * in the reel — the user's intent is "show me my recent critiques,"
+ * not "show me my recent classifier-validated critiques." Themes and
+ * stats still go through the tag-requiring `flattenCritiques` because
+ * their math depends on the structured tags.
+ *
+ * Entries without tags get `has_tags: false` and `tags: null` so
+ * downstream consumers (notably `buildReel.primary_category`) know to
+ * render them without a category chip.
+ */
+export function flattenCritiquesForReel(drawings) {
+  if (!Array.isArray(drawings)) return [];
+  const out = [];
+  for (const d of drawings) {
+    const entries = Array.isArray(d?.critique_history) ? d.critique_history : [];
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const ts = entry.created_at ? Date.parse(entry.created_at) : NaN;
+      if (!Number.isFinite(ts)) continue;
+      // Skip entries with no content — nothing to surface. Tag-less
+      // entries with content are explicitly OK.
+      const content = typeof entry.content === 'string' ? entry.content : '';
+      if (content.trim().length === 0) continue;
+      const tags = entry.tags && isValidTags(entry.tags) ? entry.tags : null;
+      out.push({
+        critique_id: entry.id ?? null,
+        drawing_id: d?.id ?? null,
+        content,
+        created_at: entry.created_at,
+        created_ts: ts,
+        has_tags: tags !== null,
+        tags,
       });
     }
   }
@@ -678,6 +722,12 @@ export function buildReel(critiques, drawingsById, { limit = 10 } = {}) {
     const subject = typeof drawing.context?.subject === 'string'
       ? drawing.context.subject.trim()
       : null;
+    // Tag-less rows render with no category chip but still get a
+    // thumbnail, title, date, and excerpt — they're as much "recent
+    // work" as a tagged row is.
+    const primaryCategory = c.tags && typeof c.tags.primary_category === 'string'
+      ? c.tags.primary_category
+      : null;
     out.push({
       critique_id: c.critique_id,
       drawing_id: c.drawing_id,
@@ -687,7 +737,7 @@ export function buildReel(critiques, drawingsById, { limit = 10 } = {}) {
       created_at: c.created_at,
       excerpt_paraphrase: null,
       excerpt_raw: extractExcerpt(c.content),
-      primary_category: c.tags?.primary_category ?? null,
+      primary_category: primaryCategory,
     });
   }
   return out;
