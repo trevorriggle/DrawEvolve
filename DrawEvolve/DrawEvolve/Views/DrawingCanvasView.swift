@@ -27,6 +27,13 @@ struct DrawingCanvasView: View {
     // Canvas state
     @StateObject private var canvasState = CanvasStateManager()
     @State private var showFeedback = false
+    /// iPhone-only — surfaces the 6 brush variants (pencil/brush/inkPen/
+    /// marker/airbrush/charcoal) in a sheet, since the flat iPhone tool
+    /// grid has no room for the iPad's long-press popover. Triggered by
+    /// the single brush tile in phoneToolPanel. iPad uses
+    /// `ToolGroup.brushes` via `GroupedToolButton` instead — separate
+    /// surface, separate code path.
+    @State private var showPhoneBrushPicker = false
     @State private var isRequestingFeedback = false
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
@@ -235,6 +242,15 @@ struct DrawingCanvasView: View {
                     }
             }
         }
+        // iPhone-only brush variant picker. iPad uses ToolGroup.brushes
+        // (long-press popover); iPhone uses this sheet because the flat
+        // tile grid has no room for a six-variant popover. The sheet
+        // body itself doesn't care about idiom — it's just never
+        // triggered on iPad (showPhoneBrushPicker is only flipped from
+        // phoneToolPanel's brush tile).
+        .sheet(isPresented: $showPhoneBrushPicker) {
+            phoneBrushPickerSheet
+        }
         // Tier-1.4: the More-button half-sheet (italic, kerning kind,
         // manual kern, on-path toggles) was retired alongside the bar's
         // More button. If those controls return they'll mount through a
@@ -376,6 +392,42 @@ struct DrawingCanvasView: View {
                 )
                 .ignoresSafeArea()
                 .background(Color(uiColor: .systemGray6))
+
+                // Symmetry mirror guides. Used to live in padBody only;
+                // the iPhone Phase 2 split deliberately omitted it but
+                // testers reported "the lines don't show on my phone."
+                // Drop it in here with the same wiring — geometry math
+                // is universal (reads from shared canvasState), the
+                // overlay just needed to be in the iPhone ZStack.
+                SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
+                    .ignoresSafeArea()
+
+                // Pose skeleton(s). PoseOverlayView gates per-joint
+                // dragging to `DeviceIdiom.isPad` internally (21 joints
+                // at thumb scale isn't manageable), but whole-skeleton
+                // transforms via PoseTransformHandlesView work on both.
+                PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
+                    .ignoresSafeArea()
+                PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
+                    .ignoresSafeArea()
+
+                // Floating chip per active skeleton (Replace / Commit /
+                // Hide / Lock / Discard). Was iPad-only; without it
+                // iPhone users had no way to hide a placed skeleton.
+                PoseSkeletonChipsOverlay(
+                    poseManager: poseOverlayManager,
+                    canvasState: canvasState,
+                    onRequestReplace: { kind in poseDetectionRequest = kind },
+                    onRequestManualPlace: { kind in
+                        poseOverlayManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
+                    }
+                )
+                .ignoresSafeArea()
+
+                // Low-confidence detection banner. Top of canvas,
+                // 5s auto-dismiss.
+                PoseLowConfidenceBanner(poseManager: poseOverlayManager)
+                    .ignoresSafeArea()
 
                 TextEntryOverlay(canvasState: canvasState)
                 FloatingTextCaretIndicator(canvasState: canvasState)
@@ -1757,6 +1809,103 @@ struct DrawingCanvasView: View {
         }
     }
 
+    // MARK: - iPhone brush variant picker (sheet)
+    //
+    // The 6 brush variants live behind a single tile on iPhone (the
+    // flat tile grid has no room for an iPad-style long-press popover).
+    // Tap → picker sheet → tap a variant → currentTool updates and
+    // sheet dismisses. The tile's icon reflects the active variant so
+    // the user sees which brush they're holding.
+
+    /// iPad-only brush variants. Keep the order matching ToolGroup.brushes
+    /// so the picker visually mirrors the iPad popover even though the
+    /// rendering surface is different. Source of truth on which tools
+    /// count as "brush variants" lives here.
+    private static let phoneBrushVariants: [DrawingTool] = [
+        .pencil, .brush, .inkPen, .marker, .airbrush, .charcoal,
+    ]
+
+    private var isCurrentToolBrushVariant: Bool {
+        Self.phoneBrushVariants.contains(canvasState.currentTool)
+    }
+
+    /// Icon for the iPhone brush tile. Shows the active variant's icon
+    /// when a brush variant is current; defaults to the base brush
+    /// icon when a non-brush tool is selected (so the tile still
+    /// reads as "brushes" semantically).
+    private var phoneBrushTileIcon: String {
+        if isCurrentToolBrushVariant {
+            return canvasState.currentTool.icon
+        }
+        return DrawingTool.brush.icon
+    }
+
+    private var phoneBrushPickerSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Self.phoneBrushVariants, id: \.self) { variant in
+                        Button {
+                            canvasState.currentTool = variant
+                            showPhoneBrushPicker = false
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: variant.icon)
+                                    .font(.title3)
+                                    .frame(width: 32, height: 32)
+                                    .foregroundStyle(canvasState.currentTool == variant
+                                                     ? Color.accentColor
+                                                     : .primary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(variant.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text(Self.phoneBrushTagline(for: variant))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if canvasState.currentTool == variant {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } footer: {
+                    Text("Each brush calibrates size / hardness / opacity to fit its style. You can fine-tune in Brush Settings after picking.")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Brushes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showPhoneBrushPicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    /// One-line vibe per variant — shown under the variant name in the
+    /// iPhone picker sheet. Kept terse so the row stays single-line
+    /// readable on narrow phones.
+    private static func phoneBrushTagline(for tool: DrawingTool) -> String {
+        switch tool {
+        case .pencil:   return "Sharp, narrow, paper-tooth grain"
+        case .brush:    return "Round disc, soft edge — the default"
+        case .inkPen:   return "Confident hard edge, pressure scales width"
+        case .marker:   return "Flat-topped, semi-transparent, overlaps deepen"
+        case .airbrush: return "Big soft mist, builds via overlap"
+        case .charcoal: return "Wide, grainy, broken edges"
+        default:        return ""
+        }
+    }
+
     private var phoneToolPanel: some View {
         // 30 tiles. 5 columns × 6 rows = 30 cells, all used. The two
         // pose-reference tiles (handPose / bodyPose) absorb the two
@@ -1779,8 +1928,19 @@ struct DrawingCanvasView: View {
             spacing: 12
         ) {
             Group {
-                ToolButton(icon: DrawingTool.brush.icon, isSelected: canvasState.currentTool == .brush) {
-                    canvasState.currentTool = .brush
+                // Single brush tile on iPhone — tapping opens the brush
+                // variant picker sheet (pencil / brush / inkPen / marker
+                // / airbrush / charcoal). The tile's ICON reflects
+                // whichever variant is currently active so the user can
+                // tell at a glance which brush they're holding.
+                // isSelected is true whenever ANY brush variant is the
+                // current tool, since the tile semantically represents
+                // "brushes" as a category.
+                ToolButton(
+                    icon: phoneBrushTileIcon,
+                    isSelected: isCurrentToolBrushVariant
+                ) {
+                    showPhoneBrushPicker = true
                     collapsePhoneToolPanel()
                 }
                 ToolButton(icon: DrawingTool.eraser.icon, isSelected: canvasState.currentTool == .eraser) {
