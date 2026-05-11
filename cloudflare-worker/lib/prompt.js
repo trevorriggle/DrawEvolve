@@ -624,13 +624,13 @@ export function validatePromptParameters(input) {
   return { value: out };
 }
 
-// Hard cap on the freeform custom voice text. Cut from 280 to 100 on
-// 2026-05-11 in response to user feedback that 280 felt exploitable.
-// At 100 chars the input is enough for a character description ("A
-// retired Japanese sumi-e master who critiques in haiku" = 56 chars)
-// but starves the space for elaborate prompt-injection payloads.
-// Mirrored client-side in PromptEditView.swift.
-export const CUSTOM_VOICE_MAX_LENGTH = 100;
+// Hard cap on the freeform custom voice text. 30 chars enforced both
+// here and client-side in PromptEditView.swift. At 30 chars there's
+// barely room for "alien xenobiologist" (19) or "1940s noir detective"
+// (20) — enough to set a character, not enough for an injection
+// payload. The wrapper preamble + containsBlockedPhrase filter below
+// are the second and third layers of defense.
+export const CUSTOM_VOICE_MAX_LENGTH = 30;
 
 // Belt-and-braces injection-phrase filter. The wrapper preamble in
 // wrapUserAuthoredVoice tells the model to treat user content as

@@ -30,9 +30,10 @@ struct PromptEditView: View {
 
     /// Character cap for the freeform custom voice. Mirrors the
     /// server-side `CUSTOM_VOICE_MAX_LENGTH` in
-    /// cloudflare-worker/lib/prompt.js. Cut from 280 to 100 on
-    /// 2026-05-11 to shrink the prompt-injection surface area.
-    private static let customVoiceMaxLength = 100
+    /// cloudflare-worker/lib/prompt.js. 30 chars is enough for
+    /// "alien xenobiologist" / "1940s noir detective" — character
+    /// descriptions, not injection payloads.
+    private static let customVoiceMaxLength = 30
 
     init(editing: CustomPrompt? = nil) {
         self.editing = editing
