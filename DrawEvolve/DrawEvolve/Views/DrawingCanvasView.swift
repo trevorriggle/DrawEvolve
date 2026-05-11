@@ -18,6 +18,11 @@ struct DrawingCanvasView: View {
 
     @Binding var context: DrawingContext
     let existingDrawing: Drawing? // Optional existing drawing to load
+    /// When true, the gallery fullScreenCover opens on first appear.
+    /// Routed in by `LaunchHomeView`'s "Go to gallery" button so the
+    /// user can browse straight through this view's existing sheet
+    /// stack without making the canvas a transient destination.
+    var openGalleryOnAppear: Bool = false
 
     // Canvas state
     @StateObject private var canvasState = CanvasStateManager()
@@ -324,6 +329,13 @@ struct DrawingCanvasView: View {
         }
         .onAppear {
             loadExistingDrawing()
+            // LaunchHomeView "Go to gallery" routes through this view
+            // so the gallery cover opens via the existing showGallery
+            // state. One-shot — we don't re-open if the user dismisses,
+            // so the canvas behaves normally on every subsequent appear.
+            if openGalleryOnAppear && !showGallery {
+                showGallery = true
+            }
         }
         .preferredColorScheme(colorSchemeValue)
     }

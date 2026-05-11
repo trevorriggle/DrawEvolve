@@ -92,6 +92,7 @@
 		DE000094 /* FloatingTextCaretIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100094 /* FloatingTextCaretIndicator.swift */; };
 		DE000101 /* EvolutionSkillRadarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100101 /* EvolutionSkillRadarView.swift */; };
 		DE000102 /* EvolutionStudioWallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100102 /* EvolutionStudioWallView.swift */; };
+		DE000103 /* LaunchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100103 /* LaunchHomeView.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -183,6 +184,7 @@
 		DE100094 /* FloatingTextCaretIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingTextCaretIndicator.swift; sourceTree = "<group>"; };
 		DE100101 /* EvolutionSkillRadarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionSkillRadarView.swift; sourceTree = "<group>"; };
 		DE100102 /* EvolutionStudioWallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionStudioWallView.swift; sourceTree = "<group>"; };
+		DE100103 /* LaunchHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchHomeView.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -261,6 +263,7 @@
 				DE100038 /* SelectionOverlays.swift */,
 				DE100045 /* SettingsView.swift */,
 				DE100056 /* EvolutionView.swift */,
+				DE100103 /* LaunchHomeView.swift */,
 				DE100064 /* SymmetrySettingsView.swift */,
 				DE100065 /* SymmetryGuideOverlay.swift */,
 				DE100090 /* TypeInspectorView.swift */,
@@ -574,6 +577,7 @@
 				DE000094 /* FloatingTextCaretIndicator.swift in Sources */,
 				DE000101 /* EvolutionSkillRadarView.swift in Sources */,
 				DE000102 /* EvolutionStudioWallView.swift in Sources */,
+				DE000103 /* LaunchHomeView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

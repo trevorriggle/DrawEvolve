@@ -57,13 +57,47 @@ private struct SignedInRoot: View {
     @State private var showOnboarding = false
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
-    @State private var hasCheckedFirstLaunch = false
+
+    /// Session route between LaunchHomeView and DrawingCanvasView.
+    /// `nil` = launch home; setting it advances into the canvas. Reset
+    /// to nil on every fresh app launch so the user always lands on
+    /// the welcome screen first.
+    @State private var route: SignedInRoute? = nil
+
+    enum SignedInRoute {
+        case canvas(openGallery: Bool)
+    }
 
     var body: some View {
-        DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
-            .onAppear {
-                performFirstLaunchCheck()
-            }
+        switch route {
+        case .none:
+            // Welcome screen. Popup-free — the prompt input modal +
+            // beta transparency + onboarding overlays are ALL gated on
+            // the .canvas case below, so they can't bleed up here.
+            // Previously this was where "couldn't load your prompts"
+            // first surfaced before its modal showed; with the route
+            // split they're cleanly separated.
+            LaunchHomeView(
+                onNewCanvas: {
+                    primeFlagsIfNeeded()
+                    if !hasCompletedPrompt {
+                        showPromptInput = true
+                    }
+                    route = .canvas(openGallery: false)
+                },
+                onOpenGallery: {
+                    primeFlagsIfNeeded()
+                    // Skip the prompt for gallery-entry — user is
+                    // browsing, not starting a fresh drawing.
+                    route = .canvas(openGallery: true)
+                }
+            )
+        case .canvas(let openGallery):
+            DrawingCanvasView(
+                context: $drawingContext,
+                existingDrawing: nil,
+                openGalleryOnAppear: openGallery
+            )
             .modifier(PopupPresentation(
                 showBetaTransparency: $showBetaTransparency,
                 showOnboarding: $showOnboarding,
@@ -86,38 +120,23 @@ private struct SignedInRoot: View {
                     hasCompletedPrompt = true
                 }
             }
+        }
     }
 
-    private func performFirstLaunchCheck() {
-        guard !hasCheckedFirstLaunch else { return }
-        hasCheckedFirstLaunch = true
-
-        // DEBUG: Reset onboarding on every launch during development
-        #if DEBUG
-        UserDefaults.standard.set(false, forKey: "hasSeenBetaTransparency")
-        UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
-        UserDefaults.standard.set(false, forKey: "hasCompletedPrompt")
-        hasSeenBetaTransparency = false
-        hasSeenOnboarding = false
-        hasCompletedPrompt = false
-        #endif
-
-        // Beta transparency notice and onboarding walkthrough are both
-        // opt-in via the (!) and (?) buttons under the canvas's
-        // settings gear — neither auto-presents on first launch. Mark
-        // both as seen up-front so the cascade onChange handlers don't
-        // re-arm them.
-        //
-        // Prompt input still auto-fires for fresh users: it captures
-        // the drawing context (subject / style / focus) that Get
-        // Feedback needs to run, so it's a required gate, not optional
-        // chrome.
-        hasSeenBetaTransparency = true
-        hasSeenOnboarding = true
-
-        if !hasCompletedPrompt {
-            showPromptInput = true
-        }
+    /// One-time priming for the beta-transparency and onboarding flags
+    /// so the cascade onChange handlers don't re-arm them. Idempotent.
+    ///
+    /// The old `performFirstLaunchCheck` had a DEBUG branch that wiped
+    /// `hasCompletedPrompt` on every .onAppear — that was the cause of
+    /// the "switching themes / any AppStorage write re-triggers the
+    /// initial prompt" bug from the previous launch-screen attempt. Any
+    /// AppStorage write caused ContentView to re-evaluate, SignedInRoot
+    /// to be recreated, onAppear to fire, and the wipe to run again.
+    /// Removed entirely. `hasCompletedPrompt` is now respected across
+    /// sessions like the other flags.
+    private func primeFlagsIfNeeded() {
+        if !hasSeenBetaTransparency { hasSeenBetaTransparency = true }
+        if !hasSeenOnboarding { hasSeenOnboarding = true }
     }
 }
 
