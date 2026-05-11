@@ -197,13 +197,21 @@ export async function handleEvolution(request, env, ctx, fetcher = fetch) {
 // `update_critique_entry_tags(uuid, uuid, jsonb)` RPC would close it.
 
 // Cap on classifier calls per refresh tap. Sized against Cloudflare's
-// 50-subrequest-per-invocation limit (drawings fetch + PATCHes consume
-// some, leaving headroom for classifier fan-out) and the ~30s wall-
-// clock budget. Classifier calls run in parallel via Promise.all so
-// the total wall-clock is roughly the slowest single call, not the
-// sum — without parallelism, 40 sequential calls at 2-3s each would
-// blow the worker timeout.
-const REFRESH_BACKFILL_CAP = 40;
+// 50-subrequest-per-invocation HARD limit. Budget breakdown worst-case:
+//   1 initial drawings fetch
+//  20 classifier calls
+//  20 PATCH writes (one per drawing in pathological case where each
+//     classified entry lives in a different drawing)
+//   = 41 subrequests, leaving 9 of headroom for retries / future
+//   instrumentation.
+// In practice users have ~2 critiques per drawing so PATCH count is
+// closer to 10 — a 20-cap means the actual subrequest count is more
+// like 31. The post-backfill drawings refetch was REMOVED (was 1
+// extra subrequest); we build the response from the in-memory tags
+// instead. Classifier calls run in parallel via Promise.all so total
+// wall-clock is the slowest single call (~5-8s for gpt-5-mini), not
+// the sum.
+const REFRESH_BACKFILL_CAP = 20;
 
 async function patchDrawingCritiqueHistory({ env, drawingId, history, fetcher = fetch }) {
   const url = `${env.SUPABASE_URL}/rest/v1/drawings?id=eq.${encodeURIComponent(drawingId)}`;
@@ -348,24 +356,22 @@ export async function handleEvolutionRefresh(request, env, ctx, fetcher = fetch)
     }
   }
 
-  // After backfill, re-read drawings and return the full evolution
-  // payload so the iOS client doesn't need a second round-trip.
-  let freshDrawings;
-  try {
-    freshDrawings = await fetchUserDrawings({ env, userId, fetcher });
-  } catch (err) {
-    console.error('[evolution-refresh] post-backfill fetch failed', err?.message);
-    // Even if the re-read fails, we still report the backfill count.
-    return jsonResponse({
-      backfilled,
-      scanned,
-      cap_reached: capReached,
-      classifier_version: CLASSIFIER_VERSION,
-      error: 'reload_failed',
-    }, 200);
-  }
+  // Build the response from IN-MEMORY drawings + mutations, NOT a
+  // refetch. Skipping the refetch saves 1 subrequest (we're at the
+  // edge of the 50-per-invocation budget) and is just as accurate:
+  // we patched the rows ourselves, so we already know what they
+  // look like. For each drawing we patched, swap its critique_history
+  // for the locally-mutated copy. Untouched drawings carry through
+  // verbatim.
+  const refreshedDrawings = drawings.map((d) => {
+    const mutatedHistory = sortedByDrawing.get(d.id);
+    if (mutatedHistory && drawingsToPatch.has(d.id)) {
+      return { ...d, critique_history: mutatedHistory };
+    }
+    return d;
+  });
 
-  const body = buildEvolutionResponseV2(freshDrawings, {
+  const body = buildEvolutionResponseV2(refreshedDrawings, {
     windowCritiques: DEFAULT_WINDOW_CRITIQUES,
     windowDays: DEFAULT_WINDOW_DAYS,
     now: Date.now(),
