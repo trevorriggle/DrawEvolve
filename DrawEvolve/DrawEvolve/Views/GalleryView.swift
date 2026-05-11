@@ -366,9 +366,12 @@ struct GalleryView: View {
         .task { await customPromptManager.refresh() }
         .refreshable { await customPromptManager.refresh() }
         .sheet(isPresented: $showPromptEditor) {
-            NavigationStack {
-                PromptEditView(editing: editingPrompt)
-            }
+            // PromptEditView wraps itself in NavigationStack — nesting
+            // it inside another one here produced overlapping toolbars
+            // (Cancel + Save tap targets fired simultaneously, and
+            // dismiss() raced the in-flight save Task → "prompts
+            // weren't saving" symptom).
+            PromptEditView(editing: editingPrompt)
         }
     }
 
