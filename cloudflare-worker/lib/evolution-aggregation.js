@@ -903,3 +903,58 @@ export function buildThemes(critiques, { limit = 3 } = {}) {
 function defaultThemeSynthesis(categoryId, dataPoints) {
   return `${dataPoints} recent critique${dataPoints === 1 ? '' : 's'} touched on ${categoryId}.`;
 }
+
+// =============================================================================
+// v3 — tagged_critiques (Studio Wall + Skill Radar input)
+// =============================================================================
+//
+// Returns every classified critique joined with its drawing's metadata
+// (title / thumbnail / subject). The iOS Studio Wall renders this as a
+// horizontal timeline of drawings with dots per critique tag; the
+// Skill Radar aggregates by category to produce "then vs now"
+// polygons.
+//
+// Differs from buildReel in three ways:
+//   1. Includes EVERY classified critique, not just the most recent 10
+//      — the wall is meant to scroll back through history.
+//   2. Surfaces secondary_categories alongside primary, since the
+//      wall renders a dot per tag (primary + secondaries).
+//   3. Carries the raw severity number (1–5), not a paraphrase or
+//      excerpt, since the wall encodes severity as dot brightness.
+//
+// Skips entries without classifier tags — those rows have no severity
+// or category to plot, so they can't appear in the visualization.
+// (The v2 reel still surfaces them so the user's general history
+// isn't lost.)
+
+export function buildTaggedCritiques(critiques, drawingsById) {
+  if (!Array.isArray(critiques) || critiques.length === 0) return [];
+  const sorted = [...critiques].sort((a, b) => a.created_ts - b.created_ts);
+  const out = [];
+  for (const c of sorted) {
+    if (!c.tags || !c.drawing_id) continue;
+    const drawing = drawingsById.get(c.drawing_id);
+    if (!drawing) continue;
+    const title = typeof drawing.title === 'string' && drawing.title.trim().length > 0
+      ? drawing.title.trim()
+      : null;
+    const subject = typeof drawing.context?.subject === 'string'
+      ? drawing.context.subject.trim()
+      : null;
+    out.push({
+      critique_id: c.critique_id,
+      drawing_id: c.drawing_id,
+      drawing_title: title,
+      drawing_subject: subject,
+      thumbnail_path: drawing.storage_path ?? null,
+      created_at: c.created_at,
+      content_excerpt: extractExcerpt(c.content),
+      primary_category: c.tags.primary_category,
+      secondary_categories: Array.isArray(c.tags.secondary_categories)
+        ? c.tags.secondary_categories
+        : [],
+      severity: c.tags.severity,
+    });
+  }
+  return out;
+}

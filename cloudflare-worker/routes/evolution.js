@@ -33,6 +33,7 @@ import {
   buildReel,
   buildThemes,
   buildStats,
+  buildTaggedCritiques,
   DEFAULT_WINDOW_CRITIQUES,
   MAX_WINDOW_CRITIQUES,
   DEFAULT_WINDOW_DAYS,
@@ -121,6 +122,10 @@ export function buildEvolutionResponseV2(drawings, { windowCritiques, windowDays
     highlight: null,                        // Phase 3 — same-subject pair
     reel: buildReel(allReelCritiques, drawingsById, { limit: REEL_PAGE_SIZE }),
     stats: buildStats(taggedCritiques),
+    // v3 (Studio Wall + Skill Radar): every classified critique with
+    // its drawing's metadata + full severity tag set. Oldest-first;
+    // iOS renders newest on the right of the wall.
+    tagged_critiques: buildTaggedCritiques(taggedCritiques, drawingsById),
     streak,                                  // retained for callers that want raw counts
     classifier_version: CLASSIFIER_VERSION,
   };

@@ -35,25 +35,14 @@ struct EvolutionPanelView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderStrip(summary: feed.summary)
 
-                DigestSection(
-                    digestSentence: feed.digestSentence,
-                    insightsLastUpdatedAt: feed.summary.insightsLastUpdatedAt,
-                    canRefresh: canRefresh,
-                    isRefreshing: isRefreshing,
-                    onRefresh: onRefresh
-                )
+                // v3 — Skill Radar (compact) + Studio Wall (hero).
+                // The radar shows shape change ("Then vs Now"); the
+                // wall shows the journey. Together they replace the
+                // v2 reel + themes + highlight stack with a real
+                // visualization of improvement.
+                EvolutionSkillRadarView(critiques: feed.taggedCritiques)
 
-                if !feed.themes.isEmpty {
-                    ThemesCard(themes: feed.themes)
-                }
-
-                if let highlight = feed.highlight {
-                    HighlightCard(highlight: highlight)
-                }
-
-                if !feed.reel.isEmpty {
-                    ReelSection(rows: feed.reel)
-                }
+                EvolutionStudioWallView(critiques: feed.taggedCritiques)
 
                 StatsStrip(stats: feed.stats)
             }

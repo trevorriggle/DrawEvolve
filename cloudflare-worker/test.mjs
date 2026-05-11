@@ -75,6 +75,7 @@ import {
   buildReel,
   buildThemes,
   buildStats,
+  buildTaggedCritiques,
   extractExcerpt,
   SOLID_FOUNDATION_CEILING,
   MEANINGFUL_DELTA,

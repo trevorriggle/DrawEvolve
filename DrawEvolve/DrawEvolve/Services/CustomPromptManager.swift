@@ -119,6 +119,15 @@ final class CustomPromptManager: ObservableObject {
         if let techniques = p.techniques, !techniques.isEmpty {
             out["techniques"] = techniques.map { $0.rawValue }
         }
+        // Freeform custom voice. Trim before sending so a trailing
+        // newline or accidental whitespace doesn't get persisted as a
+        // "non-empty" value that triggers the override path.
+        if let cv = p.customVoice {
+            let trimmed = cv.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                out["custom_voice"] = trimmed
+            }
+        }
         return out
     }
 
