@@ -19,7 +19,14 @@
 
 import { CRITIQUE_CATEGORIES, SEVERITY_MIN, SEVERITY_MAX } from './taxonomy.js';
 
-export const CLASSIFIER_MODEL = 'gpt-5.1-mini';
+// Was `gpt-5.1-mini` — OpenAI 404s on that model name (the 5.1
+// family ships gpt-5.1 only; the mini variant lives in the gpt-5
+// family). Switched to `gpt-5-mini` on 2026-05-11 after wrangler
+// tail confirmed every classifier call was 404'ing silently and
+// every critique's `tags` field was being left null at ingest time.
+// CLAUDE.md noted "gpt-5.1-mini for classifier" — that was aspirational
+// rather than verified at the time the doc was written.
+export const CLASSIFIER_MODEL = 'gpt-5-mini';
 export const CLASSIFIER_VERSION = 'v1';
 
 // Bumped whenever we change the prompt's INSTRUCTIONS in a way that affects

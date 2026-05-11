@@ -3624,8 +3624,10 @@ test('CRITIQUE_CATEGORIES locks the canonical 8-bucket taxonomy', () => {
   assert.equal(SEVERITY_MAX, 5);
 });
 
-test('CLASSIFIER_MODEL is gpt-5.1-mini (single line to swap if model changes)', () => {
-  assert.equal(CLASSIFIER_MODEL, 'gpt-5.1-mini');
+test('CLASSIFIER_MODEL is gpt-5-mini (single line to swap if model changes)', () => {
+  // Was gpt-5.1-mini until 2026-05-11 — that model name 404s on the
+  // OpenAI API. The mini variant lives in the gpt-5 family, not 5.1.
+  assert.equal(CLASSIFIER_MODEL, 'gpt-5-mini');
   assert.equal(CLASSIFIER_VERSION, 'v1');
 });
 
@@ -3651,7 +3653,7 @@ test('classifyCritique returns parsed tags with classifier_version stamped on su
   assert.equal(calls[0].url, 'https://api.openai.com/v1/chat/completions');
   assert.equal(calls[0].init.headers.Authorization, 'Bearer sk-test-classifier');
   // Body shape contract: model swap, deterministic params, json_schema strict.
-  assert.equal(calls[0].body.model, 'gpt-5.1-mini');
+  assert.equal(calls[0].body.model, 'gpt-5-mini');
   assert.equal(calls[0].body.temperature, 0);
   assert.equal(calls[0].body.seed, 42);
   assert.equal(calls[0].body.max_completion_tokens, 300);

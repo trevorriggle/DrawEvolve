@@ -232,12 +232,41 @@ export async function handleEvolutionRefresh(request, env, ctx, fetcher = fetch)
     return jsonResponse({ error: 'evolution_unavailable' }, 502);
   }
 
+  // Diagnostic: how many drawings + total entries + tagged-already + untagged?
+  // Logs once per refresh so wrangler tail shows the situation at a glance.
+  {
+    let totalEntries = 0;
+    let alreadyTagged = 0;
+    let needsTags = 0;
+    let emptyContent = 0;
+    for (const d of drawings) {
+      const entries = Array.isArray(d?.critique_history) ? d.critique_history : [];
+      totalEntries += entries.length;
+      for (const e of entries) {
+        if (e?.tags) {
+          alreadyTagged += 1;
+        } else {
+          const content = typeof e?.content === 'string' ? e.content.trim() : '';
+          if (content.length === 0) emptyContent += 1;
+          else needsTags += 1;
+        }
+      }
+    }
+    console.log('[evolution-refresh] user', userId,
+      'drawings', drawings.length,
+      'total_entries', totalEntries,
+      'already_tagged', alreadyTagged,
+      'needs_tags', needsTags,
+      'empty_content', emptyContent);
+  }
+
   // First pass: count what's missing, decide how many to backfill in
   // this call. We work in chronological order (oldest first) so a
   // capped backfill makes progress on the longest-untagged entries
   // first; users see their full history fill in across taps.
   let scanned = 0;
   let backfilled = 0;
+  let classifierNulls = 0;
   let capReached = false;
   const drawingsToPatch = new Map();   // drawing_id → updated critique_history array
 
@@ -263,7 +292,10 @@ export async function handleEvolutionRefresh(request, env, ctx, fetcher = fetch)
       const content = typeof entry.content === 'string' ? entry.content : '';
       if (content.trim().length === 0) continue;
       const tags = await classifyCritique({ feedback: content, env, fetcher });
-      if (!tags) continue;              // classifier failed or returned null — skip silently
+      if (!tags) {
+        classifierNulls += 1;
+        continue;
+      }
       sorted[i] = { ...entry, tags };
       mutated = true;
       backfilled += 1;
@@ -272,6 +304,12 @@ export async function handleEvolutionRefresh(request, env, ctx, fetcher = fetch)
       drawingsToPatch.set(d.id, sorted);
     }
   }
+  console.log('[evolution-refresh] summary',
+    'scanned', scanned,
+    'backfilled', backfilled,
+    'classifier_nulls', classifierNulls,
+    'patches', drawingsToPatch.size,
+    'cap_reached', capReached);
 
   // Write back. Each PATCH is its own request — if one fails, the rest
   // still land. The catch logs but doesn't fail the response; the user
