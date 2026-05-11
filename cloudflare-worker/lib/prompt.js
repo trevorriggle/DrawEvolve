@@ -613,6 +613,9 @@ export function validatePromptParameters(input) {
       return { error: `custom_voice exceeds ${CUSTOM_VOICE_MAX_LENGTH} chars` };
     }
     if (trimmed.length > 0) {
+      if (containsBlockedPhrase(trimmed)) {
+        return { error: 'custom_voice contains restricted phrasing' };
+      }
       out.custom_voice = trimmed;
     }
     // Empty string after trim = not set; just omit from output. Matches
@@ -621,11 +624,54 @@ export function validatePromptParameters(input) {
   return { value: out };
 }
 
-// Hard cap on the freeform custom voice text. Long enough for a
-// flavorful character description, short enough to make
-// prompt-injection attacks awkward. Mirrored client-side in
-// PromptEditView.swift.
-export const CUSTOM_VOICE_MAX_LENGTH = 280;
+// Hard cap on the freeform custom voice text. Cut from 280 to 100 on
+// 2026-05-11 in response to user feedback that 280 felt exploitable.
+// At 100 chars the input is enough for a character description ("A
+// retired Japanese sumi-e master who critiques in haiku" = 56 chars)
+// but starves the space for elaborate prompt-injection payloads.
+// Mirrored client-side in PromptEditView.swift.
+export const CUSTOM_VOICE_MAX_LENGTH = 100;
+
+// Belt-and-braces injection-phrase filter. The wrapper preamble in
+// wrapUserAuthoredVoice tells the model to treat user content as
+// quoted character notes, not instructions — but rejecting obvious
+// jailbreak phrases at the validator stage means the user never even
+// sees a critique built from one.
+//
+// Substrings checked case-insensitively. Length-bounded (100 chars
+// can fit "ignore previous instructions" but not much else after),
+// so the list stays short on purpose. If the user's intent is
+// genuine ("ignore the lighting and focus on anatomy"), the surface
+// area is small enough that false positives are unlikely.
+const CUSTOM_VOICE_BLOCKED_PHRASES = Object.freeze([
+  'ignore previous',
+  'ignore all previous',
+  'disregard previous',
+  'disregard all previous',
+  'system:',
+  'system prompt',
+  'you are now',
+  'new instructions',
+  'override',
+  'jailbreak',
+  'developer mode',
+  'respond only with',
+  'reply only with',
+  'output only',
+]);
+
+/**
+ * Returns true if the trimmed custom_voice text contains an obvious
+ * prompt-injection trigger. Caller should reject the request at the
+ * validation layer (validatePromptParameters) before any model call.
+ */
+function containsBlockedPhrase(text) {
+  const lower = text.toLowerCase();
+  for (const phrase of CUSTOM_VOICE_BLOCKED_PHRASES) {
+    if (lower.includes(phrase)) return true;
+  }
+  return false;
+}
 
 /**
  * Renders the parameters object as the body of a "PROMPT CUSTOMIZATION"
