@@ -227,7 +227,21 @@ struct DrawingDetailView: View {
             isLoadingImage = false
         }
         .fullScreenCover(isPresented: $showCanvas) {
+            // .id(drawing.id) anchors the canvas's SwiftUI identity to
+            // the stable drawing UUID. Without this, every re-render
+            // of DrawingDetailView (from @FocusState toggles, async
+            // state mutations rippling up through loadExistingDrawing,
+            // storageManager publishes, etc.) caused SwiftUI to treat
+            // the canvas as a "new" view and tear it down + re-mount.
+            // The logs showed 2–4 successive `Coordinator: Initialized`
+            // / `MetalCanvasView: Creating MTKView` rounds on a single
+            // Continue Drawing tap, and the visible symptom was the
+            // canvas appearing briefly and bouncing back to the detail
+            // view. Forcing identity = drawing.id (constant for this
+            // view's lifetime) makes SwiftUI keep the canvas mounted
+            // across all parent re-renders.
             DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
+                .id(drawing.id)
         }
         .alert("Delete Drawing", isPresented: $showDeleteAlert) {
             Button("Cancel", role: .cancel) {}
