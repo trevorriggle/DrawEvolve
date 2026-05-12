@@ -382,6 +382,57 @@ struct TransformHandlesOverlay: View {
         let origInLocal = rotateDocToLocal(s.originalDiagonalDoc, theta: s.startRotation)
 
         var newScale = s.startScale
+
+        // iPhone path: project the drag in SCREEN space, not in the
+        // selection's doc-aligned local frame. The doc-aligned approach
+        // (used unchanged on iPad below) interprets "X axis = width
+        // axis" using doc-X. When the canvas is rotated, doc-X is no
+        // longer screen-horizontal, so dragging a handle right on
+        // screen scales the wrong dimension on the rotated visual —
+        // the transformation "goes with the true X and Y values of
+        // the canvas" instead of following the user's finger.
+        // Projecting onto the screen-space original-edge direction
+        // sidesteps the rotation entirely; the factor is just how
+        // far along the visible edge axis the finger moved. Same
+        // universal `(in · orig) / |orig|²` projection works for both
+        // corner and edge — the original-edge vector encodes which
+        // direction the handle was originally placed in screen space.
+        if DeviceIdiom.isPhone {
+            let anchorScreen = canvasState.documentToScreen(s.anchorDoc)
+            let originalEdgeDoc = CGPoint(
+                x: s.anchorDoc.x + s.originalDiagonalDoc.x,
+                y: s.anchorDoc.y + s.originalDiagonalDoc.y
+            )
+            let originalEdgeScreen = canvasState.documentToScreen(originalEdgeDoc)
+            let origInScreen = CGPoint(
+                x: originalEdgeScreen.x - anchorScreen.x,
+                y: originalEdgeScreen.y - anchorScreen.y
+            )
+            let inScreen = CGPoint(
+                x: fingerScreen.x - anchorScreen.x,
+                y: fingerScreen.y - anchorScreen.y
+            )
+            let len2 = origInScreen.x * origInScreen.x + origInScreen.y * origInScreen.y
+            guard len2 > 0 else { return }
+            let dot = inScreen.x * origInScreen.x + inScreen.y * origInScreen.y
+            let factor = max(0.05, dot / len2)
+            switch handle {
+            case .corner:
+                newScale = CGSize(
+                    width:  s.startScale.width  * factor,
+                    height: s.startScale.height * factor
+                )
+            case .edge(let i):
+                let isVerticalAxis = (i == 0 || i == 2)
+                if isVerticalAxis {
+                    newScale = CGSize(width: s.startScale.width, height: s.startScale.height * factor)
+                } else {
+                    newScale = CGSize(width: s.startScale.width * factor, height: s.startScale.height)
+                }
+            case .rotation:
+                return
+            }
+        } else {
         switch handle {
         case .corner:
             // Uniform: project finger displacement onto the original-diagonal
@@ -414,6 +465,7 @@ struct TransformHandlesOverlay: View {
             }
         case .rotation:
             return
+        }
         }
 
         // Solve for the new offset that keeps the anchor pinned in doc space.
