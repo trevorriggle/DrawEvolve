@@ -89,6 +89,22 @@ struct FloatingFeedbackPanel: View {
             critiqueContent
         }
         .background(Color(uiColor: .systemBackground))
+        .onAppear {
+            // Pin to the most recent entry when the panel appears.
+            // Default @State of 0 mapped to critiqueHistory[0] = the
+            // OLDEST critique, so opening the panel always showed
+            // stale feedback. iPad's path has the same fix inside
+            // padBody's GeometryReader; phoneBody was missing it,
+            // hence the iPhone-only bug.
+            selectedHistoryIndex = max(0, critiqueHistory.count - 1)
+        }
+        .onChange(of: critiqueHistory.count) { _, newCount in
+            // When a new critique lands while the panel is already
+            // open, jump to it. Otherwise the user keeps seeing the
+            // previously-selected entry and has to fish in the
+            // history menu for the new one.
+            selectedHistoryIndex = max(0, newCount - 1)
+        }
     }
 
     private var phoneHeader: some View {
