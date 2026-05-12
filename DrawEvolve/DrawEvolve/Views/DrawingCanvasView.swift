@@ -1190,14 +1190,6 @@ struct DrawingCanvasView: View {
                                 }
                             }
 
-                            // Dark mode toggle
-                            ToolButton(
-                                icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
-                                isSelected: false
-                            ) {
-                                toggleColorScheme()
-                            }
-
                             // Canvas flip — display-only mirrors around the
                             // viewport center. Layer textures unchanged. Used
                             // by artists to spot proportion errors the eye
@@ -1210,9 +1202,14 @@ struct DrawingCanvasView: View {
                             // itself is still toggled internally; the user
                             // gets back to neutral via Recenter.)
                             //
-                            // Source order: Y-flip then X-flip puts them on
-                            // the same row of the 2-column LazyVGrid so the
-                            // pair sits row-adjacent (was column-adjacent).
+                            // Y-flip then X-flip placed at an EVEN-count
+                            // position in the 2-column LazyVGrid so the
+                            // pair sits side-by-side on the same row.
+                            // Items above this group must remain at an
+                            // even count or these two will split across
+                            // rows again (the prior layout drifted into
+                            // a column-adjacent / diagonal arrangement
+                            // when Dark Mode was inserted before them).
                             ToolButton(
                                 icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
                                 isSelected: false
@@ -1228,6 +1225,18 @@ struct DrawingCanvasView: View {
                                 canvasState.toggleFlipHorizontal()
                             }
                             .help("Flip canvas horizontally")
+
+                            // Dark mode toggle — moved AFTER the flips
+                            // so the flips end up side-by-side. (Was
+                            // immediately before the flips, which
+                            // shifted Y-flip into column 2 and X-flip
+                            // onto the next row's column 1.)
+                            ToolButton(
+                                icon: userPreferredColorScheme == "dark" ? "sun.max.fill" : "moon.fill",
+                                isSelected: false
+                            ) {
+                                toggleColorScheme()
+                            }
 
                             // Canvas Transform Controls
                             // Rotate L/R buttons removed Apr 16 — pinch-rotate
