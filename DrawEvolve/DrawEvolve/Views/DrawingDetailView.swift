@@ -15,10 +15,17 @@ struct DrawingDetailView: View {
     @State private var showDeleteAlert = false
     @State private var fullImageData: Data?
     @State private var isLoadingImage = true
-    /// Editable copy of the drawing's title. Bound to the title text
-    /// field at the top of the view; commits to the cloud on Done /
-    /// focus-loss via `commitTitleChange()`.
-    @State private var editedTitle: String
+    /// Editable copy of the drawing's title. INTENTIONALLY a @Binding
+    /// owned by GalleryView, not @State here. Reason: every storage
+    /// publish (rename PATCH, auto-save in canvas, fetch) re-renders
+    /// GalleryView, which re-evaluates the .fullScreenCover content
+    /// closure, which rebuilds this view. With @State the
+    /// State(initialValue: drawing.title) in init would reset the
+    /// typed text back to the snapshot title on every rebuild —
+    /// visible symptom: Done wipes the user's typed name. With
+    /// @Binding to a parent @State that doesn't get rebuilt, the
+    /// typed text survives.
+    @Binding var editedTitle: String
     @State private var isSavingTitle = false
     @FocusState private var titleFocused: Bool
     /// Critique IDs that the user has tapped "Read full critique" on.
@@ -48,10 +55,10 @@ struct DrawingDetailView: View {
     // SwiftUI no longer redraws when the singleton publishes.
     private let storageManager = CloudDrawingStorageManager.shared
 
-    init(drawing: Drawing) {
+    init(drawing: Drawing, editedTitle: Binding<String>) {
         self.drawing = drawing
+        self._editedTitle = editedTitle
         _drawingContext = State(initialValue: drawing.context ?? DrawingContext())
-        _editedTitle = State(initialValue: drawing.title)
     }
 
     var body: some View {
@@ -436,6 +443,7 @@ struct DrawingDetailView: View {
                 techniques: "Chiaroscuro",
                 focus: "Light and shadow"
             )
-        )
+        ),
+        editedTitle: .constant("Portrait Study")
     )
 }

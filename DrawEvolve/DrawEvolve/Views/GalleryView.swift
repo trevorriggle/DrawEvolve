@@ -65,6 +65,20 @@ struct GalleryView: View {
     @State private var showNewDrawing = false
     @State private var showPromptFirst = false
     @State private var selectedDrawing: Drawing?
+    /// The detail view's editable title lives HERE, not inside
+    /// DrawingDetailView. Reason: when the user types a new name and
+    /// hits Done, the renameDrawing PATCH publishes a change to
+    /// storageManager.drawings. GalleryView re-renders. The
+    /// .fullScreenCover(item:) content closure re-evaluates,
+    /// SwiftUI rebuilds DrawingDetailView, and (even with
+    /// .id(drawing.id)) its @State editedTitle gets reset to
+    /// drawing.title via the State(initialValue:) in init — wiping
+    /// out the user's typed name. Hoisting the state to this view
+    /// (which is stable across storage publishes — it OWNS the
+    /// observer, doesn't get rebuilt itself) and passing it as a
+    /// @Binding makes the typed text survive any number of
+    /// detail-view rebuilds.
+    @State private var detailEditedTitle: String = ""
     @State private var showDeleteAlert = false
     @State private var drawingToDelete: Drawing?
     @State private var drawingContext = DrawingContext()
@@ -489,6 +503,12 @@ struct GalleryView: View {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
                     Button(action: {
+                        // Seed the lifted title state with the
+                        // current title BEFORE presenting the cover.
+                        // DrawingDetailView reads via @Binding from
+                        // here, so it must reflect this drawing's
+                        // current title at present time.
+                        detailEditedTitle = drawing.title
                         selectedDrawing = drawing
                     }) {
                         DrawingCard(
@@ -505,21 +525,18 @@ struct GalleryView: View {
             .padding()
         }
         .fullScreenCover(item: $selectedDrawing) { drawing in
-            // .id(drawing.id) anchors DrawingDetailView's SwiftUI
-            // identity to the stable drawing UUID. GalleryView observes
-            // storageManager and re-renders on every @Published mutation
-            // (saves, renames, fetches, isLoading toggles). Each
-            // re-render re-evaluates this content closure. Without
-            // .id, SwiftUI was rebuilding DrawingDetailView from
-            // scratch on those re-renders — fresh @State, so the
-            // user's typed-but-not-yet-committed title got reset to
-            // drawing.title (the snapshot from view init). Visible
-            // symptom: type a name, hit Done, name vanishes back to
-            // the original. With .id pinned to the immutable UUID,
-            // SwiftUI preserves the view's identity across gallery
-            // re-renders so @State (editedTitle, showCanvas, etc.)
-            // survives.
-            DrawingDetailView(drawing: drawing)
+            // editedTitle binding is hoisted from this view rather
+            // than owned by DrawingDetailView's @State. The cover
+            // content closure re-evaluates on every gallery
+            // re-render (gallery observes storageManager, which
+            // publishes on every save / rename / fetch). With
+            // editedTitle as @State in DrawingDetailView, those
+            // rebuilds reset State(initialValue: drawing.title)
+            // back to the snapshot title, wiping the user's typed
+            // name. With editedTitle as @Binding pointing to a
+            // @State in THIS (stable) view, the typed text survives
+            // any number of DrawingDetailView rebuilds.
+            DrawingDetailView(drawing: drawing, editedTitle: $detailEditedTitle)
                 .id(drawing.id)
         }
     }
