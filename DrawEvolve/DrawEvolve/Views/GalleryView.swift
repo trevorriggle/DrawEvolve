@@ -50,6 +50,17 @@ struct GalleryView: View {
     @State private var showPromptEditor = false
     @State private var editingPrompt: CustomPrompt?
 
+    // iPhone-only prompt-editor state. Lives separately from
+    // `editingPrompt` / `showPromptEditor` so the iPad path stays
+    // bytes-identical. iPhone's `.sheet(isPresented:)` flow had a
+    // SwiftUI closure-capture issue: the `editing:` argument was
+    // captured stale, so tapping Edit on an existing prompt opened
+    // the editor with empty fields (effectively creating a new
+    // prompt). `.sheet(item:)` passes the value through the closure
+    // parameter directly, sidestepping the capture problem.
+    @State private var iPhoneEditingPrompt: CustomPrompt?
+    @State private var iPhoneShowNewPrompt = false
+
     @State private var selectedTab: Tab = .drawings
     @State private var showNewDrawing = false
     @State private var showPromptFirst = false
@@ -298,8 +309,12 @@ struct GalleryView: View {
             Section {
                 if customPromptManager.prompts.isEmpty {
                     Button {
-                        editingPrompt = nil
-                        showPromptEditor = true
+                        if DeviceIdiom.isPhone {
+                            iPhoneShowNewPrompt = true
+                        } else {
+                            editingPrompt = nil
+                            showPromptEditor = true
+                        }
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "plus.circle.fill")
@@ -335,8 +350,12 @@ struct GalleryView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                             Button {
-                                editingPrompt = prompt
-                                showPromptEditor = true
+                                if DeviceIdiom.isPhone {
+                                    iPhoneEditingPrompt = prompt
+                                } else {
+                                    editingPrompt = prompt
+                                    showPromptEditor = true
+                                }
                             } label: {
                                 Label("Edit", systemImage: "pencil")
                             }
@@ -344,8 +363,12 @@ struct GalleryView: View {
                         }
                     }
                     Button {
-                        editingPrompt = nil
-                        showPromptEditor = true
+                        if DeviceIdiom.isPhone {
+                            iPhoneShowNewPrompt = true
+                        } else {
+                            editingPrompt = nil
+                            showPromptEditor = true
+                        }
                     } label: {
                         Label("New saved prompt", systemImage: "plus.circle.fill")
                             .foregroundColor(.accentColor)
@@ -372,6 +395,21 @@ struct GalleryView: View {
             // dismiss() raced the in-flight save Task → "prompts
             // weren't saving" symptom).
             PromptEditView(editing: editingPrompt)
+        }
+        // iPhone-only: edit flow uses .sheet(item:) so the prompt
+        // value is passed through the closure parameter directly,
+        // not captured from @State. The .sheet(isPresented:) +
+        // captured-state pattern above was reading a stale
+        // `editingPrompt` on iPhone — the closure ran before the
+        // state update propagated, so tapping Edit opened the
+        // editor with empty fields (`editing: nil`) and a Save
+        // would create a duplicate prompt instead of patching the
+        // existing one. iPad's path is unchanged.
+        .sheet(item: $iPhoneEditingPrompt) { prompt in
+            PromptEditView(editing: prompt)
+        }
+        .sheet(isPresented: $iPhoneShowNewPrompt) {
+            PromptEditView(editing: nil)
         }
     }
 
