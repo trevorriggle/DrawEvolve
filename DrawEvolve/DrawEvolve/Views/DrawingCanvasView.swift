@@ -42,6 +42,14 @@ struct DrawingCanvasView: View {
     /// category instead of leaking pose into the "select / move /
     /// text" row.
     @State private var showPhonePosePicker = false
+    /// iPhone-only — combines the two text tools (.text + .textOnPath
+    /// in both freehand and circle sub-modes) under one grid slot.
+    /// iPad surfaces .textOnPath via a separate tile and exposes its
+    /// freehand/circle mode through the top-center toggle pill; on
+    /// iPhone the pill's `.padding(.top, 60)` collides with the inline
+    /// navigation bar, so the sub-mode lives in the picker sheet
+    /// instead and the pill is intentionally not mounted in phoneBody.
+    @State private var showPhoneTypePicker = false
     @State private var isRequestingFeedback = false
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
@@ -266,6 +274,13 @@ struct DrawingCanvasView: View {
         .sheet(isPresented: $showPhonePosePicker) {
             phonePosePickerSheet
         }
+        // iPhone-only type picker (plain text / type-on-path freehand /
+        // type-on-path circle). iPad uses two separate tiles + the
+        // floating mode-toggle pill; on iPhone the pill collides with
+        // the nav bar, so sub-mode selection lives in the sheet.
+        .sheet(isPresented: $showPhoneTypePicker) {
+            phoneTypePickerSheet
+        }
         // Tier-1.4: the More-button half-sheet (italic, kerning kind,
         // manual kern, on-path toggles) was retired alongside the bar's
         // More button. If those controls return they'll mount through a
@@ -403,6 +418,22 @@ struct DrawingCanvasView: View {
                     onTextRequest: { location in
                         canvasState.beginText(at: location, content: "")
                     },
+                    onTextOnPathRequest: { rawPoints, firstScreen, lastScreen in
+                        canvasState.beginTextOnPath(
+                            rawPoints: rawPoints,
+                            firstScreen: firstScreen,
+                            lastScreen: lastScreen,
+                            content: ""
+                        )
+                    },
+                    onTextOnPathCircleRequest: { center, radius in
+                        canvasState.beginTextOnPathCircle(
+                            center: center,
+                            radius: radius,
+                            content: ""
+                        )
+                    },
+                    typeOnPathMode: typeOnPathPathMode,
                     symmetry: symmetry
                 )
                 .ignoresSafeArea()
@@ -496,8 +527,32 @@ struct DrawingCanvasView: View {
                 PoseLowConfidenceBanner(poseManager: poseOverlayManager)
                     .ignoresSafeArea()
 
+                // Type-on-path live overlays — parity with padBody.
+                // PathStartHandle gates internally on floatingText.path,
+                // so all three are safe to mount unconditionally.
+                pathStartHandleOverlay
+                textOnPathPreviewOverlay
+                textOnPathCirclePreviewOverlay
+
+                // Caret + invisible UITextView host. `.ignoresSafeArea()`
+                // is REQUIRED on iPhone — both views position via
+                // `documentToScreen(...)` which returns coordinates in
+                // the MTKView's full-window space (MTKView itself ignores
+                // safe area). Without `.ignoresSafeArea()` the parent
+                // ZStack's local origin sits below the NavigationStack's
+                // toolbar + status bar, so `.position()` interprets the
+                // window-space point as local — shifting both the
+                // blinking caret and the invisible text host DOWN by the
+                // top safe-area inset. The visible rasterised glyphs are
+                // drawn directly into the layer texture so they still
+                // land at the correct doc location regardless, but the
+                // caret/host drift made the iPhone text tool feel "off."
+                // padBody doesn't need this because padBody is a bare
+                // ZStack at the top level (no NavigationStack chrome).
                 TextEntryOverlay(canvasState: canvasState)
+                    .ignoresSafeArea()
                 FloatingTextCaretIndicator(canvasState: canvasState)
+                    .ignoresSafeArea()
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -2099,6 +2154,145 @@ struct DrawingCanvasView: View {
         }
     }
 
+    // MARK: - iPhone type picker
+    //
+    // One grid tile, three rows in a sheet: plain text, type-on-path
+    // freehand, type-on-path circle. Selecting a row sets the tool
+    // and (for path modes) the sub-mode via `typeOnPathPathModeRaw`,
+    // then dismisses. iPad uses a separate `.textOnPath` tile + the
+    // floating mode-toggle pill; the pill collides with the iPhone
+    // nav bar so we route the sub-mode through the sheet instead.
+
+    /// Identifier for each row in the iPhone type picker. Used in
+    /// place of a flat `[DrawingTool]` array because two rows share
+    /// the same `DrawingTool` (`.textOnPath`) and differ only by
+    /// sub-mode.
+    private enum PhoneTypeVariant: Hashable, CaseIterable {
+        case plainText
+        case pathFreehand
+        case pathCircle
+
+        var tool: DrawingTool {
+            switch self {
+            case .plainText: return .text
+            case .pathFreehand, .pathCircle: return .textOnPath
+            }
+        }
+
+        var pathMode: TypeOnPathPathMode? {
+            switch self {
+            case .plainText: return nil
+            case .pathFreehand: return .freehand
+            case .pathCircle: return .circle
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .plainText:    return "Type Text"
+            case .pathFreehand: return "Type on Path — Freehand"
+            case .pathCircle:   return "Type on Path — Circle"
+            }
+        }
+
+        var tagline: String {
+            switch self {
+            case .plainText:
+                return "Tap to drop a caret; the keyboard rises immediately."
+            case .pathFreehand:
+                return "Drag a curve; the text flows along it."
+            case .pathCircle:
+                return "Tap a center, drag for the radius; the text wraps the ring."
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .plainText:    return DrawingTool.text.icon
+            case .pathFreehand: return DrawingTool.textOnPath.icon
+            case .pathCircle:   return "circle.dashed"
+            }
+        }
+    }
+
+    private var isCurrentToolTypeVariant: Bool {
+        canvasState.currentTool == .text || canvasState.currentTool == .textOnPath
+    }
+
+    private var phoneTypeTileIcon: String {
+        switch canvasState.currentTool {
+        case .textOnPath:
+            return typeOnPathPathMode == .circle ? "circle.dashed" : DrawingTool.textOnPath.icon
+        default:
+            return DrawingTool.text.icon
+        }
+    }
+
+    private func isPhoneTypeVariantActive(_ v: PhoneTypeVariant) -> Bool {
+        switch v {
+        case .plainText:
+            return canvasState.currentTool == .text
+        case .pathFreehand:
+            return canvasState.currentTool == .textOnPath && typeOnPathPathMode == .freehand
+        case .pathCircle:
+            return canvasState.currentTool == .textOnPath && typeOnPathPathMode == .circle
+        }
+    }
+
+    private var phoneTypePickerSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(PhoneTypeVariant.allCases, id: \.self) { variant in
+                        Button {
+                            canvasState.currentTool = variant.tool
+                            if let mode = variant.pathMode {
+                                typeOnPathPathModeRaw = mode.rawValue
+                            }
+                            showPhoneTypePicker = false
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: variant.icon)
+                                    .font(.title3)
+                                    .frame(width: 32, height: 32)
+                                    .foregroundStyle(isPhoneTypeVariantActive(variant)
+                                                     ? Color.accentColor
+                                                     : .primary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(variant.title)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text(variant.tagline)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if isPhoneTypeVariantActive(variant) {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } footer: {
+                    Text("Type Text drops a caret where you tap. Type on Path lets you trace a curve (or a circle) and the letters follow it.")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Type")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showPhoneTypePicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
     private var phoneToolPanel: some View {
         // 29 tiles, 5 columns × 6 rows. One trailing cell is empty.
         // Pose-reference variants (handPose / bodyPose) are consolidated
@@ -2188,8 +2382,18 @@ struct DrawingCanvasView: View {
                     canvasState.currentTool = .move
                     collapsePhoneToolPanel()
                 }
-                ToolButton(icon: DrawingTool.text.icon, isSelected: canvasState.currentTool == .text) {
-                    canvasState.currentTool = .text
+                // Combined Type tile — opens phoneTypePickerSheet,
+                // which routes to plain text or type-on-path
+                // (freehand/circle). Same pattern as the brush and
+                // pose pickers. isSelected is true while any text
+                // tool is active; the icon reflects which sub-mode
+                // (text vs freehand-path vs circle-path) so the tile
+                // communicates state at a glance.
+                ToolButton(
+                    icon: phoneTypeTileIcon,
+                    isSelected: isCurrentToolTypeVariant
+                ) {
+                    showPhoneTypePicker = true
                     collapsePhoneToolPanel()
                 }
                 // Single combined pose tile — taps open the pose
