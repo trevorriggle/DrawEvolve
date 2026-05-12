@@ -24,7 +24,29 @@ struct DrawingDetailView: View {
     /// Critique IDs that the user has tapped "Read full critique" on.
     /// Per-entry so multiple critiques can be expanded independently.
     @State private var expandedCritiqueIDs: Set<UUID> = []
-    @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
+    // INTENTIONALLY NOT @ObservedObject. CloudDrawingStorageManager is a
+    // global singleton whose @Published mutations (drawings array,
+    // isLoading flag, pendingUploadCount, etc.) fire constantly:
+    //   • Whenever the auto-save timer in DrawingCanvasView ticks
+    //     a successful save while the canvas cover is presenting,
+    //     drawings publishes, the detail view re-renders, the
+    //     .fullScreenCover content closure re-evaluates, and
+    //     SwiftUI fails to preserve DrawingCanvasView's identity
+    //     even with .id(drawing.id). Net visible effect: canvas
+    //     appears, immediately bounces back to the detail view.
+    //   • Same story for renameDrawing's own publish — the rename
+    //     cascade fed itself back into a re-render loop.
+    //   • storage manager's `isLoading` toggling during the
+    //     loadFullImage round-trip caused two extra re-renders on
+    //     view appear alone.
+    //
+    // The detail view's body reads ZERO storage-manager state
+    // (it only CALLS methods on the manager — loadFullImage,
+    // renameDrawing, deleteDrawing). So observing the publisher
+    // is purely a re-render churn source with no UI value.
+    // Holding a plain `let` reference still lets us call methods;
+    // SwiftUI no longer redraws when the singleton publishes.
+    private let storageManager = CloudDrawingStorageManager.shared
 
     init(drawing: Drawing) {
         self.drawing = drawing
