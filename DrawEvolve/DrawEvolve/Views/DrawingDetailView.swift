@@ -76,7 +76,23 @@ struct DrawingDetailView: View {
                         TextField("Drawing name", text: $editedTitle)
                             .font(.title2.weight(.semibold))
                             .textFieldStyle(.plain)
-                            .submitLabel(.done)
+                            // submitLabel(.return) — the keyboard's
+                            // primary key shows "return" and just
+                            // collapses the keyboard. NO .onSubmit
+                            // handler. The reason: a Done/.onSubmit
+                            // committing the rename was the source of
+                            // every race we hit in this view. Done
+                            // dismisses the keyboard, which fires a
+                            // focus-state change, which kicks off
+                            // SwiftUI re-renders, which collide with
+                            // the async storage mutation kicked off
+                            // by the commit. Decoupling those is the
+                            // whole game: typing edits the local
+                            // binding live; committing only happens
+                            // on explicit user action (Save and Close
+                            // in the toolbar, or Continue Drawing
+                            // below).
+                            .submitLabel(.return)
                             .focused($titleFocused)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 14)
@@ -90,23 +106,6 @@ struct DrawingDetailView: View {
                                         .padding(.trailing, 14)
                                 }
                             }
-                            .onSubmit { commitTitleChange() }
-                            // Intentionally NO focus-loss commit. The
-                            // earlier version fired commitTitleChange()
-                            // from .onChange(of: titleFocused) when the
-                            // field lost focus — but iOS dismisses the
-                            // keyboard on any tap outside the field,
-                            // including a tap on the Continue Drawing
-                            // button. That dismissal triggered a commit
-                            // Task whose subsequent storage mutation
-                            // raced the fullScreenCover presentation and
-                            // caused the canvas to flash open and
-                            // immediately collapse back to the detail
-                            // view. Done on the keyboard is now the only
-                            // commit trigger. If you dismiss the keyboard
-                            // without tapping Done, the typed text stays
-                            // in the field but doesn't persist — that's
-                            // the correct semantics: you didn't confirm.
 
                         // Drawing image — bytes live in cloud Storage now; the
                         // storage manager checks the disk cache, then falls back
@@ -244,8 +243,20 @@ struct DrawingDetailView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Close") {
-                        dismiss()
+                    // Save and Close is the canonical "I'm done with
+                    // this drawing" action. It awaits the rename
+                    // commit (no-op if the title is unchanged), then
+                    // dismisses the view. Dismiss happens AFTER the
+                    // commit completes, so the storage cascade that
+                    // a successful rename publishes lands while the
+                    // cover is still presenting (no canvas to remount,
+                    // no fullScreenCover ripple). By the time the
+                    // cover dismisses, everything is settled.
+                    Button("Save and Close") {
+                        Task { @MainActor in
+                            await performCommitTitleChange()
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -365,21 +376,14 @@ struct DrawingDetailView: View {
         .cornerRadius(12)
     }
 
-    /// Fire-and-forget commit, called from `.onSubmit` (Done on the
-    /// keyboard). Wraps `performCommitTitleChange` in a Task so the
-    /// synchronous SwiftUI callback returns immediately. Continue
-    /// Drawing awaits `performCommitTitleChange` directly instead so
-    /// it can ordering-guarantee the storage cascade settles before
-    /// presenting the canvas (otherwise the cover re-mounts the
-    /// canvas repeatedly as the storage publishes ripple through
-    /// DrawingDetailView).
-    private func commitTitleChange() {
-        Task { @MainActor in await performCommitTitleChange() }
-    }
-
-    /// The actual commit. No-ops if empty / unchanged / already in
-    /// flight. Awaits the renameDrawing PATCH so the local cache
-    /// AND the cloud row are in sync by the time this returns.
+    /// Commit the rename to local cache + cloud. No-ops if the title
+    /// is empty / unchanged / already in flight. Called only from
+    /// explicit user actions (Save and Close in the toolbar,
+    /// Continue Drawing below) — never from .onSubmit or focus-loss,
+    /// because both of those fired during keyboard-dismiss transitions
+    /// and raced the SwiftUI re-render cycle. Awaitable so callers
+    /// can ordering-guarantee the storage cascade settles before
+    /// doing anything else (presenting canvas, dismissing the view).
     @MainActor
     private func performCommitTitleChange() async {
         let trimmed = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
