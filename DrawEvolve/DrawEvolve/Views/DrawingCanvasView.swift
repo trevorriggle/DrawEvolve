@@ -623,7 +623,13 @@ struct DrawingCanvasView: View {
             // idioms); idiom-specific presentations stay inside the
             // relevant idiom body.
             .sheet(isPresented: $showFeedback) {
-                if canvasState.feedback != nil {
+                // Present whenever there's anything to show — current
+                // feedback OR prior history. Was gated on
+                // `feedback != nil`, which masked the panel when the
+                // user opened it purely to scroll their history (e.g.
+                // after relaunch when `feedback` is nil but the
+                // critique log still hydrates from cloud).
+                if canvasState.feedback != nil || !critiqueHistory.isEmpty {
                     FloatingFeedbackPanel(
                         feedback: canvasState.feedback,
                         critiqueHistory: critiqueHistory,
@@ -2562,15 +2568,21 @@ struct DrawingCanvasView: View {
                     collapsePhoneToolPanel()
                 }
                 .disabled(isSavingToPhotos)
+                // iPhone-only behavior: the sparkle tile opens the
+                // critique-history half-sheet, it does NOT fire a new
+                // AI request. The "Get Feedback" action pill on
+                // phoneActionRow is the dedicated trigger for new
+                // critiques — having two entry points (a button and a
+                // toolbar tile) that both ran the request was a
+                // double-spend hazard. Sparkle now means "look at what
+                // I've already been told." Disabled only when there's
+                // truly nothing to show (no current feedback AND no
+                // prior history).
                 ToolButton(icon: "sparkles", isSelected: showFeedback) {
-                    if canvasState.feedback != nil {
-                        showFeedback.toggle()
-                    } else {
-                        requestFeedback()
-                    }
+                    showFeedback = true
                     collapsePhoneToolPanel()
                 }
-                .disabled(canvasState.isEmpty)
+                .disabled(canvasState.feedback == nil && critiqueHistory.isEmpty)
                 Button(action: {
                     guard canvasState.currentTool != .blur,
                           canvasState.currentTool != .blurAdjustment,
