@@ -505,7 +505,22 @@ struct GalleryView: View {
             .padding()
         }
         .fullScreenCover(item: $selectedDrawing) { drawing in
+            // .id(drawing.id) anchors DrawingDetailView's SwiftUI
+            // identity to the stable drawing UUID. GalleryView observes
+            // storageManager and re-renders on every @Published mutation
+            // (saves, renames, fetches, isLoading toggles). Each
+            // re-render re-evaluates this content closure. Without
+            // .id, SwiftUI was rebuilding DrawingDetailView from
+            // scratch on those re-renders — fresh @State, so the
+            // user's typed-but-not-yet-committed title got reset to
+            // drawing.title (the snapshot from view init). Visible
+            // symptom: type a name, hit Done, name vanishes back to
+            // the original. With .id pinned to the immutable UUID,
+            // SwiftUI preserves the view's identity across gallery
+            // re-renders so @State (editedTitle, showCanvas, etc.)
+            // survives.
             DrawingDetailView(drawing: drawing)
+                .id(drawing.id)
         }
     }
 }
