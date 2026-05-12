@@ -38,7 +38,7 @@ struct BetaTransparencyPopup: View {
                         .fontWeight(.bold)
                         .multilineTextAlignment(.center)
 
-                    Text("We're being completely honest with you")
+                    Text("Here's where things stand.")
                         .font(.subheadline)
                         .foregroundColor(.primary)
                         .multilineTextAlignment(.center)
@@ -51,17 +51,15 @@ struct BetaTransparencyPopup: View {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
-                        Text("Heads up — this is a BETA")
+                        Text("A few things to know")
                             .font(.headline)
                             .fontWeight(.bold)
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        BetaWarningItem(text: "Expect bugs and rough edges. Please report what breaks.")
-                        BetaWarningItem(text: "Pose detection (hand / body) needs a real device — the iOS Simulator can't load Apple's Vision models.")
-                        BetaWarningItem(text: "iPhone support is newer than iPad — some flows are more polished on iPad.")
-                        BetaWarningItem(text: "DrawEvolve is free during the beta. Some features may move behind a paid tier when we ship.")
-                        BetaWarningItem(text: "Drawings and critiques sync to Supabase. If a crash takes the app down, your work survives the relaunch.")
+                        BetaWarningItem(text: "Bugs will happen. Tell us what you find.")
+                        BetaWarningItem(text: "The iPhone build has more rough edges than iPad. Both work, but iPad feels more polished right now.")
+                        BetaWarningItem(text: "Auto-save keeps your work backed up between manual saves, so a crash won't wipe what you've drawn.")
                     }
                 }
 
@@ -71,7 +69,7 @@ struct BetaTransparencyPopup: View {
                     HStack(spacing: 8) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(.green)
-                        Text("What's working now")
+                        Text("What you can do")
                             .font(.headline)
                             .fontWeight(.bold)
                     }
@@ -79,7 +77,7 @@ struct BetaTransparencyPopup: View {
                     VStack(alignment: .leading, spacing: 8) {
                         BetaFeatureItem(
                             icon: "paintbrush.pointed.fill",
-                            text: "6 calibrated brushes — pencil, brush, ink pen, marker, airbrush, charcoal — each with its own shape and feel."
+                            text: "Six brushes: pencil, brush, ink pen, marker, airbrush, charcoal."
                         )
                         BetaFeatureItem(
                             icon: "drop.fill",
@@ -87,39 +85,39 @@ struct BetaTransparencyPopup: View {
                         )
                         BetaFeatureItem(
                             icon: "square.on.circle",
-                            text: "Shapes (line, rectangle, circle), text, and type-on-path along a curve or a circle."
+                            text: "Shapes, text, and type along a curve or a circle."
                         )
                         BetaFeatureItem(
                             icon: "lasso",
-                            text: "Rectangle marquee + lasso selection, free transform (scale, rotate, move)."
+                            text: "Rectangle and lasso selection. Free scale and rotate."
                         )
                         BetaFeatureItem(
                             icon: "square.stack.3d.up.fill",
-                            text: "Multi-layer drawing, undo / redo, symmetry mirror modes."
+                            text: "Multi-layer canvas, undo and redo, symmetry mirror modes."
                         )
                         BetaFeatureItem(
                             icon: "figure.stand",
-                            text: "Hand and body pose reference overlays — trace from a photo, then draw over them."
+                            text: "Hand and body pose overlays you can trace from a photo."
                         )
                         BetaFeatureItem(
                             icon: "sparkles",
-                            text: "GPT-5.1 AI critique with iterative coaching — your coach remembers prior sessions on the same drawing."
+                            text: "AI critique that remembers what it told you last time on the same drawing."
                         )
                         BetaFeatureItem(
                             icon: "person.crop.circle.badge.questionmark",
-                            text: "Four voice presets (Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master) plus a freeform custom voice."
+                            text: "Four coach voices, or write your own."
                         )
                         BetaFeatureItem(
                             icon: "slider.horizontal.3",
-                            text: "Custom prompts — tune focus, tone, depth, and technique emphasis. Save and reuse."
+                            text: "Custom prompts you can save and reuse."
                         )
                         BetaFeatureItem(
                             icon: "chart.line.uptrend.xyaxis",
-                            text: "My Evolution — skill radar + critique wall tracking your growth across drawings."
+                            text: "A skill radar that tracks how you're improving."
                         )
                         BetaFeatureItem(
                             icon: "ipad.and.iphone",
-                            text: "Universal app — iPad and iPhone with cloud sync of drawings + critique history."
+                            text: "Works on iPad and iPhone."
                         )
                     }
                 }
@@ -130,20 +128,19 @@ struct BetaTransparencyPopup: View {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.forward.circle.fill")
                             .foregroundColor(.blue)
-                        Text("On the horizon")
+                        Text("What's coming")
                             .font(.headline)
                             .fontWeight(.bold)
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        ComingSoonItem(text: "Smarter brush sets — oil paint and watercolor with real texture.")
-                        ComingSoonItem(text: "Per-drawing pinned prompts that override the global voice when active.")
-                        ComingSoonItem(text: "More export formats — Procreate-compatible files and stroke-by-stroke timelapses.")
-                        ComingSoonItem(text: "Sharable evolution profiles — show your growth publicly when you want to.")
-                        ComingSoonItem(text: "A Pro tier with higher critique limits when paid plans land. Beta users keep the free tier as long as we can swing it.")
+                        ComingSoonItem(text: "Better brushes. Oil paint and watercolor with real texture.")
+                        ComingSoonItem(text: "Pinned prompts that override your default voice for one drawing.")
+                        ComingSoonItem(text: "More export options.")
+                        ComingSoonItem(text: "Sharing your evolution if you want to.")
                     }
 
-                    Text("Your journey matters. We're building this WITH you, not just FOR you.")
+                    Text("Thanks for testing early. Your feedback shapes this.")
                         .font(.caption)
                         .foregroundColor(.primary)
                         .italic()
@@ -197,7 +194,7 @@ struct BetaTransparencyPopup: View {
                         .font(.title2)
                         .fontWeight(.bold)
 
-                    Text("We're being completely honest with you")
+                    Text("Here's where things stand.")
                         .font(.subheadline)
                         .foregroundColor(.primary)
                 }
@@ -215,17 +212,15 @@ struct BetaTransparencyPopup: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundColor(.orange)
-                                Text("Heads up — this is a BETA")
+                                Text("A few things to know")
                                     .font(.headline)
                                     .fontWeight(.bold)
                             }
 
                             VStack(alignment: .leading, spacing: 8) {
-                                BetaWarningItem(text: "Expect bugs and rough edges. Please report what breaks.")
-                                BetaWarningItem(text: "Pose detection (hand / body) needs a real device — the iOS Simulator can't load Apple's Vision models.")
-                                BetaWarningItem(text: "iPhone support is newer than iPad — some flows are more polished on iPad.")
-                                BetaWarningItem(text: "DrawEvolve is free during the beta. Some features may move behind a paid tier when we ship.")
-                                BetaWarningItem(text: "Drawings and critiques sync to Supabase. If a crash takes the app down, your work survives the relaunch.")
+                                BetaWarningItem(text: "Bugs will happen. Tell us what you find.")
+                                BetaWarningItem(text: "The iPhone build has more rough edges than iPad. Both work, but iPad feels more polished right now.")
+                                BetaWarningItem(text: "Auto-save keeps your work backed up between manual saves, so a crash won't wipe what you've drawn.")
                             }
                         }
 
@@ -236,7 +231,7 @@ struct BetaTransparencyPopup: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundColor(.green)
-                                Text("What's working now")
+                                Text("What you can do")
                                     .font(.headline)
                                     .fontWeight(.bold)
                             }
@@ -244,7 +239,7 @@ struct BetaTransparencyPopup: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 BetaFeatureItem(
                                     icon: "paintbrush.pointed.fill",
-                                    text: "6 calibrated brushes — pencil, brush, ink pen, marker, airbrush, charcoal — each with its own shape and feel."
+                                    text: "Six brushes: pencil, brush, ink pen, marker, airbrush, charcoal."
                                 )
                                 BetaFeatureItem(
                                     icon: "drop.fill",
@@ -252,39 +247,39 @@ struct BetaTransparencyPopup: View {
                                 )
                                 BetaFeatureItem(
                                     icon: "square.on.circle",
-                                    text: "Shapes (line, rectangle, circle), text, and type-on-path along a curve or a circle."
+                                    text: "Shapes, text, and type along a curve or a circle."
                                 )
                                 BetaFeatureItem(
                                     icon: "lasso",
-                                    text: "Rectangle marquee + lasso selection, free transform (scale, rotate, move)."
+                                    text: "Rectangle and lasso selection. Free scale and rotate."
                                 )
                                 BetaFeatureItem(
                                     icon: "square.stack.3d.up.fill",
-                                    text: "Multi-layer drawing, undo / redo, symmetry mirror modes."
+                                    text: "Multi-layer canvas, undo and redo, symmetry mirror modes."
                                 )
                                 BetaFeatureItem(
                                     icon: "figure.stand",
-                                    text: "Hand and body pose reference overlays — trace from a photo, then draw over them."
+                                    text: "Hand and body pose overlays you can trace from a photo."
                                 )
                                 BetaFeatureItem(
                                     icon: "sparkles",
-                                    text: "GPT-5.1 AI critique with iterative coaching — your coach remembers prior sessions on the same drawing."
+                                    text: "AI critique that remembers what it told you last time on the same drawing."
                                 )
                                 BetaFeatureItem(
                                     icon: "person.crop.circle.badge.questionmark",
-                                    text: "Four voice presets (Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master) plus a freeform custom voice."
+                                    text: "Four coach voices, or write your own."
                                 )
                                 BetaFeatureItem(
                                     icon: "slider.horizontal.3",
-                                    text: "Custom prompts — tune focus, tone, depth, and technique emphasis. Save and reuse."
+                                    text: "Custom prompts you can save and reuse."
                                 )
                                 BetaFeatureItem(
                                     icon: "chart.line.uptrend.xyaxis",
-                                    text: "My Evolution — skill radar + critique wall tracking your growth across drawings."
+                                    text: "A skill radar that tracks how you're improving."
                                 )
                                 BetaFeatureItem(
                                     icon: "ipad.and.iphone",
-                                    text: "Universal app — iPad and iPhone with cloud sync of drawings + critique history."
+                                    text: "Works on iPad and iPhone."
                                 )
                             }
                         }
@@ -296,20 +291,19 @@ struct BetaTransparencyPopup: View {
                             HStack(spacing: 8) {
                                 Image(systemName: "arrow.forward.circle.fill")
                                     .foregroundColor(.blue)
-                                Text("On the horizon")
+                                Text("What's coming")
                                     .font(.headline)
                                     .fontWeight(.bold)
                             }
 
                             VStack(alignment: .leading, spacing: 8) {
-                                ComingSoonItem(text: "Smarter brush sets — oil paint and watercolor with real texture.")
-                                ComingSoonItem(text: "Per-drawing pinned prompts that override the global voice when active.")
-                                ComingSoonItem(text: "More export formats — Procreate-compatible files and stroke-by-stroke timelapses.")
-                                ComingSoonItem(text: "Sharable evolution profiles — show your growth publicly when you want to.")
-                                ComingSoonItem(text: "A Pro tier with higher critique limits when paid plans land. Beta users keep the free tier as long as we can swing it.")
+                                ComingSoonItem(text: "Better brushes. Oil paint and watercolor with real texture.")
+                                ComingSoonItem(text: "Pinned prompts that override your default voice for one drawing.")
+                                ComingSoonItem(text: "More export options.")
+                                ComingSoonItem(text: "Sharing your evolution if you want to.")
                             }
 
-                            Text("Your journey matters. We're building this WITH you, not just FOR you.")
+                            Text("Thanks for testing early. Your feedback shapes this.")
                                 .font(.caption)
                                 .foregroundColor(.primary)
                                 .italic()

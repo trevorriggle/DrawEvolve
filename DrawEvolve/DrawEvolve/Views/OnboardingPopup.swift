@@ -39,31 +39,31 @@ struct OnboardingPopup: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("How it works:")
+                    Text("How it works")
                         .font(.headline)
 
                     OnboardingStep(
                         icon: "doc.text.fill",
-                        title: "Set the scene",
-                        description: "Tell DrawEvolve what you're making — subject, style, skill level, focus areas — or skip and just start drawing."
+                        title: "Tell us about your drawing",
+                        description: "Describe what you're working on, or skip and just start."
                     )
 
                     OnboardingStep(
                         icon: "paintbrush.pointed.fill",
-                        title: "Draw on the canvas",
-                        description: "6 brushes, layers, symmetry, rectangle / lasso select, pose references, and type-on-path. Apple Pencil works on iPad; touch works everywhere."
+                        title: "Draw",
+                        description: "Brushes, layers, symmetry, pose reference, text on a path. Apple Pencil or finger."
                     )
 
                     OnboardingStep(
                         icon: "person.crop.circle.badge.questionmark",
-                        title: "Pick a coach voice",
-                        description: "Choose Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master — or write your own (\"retired sumi-e master who critiques in haiku\")."
+                        title: "Pick a coach",
+                        description: "Four voices to choose from, or write your own."
                     )
 
                     OnboardingStep(
                         icon: "sparkles",
-                        title: "Get iterative feedback",
-                        description: "Tap Get Feedback for specific, honest critique. Your coach remembers prior sessions on the same drawing — track your growth in My Evolution."
+                        title: "Get feedback",
+                        description: "Tap Get Feedback for honest critique. Your coach builds on what it said last time."
                     )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -124,31 +124,31 @@ struct OnboardingPopup: View {
 
                 // How it works
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("How it works:")
+                    Text("How it works")
                         .font(.headline)
 
                     OnboardingStep(
                         icon: "doc.text.fill",
-                        title: "Set the scene",
-                        description: "Tell DrawEvolve what you're making — subject, style, skill level, focus areas — or skip and just start drawing."
+                        title: "Tell us about your drawing",
+                        description: "Describe what you're working on, or skip and just start."
                     )
 
                     OnboardingStep(
                         icon: "paintbrush.pointed.fill",
-                        title: "Draw on the canvas",
-                        description: "6 brushes, layers, symmetry, rectangle / lasso select, pose references, and type-on-path. Apple Pencil works on iPad; touch works everywhere."
+                        title: "Draw",
+                        description: "Brushes, layers, symmetry, pose reference, text on a path. Apple Pencil or finger."
                     )
 
                     OnboardingStep(
                         icon: "person.crop.circle.badge.questionmark",
-                        title: "Pick a coach voice",
-                        description: "Choose Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master — or write your own (\"retired sumi-e master who critiques in haiku\")."
+                        title: "Pick a coach",
+                        description: "Four voices to choose from, or write your own."
                     )
 
                     OnboardingStep(
                         icon: "sparkles",
-                        title: "Get iterative feedback",
-                        description: "Tap Get Feedback for specific, honest critique. Your coach remembers prior sessions on the same drawing — track your growth in My Evolution."
+                        title: "Get feedback",
+                        description: "Tap Get Feedback for honest critique. Your coach builds on what it said last time."
                     )
                 }
                 .padding(.horizontal)
@@ -199,8 +199,9 @@ struct OnboardingStep: View {
                     .fontWeight(.semibold)
 
                 Text(description)
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
