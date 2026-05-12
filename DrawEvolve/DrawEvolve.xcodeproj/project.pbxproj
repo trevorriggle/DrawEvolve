@@ -27,6 +27,7 @@
 		DE000021 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = DE100021 /* Shaders.metal */; };
 		DE000024 /* DrawingStorageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100024 /* DrawingStorageManager.swift */; };
 		DE000025 /* Drawing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100025 /* Drawing.swift */; };
+		DE000096 /* CritiqueSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100096 /* CritiqueSummary.swift */; };
 		DE000028 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100028 /* GalleryView.swift */; };
 		DE000029 /* AnonymousUserManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100029 /* AnonymousUserManager.swift */; };
 		DE000030 /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100030 /* FloatingFeedbackPanel.swift */; };
@@ -121,6 +122,7 @@
 		DE100021 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		DE100024 /* DrawingStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingStorageManager.swift; sourceTree = "<group>"; };
 		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
+		DE100096 /* CritiqueSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueSummary.swift; sourceTree = "<group>"; };
 		DE100028 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
 		DE100029 /* AnonymousUserManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnonymousUserManager.swift; sourceTree = "<group>"; };
 		DE100030 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
@@ -284,6 +286,7 @@
 				DE100014 /* DrawingTool.swift */,
 				DE100025 /* Drawing.swift */,
 				DE100032 /* CritiqueHistory.swift */,
+				DE100096 /* CritiqueSummary.swift */,
 				DE100048 /* CustomPrompt.swift */,
 				DE100052 /* LayeredDrawingPayload.swift */,
 				DE100053 /* EvolutionData.swift */,
@@ -517,6 +520,7 @@
 				DE000021 /* Shaders.metal in Sources */,
 				DE000024 /* DrawingStorageManager.swift in Sources */,
 				DE000025 /* Drawing.swift in Sources */,
+				DE000096 /* CritiqueSummary.swift in Sources */,
 				DE000028 /* GalleryView.swift in Sources */,
 				DE000029 /* AnonymousUserManager.swift in Sources */,
 				DE000030 /* FloatingFeedbackPanel.swift in Sources */,

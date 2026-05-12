@@ -21,6 +21,9 @@ struct DrawingDetailView: View {
     @State private var editedTitle: String
     @State private var isSavingTitle = false
     @FocusState private var titleFocused: Bool
+    /// Critique IDs that the user has tapped "Read full critique" on.
+    /// Per-entry so multiple critiques can be expanded independently.
+    @State private var expandedCritiqueIDs: Set<UUID> = []
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
 
     init(drawing: Drawing) {
@@ -98,34 +101,20 @@ struct DrawingDetailView: View {
                             }
                         }
 
-                        // AI Feedback History
+                        // AI Feedback Summary — bulleted recap per critique
+                        // instead of the full wall of text. The full body
+                        // stays one tap away behind "Read full critique."
+                        // Full text still lives in the floating critique
+                        // panel; this view is the at-a-glance recap.
                         if !drawing.critiqueHistory.isEmpty {
                             VStack(alignment: .leading, spacing: 16) {
-                                Label("AI Feedback History", systemImage: "sparkles")
+                                Label("AI Feedback Summary", systemImage: "sparkles")
                                     .font(.headline)
                                     .foregroundColor(.accentColor)
 
-                                // Show all critiques in reverse chronological order (newest first)
+                                // Newest first
                                 ForEach(drawing.critiqueHistory.reversed()) { entry in
-                                    VStack(alignment: .leading, spacing: 12) {
-                                        // Timestamp
-                                        HStack {
-                                            Image(systemName: "clock")
-                                                .font(.caption)
-                                                .foregroundColor(.primary)
-                                            Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
-                                                .font(.caption)
-                                                .foregroundColor(.primary)
-                                        }
-
-                                        Divider()
-
-                                        // Feedback content
-                                        FormattedMarkdownView(text: entry.feedback)
-                                    }
-                                    .padding()
-                                    .background(Color(uiColor: .secondarySystemBackground))
-                                    .cornerRadius(12)
+                                    critiqueSummaryCard(for: entry)
                                 }
                             }
                         } else {
@@ -224,6 +213,86 @@ struct DrawingDetailView: View {
         } message: {
             Text("Are you sure you want to delete '\(drawing.title)'? This cannot be undone.")
         }
+    }
+
+    /// One card per critique in the summary panel. Renders the
+    /// bulleted summary block extracted by `CritiqueSummary.parse`,
+    /// or a first-paragraph fallback for critiques generated before
+    /// the worker started emitting the block. A "Read full critique"
+    /// button reveals the full body inline (with the summary block
+    /// itself stripped, since the bullets above already cover it).
+    @ViewBuilder
+    private func critiqueSummaryCard(for entry: CritiqueEntry) -> some View {
+        let parsed = CritiqueSummary.parse(entry.feedback)
+        let isExpanded = expandedCritiqueIDs.contains(entry.id)
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "clock")
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundColor(.primary)
+            }
+
+            Divider()
+
+            if parsed.hasExplicitSummary {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(parsed.bullets.enumerated()), id: \.offset) { _, bullet in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text("•")
+                                .foregroundColor(.accentColor)
+                                .fontWeight(.bold)
+                            Text(bullet)
+                                .font(.subheadline)
+                                .foregroundColor(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            } else {
+                // Older critique without the explicit summary block —
+                // fall back to a first-paragraph excerpt so the card
+                // still gives the user something at-a-glance.
+                Text(CritiqueSummary.fallbackExcerpt(from: parsed.body))
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Full-critique expansion. Renders below the bullets when
+            // the user taps "Read full critique." Each entry tracks
+            // its own state via `expandedCritiqueIDs` so multiple
+            // critiques can be open at once.
+            if isExpanded {
+                Divider()
+                FormattedMarkdownView(text: parsed.body)
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if isExpanded {
+                        expandedCritiqueIDs.remove(entry.id)
+                    } else {
+                        expandedCritiqueIDs.insert(entry.id)
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                    Text(isExpanded ? "Hide full critique" : "Read full critique")
+                        .font(.subheadline.weight(.medium))
+                }
+                .foregroundColor(.accentColor)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding()
+        .background(Color(uiColor: .secondarySystemBackground))
+        .cornerRadius(12)
     }
 
     /// Saves the edited title to the cloud. No-ops if the title is

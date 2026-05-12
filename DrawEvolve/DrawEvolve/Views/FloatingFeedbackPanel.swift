@@ -303,7 +303,10 @@ struct FloatingFeedbackPanel: View {
                                                             .fontWeight(.medium)
                                                             .foregroundColor(.primary)
 
-                                                        Text(entry.feedback.prefix(50) + (entry.feedback.count > 50 ? "..." : ""))
+                                                        Text({
+                                                            let body = CritiqueSummary.parse(entry.feedback).body
+                                                            return body.prefix(50) + (body.count > 50 ? "..." : "")
+                                                        }())
                                                             .font(.caption)
                                                             .foregroundColor(.primary)
                                                             .lineLimit(2)
@@ -476,10 +479,18 @@ struct FloatingFeedbackPanel: View {
     }
 
     private var displayedFeedback: String {
+        // Strip the trailing summary block before rendering. The block
+        // is HTML-comment delimited and would otherwise render as
+        // literal text in FormattedMarkdownView (our renderer doesn't
+        // strip comments). The summary is only meant to surface in
+        // the gallery-preview "AI Feedback Summary" panel.
+        let raw: String
         if !critiqueHistory.isEmpty && selectedHistoryIndex < critiqueHistory.count {
-            return critiqueHistory[selectedHistoryIndex].feedback
+            raw = critiqueHistory[selectedHistoryIndex].feedback
+        } else {
+            raw = feedback ?? ""
         }
-        return feedback ?? ""
+        return CritiqueSummary.parse(raw).body
     }
 
     private func formatTimestamp(_ date: Date) -> String {
