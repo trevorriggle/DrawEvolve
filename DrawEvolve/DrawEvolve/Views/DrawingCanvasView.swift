@@ -393,6 +393,58 @@ struct DrawingCanvasView: View {
                 .ignoresSafeArea()
                 .background(Color(uiColor: .systemGray6))
 
+                // Selection overlays — parity with padBody. Without these
+                // iPhone users got no rubber-band preview while dragging
+                // a rectangle/lasso selection and no marching ants on the
+                // finalized selection, which read as "the tool is broken
+                // / takes forever." Geometry math is universal (reads from
+                // shared canvasState), the overlays just needed to be
+                // mounted in the iPhone ZStack. Same z-ordering as padBody:
+                // selection overlays under symmetry/pose.
+
+                if let previewRect = canvasState.previewSelection {
+                    let screenPreviewRect = canvasState.documentRectToScreen(previewRect)
+                    Rectangle()
+                        .path(in: screenPreviewRect)
+                        .stroke(Color.blue, lineWidth: 2)
+                        .allowsHitTesting(false)
+                        .ignoresSafeArea()
+                }
+
+                if let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
+                    let screenPreviewPath = canvasState.documentPathToScreen(previewPath)
+                    Path { p in
+                        p.move(to: screenPreviewPath[0])
+                        for point in screenPreviewPath.dropFirst() {
+                            p.addLine(to: point)
+                        }
+                        p.closeSubpath()
+                    }
+                    .stroke(Color.blue, lineWidth: 2)
+                    .allowsHitTesting(false)
+                    .ignoresSafeArea()
+                }
+
+                if let selection = canvasState.activeSelection {
+                    let screenSelection = canvasState.documentRectToScreen(selection)
+                    MarchingAntsRectangle(rect: screenSelection)
+                        .allowsHitTesting(false)
+                        .ignoresSafeArea()
+                }
+
+                if let path = canvasState.selectionPath {
+                    let screenPath = canvasState.documentPathToScreen(path)
+                    MarchingAntsPath(path: screenPath)
+                        .allowsHitTesting(false)
+                        .ignoresSafeArea()
+                }
+
+                // Free-transform handles for the active floating selection.
+                // Hit-tests scoped to the handles themselves; the rest of
+                // the overlay frame falls through to MTKView.
+                TransformHandlesOverlay(canvasState: canvasState)
+                    .ignoresSafeArea()
+
                 // Symmetry mirror guides. Used to live in padBody only;
                 // the iPhone Phase 2 split deliberately omitted it but
                 // testers reported "the lines don't show on my phone."
