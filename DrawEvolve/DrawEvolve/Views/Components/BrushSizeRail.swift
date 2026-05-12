@@ -35,6 +35,20 @@ struct BrushSizeRail: View {
     /// container corners.
     private static let trackInset: CGFloat = Self.knobDiameter / 2 + 4
 
+    /// Response-curve exponent for knob-position → brush-size mapping.
+    /// Mirrors BrushSizeRailHorizontal so the iPad and iPhone rails
+    /// feel identical. Exponent 2 compresses small sizes into more
+    /// track real estate (the bottom half covers ~1–50px, where
+    /// artists usually live) and expands big sizes into less travel
+    /// (top half covers 50–200px). Linear (=1) made the top half
+    /// feel jumpy with no fine control over small brushes.
+    private static let sizeCurve: CGFloat = 2.0
+    /// Cap for the live size-preview circle. At max brush size
+    /// (200px) the preview would otherwise be 200pt diameter and
+    /// occupy a quarter of the canvas. Clamp so the preview reads
+    /// "this is big" without taking over the screen.
+    private static let previewDiameterCap: CGFloat = 80
+
     var body: some View {
         ZStack(alignment: .top) {
             container
@@ -69,10 +83,31 @@ struct BrushSizeRail: View {
                     .frame(width: Self.knobDiameter, height: Self.knobDiameter)
                     .position(x: proxy.size.width / 2, y: knobY)
 
-                // Numeric readout bubble — appears next to the knob while
-                // dragging so the user sees the exact size without
-                // opening Brush Properties.
+                // Live size preview — filled circle scaled to actual
+                // brush diameter (capped). Floats to the LEFT of the
+                // knob in the canvas-overlap area so the user can
+                // size-check against their drawing before stroking.
                 if isDragging {
+                    let previewDiameter = min(size, Self.previewDiameterCap)
+                    Circle()
+                        .fill(Color.primary.opacity(0.85))
+                        .frame(width: previewDiameter, height: previewDiameter)
+                        .overlay(
+                            Circle().stroke(
+                                Color(uiColor: .systemBackground).opacity(0.9),
+                                lineWidth: 1.5
+                            )
+                        )
+                        .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
+                        .position(x: -(Self.previewDiameterCap / 2 + 12), y: knobY)
+                        .transition(.opacity)
+
+                    // Numeric readout bubble — further left of the
+                    // preview circle. .fixedSize(horizontal: true) is
+                    // REQUIRED: without it the parent GeometryReader's
+                    // 36pt width propagates as the proposed width and
+                    // the "200 px" text wraps onto three lines. Fixed
+                    // sizing tells the Text to use its natural width.
                     Text("\(Int(size)) px")
                         .font(.caption.weight(.semibold))
                         .monospacedDigit()
@@ -81,7 +116,8 @@ struct BrushSizeRail: View {
                         .padding(.vertical, 4)
                         .background(Color.black.opacity(0.78))
                         .clipShape(Capsule())
-                        .position(x: -28, y: knobY)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .position(x: -(Self.previewDiameterCap + 48), y: knobY)
                         .transition(.opacity)
                 }
             }
@@ -114,10 +150,18 @@ struct BrushSizeRail: View {
     /// Knob's vertical center within the track region (0 = top of track,
     /// trackHeight = bottom of track). Bigger size renders higher on the
     /// rail, matching Procreate's convention.
+    ///
+    /// Inverse of the curve applied in `updateSize`: the size-axis
+    /// fraction is `((size - lo) / (hi - lo))^(1/curve)`, then we
+    /// flip to Y because Y-down means "bigger = smaller knobY."
+    /// Without this inverse the knob would drift relative to the
+    /// size value the slider just wrote (e.g. setting size=50 from
+    /// Brush Properties would leave the knob in the wrong place).
     private func knobYOffset(in trackHeight: CGFloat) -> CGFloat {
-        let normalized = (size - range.lowerBound) / (range.upperBound - range.lowerBound)
-        let clamped = max(0, min(1, normalized))
-        return trackHeight * (1 - clamped)
+        let raw = (size - range.lowerBound) / (range.upperBound - range.lowerBound)
+        let clamped = max(0, min(1, raw))
+        let t = pow(clamped, 1 / Self.sizeCurve)
+        return trackHeight * (1 - t)
     }
 
     // MARK: - Gesture
@@ -139,8 +183,13 @@ struct BrushSizeRail: View {
         let trackHeight = Self.containerHeight - 2 * Self.trackInset
         let trackY = y - Self.trackInset
         let clamped = max(0, min(trackHeight, trackY))
-        let normalized = 1 - (clamped / trackHeight)
-        let raw = range.lowerBound + normalized * (range.upperBound - range.lowerBound)
+        // Flip so t=0 at bottom of track, t=1 at top — Procreate convention.
+        let t = 1 - (clamped / trackHeight)
+        // Quadratic response: bottom half of track covers small
+        // sizes (fine control), top half covers big sizes (coarse
+        // control). See `sizeCurve` doc.
+        let curved = pow(t, Self.sizeCurve)
+        let raw = range.lowerBound + curved * (range.upperBound - range.lowerBound)
         size = max(range.lowerBound, min(range.upperBound, raw))
     }
 }

@@ -115,6 +115,9 @@ struct BrushSizeRailHorizontal: View {
                     // Numeric readout bubble — sits just above the
                     // knob, below the preview circle, so both are
                     // visible at a glance without overlapping.
+                    // .fixedSize so the text doesn't wrap when the
+                    // parent's proposed width is narrower than the
+                    // pill's natural width.
                     Text("\(Int(size)) px")
                         .font(.caption.weight(.semibold))
                         .monospacedDigit()
@@ -123,6 +126,7 @@ struct BrushSizeRailHorizontal: View {
                         .padding(.vertical, 4)
                         .background(Color.black.opacity(0.78))
                         .clipShape(Capsule())
+                        .fixedSize(horizontal: true, vertical: false)
                         .position(x: knobX, y: -14)
                         .transition(.opacity)
                 }
