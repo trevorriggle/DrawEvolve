@@ -334,6 +334,76 @@ final class CloudDrawingStorageManager: ObservableObject {
 
     // MARK: - Update
 
+    /// Title-only rename for any drawing (flat OR layered). Updates
+    /// the local cache and patches the `drawings` row directly via
+    /// PostgREST; does NOT touch Storage bytes and does NOT route
+    /// through the upload queue.
+    ///
+    /// WHY THIS EXISTS:
+    ///
+    /// `updateDrawing` queues a flat-upload pending entry. The flat
+    /// upload path (attemptFlatUpload) bails immediately if the
+    /// drawing has no `storagePath` — which is exactly the case for
+    /// every layered drawing. Result: title renames on layered
+    /// drawings silently never reached the cloud. Local cache showed
+    /// the new name; a fetchDrawings round-trip returned the old
+    /// one.
+    ///
+    /// This method sidesteps the queue entirely. The PATCH is small
+    /// (~hundreds of bytes), idempotent, and finishes in one
+    /// network round-trip — appropriate for a metadata-only edit.
+    /// If the user is offline the call throws; caller decides how
+    /// to surface that (DrawingDetailView keeps the typed text in
+    /// the field so the user can hit Done again on reconnect).
+    @MainActor
+    func renameDrawing(id: UUID, title: String) async throws {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw DrawingStorageError.saveFailed }
+        guard let index = drawings.firstIndex(where: { $0.id == id }) else {
+            throw DrawingStorageError.drawingNotFound
+        }
+
+        // Local cache first. Order matters: in-memory + on-disk are
+        // updated synchronously so callers (and any concurrent UI
+        // read) see the new title immediately. If the network leg
+        // below fails, the local state is still correct; the user
+        // can retry. The retry queue intentionally doesn't pick
+        // this up — renames are cheap to retry manually and we
+        // don't want a stale rename to stomp a later legitimate
+        // PATCH that won the race.
+        var drawing = drawings[index]
+        drawing.title = trimmed
+        drawing.updatedAt = Date()
+        try persistLocally(drawing: drawing, imageData: nil)
+        drawings[index] = drawing
+        print("💾 Renamed drawing locally: \(id) → '\(trimmed)'")
+
+        guard let client = SupabaseManager.shared.client else {
+            throw DrawingStorageError.saveFailed
+        }
+
+        // Direct PostgREST PATCH. Only the title + updated_at
+        // columns are touched, so this CANNOT clobber
+        // `critique_history` (Worker is sole writer per CLAUDE.md)
+        // or any Storage pointer.
+        struct TitlePatch: Encodable {
+            let title: String
+            let updated_at: String
+        }
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let patch = TitlePatch(
+            title: trimmed,
+            updated_at: isoFormatter.string(from: drawing.updatedAt)
+        )
+        try await client
+            .from("drawings")
+            .update(patch)
+            .eq("id", value: id.uuidString.lowercased())
+            .execute()
+        print("☁️ Renamed drawing on cloud: \(id) → '\(trimmed)'")
+    }
+
     func updateDrawing(
         id: UUID,
         title: String? = nil,

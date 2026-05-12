@@ -160,6 +160,18 @@ struct DrawingDetailView: View {
                     HStack(spacing: 12) {
                         // Continue Drawing button
                         Button(action: {
+                            // Fire a title commit before leaving the
+                            // view, so a typed-but-not-Done-tapped
+                            // rename still persists. renameDrawing's
+                            // PATCH is small + fast; runs in
+                            // background while the canvas presents.
+                            // The cover-bounce that an earlier
+                            // version exhibited came from the
+                            // focus-loss handler racing button taps —
+                            // explicit, button-driven commit here is
+                            // synchronous-enough to dispatch before
+                            // showCanvas flips, so no race.
+                            commitTitleChange()
                             showCanvas = true
                         }) {
                             HStack(spacing: 12) {
@@ -333,20 +345,20 @@ struct DrawingDetailView: View {
         Task { @MainActor in
             defer { isSavingTitle = false }
             do {
-                try await storageManager.updateDrawing(id: drawing.id, title: trimmed)
-                print("✅ Title rename committed locally + queued for cloud upload")
-                // Keep `editedTitle` as the user typed it on success.
-                // Do not reset to anything else here — the prior version
-                // reset to `drawing.title` on error, which was the source
-                // of the "Done reverts what I typed" bug when the
-                // storage manager threw transiently.
+                // Direct PATCH on the drawings row. updateDrawing's
+                // queued flat-upload pipeline silently dropped title
+                // changes on layered drawings (no storagePath = no
+                // flat upload). renameDrawing does a single PostgREST
+                // PATCH on title + updated_at, no Storage churn, no
+                // upload queue.
+                try await storageManager.renameDrawing(id: drawing.id, title: trimmed)
+                print("✅ Title rename committed locally + cloud")
             } catch {
                 // Cloud write failed. DON'T revert the field — the user's
-                // intent stays in the binding so they can hit Done again
-                // (or the storage manager's retry queue picks it up on
-                // network recovery). Reverting was actively confusing:
-                // the user saw their typed text disappear and assumed
-                // the rename feature was broken.
+                // intent stays in the binding so they can hit Done again.
+                // Local cache was already updated inside renameDrawing,
+                // so the UI continues to reflect the new name; the cloud
+                // catches up on the next successful rename attempt.
                 print("⚠️ Title rename failed (kept local edit): \(type(of: error)) — \(error)")
             }
         }
