@@ -21,6 +21,16 @@ struct AuthGateView: View {
     @State private var isSendingMagicLink = false
     @FocusState private var emailFieldFocused: Bool
 
+    // Password sign-in — wired primarily for the App Store review team.
+    // Apple reviewers can't tap magic links from a tester's inbox; they
+    // need a fixed email/password they can paste. The password field is
+    // collapsed-by-default so most users default to magic link / Apple /
+    // Google. Tap "Sign in with password" to reveal.
+    @State private var passwordInput: String = ""
+    @State private var passwordFieldVisible: Bool = false
+    @State private var isSigningInWithPassword = false
+    @FocusState private var passwordFieldFocused: Bool
+
     private enum EmailState {
         case input
         case sent
@@ -204,6 +214,105 @@ struct AuthGateView: View {
             magicLinkWarning
 
             magicLinkButton
+
+            passwordSignInBlock
+        }
+    }
+
+    /// Collapsed-by-default password sign-in block. The visible affordance
+    /// is just a "Sign in with password instead" link; tapping it expands
+    /// a SecureField + Sign In button. App Store reviewers will tap this
+    /// to enter the credentials we paste into App Review Information.
+    @ViewBuilder
+    private var passwordSignInBlock: some View {
+        if passwordFieldVisible {
+            VStack(spacing: 10) {
+                SecureField("Password", text: $passwordInput)
+                    .textContentType(.password)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .focused($passwordFieldFocused)
+                    .padding(.horizontal, 16)
+                    .frame(height: controlHeight)
+                    .background(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(Color(.secondarySystemBackground))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .stroke(
+                                passwordFieldFocused ? Color.accentColor.opacity(0.8) : Color(.separator),
+                                lineWidth: passwordFieldFocused ? 1.5 : 1
+                            )
+                    )
+                    .submitLabel(.go)
+                    .onSubmit { signInWithPassword() }
+
+                Button(action: signInWithPassword) {
+                    ZStack {
+                        if isSigningInWithPassword {
+                            ProgressView().tint(Color.accentColor)
+                        } else {
+                            Text("Sign In")
+                                .font(.system(.body, design: .default).weight(.semibold))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: controlHeight)
+                    .background(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .stroke(
+                                canSubmitPassword ? Color.accentColor : Color.accentColor.opacity(0.35),
+                                lineWidth: 1.5
+                            )
+                    )
+                    .foregroundStyle(canSubmitPassword ? Color.accentColor : Color.accentColor.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSubmitPassword || isSigningInWithPassword)
+            }
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else {
+            Button {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    passwordFieldVisible = true
+                    passwordFieldFocused = true
+                }
+            } label: {
+                Text("Sign in with password instead")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .underline()
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+    }
+
+    private var canSubmitPassword: Bool {
+        let emailOK = emailInput.contains("@") && emailInput.count > 3
+        let pwOK = passwordInput.count >= 1
+        return emailOK && pwOK
+    }
+
+    private func signInWithPassword() {
+        guard canSubmitPassword, !isSigningInWithPassword else { return }
+        isSigningInWithPassword = true
+        Task {
+            await authManager.signInWithPassword(
+                email: emailInput,
+                password: passwordInput
+            )
+            await MainActor.run {
+                isSigningInWithPassword = false
+                if authManager.lastError == nil {
+                    // Successful sign-in — AuthManager.state changes to
+                    // .signedIn and ContentView swaps away from this view.
+                    // Clear the password field as defense-in-depth in case
+                    // the view sticks around briefly during teardown.
+                    passwordInput = ""
+                }
+            }
         }
     }
 

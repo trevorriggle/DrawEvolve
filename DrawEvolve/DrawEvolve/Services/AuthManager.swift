@@ -378,6 +378,67 @@ final class AuthManager: ObservableObject {
         }
     }
 
+    // MARK: - Email + password
+    //
+    // Wired up primarily for the App Store review team — Apple's reviewers
+    // need a fixed email/password they can paste into the sign-in form,
+    // and magic links to a per-tester inbox aren't workable for that
+    // workflow. Provide a single review account whose creds we paste
+    // into App Store Connect → App Review Information.
+    //
+    // Real users still land on magic link / Sign in with Apple / Google
+    // by default; the password field on AuthGateView is intentionally
+    // de-emphasised so most users don't reach for it. Supabase Auth
+    // supports email/password natively as long as the "Email" provider
+    // is enabled in the Supabase dashboard (Authentication → Providers
+    // → Email → "Enable Email Provider").
+
+    func signInWithPassword(email: String, password: String) async {
+        guard let client = SupabaseManager.shared.client else {
+            lastError = AuthError.notConfigured.errorDescription
+            return
+        }
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !password.isEmpty else {
+            lastError = "Email and password are required."
+            return
+        }
+        do {
+            try await client.auth.signIn(email: trimmed, password: password)
+            lastError = nil
+        } catch {
+            // Supabase returns 400 with a generic "Invalid login credentials"
+            // for any auth failure — bad password, unverified email, unknown
+            // user. Don't try to disambiguate; the reviewer pastes a known-
+            // good pair and we trust the server to either accept or reject.
+            lastError = "Sign-in failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Sign-up via email/password. Not exposed in the App Review path
+    /// (the reviewer uses a pre-created account), but offered on the
+    /// auth gate so a regular user can register without going through
+    /// the magic-link inbox round-trip. Behaviour depends on whether
+    /// Supabase has email confirmation turned on — when enabled, the
+    /// user gets a verification email before they can sign in.
+    func signUpWithPassword(email: String, password: String) async {
+        guard let client = SupabaseManager.shared.client else {
+            lastError = AuthError.notConfigured.errorDescription
+            return
+        }
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, password.count >= 8 else {
+            lastError = "Email and 8+ char password are required."
+            return
+        }
+        do {
+            _ = try await client.auth.signUp(email: trimmed, password: password)
+            lastError = nil
+        } catch {
+            lastError = "Sign-up failed: \(error.localizedDescription)"
+        }
+    }
+
     /// Consume the magic-link callback URL — wired up via `.onOpenURL` in the App.
     func handleDeepLink(_ url: URL) async {
         guard let client = SupabaseManager.shared.client else { return }
