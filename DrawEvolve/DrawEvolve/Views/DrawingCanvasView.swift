@@ -34,6 +34,14 @@ struct DrawingCanvasView: View {
     /// `ToolGroup.brushes` via `GroupedToolButton` instead — separate
     /// surface, separate code path.
     @State private var showPhoneBrushPicker = false
+    /// iPhone-only — surfaces the two pose-reference variants
+    /// (handPose / bodyPose) in a sheet, mirroring the brush picker
+    /// pattern. iPad uses the long-press popover via
+    /// `ToolGroup.poseReference`; iPhone consolidates the two pose
+    /// tiles into one grid slot so the panel stays at one row per
+    /// category instead of leaking pose into the "select / move /
+    /// text" row.
+    @State private var showPhonePosePicker = false
     @State private var isRequestingFeedback = false
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
@@ -250,6 +258,13 @@ struct DrawingCanvasView: View {
         // phoneToolPanel's brush tile).
         .sheet(isPresented: $showPhoneBrushPicker) {
             phoneBrushPickerSheet
+        }
+        // iPhone-only pose-reference picker. Same justification as the
+        // brush picker — the flat tile grid has no surface for the
+        // iPad long-press popover, so one consolidated slot opens a
+        // sheet listing the two pose variants.
+        .sheet(isPresented: $showPhonePosePicker) {
+            phonePosePickerSheet
         }
         // Tier-1.4: the More-button half-sheet (italic, kerning kind,
         // manual kern, on-path toggles) was retired alongside the bar's
@@ -1958,10 +1973,138 @@ struct DrawingCanvasView: View {
         }
     }
 
+    // MARK: - iPhone pose picker
+    //
+    // Mirrors the brush picker pattern. The grid tile is a single
+    // "Pose" entry; tapping it opens a sheet listing hand pose and
+    // body pose, each row preserving the same tap-cycle as the
+    // standalone PoseReferenceTile (request detection if no skeleton
+    // exists, toggle visibility otherwise).
+
+    private static let phonePoseVariants: [DrawingTool] = [.handPose, .bodyPose]
+
+    /// True when any pose skeleton is currently visible. Used to
+    /// drive the combined tile's selected-state styling — matches the
+    /// brush tile's "is the active tool a brush variant" semantic.
+    private var isAnyPoseVisible: Bool {
+        poseOverlayManager.state(for: .hand).isVisible
+            || poseOverlayManager.state(for: .body).isVisible
+    }
+
+    /// Icon for the combined iPhone pose tile. Reflects which kind is
+    /// currently visible so the tile communicates state at a glance.
+    /// Falls back to the body-pose icon (more recognisable as "pose")
+    /// when nothing is visible or both are.
+    private var phonePoseTileIcon: String {
+        let handVisible = poseOverlayManager.state(for: .hand).isVisible
+        let bodyVisible = poseOverlayManager.state(for: .body).isVisible
+        if handVisible && !bodyVisible { return DrawingTool.handPose.icon }
+        if bodyVisible && !handVisible { return DrawingTool.bodyPose.icon }
+        return DrawingTool.bodyPose.icon
+    }
+
+    private var phonePosePickerSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Self.phonePoseVariants, id: \.self) { variant in
+                        Button {
+                            handlePhonePosePick(variant)
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: variant.icon)
+                                    .font(.title3)
+                                    .frame(width: 32, height: 32)
+                                    .foregroundStyle(phonePoseRowAccent(for: variant))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(variant.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text(phonePoseRowStatus(for: variant))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                phonePoseRowTrailing(for: variant)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } footer: {
+                    Text("Tap a pose to detect from a photo. Tap again to hide a placed skeleton; once more to show it again.")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Pose Reference")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showPhonePosePicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    /// Tap dispatcher for a row in the iPhone pose picker. Runs the
+    /// same tap cycle as the standalone PoseReferenceTile so behavior
+    /// stays consistent: handleSlotTap may return a detection request,
+    /// which we route to `poseDetectionRequest` (drives the detection
+    /// sheet) — visibility toggles are absorbed by the manager. The
+    /// picker dismisses on tap regardless of outcome.
+    private func handlePhonePosePick(_ variant: DrawingTool) {
+        if let outcome = poseOverlayManager.handleSlotTap(forTool: variant) {
+            if case .requestDetection(let kind) = outcome {
+                poseDetectionRequest = kind
+            }
+        }
+        showPhonePosePicker = false
+    }
+
+    private func phonePoseRowAccent(for variant: DrawingTool) -> Color {
+        guard let kind = PoseSkeletonKind(tool: variant) else { return .primary }
+        return poseOverlayManager.state(for: kind).isVisible ? Color.accentColor : .primary
+    }
+
+    private func phonePoseRowStatus(for variant: DrawingTool) -> String {
+        guard let kind = PoseSkeletonKind(tool: variant) else { return "" }
+        switch poseOverlayManager.state(for: kind) {
+        case .none:
+            return variant == .handPose
+                ? "Detect a hand from a photo to place a skeleton"
+                : "Detect a body from a photo to place a skeleton"
+        case .activeVisible:
+            return "Visible — tap to hide"
+        case .activeHidden:
+            return "Hidden — tap to show again"
+        }
+    }
+
+    @ViewBuilder
+    private func phonePoseRowTrailing(for variant: DrawingTool) -> some View {
+        if let kind = PoseSkeletonKind(tool: variant) {
+            switch poseOverlayManager.state(for: kind) {
+            case .activeVisible:
+                Image(systemName: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+            case .activeHidden:
+                Image(systemName: "eye.slash")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            case .none:
+                EmptyView()
+            }
+        }
+    }
+
     private var phoneToolPanel: some View {
-        // 30 tiles. 5 columns × 6 rows = 30 cells, all used. The two
-        // pose-reference tiles (handPose / bodyPose) absorb the two
-        // empty trailing slots that the v1.1 toolbar refactor reserved.
+        // 29 tiles, 5 columns × 6 rows. One trailing cell is empty.
+        // Pose-reference variants (handPose / bodyPose) are consolidated
+        // into one grid slot that opens phonePosePickerSheet — same
+        // pattern as the brush tile, so iPhone gets one slot per
+        // category instead of one per variant.
         // Each tile auto-collapses the panel via collapsePhoneToolPanel()
         // after firing.
         //
@@ -2049,21 +2192,19 @@ struct DrawingCanvasView: View {
                     canvasState.currentTool = .text
                     collapsePhoneToolPanel()
                 }
-                // Pose-reference tiles. Each is its own ToolButton-styled
-                // tile (no popover; iPhone is flat). Tap routes through
-                // the same Decision-7 cycle used by the iPad slot.
-                PoseReferenceTile(
-                    tool: .handPose,
-                    poseManager: poseOverlayManager,
-                    onRequestDetection: { kind in poseDetectionRequest = kind },
-                    onTapCompleted: { collapsePhoneToolPanel() }
-                )
-                PoseReferenceTile(
-                    tool: .bodyPose,
-                    poseManager: poseOverlayManager,
-                    onRequestDetection: { kind in poseDetectionRequest = kind },
-                    onTapCompleted: { collapsePhoneToolPanel() }
-                )
+                // Single combined pose tile — taps open the pose
+                // picker sheet (hand / body), mirroring the brush
+                // tile pattern. isSelected reflects whether any
+                // pose skeleton is currently visible; the tile icon
+                // reflects which kind (or defaults to body when
+                // neither or both are visible).
+                ToolButton(
+                    icon: phonePoseTileIcon,
+                    isSelected: isAnyPoseVisible
+                ) {
+                    showPhonePosePicker = true
+                    collapsePhoneToolPanel()
+                }
             }
             // ViewBuilder caps each Group at 10 children. The second Group
             // hit that ceiling pre-pose; the two pose tiles above forced a
