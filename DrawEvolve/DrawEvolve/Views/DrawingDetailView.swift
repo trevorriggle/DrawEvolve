@@ -62,12 +62,22 @@ struct DrawingDetailView: View {
                                 }
                             }
                             .onSubmit { commitTitleChange() }
-                            .onChange(of: titleFocused) { _, focused in
-                                // Commit on blur too, so a user who taps
-                                // away from the field without hitting Done
-                                // still saves their rename.
-                                if !focused { commitTitleChange() }
-                            }
+                            // Intentionally NO focus-loss commit. The
+                            // earlier version fired commitTitleChange()
+                            // from .onChange(of: titleFocused) when the
+                            // field lost focus — but iOS dismisses the
+                            // keyboard on any tap outside the field,
+                            // including a tap on the Continue Drawing
+                            // button. That dismissal triggered a commit
+                            // Task whose subsequent storage mutation
+                            // raced the fullScreenCover presentation and
+                            // caused the canvas to flash open and
+                            // immediately collapse back to the detail
+                            // view. Done on the keyboard is now the only
+                            // commit trigger. If you dismiss the keyboard
+                            // without tapping Done, the typed text stays
+                            // in the field but doesn't persist — that's
+                            // the correct semantics: you didn't confirm.
 
                         // Drawing image — bytes live in cloud Storage now; the
                         // storage manager checks the disk cache, then falls back
@@ -318,11 +328,13 @@ struct DrawingDetailView: View {
         // commits in succession that race in the storage manager.
         if isSavingTitle { return }
 
+        print("🖊  Title rename: '\(drawing.title)' → '\(trimmed)' (id=\(drawing.id))")
         isSavingTitle = true
         Task { @MainActor in
             defer { isSavingTitle = false }
             do {
                 try await storageManager.updateDrawing(id: drawing.id, title: trimmed)
+                print("✅ Title rename committed locally + queued for cloud upload")
                 // Keep `editedTitle` as the user typed it on success.
                 // Do not reset to anything else here — the prior version
                 // reset to `drawing.title` on error, which was the source
@@ -335,7 +347,7 @@ struct DrawingDetailView: View {
                 // network recovery). Reverting was actively confusing:
                 // the user saw their typed text disappear and assumed
                 // the rename feature was broken.
-                print("⚠️ Title rename failed (kept local edit): \(error)")
+                print("⚠️ Title rename failed (kept local edit): \(type(of: error)) — \(error)")
             }
         }
     }
