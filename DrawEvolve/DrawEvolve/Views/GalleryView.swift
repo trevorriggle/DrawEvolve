@@ -4,6 +4,33 @@
 //
 //  Gallery view displaying user's saved drawings.
 //
+//  ARCHITECTURE NOTE — DO NOT COLLAPSE BACK INTO ONE STRUCT
+//
+//  This file is split intentionally:
+//
+//    • `GalleryView` is a THIN SHELL that owns the `@State` for the
+//      .fullScreenCover triggers (selectedDrawing, canvasDrawing,
+//      showPromptFirst, showNewDrawing) and the cover modifiers
+//      themselves. It does NOT observe `CloudDrawingStorageManager`
+//      or any other publisher.
+//
+//    • `GalleryContent` is the body of the gallery — tabs, grid,
+//      prompts list, toolbar, alerts. It observes storageManager and
+//      re-renders on every @Published mutation.
+//
+//  Why the split is non-negotiable: any time the gallery's body
+//  re-rendered (which it did on every storage publish — saves,
+//  renames, auto-save ticks, fetches), the .fullScreenCover content
+//  closures re-evaluated, and SwiftUI's identity tracking for views
+//  inside modifier closures isn't reliable enough to preserve the
+//  underlying UIView. The detail view's @State reset on rebuild
+//  (wiping the user's typed rename), and DrawingCanvasView's
+//  MTKView got torn down mid-load ("renderer not initialized" error
+//  spam). Hosting the covers on a shell that only re-renders on
+//  its own @State eliminates the re-evaluation cycle entirely — the
+//  covers' content is stable for the lifetime of the presented
+//  drawing.
+//
 
 import SwiftUI
 
@@ -33,84 +60,112 @@ private let presetVoiceOptions: [PresetVoiceOption] = [
           description: "A Florentine workshop master, somewhere around 1503."),
 ]
 
+// MARK: - GalleryView (shell)
+
 struct GalleryView: View {
-    /// Top-level sections of the gallery. `.drawings` is fully wired today;
-    /// `.prompts` is the preset-voice picker (Commit C of the preset voices
-    /// feature); `.evolution` is placeholder scaffolding for an upcoming
-    /// feature.
+    // Cover-related state lives here — on a view that doesn't
+    // observe any publisher. The shell only re-renders when one of
+    // these @States changes, which only happens on user action
+    // (tap a card, tap +, etc.) or on programmatic transition.
+    @State private var selectedDrawing: Drawing?
+    @State private var canvasDrawing: Drawing?
+    @State private var detailEditedTitle: String = ""
+    @State private var showNewDrawing = false
+    @State private var showPromptFirst = false
+    @State private var canvasID = UUID()
+    @State private var drawingContext = DrawingContext()
+
+    var body: some View {
+        GalleryContent(
+            selectedDrawing: $selectedDrawing,
+            detailEditedTitle: $detailEditedTitle,
+            showPromptFirst: $showPromptFirst
+        )
+        .fullScreenCover(item: $selectedDrawing) { drawing in
+            DrawingDetailView(
+                drawing: drawing,
+                editedTitle: $detailEditedTitle,
+                onContinueDrawing: {
+                    // Dismiss the detail cover, then hand off to the
+                    // canvas cover on this same shell. Sequential
+                    // (not nested) — the 350ms pause lets the detail
+                    // dismiss animation complete so SwiftUI doesn't
+                    // trip over two covers transitioning at once.
+                    let drawingToOpen = drawing
+                    selectedDrawing = nil
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        canvasDrawing = drawingToOpen
+                    }
+                }
+            )
+            .id(drawing.id)
+        }
+        .fullScreenCover(item: $canvasDrawing) { drawing in
+            DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
+                .id(drawing.id)
+        }
+        .fullScreenCover(isPresented: $showPromptFirst) {
+            PromptInputView(context: $drawingContext, isPresented: $showPromptFirst)
+        }
+        .fullScreenCover(isPresented: $showNewDrawing) {
+            DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
+                .id(canvasID)
+        }
+        .onChange(of: showPromptFirst) { _, newValue in
+            if !newValue && drawingContext.isComplete {
+                showNewDrawing = true
+            }
+        }
+        .onChange(of: showNewDrawing) { _, newValue in
+            if !newValue {
+                drawingContext = DrawingContext()
+                canvasID = UUID()
+            }
+        }
+    }
+}
+
+// MARK: - GalleryContent (the actual body)
+
+/// Holds everything that re-renders on storage publishes — the grid,
+/// tabs, prompts list, toolbar, alerts. Separated from `GalleryView`
+/// so the cover modifiers up there stay stable across re-renders here.
+/// See the file header for the full rationale.
+private struct GalleryContent: View {
     private enum Tab: Hashable { case drawings, prompts, evolution }
 
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
     @ObservedObject private var customPromptManager = CustomPromptManager.shared
     @Environment(\.dismiss) private var dismiss
 
-    /// Sheet trigger for the bounded-knobs prompt editor. Used by the
-    /// inline "Saved Prompts" section in myPromptsView so the user can
-    /// author + save without descending into a sub-navigation.
+    // Bindings up to the shell — these are how the content view
+    // triggers cover presentations. Setting selectedDrawing /
+    // showPromptFirst here flips a value that the shell's
+    // .fullScreenCover modifier picks up.
+    @Binding var selectedDrawing: Drawing?
+    @Binding var detailEditedTitle: String
+    @Binding var showPromptFirst: Bool
+
+    // State internal to the content view — sheets, alerts, tab
+    // selection. Nothing here triggers a cover at the shell level.
     @State private var showPromptEditor = false
     @State private var editingPrompt: CustomPrompt?
-
-    // iPhone-only prompt-editor state. Lives separately from
-    // `editingPrompt` / `showPromptEditor` so the iPad path stays
-    // bytes-identical. iPhone's `.sheet(isPresented:)` flow had a
-    // SwiftUI closure-capture issue: the `editing:` argument was
-    // captured stale, so tapping Edit on an existing prompt opened
-    // the editor with empty fields (effectively creating a new
-    // prompt). `.sheet(item:)` passes the value through the closure
-    // parameter directly, sidestepping the capture problem.
+    /// iPhone-only prompt-editor state. Lives separately from the
+    /// iPad path because `.sheet(isPresented:)` with a captured
+    /// @State reads stale on iPhone — see commit b862687.
     @State private var iPhoneEditingPrompt: CustomPrompt?
     @State private var iPhoneShowNewPrompt = false
 
     @State private var selectedTab: Tab = .drawings
-    @State private var showNewDrawing = false
-    @State private var showPromptFirst = false
-    @State private var selectedDrawing: Drawing?
-    /// The detail view's editable title lives HERE, not inside
-    /// DrawingDetailView. Reason: when the user types a new name and
-    /// hits Done, the renameDrawing PATCH publishes a change to
-    /// storageManager.drawings. GalleryView re-renders. The
-    /// .fullScreenCover(item:) content closure re-evaluates,
-    /// SwiftUI rebuilds DrawingDetailView, and (even with
-    /// .id(drawing.id)) its @State editedTitle gets reset to
-    /// drawing.title via the State(initialValue:) in init — wiping
-    /// out the user's typed name. Hoisting the state to this view
-    /// (which is stable across storage publishes — it OWNS the
-    /// observer, doesn't get rebuilt itself) and passing it as a
-    /// @Binding makes the typed text survive any number of
-    /// detail-view rebuilds.
-    @State private var detailEditedTitle: String = ""
-    /// Owns the canvas-cover state on behalf of DrawingDetailView.
-    /// Same rationale as detailEditedTitle: DrawingDetailView gets
-    /// rebuilt with a fresh @State container every time GalleryView
-    /// re-renders (which it does on every storage publish). With
-    /// showCanvas as @State in DrawingDetailView, that rebuild
-    /// reset it to false mid-presentation and the canvas cover
-    /// collapsed back to the detail view — the bouncing bug. With
-    /// showCanvas as @Binding into THIS view's @State, the
-    /// underlying boolean lives in a stable spot and the cover
-    /// stays presented across any number of detail-view rebuilds.
-    /// When non-nil, the gallery presents a canvas cover for this
-    /// drawing. Set by DrawingDetailView's onContinueDrawing callback
-    /// AFTER its own cover has dismissed. Keeping the canvas cover at
-    /// THIS level (not nested inside DrawingDetailView) is the
-    /// non-negotiable fix: when DrawingDetailView gets rebuilt by
-    /// SwiftUI on a storage publish, any cover modifiers ATTACHED to
-    /// it get torn down with it, dismissing the canvas. Moving the
-    /// cover up to GalleryView puts it on a host whose lifetime is
-    /// bound to the gallery being on screen, not to detail-view
-    /// rebuilds.
-    @State private var canvasDrawing: Drawing? = nil
     @State private var showDeleteAlert = false
     @State private var drawingToDelete: Drawing?
-    @State private var drawingContext = DrawingContext()
-    @State private var canvasID = UUID() // Force new canvas instance
-
-    // Debug: Clear all drawings
     @State private var showClearAllAlert = false
 
-    // Persisted across launches via UserDefaults. OpenAIManager reads the same
-    // key directly when assembling each request, so the worker sees the user's
-    // current selection without view-layer state propagation.
+    // Persisted across launches via UserDefaults. OpenAIManager reads
+    // the same key directly when assembling each request, so the
+    // worker sees the user's current selection without view-layer
+    // state propagation.
     @AppStorage("selectedPresetID") private var selectedPresetID: String = "studio_mentor"
 
     let columns = [
@@ -183,25 +238,6 @@ struct GalleryView: View {
             .refreshable {
                 await storageManager.fetchDrawings()
             }
-            .fullScreenCover(isPresented: $showPromptFirst) {
-                PromptInputView(context: $drawingContext, isPresented: $showPromptFirst)
-            }
-            .fullScreenCover(isPresented: $showNewDrawing) {
-                DrawingCanvasView(context: $drawingContext, existingDrawing: nil)
-                    .id(canvasID) // Force completely new canvas instance
-            }
-            .onChange(of: showPromptFirst) { _, newValue in
-                if !newValue && drawingContext.isComplete {
-                    showNewDrawing = true
-                }
-            }
-            .onChange(of: showNewDrawing) { _, newValue in
-                // Reset everything for next drawing
-                if !newValue {
-                    drawingContext = DrawingContext()
-                    canvasID = UUID() // Create fresh canvas next time
-                }
-            }
             .alert("Delete Drawing", isPresented: $showDeleteAlert, presenting: drawingToDelete) { drawing in
                 Button("Cancel", role: .cancel) {}
                 Button("Delete", role: .destructive) {
@@ -226,18 +262,8 @@ struct GalleryView: View {
     }
 
     // MARK: - Tab Strip — iPad
-    //
-    // Three large-title labels side-by-side, styled to match the original
-    // .navigationTitle(.large) treatment that this strip replaced. Selection
-    // is communicated by text color only — no pills, no backgrounds, no
-    // borders. Selected = Color.accentColor (the app's blue), unselected =
-    // .primary (the dark/black of a normal nav title).
 
     private var padTabStrip: some View {
-        // Fixed 28pt inline gap (≈ one em at .largeTitle bold) between labels
-        // and left-aligned within the available width — mirrors the original
-        // .navigationTitle's leading anchor rather than centering across the
-        // bar.
         HStack(alignment: .firstTextBaseline, spacing: 28) {
             tabButton(.drawings, label: "My Drawings")
             tabButton(.prompts, label: "My Prompts")
@@ -249,14 +275,6 @@ struct GalleryView: View {
     }
 
     // MARK: - Tab Strip — iPhone
-    //
-    // Segmented Picker. Three large-title labels would overflow / truncate
-    // aggressively on a 375pt viewport, and the iPad strip's leading-anchor
-    // .largeTitle treatment doesn't translate to the iPhone aesthetic
-    // anyway. Short labels ("Drawings" / "Prompts" / "Evolution") on iPhone
-    // — the "My ..." prefix is brand voice that earns its place at large
-    // size on iPad but reads as redundant inside a segmented control.
-    // iPad strip stays untouched in padTabStrip above.
 
     private var phoneTabStrip: some View {
         Picker("Section", selection: $selectedTab) {
@@ -277,27 +295,6 @@ struct GalleryView: View {
                 .foregroundColor(isSelected ? .accentColor : .primary)
         }
         .buttonStyle(.plain)
-    }
-
-    // MARK: - Coming Soon Placeholder
-
-    private func comingSoonView(icon: String, title: String) -> some View {
-        VStack(spacing: 24) {
-            Image(systemName: icon)
-                .font(.system(size: 80))
-                .foregroundColor(.secondary.opacity(0.5))
-
-            VStack(spacing: 8) {
-                Text(title)
-                    .font(.title2)
-                    .fontWeight(.semibold)
-
-                Text("Coming soon")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding()
     }
 
     // MARK: - My Prompts (preset voice picker)
@@ -335,12 +332,6 @@ struct GalleryView: View {
                 Text("This voice is used for every Get Feedback request. You can switch any time.")
             }
 
-            // Bounded-knobs custom prompts — inlined into the My Prompts
-            // tab so saved prompts show up directly here without
-            // descending into a sub-navigation. Empty state surfaces a
-            // "New Prompt" CTA; populated state lists each row with the
-            // standard preset-selection check + swipe-to-edit/delete
-            // affordances.
             Section {
                 if customPromptManager.prompts.isEmpty {
                     Button {
@@ -424,22 +415,8 @@ struct GalleryView: View {
         .task { await customPromptManager.refresh() }
         .refreshable { await customPromptManager.refresh() }
         .sheet(isPresented: $showPromptEditor) {
-            // PromptEditView wraps itself in NavigationStack — nesting
-            // it inside another one here produced overlapping toolbars
-            // (Cancel + Save tap targets fired simultaneously, and
-            // dismiss() raced the in-flight save Task → "prompts
-            // weren't saving" symptom).
             PromptEditView(editing: editingPrompt)
         }
-        // iPhone-only: edit flow uses .sheet(item:) so the prompt
-        // value is passed through the closure parameter directly,
-        // not captured from @State. The .sheet(isPresented:) +
-        // captured-state pattern above was reading a stale
-        // `editingPrompt` on iPhone — the closure ran before the
-        // state update propagated, so tapping Edit opened the
-        // editor with empty fields (`editing: nil`) and a Save
-        // would create a duplicate prompt instead of patching the
-        // existing one. iPad's path is unchanged.
         .sheet(item: $iPhoneEditingPrompt) { prompt in
             PromptEditView(editing: prompt)
         }
@@ -448,9 +425,6 @@ struct GalleryView: View {
         }
     }
 
-    /// Compact row for a saved bounded-knobs prompt — name + a one-line
-    /// summary of the set knobs, with a checkmark when this row is the
-    /// currently-selected preset.
     private func savedPromptRow(_ prompt: CustomPrompt) -> some View {
         let presetID = "custom:\(prompt.id.uuidString.lowercased())"
         return HStack(alignment: .top, spacing: 12) {
@@ -518,14 +492,17 @@ struct GalleryView: View {
     }
 
     // MARK: - Drawings Grid
+    //
+    // NO .fullScreenCover here. The detail / canvas covers are
+    // hosted by GalleryView (the shell). This grid just sets
+    // `selectedDrawing` via the binding when a card is tapped; the
+    // shell's modifier picks that up and presents the cover.
 
     private var drawingsGridView: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
                     Button(action: {
-                        // Seed the lifted title state and present
-                        // the detail cover.
                         detailEditedTitle = drawing.title
                         selectedDrawing = drawing
                     }) {
@@ -542,44 +519,6 @@ struct GalleryView: View {
             }
             .padding()
         }
-        .fullScreenCover(item: $selectedDrawing) { drawing in
-            DrawingDetailView(
-                drawing: drawing,
-                editedTitle: $detailEditedTitle,
-                onContinueDrawing: {
-                    // Dismiss the detail cover, then present the
-                    // canvas cover on this view (NOT a nested cover
-                    // inside detail). The brief delay lets the
-                    // detail dismiss animation complete so SwiftUI
-                    // doesn't trip over two covers transitioning at
-                    // once. The user sees the gallery for ~350ms,
-                    // then the canvas slides up — acceptable cost
-                    // for a presentation chain that doesn't break.
-                    let drawingToOpen = drawing
-                    selectedDrawing = nil
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 350_000_000)
-                        canvasDrawing = drawingToOpen
-                    }
-                }
-            )
-            .id(drawing.id)
-        }
-        // Canvas cover at the GALLERY level — not nested inside
-        // DrawingDetailView. Reason: detail view gets rebuilt by
-        // SwiftUI every time the gallery's observed storageManager
-        // publishes (saves, renames, fetches). When DrawingDetailView
-        // is torn down, any .fullScreenCover modifiers attached TO
-        // IT are torn down with it. The canvas cover dies, then the
-        // new detail view's modifier re-applies and the cover
-        // re-presents — that's the open/close loop the user saw.
-        // Hosting the canvas cover here on GalleryView (which only
-        // rebuilds on its own @State, not on storage publishes)
-        // keeps the cover stable for the entire canvas session.
-        .fullScreenCover(item: $canvasDrawing) { drawing in
-            DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
-                .id(drawing.id)
-        }
     }
 }
 
@@ -593,12 +532,6 @@ struct DrawingCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Drawing thumbnail — always square, fills the grid cell width.
-            //
-            // Previous layout used a `GeometryReader` with fixed 200pt height and
-            // `.aspectRatio(.fill)` which silently cropped the image horizontally
-            // whenever the grid cell was wider than 200pt (i.e. always on iPad
-            // landscape). Saved images are square 2048² so a 1:1 aspect with
-            // `.scaledToFill` on a square container produces no cropping at all.
             ZStack(alignment: .topTrailing) {
                 Color.white
                     .aspectRatio(1, contentMode: .fit)
