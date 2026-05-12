@@ -89,7 +89,17 @@ struct GalleryView: View {
     /// showCanvas as @Binding into THIS view's @State, the
     /// underlying boolean lives in a stable spot and the cover
     /// stays presented across any number of detail-view rebuilds.
-    @State private var detailShowCanvas: Bool = false
+    /// When non-nil, the gallery presents a canvas cover for this
+    /// drawing. Set by DrawingDetailView's onContinueDrawing callback
+    /// AFTER its own cover has dismissed. Keeping the canvas cover at
+    /// THIS level (not nested inside DrawingDetailView) is the
+    /// non-negotiable fix: when DrawingDetailView gets rebuilt by
+    /// SwiftUI on a storage publish, any cover modifiers ATTACHED to
+    /// it get torn down with it, dismissing the canvas. Moving the
+    /// cover up to GalleryView puts it on a host whose lifetime is
+    /// bound to the gallery being on screen, not to detail-view
+    /// rebuilds.
+    @State private var canvasDrawing: Drawing? = nil
     @State private var showDeleteAlert = false
     @State private var drawingToDelete: Drawing?
     @State private var drawingContext = DrawingContext()
@@ -514,13 +524,9 @@ struct GalleryView: View {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
                     Button(action: {
-                        // Seed the lifted state BEFORE presenting
-                        // the cover. detailEditedTitle gets the
-                        // current title; detailShowCanvas resets to
-                        // false so the canvas isn't presented on
-                        // first appear of the detail view.
+                        // Seed the lifted title state and present
+                        // the detail cover.
                         detailEditedTitle = drawing.title
-                        detailShowCanvas = false
                         selectedDrawing = drawing
                     }) {
                         DrawingCard(
@@ -537,23 +543,42 @@ struct GalleryView: View {
             .padding()
         }
         .fullScreenCover(item: $selectedDrawing) { drawing in
-            // editedTitle binding is hoisted from this view rather
-            // than owned by DrawingDetailView's @State. The cover
-            // content closure re-evaluates on every gallery
-            // re-render (gallery observes storageManager, which
-            // publishes on every save / rename / fetch). With
-            // editedTitle as @State in DrawingDetailView, those
-            // rebuilds reset State(initialValue: drawing.title)
-            // back to the snapshot title, wiping the user's typed
-            // name. With editedTitle as @Binding pointing to a
-            // @State in THIS (stable) view, the typed text survives
-            // any number of DrawingDetailView rebuilds.
             DrawingDetailView(
                 drawing: drawing,
                 editedTitle: $detailEditedTitle,
-                showCanvas: $detailShowCanvas
+                onContinueDrawing: {
+                    // Dismiss the detail cover, then present the
+                    // canvas cover on this view (NOT a nested cover
+                    // inside detail). The brief delay lets the
+                    // detail dismiss animation complete so SwiftUI
+                    // doesn't trip over two covers transitioning at
+                    // once. The user sees the gallery for ~350ms,
+                    // then the canvas slides up — acceptable cost
+                    // for a presentation chain that doesn't break.
+                    let drawingToOpen = drawing
+                    selectedDrawing = nil
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        canvasDrawing = drawingToOpen
+                    }
+                }
             )
             .id(drawing.id)
+        }
+        // Canvas cover at the GALLERY level — not nested inside
+        // DrawingDetailView. Reason: detail view gets rebuilt by
+        // SwiftUI every time the gallery's observed storageManager
+        // publishes (saves, renames, fetches). When DrawingDetailView
+        // is torn down, any .fullScreenCover modifiers attached TO
+        // IT are torn down with it. The canvas cover dies, then the
+        // new detail view's modifier re-applies and the cover
+        // re-presents — that's the open/close loop the user saw.
+        // Hosting the canvas cover here on GalleryView (which only
+        // rebuilds on its own @State, not on storage publishes)
+        // keeps the cover stable for the entire canvas session.
+        .fullScreenCover(item: $canvasDrawing) { drawing in
+            DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
+                .id(drawing.id)
         }
     }
 }

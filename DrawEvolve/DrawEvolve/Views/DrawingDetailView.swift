@@ -10,13 +10,16 @@ import SwiftUI
 struct DrawingDetailView: View {
     let drawing: Drawing
     @Environment(\.dismiss) private var dismiss
-    /// Canvas-cover state lives in GalleryView (@State), passed down
-    /// as @Binding here. Same reason as editedTitle: this view gets
-    /// rebuilt every time a storage publish ripples through, and a
-    /// @State here would reset to false mid-presentation, dismissing
-    /// the canvas. @Binding to a stable parent state keeps the cover
-    /// presented across rebuilds.
-    @Binding var showCanvas: Bool
+    /// Called when the user taps Continue Drawing. The CANVAS COVER
+    /// IS NOT HOSTED HERE — it's at GalleryView. Reason: this view
+    /// gets rebuilt every time a storage publish ripples through
+    /// GalleryView, and when a SwiftUI view is rebuilt, any cover
+    /// modifiers attached TO it are torn down. The canvas cover
+    /// would die mid-rename. By having GalleryView own the cover
+    /// (its own state, its own modifier), the canvas survives any
+    /// number of detail-view rebuilds. This view just signals
+    /// intent; the gallery handles presentation.
+    let onContinueDrawing: () -> Void
     @State private var drawingContext: DrawingContext
     @State private var showDeleteAlert = false
     @State private var fullImageData: Data?
@@ -61,10 +64,10 @@ struct DrawingDetailView: View {
     // SwiftUI no longer redraws when the singleton publishes.
     private let storageManager = CloudDrawingStorageManager.shared
 
-    init(drawing: Drawing, editedTitle: Binding<String>, showCanvas: Binding<Bool>) {
+    init(drawing: Drawing, editedTitle: Binding<String>, onContinueDrawing: @escaping () -> Void) {
         self.drawing = drawing
         self._editedTitle = editedTitle
-        self._showCanvas = showCanvas
+        self.onContinueDrawing = onContinueDrawing
         _drawingContext = State(initialValue: drawing.context ?? DrawingContext())
     }
 
@@ -209,9 +212,22 @@ struct DrawingDetailView: View {
                         // before showCanvas flips, so the canvas
                         // mounts exactly once.
                         Button(action: {
+                            // Await the rename commit so the storage
+                            // cascade settles while the detail cover
+                            // is still on screen. Then signal the
+                            // gallery to take over and present the
+                            // canvas cover from there. Doing the
+                            // canvas presentation from this view's
+                            // own .fullScreenCover would tie the
+                            // cover's lifetime to this view, and
+                            // this view gets rebuilt on every
+                            // storage publish. Letting GalleryView
+                            // own the canvas cover puts it on a
+                            // stable host that survives detail-view
+                            // rebuilds.
                             Task { @MainActor in
                                 await performCommitTitleChange()
-                                showCanvas = true
+                                onContinueDrawing()
                             }
                         }) {
                             HStack(spacing: 12) {
@@ -273,23 +289,11 @@ struct DrawingDetailView: View {
             fullImageData = try? await storageManager.loadFullImage(for: drawing.id)
             isLoadingImage = false
         }
-        .fullScreenCover(isPresented: $showCanvas) {
-            // .id(drawing.id) anchors the canvas's SwiftUI identity to
-            // the stable drawing UUID. Without this, every re-render
-            // of DrawingDetailView (from @FocusState toggles, async
-            // state mutations rippling up through loadExistingDrawing,
-            // storageManager publishes, etc.) caused SwiftUI to treat
-            // the canvas as a "new" view and tear it down + re-mount.
-            // The logs showed 2–4 successive `Coordinator: Initialized`
-            // / `MetalCanvasView: Creating MTKView` rounds on a single
-            // Continue Drawing tap, and the visible symptom was the
-            // canvas appearing briefly and bouncing back to the detail
-            // view. Forcing identity = drawing.id (constant for this
-            // view's lifetime) makes SwiftUI keep the canvas mounted
-            // across all parent re-renders.
-            DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
-                .id(drawing.id)
-        }
+        // NO .fullScreenCover for canvas here. The canvas cover is
+        // hosted by GalleryView (.fullScreenCover(item: $canvasDrawing))
+        // because detail view rebuilds on every storage publish and
+        // would take any modifiers attached to it down on each rebuild.
+        // See onContinueDrawing in init.
         .alert("Delete Drawing", isPresented: $showDeleteAlert) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
@@ -456,6 +460,6 @@ struct DrawingDetailView: View {
             )
         ),
         editedTitle: .constant("Portrait Study"),
-        showCanvas: .constant(false)
+        onContinueDrawing: {}
     )
 }
