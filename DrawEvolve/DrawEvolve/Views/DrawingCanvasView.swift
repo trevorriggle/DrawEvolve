@@ -593,6 +593,11 @@ struct DrawingCanvasView: View {
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 8) {
                     phoneSelectionContextBar
+                    if phoneBrushSizeRailVisible {
+                        BrushSizeRailHorizontal(size: $canvasState.brushSettings.size)
+                            .padding(.horizontal, 16)
+                            .transition(.opacity)
+                    }
                     phoneActionRow
                     if isToolPanelExpanded {
                         phoneToolPanel
@@ -601,6 +606,7 @@ struct DrawingCanvasView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 4)
                 .background(.regularMaterial)
+                .animation(.easeInOut(duration: 0.18), value: phoneBrushSizeRailVisible)
             }
             // iPhone Phase 4: half-sheet for FloatingFeedbackPanel.
             // iPad's path renders the panel inline inside padBody's ZStack
@@ -1937,6 +1943,25 @@ struct DrawingCanvasView: View {
     private func collapsePhoneToolPanel() {
         withAnimation(.spring(response: 0.3)) {
             isToolPanelExpanded = false
+        }
+    }
+
+    /// True when the active tool actually consumes `brushSettings.size`.
+    /// The horizontal brush-size rail hugs the action row when this is
+    /// true and collapses out when the user picks a tool that ignores
+    /// size (fill, eyedropper, select / move, text, pose, blur
+    /// adjustment) — those tools don't benefit from a size affordance,
+    /// and giving the canvas the row back reads better on a narrow
+    /// phone. The list matches the doc-comment on
+    /// `BrushSizeRail.swift`; keep them in sync when adding tools.
+    private var phoneBrushSizeRailVisible: Bool {
+        switch canvasState.currentTool {
+        case .brush, .pencil, .inkPen, .marker, .airbrush, .charcoal,
+             .eraser, .blur, .smudge,
+             .line, .rectangle, .circle:
+            return true
+        default:
+            return false
         }
     }
 
