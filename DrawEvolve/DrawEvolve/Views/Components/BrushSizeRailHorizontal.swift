@@ -46,21 +46,18 @@ struct BrushSizeRailHorizontal: View {
     private static let trackInset: CGFloat = Self.knobDiameter / 2 + 4
 
     /// Response-curve exponent for knob-position → brush-size mapping.
-    /// Linear (=1) made the upper half of the track feel jumpy — every
-    /// pt of travel was ~1.6px of size change, so small brushes had
-    /// almost no resolution and large brushes overshot in a finger
-    /// flick. Exponent 2 (quadratic) compresses small sizes into more
-    /// track real estate (the left ~50% of travel covers 1–50px,
-    /// where artists usually live) and expands big sizes into less
-    /// travel (the right half covers 50–200px, where exact precision
-    /// matters less). Mirror this if BrushSizeRail.swift adopts a
-    /// curve too.
-    private static let sizeCurve: CGFloat = 2.0
-    /// Cap for the live size-preview circle. A 200px brush would
-    /// swamp the screen at true scale; clamp so the preview reads
-    /// "this is big" without taking up the whole viewport. Anything
-    /// over the cap renders at the cap diameter.
-    private static let previewDiameterCap: CGFloat = 80
+    /// 1.0 = linear. A previous version used 2.0 (quadratic) to give
+    /// fine control over small brushes, but the cost was the top half
+    /// of the track feeling "exponential" — small slider movements
+    /// near the top caused big size jumps. The user reported this as
+    /// the slider not matching what was actually drawn. Linear feels
+    /// predictable: each pt of slider travel = the same px of brush
+    /// size change at any position.
+    private static let sizeCurve: CGFloat = 1.0
+    /// Vertical offset for the preview circle's center, above the
+    /// knob. Generous so even a large brush preview floats clear of
+    /// the rail itself.
+    private static let previewYOffset: CGFloat = 56
 
     var body: some View {
         ZStack {
@@ -96,21 +93,16 @@ struct BrushSizeRailHorizontal: View {
                     .frame(width: Self.knobDiameter, height: Self.knobDiameter)
                     .position(x: knobX, y: proxy.size.height / 2)
 
-                // Live size preview — filled circle scaled to the
-                // actual brush diameter, capped so a 200px brush
-                // doesn't take a quarter of the screen. Appears
-                // above the knob while dragging so the user can see
-                // what a single stamp will look like before
-                // committing to draw. Capped at `previewDiameterCap`
-                // (80pt): past the cap the circle stays at the cap
-                // but the px readout below it keeps growing, so
-                // "much bigger than the preview" is unambiguous.
+                // Live size preview — filled circle drawn at the
+                // ACTUAL on-screen stamp diameter. No cap. The
+                // previous capped version (80pt) underrepresented the
+                // stroke at higher zoom levels or larger brush sizes,
+                // and the discrepancy felt "exponential" to the user
+                // because the gap grew faster than the slider's
+                // visible position. Now what you see is what hits the
+                // canvas — even if the preview circle becomes large.
                 if isDragging {
-                    // True on-screen stamp diameter when a converter
-                    // is wired; otherwise fall back to interpreting
-                    // `size` as a raw screen value (legacy).
-                    let trueDiameter = screenDiameter?(size) ?? size
-                    let previewDiameter = min(trueDiameter, Self.previewDiameterCap)
+                    let previewDiameter = screenDiameter?(size) ?? size
                     Circle()
                         .fill(Color.primary.opacity(0.85))
                         .frame(width: previewDiameter, height: previewDiameter)
@@ -121,7 +113,13 @@ struct BrushSizeRailHorizontal: View {
                             )
                         )
                         .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
-                        .position(x: knobX, y: -(Self.previewDiameterCap / 2 + 6))
+                        // Center the preview so its BOTTOM sits a
+                        // consistent distance above the rail
+                        // regardless of size, rather than always
+                        // anchoring at a fixed center y. Bigger
+                        // brushes float higher; small ones nestle
+                        // just above the knob.
+                        .position(x: knobX, y: -(previewDiameter / 2 + 8))
                         .transition(.opacity)
 
                     // Numeric readout bubble — sits just above the
