@@ -7,7 +7,6 @@
 
 import SwiftUI
 import PhotosUI
-import Combine
 @preconcurrency import Metal
 
 struct DrawingCanvasView: View {
@@ -58,27 +57,6 @@ struct DrawingCanvasView: View {
     @State private var isRequestingFeedback = false
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
-
-    // MARK: - Auto-save state
-    //
-    // The first save still routes through saveToGalleryButton's title
-    // alert so the user names the drawing. Once `currentDrawingID` is
-    // set, a background timer auto-syncs every change to the cloud:
-    //
-    //   • Idle save — 20s after the last canvas edit (the user paused)
-    //   • Max-interval save — at most 60s since the last successful
-    //     save, even if the user is still actively drawing
-    //
-    // Reuses the same `storageManager.updateLayeredDrawing(...)` path
-    // as the explicit Save button, so the NWPathMonitor retry queue
-    // and texture-export pipeline are shared. Auto-save is silent on
-    // failure (the queue retries on its own); the explicit Save button
-    // remains as a manual "save now" override and surfaces errors.
-
-    @State private var lastEditAt: Date? = nil
-    @State private var lastAutoSaveAt: Date? = nil
-    @State private var isAutoSaving: Bool = false
-    @State private var showAutoSavedToast: Bool = false
 
     // Tool and layer controls
     @State private var showColorPicker = false
@@ -186,43 +164,6 @@ struct DrawingCanvasView: View {
         }
         .overlay(typingPathOverlay)
         .overlay(typeBarOverlay)
-        .overlay(alignment: .top) {
-            autoSaveStatusIndicator
-                .allowsHitTesting(false)
-        }
-        // Coarse "the canvas changed" signal. `objectWillChange` fires
-        // for every @Published mutation on CanvasStateManager, which
-        // is more than just "user edited" — pan / zoom / transient
-        // drag state also flow through. The 0.5s debounce collapses
-        // bursts (60fps stroke updates, etc.) into a single bump,
-        // and a few false positives from non-edit signals are fine:
-        // they just delay auto-save by 20s of idle. Real edits will
-        // continue bumping until the user pauses, then save fires.
-        .onReceive(
-            canvasState.objectWillChange
-                .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
-        ) { _ in
-            bumpEditTimestamp()
-        }
-        // Polling task — checks every 5s whether auto-save conditions
-        // are met. Cancelled automatically when the view goes away
-        // (SwiftUI .task lifetime). Sleep-loop rather than Timer so
-        // we don't have to bridge a Combine schedule onto the main
-        // actor for the maybeAutoSave check.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                await maybeAutoSave()
-            }
-        }
-        // Reset auto-save state when the user opens a different
-        // drawing — otherwise stale timestamps from the previous
-        // canvas would trigger a spurious save against the new one.
-        .onChange(of: currentDrawingID) { _ in
-            lastEditAt = nil
-            lastAutoSaveAt = nil
-            showAutoSavedToast = false
-        }
         .onChange(of: canvasState.currentTool) { newTool in
             // Capture the last non-Type tool so future restoration knows
             // where to return. Re-entering a Type tool resets the bar's
@@ -2915,142 +2856,11 @@ struct DrawingCanvasView: View {
 
         if didSucceed {
             showSavedConfirmation = true
-            // A manual save zeros out the auto-save dirty/timing state
-            // — the cloud is now up to date, no need for the timer to
-            // immediately fire another save chasing this change.
-            lastAutoSaveAt = Date()
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 showSavedConfirmation = false
             }
         }
-    }
-
-    // MARK: - Auto-save
-
-    /// Called by the debounced `objectWillChange` observer. Marks the
-    /// drawing dirty as of "now"; the polling timer in `body` later
-    /// decides whether enough idle time has elapsed to fire a save.
-    private func bumpEditTimestamp() {
-        lastEditAt = Date()
-    }
-
-    /// Auto-save eligibility check, called by the polling task ~every
-    /// 5s. Bails unless every condition holds:
-    ///   • A drawing ID exists (the user has named + saved at least
-    ///     once — auto-save reuses that title)
-    ///   • A non-empty title is loaded
-    ///   • There's an edit newer than the last save (dirty)
-    ///   • No manual save is in flight (`isSaving`)
-    ///   • No auto-save is already in flight (`isAutoSaving`)
-    ///   • Either 20s of idle since the last edit (user paused), OR
-    ///     60s since the last save (user is mid-marathon — sync anyway)
-    @MainActor
-    private func maybeAutoSave() async {
-        guard let drawingID = currentDrawingID,
-              !drawingTitle.isEmpty,
-              let lastEdit = lastEditAt,
-              !isSaving,
-              !isAutoSaving else { return }
-
-        // Already up to date — the last save is newer than the last edit.
-        if let lastSave = lastAutoSaveAt, lastSave >= lastEdit { return }
-
-        let now = Date()
-        let idleEnough = now.timeIntervalSince(lastEdit) >= 20.0
-        let maxIntervalReached = lastAutoSaveAt.map { now.timeIntervalSince($0) >= 60.0 } ?? false
-
-        guard idleEnough || maxIntervalReached else { return }
-
-        isAutoSaving = true
-        await performAutoSave(drawingID: drawingID)
-        isAutoSaving = false
-    }
-
-    /// The actual save. Same texture-export + Supabase write path as
-    /// the manual Save button. Failures are logged but not surfaced —
-    /// `DrawingStorageManager`'s `NWPathMonitor` retry queue handles
-    /// network drops, and the next timer tick will try again if
-    /// `lastEditAt` is still ahead of `lastAutoSaveAt`. The user's
-    /// explicit Save button remains as a "save now" override that
-    /// DOES surface errors.
-    @MainActor
-    private func performAutoSave(drawingID: UUID) async {
-        guard let payload = canvasState.exportLayeredPayload(drawingID: drawingID) else {
-            print("⚠️ Auto-save: failed to build layered payload")
-            return
-        }
-        do {
-            try await storageManager.updateLayeredDrawing(
-                id: drawingID,
-                title: drawingTitle,
-                payload: payload,
-                feedback: canvasState.feedback,
-                context: context,
-                critiqueHistory: critiqueHistory
-            )
-            lastAutoSaveAt = Date()
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showAutoSavedToast = true
-            }
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showAutoSavedToast = false
-                }
-            }
-        } catch {
-            print("⚠️ Auto-save failed (storage queue will retry): \(error)")
-        }
-    }
-
-    /// Subtle floating indicator anchored to the top of the canvas.
-    /// Shows "Saving…" mid-flight and "Saved" briefly on success;
-    /// otherwise renders nothing. Positioned with top padding so it
-    /// clears the iPhone nav bar / iPad chrome.
-    @ViewBuilder
-    private var autoSaveStatusIndicator: some View {
-        Group {
-            if showAutoSavedToast {
-                autoSaveLabel(
-                    icon: "checkmark.circle.fill",
-                    iconColor: .green,
-                    text: "Saved"
-                )
-            } else if isAutoSaving {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                    Text("Saving…")
-                        .font(.caption.weight(.medium))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.regularMaterial)
-                .clipShape(Capsule())
-                .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-                .padding(.top, 60)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-    }
-
-    private func autoSaveLabel(icon: String, iconColor: Color, text: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .foregroundStyle(iconColor)
-            Text(text)
-                .font(.caption.weight(.medium))
-                .foregroundColor(.primary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.regularMaterial)
-        .clipShape(Capsule())
-        .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-        .padding(.top, 60)
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
     @MainActor
