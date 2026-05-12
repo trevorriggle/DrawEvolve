@@ -21,6 +21,11 @@ struct BrushSizeRail: View {
     /// Matches the range surfaced in `BrushSettingsView` (1...200) so the
     /// rail and the full panel agree on bounds.
     var range: ClosedRange<CGFloat> = 1...200
+    /// Optional converter from brush size (doc px) → on-screen
+    /// diameter (screen pt) at the current canvas zoom/fit. When
+    /// provided, the live preview circle uses this so its diameter
+    /// matches what a single stamp will look like on the canvas.
+    var screenDiameter: ((CGFloat) -> CGFloat)? = nil
 
     /// True while the user is actively dragging — fades in the readout
     /// bubble that shows the live numeric size.
@@ -88,7 +93,8 @@ struct BrushSizeRail: View {
                 // knob in the canvas-overlap area so the user can
                 // size-check against their drawing before stroking.
                 if isDragging {
-                    let previewDiameter = min(size, Self.previewDiameterCap)
+                    let trueDiameter = screenDiameter?(size) ?? size
+                    let previewDiameter = min(trueDiameter, Self.previewDiameterCap)
                     Circle()
                         .fill(Color.primary.opacity(0.85))
                         .frame(width: previewDiameter, height: previewDiameter)

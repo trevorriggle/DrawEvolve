@@ -21,6 +21,14 @@ struct BrushSizeRailHorizontal: View {
     /// Matches BrushSizeRail and BrushSettingsView so all three surfaces
     /// agree on bounds. Don't widen here without widening there too.
     var range: ClosedRange<CGFloat> = 1...200
+    /// Optional converter from brush size (doc px) → on-screen
+    /// diameter (screen pt) at the current canvas zoom/fit. When
+    /// provided, the live preview circle uses this so its diameter
+    /// matches what a single stamp will actually look like on the
+    /// canvas. Without it, `size` is treated as screen pt directly
+    /// (which is wrong on a zoomed canvas — the bug this parameter
+    /// fixes).
+    var screenDiameter: ((CGFloat) -> CGFloat)? = nil
 
     @State private var isDragging = false
     /// Captured from the GeometryReader during layout; the drag handler
@@ -98,7 +106,11 @@ struct BrushSizeRailHorizontal: View {
                 // but the px readout below it keeps growing, so
                 // "much bigger than the preview" is unambiguous.
                 if isDragging {
-                    let previewDiameter = min(size, Self.previewDiameterCap)
+                    // True on-screen stamp diameter when a converter
+                    // is wired; otherwise fall back to interpreting
+                    // `size` as a raw screen value (legacy).
+                    let trueDiameter = screenDiameter?(size) ?? size
+                    let previewDiameter = min(trueDiameter, Self.previewDiameterCap)
                     Circle()
                         .fill(Color.primary.opacity(0.85))
                         .frame(width: previewDiameter, height: previewDiameter)

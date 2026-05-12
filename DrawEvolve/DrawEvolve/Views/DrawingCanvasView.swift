@@ -643,7 +643,10 @@ struct DrawingCanvasView: View {
                 VStack(spacing: 8) {
                     phoneSelectionContextBar
                     if phoneBrushSizeRailVisible {
-                        BrushSizeRailHorizontal(size: $canvasState.brushSettings.size)
+                        BrushSizeRailHorizontal(
+                            size: $canvasState.brushSettings.size,
+                            screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
+                        )
                             .padding(.horizontal, 16)
                             .transition(.opacity)
                     }
@@ -1708,7 +1711,10 @@ struct DrawingCanvasView: View {
                 // the canvas edge — matching that.
                 VStack(alignment: .trailing, spacing: 12) {
                     if !isToolbarCollapsed {
-                        BrushSizeRail(size: $canvasState.brushSettings.size)
+                        BrushSizeRail(
+                            size: $canvasState.brushSettings.size,
+                            screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
+                        )
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                     VStack(spacing: 12) {

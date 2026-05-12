@@ -200,6 +200,18 @@ class CanvasStateManager: ObservableObject {
     var documentSize: CGSize {
         return renderer?.canvasSize ?? CGSize(width: 2048, height: 2048)
     }
+
+    /// Approximate doc-pixel → screen-point diameter for a brush stamp
+    /// at the current zoom and canvas-fit ratio. Mirrors the math in
+    /// `MetalCanvasView.Coordinator.stampScreenDiameter` so the brush
+    /// rail's live size preview matches what a single stamp will look
+    /// like on the canvas. Returns the raw `docSize` if the document
+    /// width hasn't been set up yet (briefly true on first launch).
+    func stampScreenDiameter(forBrushSize docSize: CGFloat) -> CGFloat {
+        let docWidth = documentSize.width
+        guard docWidth > 0 else { return docSize }
+        return docSize * (screenSize.width / docWidth) * zoomScale
+    }
     @Published var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 
     var isEmpty: Bool {
