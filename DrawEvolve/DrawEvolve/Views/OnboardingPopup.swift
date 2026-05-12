@@ -44,20 +44,26 @@ struct OnboardingPopup: View {
 
                     OnboardingStep(
                         icon: "doc.text.fill",
-                        title: "Tell us about your drawing",
-                        description: "Share what you're creating and what feedback you need"
+                        title: "Set the scene",
+                        description: "Tell DrawEvolve what you're making — subject, style, skill level, focus areas — or skip and just start drawing."
                     )
 
                     OnboardingStep(
                         icon: "paintbrush.pointed.fill",
-                        title: "Create your artwork",
-                        description: "Use our canvas and Apple Pencil to bring your vision to life"
+                        title: "Draw on the canvas",
+                        description: "6 brushes, layers, symmetry, rectangle / lasso select, pose references, and type-on-path. Apple Pencil works on iPad; touch works everywhere."
+                    )
+
+                    OnboardingStep(
+                        icon: "person.crop.circle.badge.questionmark",
+                        title: "Pick a coach voice",
+                        description: "Choose Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master — or write your own (\"retired sumi-e master who critiques in haiku\")."
                     )
 
                     OnboardingStep(
                         icon: "sparkles",
-                        title: "Get personalized feedback",
-                        description: "Receive encouraging, tailored guidance to improve your skills"
+                        title: "Get iterative feedback",
+                        description: "Tap Get Feedback for specific, honest critique. Your coach remembers prior sessions on the same drawing — track your growth in My Evolution."
                     )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -123,20 +129,26 @@ struct OnboardingPopup: View {
 
                     OnboardingStep(
                         icon: "doc.text.fill",
-                        title: "Tell us about your drawing",
-                        description: "Share what you're creating and what feedback you need"
+                        title: "Set the scene",
+                        description: "Tell DrawEvolve what you're making — subject, style, skill level, focus areas — or skip and just start drawing."
                     )
 
                     OnboardingStep(
                         icon: "paintbrush.pointed.fill",
-                        title: "Create your artwork",
-                        description: "Use our canvas and Apple Pencil to bring your vision to life"
+                        title: "Draw on the canvas",
+                        description: "6 brushes, layers, symmetry, rectangle / lasso select, pose references, and type-on-path. Apple Pencil works on iPad; touch works everywhere."
+                    )
+
+                    OnboardingStep(
+                        icon: "person.crop.circle.badge.questionmark",
+                        title: "Pick a coach voice",
+                        description: "Choose Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master — or write your own (\"retired sumi-e master who critiques in haiku\")."
                     )
 
                     OnboardingStep(
                         icon: "sparkles",
-                        title: "Get personalized feedback",
-                        description: "Receive encouraging, tailored guidance to improve your skills"
+                        title: "Get iterative feedback",
+                        description: "Tap Get Feedback for specific, honest critique. Your coach remembers prior sessions on the same drawing — track your growth in My Evolution."
                     )
                 }
                 .padding(.horizontal)
