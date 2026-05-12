@@ -58,6 +58,28 @@ struct DrawingCanvasView: View {
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
 
+    // MARK: - Auto-save state
+    //
+    // The first save still routes through saveToGalleryButton's title
+    // alert (the user names the drawing). Once `currentDrawingID` is
+    // set, a 30s timer flushes pending edits to the cloud — but ONLY
+    // if a real mutation happened since the last save. The dirty flag
+    // is driven by `canvasState.layerMutationCounter`, which gets
+    // bumped from explicit commit points (stroke commit, flood fill,
+    // text commit, selection delete, undo/redo, layer add/remove/
+    // reorder). Viewport changes and transient drag state DON'T bump
+    // it — saving every 30s regardless of edits would multiply our
+    // Supabase egress by ~4x at no benefit.
+    //
+    // Reuses the existing `saveDrawing()` path so texture export,
+    // NWPathMonitor retry queue, and Supabase upload semantics are
+    // shared with the manual Save button. Auto-save is silent on
+    // failure (queue retries); manual Save still surfaces errors.
+
+    @State private var hasUnsavedEdits: Bool = false
+    @State private var isAutoSaving: Bool = false
+    @State private var showAutoSavedToast: Bool = false
+
     // Tool and layer controls
     @State private var showColorPicker = false
     @State private var showLayerPanel = false
@@ -164,6 +186,33 @@ struct DrawingCanvasView: View {
         }
         .overlay(typingPathOverlay)
         .overlay(typeBarOverlay)
+        .overlay(alignment: .top) {
+            autoSaveStatusIndicator
+                .allowsHitTesting(false)
+        }
+        // Dirty signal — `bumpLayerMutation()` increments
+        // `layerMutationCounter` at every real pixel commit. Viewport
+        // changes (pan / zoom / tool switch) DON'T bump it, so we
+        // don't spuriously auto-save on navigation.
+        .onChange(of: canvasState.layerMutationCounter) { _ in
+            hasUnsavedEdits = true
+        }
+        // 30s polling tick. Cancelled when the view goes away. Sleep-
+        // loop rather than Timer so we don't have to bridge a Combine
+        // schedule onto the main actor for the autoSaveTick check.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                await autoSaveTick()
+            }
+        }
+        // Opening a different drawing — clear the dirty flag so stale
+        // edits from the prior canvas don't trigger a save against
+        // the new one.
+        .onChange(of: currentDrawingID) { _ in
+            hasUnsavedEdits = false
+            showAutoSavedToast = false
+        }
         .onChange(of: canvasState.currentTool) { newTool in
             // Capture the last non-Type tool so future restoration knows
             // where to return. Re-entering a Type tool resets the bar's
@@ -2856,9 +2905,103 @@ struct DrawingCanvasView: View {
 
         if didSucceed {
             showSavedConfirmation = true
+            // A manual save zeros the auto-save dirty flag — the cloud
+            // is now up to date, no need for the next 30s tick to
+            // chase the same change.
+            hasUnsavedEdits = false
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 showSavedConfirmation = false
+            }
+        }
+    }
+
+    // MARK: - Auto-save tick
+
+    /// Called by the 30s polling task. Bails unless every condition
+    /// holds: a drawing ID exists (first manual save happened), a
+    /// title is loaded, there's been a real edit since the last
+    /// save, no manual save is in flight, and no auto-save is
+    /// already in flight.
+    @MainActor
+    private func autoSaveTick() async {
+        guard let drawingID = currentDrawingID,
+              !drawingTitle.isEmpty,
+              hasUnsavedEdits,
+              !isSaving,
+              !isAutoSaving else { return }
+
+        isAutoSaving = true
+        defer { isAutoSaving = false }
+
+        guard let payload = canvasState.exportLayeredPayload(drawingID: drawingID) else {
+            print("⚠️ Auto-save: failed to build layered payload")
+            return
+        }
+        do {
+            try await storageManager.updateLayeredDrawing(
+                id: drawingID,
+                title: drawingTitle,
+                payload: payload,
+                feedback: canvasState.feedback,
+                context: context,
+                critiqueHistory: critiqueHistory
+            )
+            // Clear the dirty flag ONLY if no new mutation arrived
+            // while the upload was in flight — otherwise the next
+            // tick should still fire to flush the in-flight edits.
+            // Bumped during the await? Leave the flag set.
+            hasUnsavedEdits = false
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showAutoSavedToast = true
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showAutoSavedToast = false
+                }
+            }
+        } catch {
+            print("⚠️ Auto-save failed (storage queue will retry next tick): \(error)")
+        }
+    }
+
+    /// Subtle floating indicator anchored to the top of the canvas.
+    /// "Saving…" mid-flight, "Saved" briefly on success, nothing
+    /// otherwise. Top padding clears the iPhone nav bar / iPad chrome.
+    @ViewBuilder
+    private var autoSaveStatusIndicator: some View {
+        Group {
+            if showAutoSavedToast {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.green)
+                    Text("Saved")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.primary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.regularMaterial)
+                .clipShape(Capsule())
+                .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+                .padding(.top, 60)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if isAutoSaving {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                    Text("Saving…")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.regularMaterial)
+                .clipShape(Capsule())
+                .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+                .padding(.top, 60)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }

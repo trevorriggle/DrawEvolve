@@ -21,6 +21,14 @@ class CanvasStateManager: ObservableObject {
     /// concurrent fill, and DrawingCanvasView shows a HUD over the canvas.
     @Published var isFilling: Bool = false
     @Published var feedback: String?
+    /// Incremented once per real pixel-level edit. Drives auto-save —
+    /// `DrawingCanvasView` observes this and flips an unsaved-edits flag
+    /// that a 30s timer flushes to the cloud. Viewport changes
+    /// (pan / zoom / tool switch / transient drag previews) DON'T bump
+    /// this; only commits that change what the saved manifest would
+    /// contain do. Wrapping arithmetic — we don't care about the value,
+    /// only that it changes.
+    @Published var layerMutationCounter: Int = 0
     /// Phase 5d: the Worker-persisted critique entry returned alongside the
     /// feedback text. Consumers append this directly to local
     /// `critiqueHistory` for immediate display; the cloud row is canonical
@@ -330,12 +338,23 @@ class CanvasStateManager: ObservableObject {
             }
     }
 
+    /// Marks the drawing as having an unsaved pixel-level change. Call
+    /// from every commit point that mutates the texture/manifest the
+    /// auto-save would upload — strokes, fills, text commits, selection
+    /// deletes, undo/redo, layer add/remove/reorder. Do NOT call from
+    /// viewport changes (pan/zoom), tool switches, or transient drag
+    /// state.
+    func bumpLayerMutation() {
+        layerMutationCounter &+= 1
+    }
+
     func addLayer() {
         let layer = DrawingLayer(name: "Layer \(layers.count + 1)")
         layers.append(layer)
         selectedLayerIndex = layers.count - 1
         print("➕ Added '\(layer.name)' - selectedLayerIndex now = \(selectedLayerIndex), total layers = \(layers.count)")
         historyManager.record(.layerAdded(layer))
+        bumpLayerMutation()
     }
 
     func deleteLayer(at index: Int) {
@@ -346,6 +365,7 @@ class CanvasStateManager: ObservableObject {
             selectedLayerIndex = layers.count - 1
         }
         historyManager.record(.layerRemoved(layer, index: index))
+        bumpLayerMutation()
     }
 
     /// Reorder a layer within the stack. `destIndex` is interpreted as an
@@ -367,6 +387,7 @@ class CanvasStateManager: ObservableObject {
         selectedLayerIndex = layers.firstIndex(where: { $0.id == layer.id }) ?? selectedLayerIndex
 
         historyManager.record(.layerMoved(from: sourceIndex, to: insertAt))
+        bumpLayerMutation()
     }
 
     // MARK: - Opacity slider history bracketing
@@ -454,6 +475,7 @@ class CanvasStateManager: ObservableObject {
 
     func undo() {
         guard let action = historyManager.undo() else { return }
+        defer { bumpLayerMutation() }
 
         switch action {
         case .stroke(let layerId, let beforeSnapshot, _):
@@ -513,6 +535,7 @@ class CanvasStateManager: ObservableObject {
 
     func redo() {
         guard let action = historyManager.redo() else { return }
+        defer { bumpLayerMutation() }
 
         switch action {
         case .stroke(let layerId, _, let afterSnapshot):
@@ -671,6 +694,8 @@ class CanvasStateManager: ObservableObject {
                 afterSnapshot: after
             ))
         }
+
+        bumpLayerMutation()
 
         // Refresh the layer thumbnail off-main, same pattern as renderStroke.
         let currentLayerIndex = selectedLayerIndex
@@ -1441,6 +1466,8 @@ class CanvasStateManager: ObservableObject {
                 afterSnapshot: after
             ))
         }
+
+        bumpLayerMutation()
 
         // Update thumbnail
         let currentLayerIndex = selectedLayerIndex

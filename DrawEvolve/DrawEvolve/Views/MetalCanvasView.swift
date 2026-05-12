@@ -950,6 +950,10 @@ struct MetalCanvasView: UIViewRepresentable {
                         ))
                     }
 
+                    // Mark dirty for auto-save — flood fill mutates the
+                    // layer texture just like a stroke.
+                    canvasState.bumpLayerMutation()
+
                     // Update thumbnail (existing pattern). [weak self] above
                     // is what this nested block needs; the outer closure
                     // itself doesn't reference self otherwise.
@@ -2181,6 +2185,19 @@ struct MetalCanvasView: UIViewRepresentable {
                             afterSnapshot: after
                         ))
                         print("Recorded stroke in history (before: \(before.count) bytes, after: \(after.count) bytes)")
+                    }
+
+                    // Mark the drawing dirty for auto-save. Stroke commit
+                    // is the most common edit event by far; this single
+                    // bump is what makes the 30s auto-save timer actually
+                    // pick up brush / eraser / shape / line / blur / smudge
+                    // changes — they all funnel through dispatchStroke.
+                    // Bump on main since `bumpLayerMutation` writes a
+                    // @Published property.
+                    if let canvasState = capturedCanvasState {
+                        DispatchQueue.main.async {
+                            canvasState.bumpLayerMutation()
+                        }
                     }
 
                     DispatchQueue.global(qos: .utility).async {
