@@ -66,10 +66,12 @@ struct AuthGateView: View {
 
                 Spacer(minLength: 24)
 
-                #if DEBUG
-                debugSkipButton
-                    .padding(.bottom, 16)
-                #endif
+                // Debug "Skip Auth" button removed pre-App-Store-review.
+                // Apple's review team will flag any visible debug-bypass
+                // surface as a security backdoor. The underlying bypass
+                // flag is kept in AuthManager (defaults to false, no UI
+                // path to flip it) so the storage-manager defense-in-depth
+                // guards stay wired.
 
                 footer
                     .padding(.horizontal, 32)
@@ -406,36 +408,6 @@ struct AuthGateView: View {
         .padding(.top, 12)
         .animation(.easeInOut(duration: 0.2), value: authManager.lastError)
     }
-
-    // MARK: - Debug bypass (compiled out of Release builds)
-
-    #if DEBUG
-    private var debugSkipButton: some View {
-        Button {
-            authManager.enableDebugBypass()
-        } label: {
-            Text("DEBUG - SKIP AUTH")
-                .font(.caption.weight(.semibold))
-                .tracking(1.2)
-                .foregroundStyle(Color.orange)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 18)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.orange.opacity(0.08))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(
-                            Color.orange.opacity(0.55),
-                            style: StrokeStyle(lineWidth: 1, dash: [4, 3])
-                        )
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Debug only — skip authentication and enter the app")
-    }
-    #endif
 
     // MARK: - Footer
 

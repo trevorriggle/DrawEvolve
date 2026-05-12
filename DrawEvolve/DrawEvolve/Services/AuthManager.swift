@@ -52,32 +52,26 @@ final class AuthManager: ObservableObject {
     }
 
     #if DEBUG
-    // MARK: - Debug bypass (compiled out of Release; UserDefaults install-scoped)
+    // MARK: - Debug bypass (compiled out of Release)
+    //
+    // The "DEBUG - SKIP AUTH" button on AuthGateView was removed before
+    // App Store review (Apple flags any visible debug-bypass surface as
+    // a security backdoor). The flag below is hardcoded to `false` and
+    // exposes no setter, so there is no path for a debug build to enter
+    // the app without a real Supabase session. The constant + flag are
+    // kept so the storage-manager defense-in-depth guards that reference
+    // them (DrawingStorageManager, CloudDrawingStorageManager) stay wired
+    // — if a future debug-only flow ever needs to re-introduce a synthetic
+    // user, those guards prevent its data from leaking into the cloud
+    // bucket via RLS-denied writes.
 
     /// Synthetic UUID stamped on drawings saved while the auth gate is bypassed.
     /// No matching `auth.users` row exists, so any cloud operation against
-    /// Supabase will fail with an RLS denial — that's intentional. The bypass
-    /// is for exercising local-only flows while real auth is gated on Apple
-    /// Developer approval.
+    /// Supabase would fail with an RLS denial — that's intentional.
     static let debugBypassUserID = UUID(uuidString: "DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF")!
 
-    private static let debugBypassDefaultsKey = "drawevolve.debug.authBypass"
-
-    @Published private(set) var isDebugBypassed: Bool =
-        UserDefaults.standard.bool(forKey: "drawevolve.debug.authBypass")
-
-    /// Enter the app without going through Supabase. DEBUG only.
-    func enableDebugBypass() {
-        isDebugBypassed = true
-        UserDefaults.standard.set(true, forKey: Self.debugBypassDefaultsKey)
-        lastError = nil
-    }
-
-    /// Drop back to the auth gate. DEBUG only.
-    func disableDebugBypass() {
-        isDebugBypassed = false
-        UserDefaults.standard.set(false, forKey: Self.debugBypassDefaultsKey)
-    }
+    /// Hardcoded `false`. No setter exists. See block comment above.
+    @Published private(set) var isDebugBypassed: Bool = false
     #endif
 
     private init() {
