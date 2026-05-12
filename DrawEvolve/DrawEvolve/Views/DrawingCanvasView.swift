@@ -50,6 +50,10 @@ struct DrawingCanvasView: View {
     /// navigation bar, so the sub-mode lives in the picker sheet
     /// instead and the pill is intentionally not mounted in phoneBody.
     @State private var showPhoneTypePicker = false
+    /// iPhone-only — combines the three effect tools (smudge / blur
+    /// brush / blur adjustment) under one grid slot. Mirrors iPad's
+    /// `ToolGroup.effects` long-press popover.
+    @State private var showPhoneEffectsPicker = false
     @State private var isRequestingFeedback = false
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
@@ -280,6 +284,11 @@ struct DrawingCanvasView: View {
         // the nav bar, so sub-mode selection lives in the sheet.
         .sheet(isPresented: $showPhoneTypePicker) {
             phoneTypePickerSheet
+        }
+        // iPhone-only effects picker — mirrors iPad's ToolGroup.effects
+        // long-press popover under a single grid slot.
+        .sheet(isPresented: $showPhoneEffectsPicker) {
+            phoneEffectsPickerSheet
         }
         // Tier-1.4: the More-button half-sheet (italic, kerning kind,
         // manual kern, on-path toggles) was retired alongside the bar's
@@ -2293,12 +2302,108 @@ struct DrawingCanvasView: View {
         .presentationDetents([.medium, .large])
     }
 
+    // MARK: - iPhone effects picker
+    //
+    // Mirrors iPad's ToolGroup.effects: smudge, blur (brush), blur
+    // adjustment under one grid tile. Same picker pattern as brush /
+    // pose / type — tap the tile to open a sheet, tap a row to
+    // select and dismiss. Order matches the iPad popover so the
+    // mental model is consistent across idioms.
+
+    private static let phoneEffectsVariants: [DrawingTool] = [
+        .smudge, .blur, .blurAdjustment,
+    ]
+
+    private var isCurrentToolEffectVariant: Bool {
+        Self.phoneEffectsVariants.contains(canvasState.currentTool)
+    }
+
+    /// Tile icon reflects the active effect when one is selected;
+    /// defaults to the smudge icon (iPad's default variant) otherwise.
+    private var phoneEffectsTileIcon: String {
+        if isCurrentToolEffectVariant {
+            return canvasState.currentTool.icon
+        }
+        return DrawingTool.smudge.icon
+    }
+
+    private static func phoneEffectsTagline(for tool: DrawingTool) -> String {
+        switch tool {
+        case .smudge:
+            return "Drag pixels along the stroke — smear the color you start on."
+        case .blur:
+            return "Paint Gaussian blur freeform along the stroke."
+        case .blurAdjustment:
+            return "Drag horizontally to set blur strength, ✓ to commit."
+        default:
+            return ""
+        }
+    }
+
+    private var phoneEffectsPickerSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Self.phoneEffectsVariants, id: \.self) { variant in
+                        Button {
+                            canvasState.currentTool = variant
+                            showPhoneEffectsPicker = false
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: variant.icon)
+                                    .font(.title3)
+                                    .frame(width: 32, height: 32)
+                                    .foregroundStyle(canvasState.currentTool == variant
+                                                     ? Color.accentColor
+                                                     : .primary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(variant.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text(Self.phoneEffectsTagline(for: variant))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if canvasState.currentTool == variant {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } footer: {
+                    Text("Smudge and Blur paint freeform along your stroke. Blur Adjustment locks the canvas and lets you dial blur strength with a horizontal drag.")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Effects")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showPhoneEffectsPicker = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
     private var phoneToolPanel: some View {
-        // 29 tiles, 5 columns × 6 rows. One trailing cell is empty.
-        // Pose-reference variants (handPose / bodyPose) are consolidated
-        // into one grid slot that opens phonePosePickerSheet — same
-        // pattern as the brush tile, so iPhone gets one slot per
-        // category instead of one per variant.
+        // 27 tiles, 5 columns × 6 rows. Three trailing cells are empty.
+        // iPhone consolidates iPad's grouped categories under single
+        // tiles that open a picker sheet — same pattern as iPad's
+        // long-press popovers, just sheet-based since the flat phone
+        // grid has no popover surface:
+        //   • Brushes (6 variants) → one tile, phoneBrushPickerSheet
+        //   • Effects (smudge / blur / blurAdjustment) → one tile,
+        //     phoneEffectsPickerSheet
+        //   • Type (text / textOnPath freehand / textOnPath circle)
+        //     → one tile, phoneTypePickerSheet
+        //   • Pose Reference (handPose / bodyPose) → one tile,
+        //     phonePosePickerSheet
         // Each tile auto-collapses the panel via collapsePhoneToolPanel()
         // after firing.
         //
@@ -2336,16 +2441,15 @@ struct DrawingCanvasView: View {
                     canvasState.currentTool = .eraser
                     collapsePhoneToolPanel()
                 }
-                ToolButton(icon: DrawingTool.blur.icon, isSelected: canvasState.currentTool == .blur) {
-                    canvasState.currentTool = .blur
-                    collapsePhoneToolPanel()
-                }
-                ToolButton(icon: DrawingTool.blurAdjustment.icon, isSelected: canvasState.currentTool == .blurAdjustment) {
-                    canvasState.currentTool = .blurAdjustment
-                    collapsePhoneToolPanel()
-                }
-                ToolButton(icon: DrawingTool.smudge.icon, isSelected: canvasState.currentTool == .smudge) {
-                    canvasState.currentTool = .smudge
+                // Combined Effects tile — opens phoneEffectsPickerSheet
+                // (smudge / blur / blurAdjustment). Mirrors iPad's
+                // ToolGroup.effects category. Tile icon reflects the
+                // active effect when one is selected.
+                ToolButton(
+                    icon: phoneEffectsTileIcon,
+                    isSelected: isCurrentToolEffectVariant
+                ) {
+                    showPhoneEffectsPicker = true
                     collapsePhoneToolPanel()
                 }
                 ToolButton(icon: DrawingTool.line.icon, isSelected: canvasState.currentTool == .line) {

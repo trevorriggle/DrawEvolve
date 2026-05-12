@@ -118,26 +118,38 @@ struct BrushSettingsView: View {
                 Slider(value: $settings.spacing, in: 0.01...1)
             }
 
-            Section("Pressure") {
-                Toggle("Pressure Sensitivity", isOn: $settings.pressureSensitivity)
+            // Pressure section is iPad-only. iPhone has no Apple Pencil
+            // input path and finger-force readings vary wildly across
+            // models (3D Touch was deprecated on most current iPhones),
+            // so the controls do nothing useful for phone users and the
+            // section just adds clutter. The underlying
+            // BrushSettings.pressureSensitivity / min / max fields
+            // keep their defaults on iPhone — MetalCanvasView's
+            // computePressure() returns 1.0 when no real pressure is
+            // reported, so the iPhone stroke ends up size-flat regardless
+            // of the toggle state.
+            if !DeviceIdiom.isPhone {
+                Section("Pressure") {
+                    Toggle("Pressure Sensitivity", isOn: $settings.pressureSensitivity)
 
-                if settings.pressureSensitivity {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Minimum Size")
-                            Spacer()
-                            Text(String(format: "%.0f%%", settings.minPressureSize * 100))
-                                .foregroundColor(.primary)
-                        }
-                        Slider(value: $settings.minPressureSize, in: 0...1)
+                    if settings.pressureSensitivity {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Minimum Size")
+                                Spacer()
+                                Text(String(format: "%.0f%%", settings.minPressureSize * 100))
+                                    .foregroundColor(.primary)
+                            }
+                            Slider(value: $settings.minPressureSize, in: 0...1)
 
-                        HStack {
-                            Text("Maximum Size")
-                            Spacer()
-                            Text(String(format: "%.0f%%", settings.maxPressureSize * 100))
-                                .foregroundColor(.primary)
+                            HStack {
+                                Text("Maximum Size")
+                                Spacer()
+                                Text(String(format: "%.0f%%", settings.maxPressureSize * 100))
+                                    .foregroundColor(.primary)
+                            }
+                            Slider(value: $settings.maxPressureSize, in: 0...1)
                         }
-                        Slider(value: $settings.maxPressureSize, in: 0...1)
                     }
                 }
             }
