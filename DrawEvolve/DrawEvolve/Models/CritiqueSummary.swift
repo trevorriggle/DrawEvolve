@@ -86,27 +86,62 @@ struct CritiqueSummary {
 
     // MARK: - Internals
 
-    /// Locate the last well-formed `<!--summary-->...<!--/summary-->`
-    /// pair in `text`. Returns nil if no balanced pair is present.
-    /// Picks the *last* pair so a model that mistakenly opens a block,
-    /// reconsiders, and writes a second one only yields the final
-    /// intended one.
+    /// Locate the last well-formed summary block in `text`. Returns nil
+    /// if nothing parseable is present.
+    ///
+    /// Strategy is three-tiered, each more lenient than the last, so a
+    /// minor formatting drift from the model still lets us extract
+    /// bullets instead of falling all the way through to the fallback:
+    ///
+    ///   1. Closed HTML comment block, case-insensitive, whitespace
+    ///      tolerant: `<!--summary-->`, `<!-- summary -->`,
+    ///      `<!--SUMMARY-->`, etc.
+    ///   2. Open HTML comment with no closing tag — assume the
+    ///      response got truncated mid-block by max_completion_tokens
+    ///      and take everything from the opener to end-of-text.
+    ///   3. Trailing markdown header (`## Summary` or `**Summary**`
+    ///      / `**Summary:**`) followed by bullet lines, no HTML
+    ///      comments at all — covers the case where the model
+    ///      ignored the comment-delimiter directive and just wrote a
+    ///      markdown section instead.
+    ///
+    /// Both opening and closing tag matches are last-wins so a model
+    /// that mistakenly opens a block, reconsiders, and writes a
+    /// second one only yields the final intended one.
     private static func findSummaryBlockRange(in text: String) -> (outerStart: String.Index, contentRange: Range<String.Index>)? {
-        let openTag = "<!--summary-->"
-        let closeTag = "<!--/summary-->"
-
-        var searchStart = text.startIndex
-        var lastMatch: (outer: String.Index, content: Range<String.Index>)? = nil
-
-        while let openRange = text.range(of: openTag, range: searchStart..<text.endIndex) {
-            guard let closeRange = text.range(of: closeTag, range: openRange.upperBound..<text.endIndex) else {
-                break
+        // Tier 1: closed comment block, lenient
+        if let closedPattern = try? Regex(#"(?is)<!--\s*summary\s*-->(.*?)<!--\s*/\s*summary\s*-->"#) {
+            let matches = text.matches(of: closedPattern)
+            if let last = matches.last, last.count >= 2, let contentRange = last[1].range {
+                return (last.range.lowerBound, contentRange)
             }
-            lastMatch = (openRange.lowerBound, openRange.upperBound..<closeRange.lowerBound)
-            searchStart = closeRange.upperBound
         }
-        guard let lastMatch else { return nil }
-        return (lastMatch.outer, lastMatch.content)
+
+        // Tier 2: open comment, no close — truncation
+        if let openPattern = try? Regex(#"(?is)<!--\s*summary\s*-->"#) {
+            let matches = text.matches(of: openPattern)
+            if let last = matches.last {
+                return (last.range.lowerBound, last.range.upperBound..<text.endIndex)
+            }
+        }
+
+        // Tier 3: markdown header — `## Summary` or `**Summary**` /
+        // `**Summary:**` at the end of the response, followed by bullet
+        // lines. Anchored to the end so we don't capture an arbitrary
+        // mid-critique header.
+        let headerPatterns = [
+            #"(?im)^\s*##\s+summary\s*:?\s*$\n((?:\s*[-*]\s+.+\n?)+)\s*$"#,
+            #"(?im)^\s*\*\*\s*summary\s*:?\s*\*\*\s*$\n((?:\s*[-*]\s+.+\n?)+)\s*$"#,
+        ]
+        for pattern in headerPatterns {
+            guard let regex = try? Regex(pattern) else { continue }
+            let matches = text.matches(of: regex)
+            if let last = matches.last, last.count >= 2, let contentRange = last[1].range {
+                return (last.range.lowerBound, contentRange)
+            }
+        }
+
+        return nil
     }
 
     /// Pull bullets out of the block. Accepts both `- ` and `* `
