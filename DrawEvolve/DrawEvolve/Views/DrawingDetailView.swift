@@ -58,12 +58,12 @@ struct DrawingDetailView: View {
                                         .padding(.trailing, 14)
                                 }
                             }
-                            .onSubmit { Task { await commitTitleChange() } }
-                            .onChange(of: titleFocused) { focused in
+                            .onSubmit { commitTitleChange() }
+                            .onChange(of: titleFocused) { _, focused in
                                 // Commit on blur too, so a user who taps
                                 // away from the field without hitting Done
                                 // still saves their rename.
-                                if !focused { Task { await commitTitleChange() } }
+                                if !focused { commitTitleChange() }
                             }
 
                         // Drawing image — bytes live in cloud Storage now; the
@@ -227,35 +227,47 @@ struct DrawingDetailView: View {
     }
 
     /// Saves the edited title to the cloud. No-ops if the title is
-    /// empty or unchanged. Called from `.onSubmit` (Done on the
-    /// keyboard) AND from `.onChange(of: titleFocused)` when the
-    /// field loses focus (so a tap-elsewhere also saves the rename).
-    /// Idempotent — repeated calls with the same value are cheap and
-    /// just exit early.
-    @MainActor
-    private func commitTitleChange() async {
+    /// empty, unchanged, or a previous commit is already in flight.
+    /// Called from `.onSubmit` (Done on the keyboard) AND from
+    /// `.onChange(of: titleFocused)` when the field loses focus.
+    /// Tapping Done dismisses the keyboard which ALSO triggers
+    /// the focus-loss path, so both modifiers can fire in quick
+    /// succession — the `isSavingTitle` guard collapses the
+    /// duplicate into one upload.
+    private func commitTitleChange() {
         let trimmed = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            // Empty title — revert and bail. Don't push an empty
-            // string to the database; it'd leave the row in an odd
-            // state and the gallery row would render blank.
+        // Empty input — revert to the original title since a blank
+        // name would render the gallery row as a void.
+        if trimmed.isEmpty {
             editedTitle = drawing.title
             return
         }
-        guard trimmed != drawing.title else { return }
+        // Unchanged from the originally-loaded title — nothing to do.
+        if trimmed == drawing.title { return }
+        // Re-entrance guard. Without this, .onSubmit + .onChange
+        // (focus loss when Done dismisses the keyboard) fire two
+        // commits in succession that race in the storage manager.
+        if isSavingTitle { return }
 
         isSavingTitle = true
-        defer { isSavingTitle = false }
-        do {
-            try await storageManager.updateDrawing(id: drawing.id, title: trimmed)
-        } catch {
-            // Cloud save failed — revert the local field so the user
-            // doesn't think it stuck. The storage manager's NWPathMonitor
-            // retry queue handles transient network drops; surfacing a
-            // hard error here means something else went wrong (drawing
-            // missing in memory, etc).
-            print("⚠️ Title rename failed: \(error)")
-            editedTitle = drawing.title
+        Task { @MainActor in
+            defer { isSavingTitle = false }
+            do {
+                try await storageManager.updateDrawing(id: drawing.id, title: trimmed)
+                // Keep `editedTitle` as the user typed it on success.
+                // Do not reset to anything else here — the prior version
+                // reset to `drawing.title` on error, which was the source
+                // of the "Done reverts what I typed" bug when the
+                // storage manager threw transiently.
+            } catch {
+                // Cloud write failed. DON'T revert the field — the user's
+                // intent stays in the binding so they can hit Done again
+                // (or the storage manager's retry queue picks it up on
+                // network recovery). Reverting was actively confusing:
+                // the user saw their typed text disappear and assumed
+                // the rename feature was broken.
+                print("⚠️ Title rename failed (kept local edit): \(error)")
+            }
         }
     }
 }
