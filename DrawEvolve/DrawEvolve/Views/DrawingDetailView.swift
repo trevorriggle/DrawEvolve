@@ -10,7 +10,13 @@ import SwiftUI
 struct DrawingDetailView: View {
     let drawing: Drawing
     @Environment(\.dismiss) private var dismiss
-    @State private var showCanvas = false
+    /// Canvas-cover state lives in GalleryView (@State), passed down
+    /// as @Binding here. Same reason as editedTitle: this view gets
+    /// rebuilt every time a storage publish ripples through, and a
+    /// @State here would reset to false mid-presentation, dismissing
+    /// the canvas. @Binding to a stable parent state keeps the cover
+    /// presented across rebuilds.
+    @Binding var showCanvas: Bool
     @State private var drawingContext: DrawingContext
     @State private var showDeleteAlert = false
     @State private var fullImageData: Data?
@@ -55,9 +61,10 @@ struct DrawingDetailView: View {
     // SwiftUI no longer redraws when the singleton publishes.
     private let storageManager = CloudDrawingStorageManager.shared
 
-    init(drawing: Drawing, editedTitle: Binding<String>) {
+    init(drawing: Drawing, editedTitle: Binding<String>, showCanvas: Binding<Bool>) {
         self.drawing = drawing
         self._editedTitle = editedTitle
+        self._showCanvas = showCanvas
         _drawingContext = State(initialValue: drawing.context ?? DrawingContext())
     }
 
@@ -448,6 +455,7 @@ struct DrawingDetailView: View {
                 focus: "Light and shadow"
             )
         ),
-        editedTitle: .constant("Portrait Study")
+        editedTitle: .constant("Portrait Study"),
+        showCanvas: .constant(false)
     )
 }

@@ -79,6 +79,17 @@ struct GalleryView: View {
     /// @Binding makes the typed text survive any number of
     /// detail-view rebuilds.
     @State private var detailEditedTitle: String = ""
+    /// Owns the canvas-cover state on behalf of DrawingDetailView.
+    /// Same rationale as detailEditedTitle: DrawingDetailView gets
+    /// rebuilt with a fresh @State container every time GalleryView
+    /// re-renders (which it does on every storage publish). With
+    /// showCanvas as @State in DrawingDetailView, that rebuild
+    /// reset it to false mid-presentation and the canvas cover
+    /// collapsed back to the detail view — the bouncing bug. With
+    /// showCanvas as @Binding into THIS view's @State, the
+    /// underlying boolean lives in a stable spot and the cover
+    /// stays presented across any number of detail-view rebuilds.
+    @State private var detailShowCanvas: Bool = false
     @State private var showDeleteAlert = false
     @State private var drawingToDelete: Drawing?
     @State private var drawingContext = DrawingContext()
@@ -503,12 +514,13 @@ struct GalleryView: View {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(storageManager.drawings) { drawing in
                     Button(action: {
-                        // Seed the lifted title state with the
-                        // current title BEFORE presenting the cover.
-                        // DrawingDetailView reads via @Binding from
-                        // here, so it must reflect this drawing's
-                        // current title at present time.
+                        // Seed the lifted state BEFORE presenting
+                        // the cover. detailEditedTitle gets the
+                        // current title; detailShowCanvas resets to
+                        // false so the canvas isn't presented on
+                        // first appear of the detail view.
                         detailEditedTitle = drawing.title
+                        detailShowCanvas = false
                         selectedDrawing = drawing
                     }) {
                         DrawingCard(
@@ -536,8 +548,12 @@ struct GalleryView: View {
             // name. With editedTitle as @Binding pointing to a
             // @State in THIS (stable) view, the typed text survives
             // any number of DrawingDetailView rebuilds.
-            DrawingDetailView(drawing: drawing, editedTitle: $detailEditedTitle)
-                .id(drawing.id)
+            DrawingDetailView(
+                drawing: drawing,
+                editedTitle: $detailEditedTitle,
+                showCanvas: $detailShowCanvas
+            )
+            .id(drawing.id)
         }
     }
 }
