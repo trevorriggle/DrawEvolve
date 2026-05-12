@@ -158,21 +158,26 @@ struct DrawingDetailView: View {
                     Divider()
 
                     HStack(spacing: 12) {
-                        // Continue Drawing button
+                        // Continue Drawing button — AWAITS the rename
+                        // commit before presenting the canvas. Without
+                        // the await, the storageManager.drawings
+                        // mutation that renameDrawing publishes after
+                        // its PATCH lands DURING the canvas mount,
+                        // which causes DrawingDetailView to re-render
+                        // and the .fullScreenCover content to
+                        // re-evaluate. SwiftUI isn't preserving
+                        // DrawingCanvasView identity across that
+                        // re-evaluation, so the canvas gets torn down
+                        // and re-mounted (logs show 4× Coordinator
+                        // init / MTKView create on a single button
+                        // tap). Awaiting lets the cascade settle
+                        // before showCanvas flips, so the canvas
+                        // mounts exactly once.
                         Button(action: {
-                            // Fire a title commit before leaving the
-                            // view, so a typed-but-not-Done-tapped
-                            // rename still persists. renameDrawing's
-                            // PATCH is small + fast; runs in
-                            // background while the canvas presents.
-                            // The cover-bounce that an earlier
-                            // version exhibited came from the
-                            // focus-loss handler racing button taps —
-                            // explicit, button-driven commit here is
-                            // synchronous-enough to dispatch before
-                            // showCanvas flips, so no race.
-                            commitTitleChange()
-                            showCanvas = true
+                            Task { @MainActor in
+                                await performCommitTitleChange()
+                                showCanvas = true
+                            }
                         }) {
                             HStack(spacing: 12) {
                                 Image(systemName: "paintbrush.pointed.fill")
@@ -317,15 +322,23 @@ struct DrawingDetailView: View {
         .cornerRadius(12)
     }
 
-    /// Saves the edited title to the cloud. No-ops if the title is
-    /// empty, unchanged, or a previous commit is already in flight.
-    /// Called from `.onSubmit` (Done on the keyboard) AND from
-    /// `.onChange(of: titleFocused)` when the field loses focus.
-    /// Tapping Done dismisses the keyboard which ALSO triggers
-    /// the focus-loss path, so both modifiers can fire in quick
-    /// succession — the `isSavingTitle` guard collapses the
-    /// duplicate into one upload.
+    /// Fire-and-forget commit, called from `.onSubmit` (Done on the
+    /// keyboard). Wraps `performCommitTitleChange` in a Task so the
+    /// synchronous SwiftUI callback returns immediately. Continue
+    /// Drawing awaits `performCommitTitleChange` directly instead so
+    /// it can ordering-guarantee the storage cascade settles before
+    /// presenting the canvas (otherwise the cover re-mounts the
+    /// canvas repeatedly as the storage publishes ripple through
+    /// DrawingDetailView).
     private func commitTitleChange() {
+        Task { @MainActor in await performCommitTitleChange() }
+    }
+
+    /// The actual commit. No-ops if empty / unchanged / already in
+    /// flight. Awaits the renameDrawing PATCH so the local cache
+    /// AND the cloud row are in sync by the time this returns.
+    @MainActor
+    private func performCommitTitleChange() async {
         let trimmed = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         // Empty input — revert to the original title since a blank
         // name would render the gallery row as a void.
@@ -335,32 +348,27 @@ struct DrawingDetailView: View {
         }
         // Unchanged from the originally-loaded title — nothing to do.
         if trimmed == drawing.title { return }
-        // Re-entrance guard. Without this, .onSubmit + .onChange
-        // (focus loss when Done dismisses the keyboard) fire two
-        // commits in succession that race in the storage manager.
+        // Re-entrance guard against rapid double-fires (e.g. Done
+        // followed immediately by Continue Drawing).
         if isSavingTitle { return }
 
         print("🖊  Title rename: '\(drawing.title)' → '\(trimmed)' (id=\(drawing.id))")
         isSavingTitle = true
-        Task { @MainActor in
-            defer { isSavingTitle = false }
-            do {
-                // Direct PATCH on the drawings row. updateDrawing's
-                // queued flat-upload pipeline silently dropped title
-                // changes on layered drawings (no storagePath = no
-                // flat upload). renameDrawing does a single PostgREST
-                // PATCH on title + updated_at, no Storage churn, no
-                // upload queue.
-                try await storageManager.renameDrawing(id: drawing.id, title: trimmed)
-                print("✅ Title rename committed locally + cloud")
-            } catch {
-                // Cloud write failed. DON'T revert the field — the user's
-                // intent stays in the binding so they can hit Done again.
-                // Local cache was already updated inside renameDrawing,
-                // so the UI continues to reflect the new name; the cloud
-                // catches up on the next successful rename attempt.
-                print("⚠️ Title rename failed (kept local edit): \(type(of: error)) — \(error)")
-            }
+        defer { isSavingTitle = false }
+        do {
+            // Direct PATCH on the drawings row. The legacy
+            // updateDrawing flow queues a flat-upload pending entry
+            // and silently drops it for layered drawings (no
+            // storagePath). renameDrawing does a single PostgREST
+            // PATCH on title + updated_at — no Storage churn, no
+            // upload queue.
+            try await storageManager.renameDrawing(id: drawing.id, title: trimmed)
+            print("✅ Title rename committed locally + cloud")
+        } catch {
+            // Cloud write failed. DON'T revert the field — the user's
+            // intent stays in the binding so they can hit Done again
+            // (or tap Continue Drawing, which awaits this method).
+            print("⚠️ Title rename failed (kept local edit): \(type(of: error)) — \(error)")
         }
     }
 }
