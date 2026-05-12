@@ -15,11 +15,18 @@ struct DrawingDetailView: View {
     @State private var showDeleteAlert = false
     @State private var fullImageData: Data?
     @State private var isLoadingImage = true
+    /// Editable copy of the drawing's title. Bound to the title text
+    /// field at the top of the view; commits to the cloud on Done /
+    /// focus-loss via `commitTitleChange()`.
+    @State private var editedTitle: String
+    @State private var isSavingTitle = false
+    @FocusState private var titleFocused: Bool
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
 
     init(drawing: Drawing) {
         self.drawing = drawing
         _drawingContext = State(initialValue: drawing.context ?? DrawingContext())
+        _editedTitle = State(initialValue: drawing.title)
     }
 
     var body: some View {
@@ -28,6 +35,37 @@ struct DrawingDetailView: View {
                 // Scrollable content area
                 ScrollView {
                     VStack(spacing: 24) {
+                        // Editable title bar at the top of the scroll. Tapping
+                        // inside puts the field into edit mode; the keyboard's
+                        // Done button (or losing focus) commits the new name to
+                        // the database. SwiftUI's keyboard avoidance keeps the
+                        // field visible above the keyboard since it's at the
+                        // top of the scroll content.
+                        TextField("Drawing name", text: $editedTitle)
+                            .font(.title2.weight(.semibold))
+                            .textFieldStyle(.plain)
+                            .submitLabel(.done)
+                            .focused($titleFocused)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(uiColor: .secondarySystemBackground))
+                            .cornerRadius(12)
+                            .overlay(alignment: .trailing) {
+                                if isSavingTitle {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                        .padding(.trailing, 14)
+                                }
+                            }
+                            .onSubmit { Task { await commitTitleChange() } }
+                            .onChange(of: titleFocused) { focused in
+                                // Commit on blur too, so a user who taps
+                                // away from the field without hitting Done
+                                // still saves their rename.
+                                if !focused { Task { await commitTitleChange() } }
+                            }
+
                         // Drawing image — bytes live in cloud Storage now; the
                         // storage manager checks the disk cache, then falls back
                         // to a signed-URL download.
@@ -55,36 +93,6 @@ struct DrawingDetailView: View {
                                         .foregroundColor(.secondary)
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 240)
-                                .background(Color(uiColor: .secondarySystemBackground))
-                                .cornerRadius(12)
-                            }
-                        }
-
-                        // Drawing context (if available)
-                        if let context = drawing.context {
-                            VStack(alignment: .leading, spacing: 16) {
-                                Label("Drawing Context", systemImage: "paintbrush.pointed.fill")
-                                    .font(.headline)
-                                    .foregroundColor(.accentColor)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    if !context.subject.isEmpty {
-                                        InfoRow(label: "Subject", value: context.subject)
-                                    }
-                                    if !context.style.isEmpty {
-                                        InfoRow(label: "Style", value: context.style)
-                                    }
-                                    if !context.artists.isEmpty {
-                                        InfoRow(label: "Artists", value: context.artists)
-                                    }
-                                    if !context.techniques.isEmpty {
-                                        InfoRow(label: "Techniques", value: context.techniques)
-                                    }
-                                    if !context.focus.isEmpty {
-                                        InfoRow(label: "Focus", value: context.focus)
-                                    }
-                                }
-                                .padding()
                                 .background(Color(uiColor: .secondarySystemBackground))
                                 .cornerRadius(12)
                             }
@@ -184,11 +192,14 @@ struct DrawingDetailView: View {
                     .background(.ultraThinMaterial)
                 }
             }
-            .navigationTitle(drawing.title)
+            // No navigationTitle — the editable text field at the top
+            // of the scroll content IS the title. Keeping the inline
+            // bar empty also leaves the toolbar's trailing Close button
+            // legible against the chrome.
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
+                    Button("Close") {
                         dismiss()
                     }
                 }
@@ -214,21 +225,37 @@ struct DrawingDetailView: View {
             Text("Are you sure you want to delete '\(drawing.title)'? This cannot be undone.")
         }
     }
-}
 
-struct InfoRow: View {
-    let label: String
-    let value: String
+    /// Saves the edited title to the cloud. No-ops if the title is
+    /// empty or unchanged. Called from `.onSubmit` (Done on the
+    /// keyboard) AND from `.onChange(of: titleFocused)` when the
+    /// field loses focus (so a tap-elsewhere also saves the rename).
+    /// Idempotent — repeated calls with the same value are cheap and
+    /// just exit early.
+    @MainActor
+    private func commitTitleChange() async {
+        let trimmed = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // Empty title — revert and bail. Don't push an empty
+            // string to the database; it'd leave the row in an odd
+            // state and the gallery row would render blank.
+            editedTitle = drawing.title
+            return
+        }
+        guard trimmed != drawing.title else { return }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.primary)
-                .textCase(.uppercase)
-
-            Text(value)
-                .font(.body)
+        isSavingTitle = true
+        defer { isSavingTitle = false }
+        do {
+            try await storageManager.updateDrawing(id: drawing.id, title: trimmed)
+        } catch {
+            // Cloud save failed — revert the local field so the user
+            // doesn't think it stuck. The storage manager's NWPathMonitor
+            // retry queue handles transient network drops; surfacing a
+            // hard error here means something else went wrong (drawing
+            // missing in memory, etc).
+            print("⚠️ Title rename failed: \(error)")
+            editedTitle = drawing.title
         }
     }
 }
