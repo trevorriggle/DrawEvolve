@@ -260,7 +260,10 @@ struct DrawingCanvasView: View {
         }
         .sheet(isPresented: $showColorPicker) {
             NavigationView {
-                AdvancedColorPicker(selectedColor: $canvasState.brushSettings.color)
+                AdvancedColorPicker(
+                    selectedColor: $canvasState.brushSettings.color,
+                    compositeImage: composeCanvasForPaletteGeneration
+                )
                     .navigationTitle("Color")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -1863,6 +1866,21 @@ struct DrawingCanvasView: View {
     private var currentDrawingTitle: String? {
         guard let id = currentDrawingID else { return nil }
         return storageManager.drawings.first(where: { $0.id == id })?.title
+    }
+
+    /// Render the canvas composite as a UIImage for AdvancedColorPicker's
+    /// "Generate from canvas" button. Same path the eyedropper uses to
+    /// sample a pixel — composite all visible layers, then export. Cost
+    /// is bounded by the 128×128 downsample inside PaletteGenerator;
+    /// the full-resolution UIImage we hand off only lives for the
+    /// duration of one generation request. Returns nil if the renderer
+    /// or composite isn't available (cold canvas, transient state).
+    private func composeCanvasForPaletteGeneration() -> UIImage? {
+        guard let renderer = canvasState.renderer else { return nil }
+        guard let composite = renderer.compositeLayersToTexture(layers: canvasState.layers) else {
+            return nil
+        }
+        return renderer.textureToUIImage(composite)
     }
 
     private var settingsGearButton: some View {

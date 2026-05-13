@@ -32,6 +32,12 @@ import {
   buildRecommendationsUserMessage,
   RECOMMENDATIONS_SCHEMA,
   validateRecommendations,
+  handlePalettes,
+  normalizeHexColor,
+  validatePaletteName,
+  validateColors,
+  validatePalettePayload,
+  PALETTES_VALIDATION_CONSTANTS,
   EVE_TIER_LIMITS,
   readEveTierLimits,
   readEveMaxTurnsPerConversation,
@@ -7191,4 +7197,375 @@ test('handleRecommendations: happy path with realistic portfolio includes drawin
     assert.ok(!userMsgSeen.includes('new user with no drawings'),
       'realistic portfolio must NOT trigger the empty-portfolio path');
   } finally { globalThis.fetch = originalFetch; }
+});
+
+// =============================================================================
+// Feature 5, Phase 3 — Color System Overhaul: palette CRUD + validation
+// =============================================================================
+
+// ---- normalizeHexColor -----------------------------------------------------
+
+test('normalizeHexColor accepts 6-digit hex with or without leading #', () => {
+  assert.equal(normalizeHexColor('#ff8844'), '#ff8844');
+  assert.equal(normalizeHexColor('ff8844'), '#ff8844');
+  assert.equal(normalizeHexColor('#FF8844'), '#ff8844');
+  assert.equal(normalizeHexColor('FF8844'), '#ff8844');
+  assert.equal(normalizeHexColor('  #FF8844  '), '#ff8844');
+  assert.equal(normalizeHexColor('aBcDeF'), '#abcdef');
+});
+
+test('normalizeHexColor rejects 3-digit, 8-digit, non-hex, non-string', () => {
+  assert.equal(normalizeHexColor('#abc'), null, '3-digit hex not allowed');
+  assert.equal(normalizeHexColor('#aabbccdd'), null, '8-digit hex (with alpha) not allowed');
+  assert.equal(normalizeHexColor('#zzzzzz'), null, 'non-hex chars rejected');
+  assert.equal(normalizeHexColor(''), null);
+  assert.equal(normalizeHexColor(null), null);
+  assert.equal(normalizeHexColor(undefined), null);
+  assert.equal(normalizeHexColor(0xff8844), null, 'numbers rejected (must be string)');
+  assert.equal(normalizeHexColor(['#ff8844']), null);
+});
+
+// ---- validatePaletteName ---------------------------------------------------
+
+test('validatePaletteName accepts a trimmed non-empty string under 50 chars', () => {
+  assert.deepEqual(validatePaletteName('My palette'), { ok: true, value: 'My palette' });
+  assert.deepEqual(validatePaletteName('  My palette  '), { ok: true, value: 'My palette' });
+});
+
+test('validatePaletteName rejects empty, oversize, non-string', () => {
+  assert.equal(validatePaletteName('').ok, false);
+  assert.equal(validatePaletteName('   ').ok, false);
+  assert.equal(validatePaletteName('a'.repeat(51)).ok, false);
+  assert.equal(validatePaletteName(null).ok, false);
+  assert.equal(validatePaletteName(42).ok, false);
+});
+
+// ---- validateColors --------------------------------------------------------
+
+test('validateColors normalizes a well-formed array', () => {
+  const r = validateColors(['#FF8844', 'aabbcc', '#11AA33']);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.value, ['#ff8844', '#aabbcc', '#11aa33']);
+});
+
+test('validateColors accepts an empty array (empty palette)', () => {
+  assert.deepEqual(validateColors([]), { ok: true, value: [] });
+});
+
+test('validateColors rejects non-array', () => {
+  assert.equal(validateColors('not an array').ok, false);
+  assert.equal(validateColors({ '0': '#ff8844' }).ok, false);
+  assert.equal(validateColors(null).ok, false);
+});
+
+test('validateColors rejects oversize array (> 100)', () => {
+  const tooMany = Array(101).fill('#ff8844');
+  const r = validateColors(tooMany);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /hard cap/);
+});
+
+test('validateColors rejects any bad entry, reporting the index', () => {
+  const r = validateColors(['#ff8844', '#aabbcc', 'not-a-hex']);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /colors\[2\]/);
+});
+
+// ---- validatePalettePayload ------------------------------------------------
+
+test('validatePalettePayload POST shape requires name + colors', () => {
+  const ok = validatePalettePayload({ name: 'My palette', colors: ['#ff8844'] });
+  assert.deepEqual(ok, { ok: true, value: { name: 'My palette', colors: ['#ff8844'] } });
+
+  // Missing name
+  assert.equal(validatePalettePayload({ colors: ['#ff8844'] }).ok, false);
+  // Missing colors
+  assert.equal(validatePalettePayload({ name: 'My palette' }).ok, false);
+});
+
+test('validatePalettePayload PATCH shape allows partial updates', () => {
+  // Just name
+  assert.deepEqual(
+    validatePalettePayload({ name: 'Renamed' }, { requireAtLeastOne: true }),
+    { ok: true, value: { name: 'Renamed' } },
+  );
+  // Just colors
+  assert.deepEqual(
+    validatePalettePayload({ colors: ['#ff8844'] }, { requireAtLeastOne: true }),
+    { ok: true, value: { colors: ['#ff8844'] } },
+  );
+  // Both
+  assert.deepEqual(
+    validatePalettePayload({ name: 'Renamed', colors: ['#ff8844'] }, { requireAtLeastOne: true }),
+    { ok: true, value: { name: 'Renamed', colors: ['#ff8844'] } },
+  );
+});
+
+test('validatePalettePayload PATCH rejects empty body', () => {
+  const r = validatePalettePayload({}, { requireAtLeastOne: true });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /PATCH must include/);
+});
+
+test('validatePalettePayload rejects non-object body', () => {
+  assert.equal(validatePalettePayload(null).ok, false);
+  assert.equal(validatePalettePayload('hello').ok, false);
+  assert.equal(validatePalettePayload([]).ok, false);
+});
+
+// ---- handlePalettes integration ---------------------------------------------
+
+const PALETTE_TEST_ID = '11111111-aaaa-bbbb-cccc-222222222222';
+
+async function setupPalettesEnv() {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const env = {
+    ...TEST_JWT_ENV,
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    APP_ATTEST_REQUIRED: 'false',
+    QUOTA_KV: new FakeKV(),
+  };
+  const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+  const ctx = { waitUntil: (p) => { Promise.resolve(p).catch(() => {}); } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  return {
+    env, ctx, jwt, jwk,
+    restore: () => { globalThis.fetch = originalFetch; },
+  };
+}
+
+function paletteAuthHeaders(jwt) {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${jwt}`,
+  };
+}
+
+test('handlePalettes 401 on missing JWT', async () => {
+  _resetJwksCacheForTests();
+  const env = {
+    ...TEST_JWT_ENV,
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    APP_ATTEST_REQUIRED: 'false',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ keys: [] }) });
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/palettes', {
+      method: 'GET',
+    });
+    const res = await handlePalettes(req, env, { waitUntil: () => {} });
+    assert.equal(res.status, 401);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('handlePalettes GET /v1/palettes lists user palettes', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupPalettesEnv();
+  try {
+    const rows = [
+      { id: 'a', user_id: TEST_SUB, name: 'My palette', colors: ['#ff8844'], created_at: 't1', updated_at: 't2', deleted_at: null },
+      { id: 'b', user_id: TEST_SUB, name: 'Forest', colors: ['#1a1a1a', '#aabbcc'], created_at: 't0', updated_at: 't1', deleted_at: null },
+    ];
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/user_palettes')) {
+        return { ok: true, json: async () => rows };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request('https://drawevolve-backend.test/v1/palettes', {
+      method: 'GET',
+      headers: paletteAuthHeaders(jwt),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.palettes.map((p) => p.id), ['a', 'b']);
+  } finally { restore(); }
+});
+
+test('handlePalettes POST /v1/palettes creates a palette', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupPalettesEnv();
+  try {
+    const created = {
+      id: PALETTE_TEST_ID,
+      user_id: TEST_SUB,
+      name: 'My palette',
+      colors: ['#ff8844'],
+      created_at: 't1',
+      updated_at: 't1',
+      deleted_at: null,
+    };
+    let postBody = null;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/user_palettes') && init?.method === 'POST') {
+        postBody = JSON.parse(init.body);
+        return { ok: true, json: async () => ([created]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request('https://drawevolve-backend.test/v1/palettes', {
+      method: 'POST',
+      headers: paletteAuthHeaders(jwt),
+      body: JSON.stringify({ name: 'My palette', colors: ['#FF8844'] }),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.palette.id, PALETTE_TEST_ID);
+    // Hex normalized to lowercase on the way in.
+    assert.deepEqual(postBody.colors, ['#ff8844']);
+    assert.equal(postBody.user_id, TEST_SUB);
+  } finally { restore(); }
+});
+
+test('handlePalettes POST rejects 8-digit hex (alpha not allowed in palettes)', async () => {
+  const { env, ctx, jwt, restore } = await setupPalettesEnv();
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/palettes', {
+      method: 'POST',
+      headers: paletteAuthHeaders(jwt),
+      body: JSON.stringify({ name: 'X', colors: ['#ff884480'] }),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 400);
+  } finally { restore(); }
+});
+
+test('handlePalettes PATCH /v1/palettes/:id rejects empty body', async () => {
+  const { env, ctx, jwt, restore } = await setupPalettesEnv();
+  try {
+    const req = new Request(`https://drawevolve-backend.test/v1/palettes/${PALETTE_TEST_ID}`, {
+      method: 'PATCH',
+      headers: paletteAuthHeaders(jwt),
+      body: JSON.stringify({}),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 400);
+  } finally { restore(); }
+});
+
+test('handlePalettes PATCH /v1/palettes/:id allows partial updates', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupPalettesEnv();
+  try {
+    let patchBody = null;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/user_palettes') && init?.method === 'PATCH') {
+        patchBody = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: PALETTE_TEST_ID, name: 'Renamed' }]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request(`https://drawevolve-backend.test/v1/palettes/${PALETTE_TEST_ID}`, {
+      method: 'PATCH',
+      headers: paletteAuthHeaders(jwt),
+      body: JSON.stringify({ name: 'Renamed' }),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 200);
+    assert.deepEqual(patchBody, { name: 'Renamed' });
+  } finally { restore(); }
+});
+
+test('handlePalettes PATCH returns 404 when no row affected', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupPalettesEnv();
+  try {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/user_palettes')) {
+        return { ok: true, json: async () => ([]) }; // no rows affected
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request(`https://drawevolve-backend.test/v1/palettes/${PALETTE_TEST_ID}`, {
+      method: 'PATCH',
+      headers: paletteAuthHeaders(jwt),
+      body: JSON.stringify({ name: 'Renamed' }),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 404);
+  } finally { restore(); }
+});
+
+test('handlePalettes DELETE /v1/palettes/:id soft-deletes (idempotent)', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupPalettesEnv();
+  try {
+    let patchBody = null;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/user_palettes') && init?.method === 'PATCH') {
+        patchBody = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: PALETTE_TEST_ID, deleted_at: 'stamped' }]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request(`https://drawevolve-backend.test/v1/palettes/${PALETTE_TEST_ID}`, {
+      method: 'DELETE',
+      headers: paletteAuthHeaders(jwt),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.ok(patchBody.deleted_at, 'soft-delete must stamp deleted_at');
+    assert.ok(!Number.isNaN(Date.parse(patchBody.deleted_at)));
+  } finally { restore(); }
+});
+
+test('handlePalettes returns 405 on wrong method, 404 on unmatched path', async () => {
+  const { env, ctx, jwt, restore } = await setupPalettesEnv();
+  try {
+    // Wrong method on collection
+    const wrongMethod = new Request('https://drawevolve-backend.test/v1/palettes', {
+      method: 'PUT',
+      headers: paletteAuthHeaders(jwt),
+    });
+    const r1 = await handlePalettes(wrongMethod, env, ctx);
+    assert.equal(r1.status, 405);
+
+    // Bogus subpath
+    const noMatch = new Request('https://drawevolve-backend.test/v1/palettes/abc/extra', {
+      method: 'GET',
+      headers: paletteAuthHeaders(jwt),
+    });
+    const r2 = await handlePalettes(noMatch, env, ctx);
+    assert.equal(r2.status, 404);
+  } finally { restore(); }
+});
+
+test('handlePalettes GET /v1/palettes/:id rejects invalid UUID', async () => {
+  const { env, ctx, jwt, restore } = await setupPalettesEnv();
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/palettes/not-a-uuid', {
+      method: 'GET',
+      headers: paletteAuthHeaders(jwt),
+    });
+    const res = await handlePalettes(req, env, ctx);
+    assert.equal(res.status, 400);
+  } finally { restore(); }
 });

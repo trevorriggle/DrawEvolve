@@ -117,7 +117,18 @@ enum DrawingTool {
 }
 
 /// Brush settings
-struct BrushSettings {
+///
+/// Codable conformance (Phase 3 of the color system overhaul, 2026-05-13)
+/// persists the entire brush state across app launches — color, size,
+/// opacity, hardness, grain, the lot. Pattern mirrors TextSettings'
+/// existing Codable conformance: `color` rides through as a CodableColor
+/// (CodableColor.swift). All other fields are Codable-native primitives.
+///
+/// Restored from UserDefaults in CanvasStateManager.init, persisted on
+/// every mutation via the @Published didSet hook there. UI bindings are
+/// unaffected — @Published semantics work the same whether the type is
+/// Codable or not.
+struct BrushSettings: Codable {
     // Doubled from 5 to preserve the previous on-screen stamp size after
     // the canvas texture bump (2048→4096 on iPad Pro). size is in doc pixels;
     // doubling the doc resolution halves the on-screen thickness at the same
@@ -145,6 +156,51 @@ struct BrushSettings {
     // 0 = smooth (no grain), 1 = fully speckled. Only surfaced in the
     // settings UI when activeTool is `.charcoal`.
     var grainDensity: Float = 0.5
+
+    // MARK: - Codable
+
+    enum CodingKeys: String, CodingKey {
+        case size, opacity, hardness, spacing, pressureSensitivity
+        case color
+        case minPressureSize, maxPressureSize
+        case blurStrength, smudgeStrength, grainDensity
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        // Decode-with-defaults: every field is optional in the stored
+        // representation so future schema additions don't break old
+        // payloads on launch. Same shape TextSettings uses.
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.size = try c.decodeIfPresent(CGFloat.self, forKey: .size) ?? 10.0
+        self.opacity = try c.decodeIfPresent(CGFloat.self, forKey: .opacity) ?? 1.0
+        self.hardness = try c.decodeIfPresent(CGFloat.self, forKey: .hardness) ?? 0.8
+        self.spacing = try c.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 0.1
+        self.pressureSensitivity = try c.decodeIfPresent(Bool.self, forKey: .pressureSensitivity) ?? true
+        let codableColor = try c.decodeIfPresent(CodableColor.self, forKey: .color)
+        self.color = codableColor?.uiColor ?? .black
+        self.minPressureSize = try c.decodeIfPresent(CGFloat.self, forKey: .minPressureSize) ?? 0.3
+        self.maxPressureSize = try c.decodeIfPresent(CGFloat.self, forKey: .maxPressureSize) ?? 1.0
+        self.blurStrength = try c.decodeIfPresent(Float.self, forKey: .blurStrength) ?? 1.0
+        self.smudgeStrength = try c.decodeIfPresent(Float.self, forKey: .smudgeStrength) ?? 0.5
+        self.grainDensity = try c.decodeIfPresent(Float.self, forKey: .grainDensity) ?? 0.5
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(size, forKey: .size)
+        try c.encode(opacity, forKey: .opacity)
+        try c.encode(hardness, forKey: .hardness)
+        try c.encode(spacing, forKey: .spacing)
+        try c.encode(pressureSensitivity, forKey: .pressureSensitivity)
+        try c.encode(CodableColor(color), forKey: .color)
+        try c.encode(minPressureSize, forKey: .minPressureSize)
+        try c.encode(maxPressureSize, forKey: .maxPressureSize)
+        try c.encode(blurStrength, forKey: .blurStrength)
+        try c.encode(smudgeStrength, forKey: .smudgeStrength)
+        try c.encode(grainDensity, forKey: .grainDensity)
+    }
 
     /// Calibrated per-brush starting values. Each brush variant has a
     /// distinct design intent (graphite vs ink vs charcoal vs airbrush)

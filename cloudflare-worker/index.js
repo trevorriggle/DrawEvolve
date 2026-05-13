@@ -29,6 +29,7 @@ import { handlePrompts } from './routes/prompts.js';
 import { handleEvolution, handleEvolutionRefresh } from './routes/evolution.js';
 import { handleEve } from './routes/eve.js';
 import { handleRecommendations } from './routes/recommendations.js';
+import { handlePalettes } from './routes/palettes.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 // Methods allowed on the legacy POST-only routes (/, /attest/*). The new
@@ -97,6 +98,14 @@ export default {
     // returns 405 for anything else (kept symmetric with handleEve).
     if (pathname === '/v1/recommendations') {
       return handleRecommendations(request, env, ctx);
+    }
+
+    // /v1/palettes[/:id] — Feature 5 user palette CRUD. handlePalettes
+    // owns its own method gating + 405s; index.js just matches the
+    // path shape.
+    if (pathname === '/v1/palettes'
+        || /^\/v1\/palettes\/[^/]+$/.test(pathname)) {
+      return handlePalettes(request, env, ctx);
     }
 
     if (POST_ONLY_PATHS.has(pathname) && request.method !== 'POST') {
@@ -202,6 +211,16 @@ export {
   RECOMMENDATIONS_SCHEMA,
   validateRecommendations,
 } from './lib/recommendations-validation.js';
+
+export { handlePalettes } from './routes/palettes.js';
+
+export {
+  normalizeHexColor,
+  validatePaletteName,
+  validateColors,
+  validatePalettePayload,
+  PALETTES_VALIDATION_CONSTANTS,
+} from './lib/palettes-validation.js';
 
 export {
   validateJWT,

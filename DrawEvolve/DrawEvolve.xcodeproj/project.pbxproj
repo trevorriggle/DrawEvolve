@@ -107,6 +107,10 @@
 		DE000114 /* RecommendationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100114 /* RecommendationsService.swift */; };
 		DE000115 /* RecommendationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100115 /* RecommendationCard.swift */; };
 		DE000116 /* RecommendationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100116 /* RecommendationsView.swift */; };
+		DE000117 /* Palette.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100117 /* Palette.swift */; };
+		DE000118 /* PaletteService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100118 /* PaletteService.swift */; };
+		DE000119 /* PaletteManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100119 /* PaletteManager.swift */; };
+		DE000120 /* PaletteGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100120 /* PaletteGenerator.swift */; };
 		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
@@ -214,6 +218,10 @@
 		DE100114 /* RecommendationsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationsService.swift; sourceTree = "<group>"; };
 		DE100115 /* RecommendationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationCard.swift; sourceTree = "<group>"; };
 		DE100116 /* RecommendationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationsView.swift; sourceTree = "<group>"; };
+		DE100117 /* Palette.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Palette.swift; sourceTree = "<group>"; };
+		DE100118 /* PaletteService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteService.swift; sourceTree = "<group>"; };
+		DE100119 /* PaletteManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteManager.swift; sourceTree = "<group>"; };
+		DE100120 /* PaletteGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteGenerator.swift; sourceTree = "<group>"; };
 		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -324,6 +332,7 @@
 				DE100070 /* CodableColor.swift */,
 				DE100104 /* EveConversation.swift */,
 				DE100113 /* Recommendation.swift */,
+				DE100117 /* Palette.swift */,
 				DE000319 /* Pose */,
 			);
 			path = Models;
@@ -350,6 +359,8 @@
 				DE100072 /* TextOnPathRenderer.swift */,
 				DE100105 /* EveService.swift */,
 				DE100114 /* RecommendationsService.swift */,
+				DE100118 /* PaletteService.swift */,
+				DE100120 /* PaletteGenerator.swift */,
 				DE000318 /* Vision */,
 				DE000321 /* Pose */,
 			);
@@ -380,6 +391,7 @@
 				DE100055 /* EvolutionViewModel.swift */,
 				DE100082 /* PoseOverlayManager.swift */,
 				DE100106 /* EveConversationManager.swift */,
+				DE100119 /* PaletteManager.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -654,6 +666,10 @@
 				DE000114 /* RecommendationsService.swift in Sources */,
 				DE000115 /* RecommendationCard.swift in Sources */,
 				DE000116 /* RecommendationsView.swift in Sources */,
+				DE000117 /* Palette.swift in Sources */,
+				DE000118 /* PaletteService.swift in Sources */,
+				DE000119 /* PaletteManager.swift in Sources */,
+				DE000120 /* PaletteGenerator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

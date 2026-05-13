@@ -714,7 +714,11 @@ class CanvasRenderer: NSObject {
         return finalTexture
     }
 
-    private func textureToUIImage(_ texture: MTLTexture) -> UIImage? {
+    // Internal (was private until Phase 3 of the color system overhaul,
+    // 2026-05-13). DrawingCanvasView calls it to compose a UIImage for
+    // PaletteGenerator's "Generate from canvas" path. The implementation
+    // is unchanged; widening the visibility is the only semantic delta.
+    func textureToUIImage(_ texture: MTLTexture) -> UIImage? {
         let width = texture.width
         let height = texture.height
         let rowBytes = width * 4

@@ -988,6 +988,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
                 if let pickedColor = getColorAt(location, in: composite, screenSize: documentSize) {
                     brushSettings.color = pickedColor
+                    // Phase 3 (Color System Overhaul, 2026-05-13):
+                    // every eyedropper pick also lands in the recent-
+                    // colors strip so the user can re-tap a previously-
+                    // sampled color without having to eyedropper-pick
+                    // the same pixel again. PaletteManager handles
+                    // dedupe + capping.
+                    MainActor.assumeIsolated {
+                        PaletteManager.shared.addRecentColor(pickedColor)
+                    }
                     print("Picked color: \(pickedColor)")
                 }
 

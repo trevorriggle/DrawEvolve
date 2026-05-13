@@ -15,7 +15,14 @@ class CanvasStateManager: ObservableObject {
     @Published var layers: [DrawingLayer] = []
     @Published var selectedLayerIndex = 0
     @Published var currentTool: DrawingTool = .brush
-    @Published var brushSettings = BrushSettings()
+    @Published var brushSettings = BrushSettings() {
+        // Phase 3 (Color System Overhaul, 2026-05-13): persist across
+        // app launches. BrushSettings is Codable; CodableColor wraps the
+        // UIColor field. The matching restore happens in init() below.
+        // Matches the TextSettings persistence shape — same key
+        // versioning pattern, same UserDefaults / JSONCoder usage.
+        didSet { CanvasStateManager.saveBrushSettings(brushSettings) }
+    }
     /// True while the paint-bucket flood fill is running on a background queue.
     /// The canvas re-entrancy-guards on this so a second tap can't kick off a
     /// concurrent fill, and DrawingCanvasView shows a HUD over the canvas.
@@ -238,6 +245,16 @@ class CanvasStateManager: ObservableObject {
     }
 
     init() {
+        // Phase 3 (Color System Overhaul) — restore the user's last
+        // brush settings from UserDefaults before any UI binding wires
+        // up. Done first so the published default never momentarily
+        // flashes to .black before the saved color lands. If load
+        // returns nil (first launch, ever) we keep the BrushSettings()
+        // default; the next mutation persists it for next launch.
+        if let saved = CanvasStateManager.loadBrushSettings() {
+            self.brushSettings = saved
+        }
+
         // Forward nested HistoryManager change notifications. `objectWillChange.send()`
         // must fire on the main actor; we're already @MainActor-isolated, so that's
         // guaranteed for callers that mutate historyManager from the main actor (which
@@ -2209,5 +2226,26 @@ class CanvasStateManager: ObservableObject {
         renderer?.endBlurAdjustment()
         blurAdjustmentSigma = 0.0
         blurAdjustmentActive = false
+    }
+
+    // MARK: - BrushSettings persistence (Phase 3, Color System Overhaul)
+    //
+    // Saves brushSettings to UserDefaults on every mutation; restores
+    // on init. Pattern lifted from TextSettings (see TextSettings.swift
+    // lines 156-173). Versioned key so a future schema break can ship
+    // a v2 alongside v1 without overwriting.
+
+    private static let brushSettingsKey = "DrawEvolve.BrushSettings.v1"
+
+    static func loadBrushSettings() -> BrushSettings? {
+        guard let data = UserDefaults.standard.data(forKey: brushSettingsKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(BrushSettings.self, from: data)
+    }
+
+    fileprivate static func saveBrushSettings(_ settings: BrushSettings) {
+        guard let data = try? JSONEncoder().encode(settings) else { return }
+        UserDefaults.standard.set(data, forKey: brushSettingsKey)
     }
 }
