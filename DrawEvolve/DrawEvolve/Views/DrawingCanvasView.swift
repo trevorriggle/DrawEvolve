@@ -1393,31 +1393,40 @@ struct DrawingCanvasView: View {
                 )
             }
 
-            // Eve floating panel — iPad. Renders in the same ZStack as the
-            // feedback panel so the canvas remains visible behind both.
-            // Right-edge drawer shape; transition slides in from the right
-            // and out the same way. Manager + presentation state live on
-            // showEve / eveScope / eveCritiqueSequence so each open creates
-            // a fresh conversation per Phase 2A spec (no list view yet).
+            // Eve floating panel — iPad. Centered on the canvas with a
+            // scale-fade transition. Earlier iteration was right-edged
+            // (drawer shape) but clipped behind the right-side action
+            // column (Gallery / EVE / Settings / etc.) on every iPad
+            // size, so the panel moved to center where it has room and
+            // no z-order fights with chrome. Tradeoff: the canvas is
+            // occluded mid-screen while Eve is open — accepted, since
+            // a focused conversation is the goal, not draw-while-talk.
+            //
+            // Width 560 reads well on landscape (~half-screen) and
+            // portrait (~70% of the narrower axis). Height caps at 820
+            // with 80pt of breathing room so the panel never butts up
+            // against the canvas edges on smaller iPads. Both axes
+            // clamp against the geometry so an unusually small split-
+            // screen pane still fits the panel.
             if showEve {
                 GeometryReader { geo in
-                    HStack {
-                        Spacer()
-                        EveSheetHost(
-                            scope: eveScope,
-                            drawingId: eveScope == .drawing ? currentDrawingID : nil,
-                            critiqueSequence: eveCritiqueSequence,
-                            drawingTitle: eveDrawingTitle,
-                            onClose: { showEve = false }
-                        )
-                        .frame(width: 460, height: min(720, geo.size.height - 80))
-                        .background(Color(uiColor: .systemBackground))
-                        .cornerRadius(16)
-                        .shadow(radius: 12)
-                        .padding(.trailing, 16)
-                    }
+                    EveSheetHost(
+                        scope: eveScope,
+                        drawingId: eveScope == .drawing ? currentDrawingID : nil,
+                        critiqueSequence: eveCritiqueSequence,
+                        drawingTitle: eveDrawingTitle,
+                        onClose: { showEve = false }
+                    )
+                    .frame(
+                        width: min(560, geo.size.width - 40),
+                        height: min(820, geo.size.height - 80)
+                    )
+                    .background(Color(uiColor: .systemBackground))
+                    .cornerRadius(16)
+                    .shadow(radius: 12)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .transition(.scale(scale: 0.95).combined(with: .opacity))
             }
 
             // Selection actions overlay — iPad positioning. The card

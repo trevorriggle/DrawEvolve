@@ -484,6 +484,15 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
 
   // Insert the user message FIRST. If OpenAI fails, the user's question
   // still persists and they see their own bubble in the thread.
+  //
+  // `client_request_id` is intentionally OMITTED on the user row — only
+  // the assistant row carries it. The unique index
+  // conversation_messages_idempotency_idx scopes by (conversation_id,
+  // client_request_id) for any non-null client_request_id, so putting
+  // the id on BOTH rows would trip the constraint on the assistant
+  // insert. findMessageByClientRequestId only looks for assistant rows
+  // anyway (the replay shape is "did we already produce an answer for
+  // this logical send?"), so the user-row mirror added nothing.
   let userMessage;
   try {
     userMessage = await appendMessage({
@@ -491,7 +500,6 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
       conversationId,
       role: 'user',
       content,
-      clientRequestId, // mirrored onto the user row for cross-row idempotency lookup
     });
   } catch (err) {
     console.error('[eve] append user message failed', err?.message);

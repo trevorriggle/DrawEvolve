@@ -5711,6 +5711,91 @@ test('handleEve POST /v1/eve/conversations/:id/messages full happy path (general
   } finally { restore(); }
 });
 
+test('handleEve POST /:id/messages does NOT put client_request_id on the user row (would collide with assistant row via unique constraint)', async () => {
+  // Regression for prod 23505 (2026-05-13): both user + assistant rows
+  // were getting the same client_request_id, tripping
+  // conversation_messages_idempotency_idx on the assistant insert. Only
+  // the assistant row should carry it — that's the row
+  // findMessageByClientRequestId looks up for replay.
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'general',
+      message_count: 0, scope_drawing_id: null,
+    };
+    const captured = []; // bodies POSTed to conversation_messages
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) }; // no replay
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        captured.push(body);
+        return { ok: true, json: async () => ([{ id: `m-${captured.length}`, ...body }]) };
+      }
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 20 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'hello',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+
+    // Exactly two POSTs to conversation_messages: one user, one assistant.
+    assert.equal(captured.length, 2,
+      `expected two message inserts, saw ${captured.length}`);
+    const userInsert = captured.find((b) => b.role === 'user');
+    const assistantInsert = captured.find((b) => b.role === 'assistant');
+    assert.ok(userInsert, 'user insert must happen');
+    assert.ok(assistantInsert, 'assistant insert must happen');
+
+    // The LOAD-BEARING ASSERTION: user row must NOT carry client_request_id.
+    assert.equal(userInsert.client_request_id, null,
+      'user row must not carry client_request_id (collides with assistant row via unique index)');
+    // Assistant row MUST carry it (used by findMessageByClientRequestId).
+    assert.equal(assistantInsert.client_request_id,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      'assistant row must carry the client_request_id for replay lookup');
+  } finally { restore(); }
+});
+
 test('handleEve POST /:id/messages returns cached assistant row on retry (idempotency replay)', async () => {
   const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
   try {
