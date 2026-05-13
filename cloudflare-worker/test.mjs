@@ -6717,8 +6717,8 @@ test('isRecommendationsEnabled is strict — only the literal string "true" enab
 
 // ---- RECOMMENDATIONS_SCHEMA + system prompt regression guards --------------
 
-test('RECOMMENDATIONS_PROMPT_VERSION is 1 (Phase 4 initial)', () => {
-  assert.equal(RECOMMENDATIONS_PROMPT_VERSION, 1);
+test('RECOMMENDATIONS_PROMPT_VERSION is 2 (Phase 4 + brevity tightening)', () => {
+  assert.equal(RECOMMENDATIONS_PROMPT_VERSION, 2);
 });
 
 test('RECOMMENDATIONS_SYSTEM_PROMPT contains the three load-bearing mix rules', () => {
@@ -6730,6 +6730,16 @@ test('RECOMMENDATIONS_SYSTEM_PROMPT contains the three load-bearing mix rules', 
   assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('exactly 5'));
   assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('fundamentals'),
     'empty-portfolio fallback instruction must be present');
+});
+
+test('RECOMMENDATIONS_SYSTEM_PROMPT contains the brevity guardrails (v2)', () => {
+  // Live testing on 2026-05-13 showed the model producing 100+ char
+  // subjects that hit the schema cap mid-word. v2 added explicit brevity
+  // rules + good/bad examples. Don't drop them without a version bump.
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('under 10 words'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('headline only'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('GOOD SUBJECT LENGTHS'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('BAD SUBJECT LENGTHS'));
 });
 
 test('RECOMMENDATIONS_SCHEMA enforces minItems and maxItems at 5', () => {
@@ -6839,8 +6849,10 @@ test('validateRecommendations rejects missing required fields', () => {
 
 test('validateRecommendations rejects oversized strings', () => {
   const baseRecs = Array.from({ length: 4 }, () => validRec());
-  // subject max 100
-  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ subject: 'a'.repeat(101) })] }).ok, false);
+  // subject max 150 (bumped from 100 on 2026-05-13 after live truncation)
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ subject: 'a'.repeat(151) })] }).ok, false);
+  // subject at 150 still accepted
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ subject: 'a'.repeat(150) })] }).ok, true);
   // rationale max 200
   assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ rationale: 'a'.repeat(201) })] }).ok, false);
   // focus_area max 50

@@ -14,6 +14,15 @@
 // us something we can't trust) rather than passing through to iOS.
 // Better to surface a clear error than show a broken card stack.
 
+// SUBJECT_MAX bumped from 100 → 150 on 2026-05-13 after live observation
+// of truncated subjects ("...thick–thin," / "...each time with a"). The
+// previous 100-char cap was tight enough that real-world model output
+// regularly exceeded it, and OpenAI's strict-mode emitter hard-truncated
+// at the boundary instead of regenerating, producing nonsense subjects.
+// 150 gives headroom while keeping subjects card-renderable. Paired with
+// a system-prompt nudge in recommendations-prompt.js that pushes the
+// model toward terse subjects (under ~10 words) so the cap stays a
+// safety net, not the typical case.
 export const RECOMMENDATIONS_SCHEMA = {
   name: 'recommendations',
   strict: true,
@@ -29,7 +38,7 @@ export const RECOMMENDATIONS_SCHEMA = {
           type: 'object',
           additionalProperties: false,
           properties: {
-            subject: { type: 'string', minLength: 3, maxLength: 100 },
+            subject: { type: 'string', minLength: 3, maxLength: 150 },
             rationale: { type: 'string', minLength: 10, maxLength: 200 },
             focus_area: { type: 'string', maxLength: 50 },
             recommendation_type: {
@@ -47,7 +56,7 @@ export const RECOMMENDATIONS_SCHEMA = {
 
 const ALLOWED_TYPES = new Set(['skill_targeting', 'variety', 'stretch']);
 const SUBJECT_MIN = 3;
-const SUBJECT_MAX = 100;
+const SUBJECT_MAX = 150;
 const RATIONALE_MIN = 10;
 const RATIONALE_MAX = 200;
 const FOCUS_AREA_MAX = 50;

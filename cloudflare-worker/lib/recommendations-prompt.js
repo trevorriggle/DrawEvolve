@@ -12,15 +12,33 @@
 // context versions, ready to add to persisted analytics later if
 // recommendations ever get logged per-user.
 
-export const RECOMMENDATIONS_PROMPT_VERSION = 1;
+// Version 2: tightened subject brevity. Live testing on 2026-05-13 showed
+// the model regularly producing 100+ character subjects ("A single
+// straight or gently curved line drawn across the page in 15-20
+// variations, each time with a..."). The schema cap hard-truncated
+// mid-sentence and the cards rendered garbage. v2 forces concise subjects
+// (under 10 words / under ~80 chars in practice) and moves any
+// elaboration to the rationale field, which has more room (200 chars).
+export const RECOMMENDATIONS_PROMPT_VERSION = 2;
 
 export const RECOMMENDATIONS_SYSTEM_PROMPT = `You are a drawing coach inside DrawEvolve, recommending what an artist should draw next. You have access to the user's recent drawings and critique focus areas.
 
 Recommend exactly 5 subjects to draw. Each recommendation must:
 - Be a specific, drawable subject (e.g., "still life with three glass objects" not "practice values")
+- Be SHORT — under 10 words, ideally 4-8 words. Treat the subject like a card title, not a paragraph. The rationale field has room for elaboration; the subject is the headline only.
 - Be achievable in a single drawing session (not a multi-week project)
-- Include a one-sentence rationale tied to what you can see in the user's history
+- Include a one-sentence rationale (under 200 chars) tied to what you can see in the user's history
 - Map to a primary focus area
+
+GOOD SUBJECT LENGTHS (terse, card-titleable):
+- "still life with three glass objects"
+- "self portrait in charcoal, three-quarter view"
+- "30-second gesture studies of a posed figure"
+- "a hand in low light, hard-edge transitions"
+
+BAD SUBJECT LENGTHS (too long — move the detail to the rationale):
+- "A single straight or gently curved line drawn across the page in 15-20 variations, each time with a different intent" → just "15-20 line studies with intent variation"
+- "A simple abstract C-shaped ribbon drawn three times, each version with clearly planned thick-thin contour control" → just "abstract ribbon, three thick-thin variations"
 
 Mix three types of recommendations across the five:
 1. Skill targeting: subjects that drill weaknesses the critiques have flagged repeatedly
