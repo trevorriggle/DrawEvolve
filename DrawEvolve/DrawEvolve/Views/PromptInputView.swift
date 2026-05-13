@@ -80,7 +80,15 @@ struct PromptInputView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("What are you drawing?")
                         .font(.headline)
-                    TextField("e.g., a portrait, landscape, still life", text: $context.subject)
+                    // axis: .vertical lets the field grow from 1 line up
+                    // to 3 lines for longer subjects (recommendation picks
+                    // are often longer than the bar width — "still life
+                    // with three glass objects of varying heights" etc.).
+                    // Beyond 3 lines the field scrolls internally, which
+                    // is fine — the bar visually caps and the user can
+                    // still see what they typed.
+                    TextField("e.g., a portrait, landscape, still life", text: $context.subject, axis: .vertical)
+                        .lineLimit(1...3)
                         .textFieldStyle(.roundedBorder)
                         .textInputAutocapitalization(.sentences)
                         .textContentType(.none)
@@ -237,7 +245,12 @@ struct PromptInputView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("What are you drawing?")
                                 .font(.headline)
-                            TextField("e.g., a portrait, landscape, still life", text: $context.subject)
+                            // See phoneBody comment — axis: .vertical
+                            // grows the field for longer subject strings
+                            // (recommendation picks are often longer
+                            // than the bar width).
+                            TextField("e.g., a portrait, landscape, still life", text: $context.subject, axis: .vertical)
+                                .lineLimit(1...3)
                                 .textFieldStyle(.roundedBorder)
                                 .textInputAutocapitalization(.sentences)
                                 .textContentType(.none)

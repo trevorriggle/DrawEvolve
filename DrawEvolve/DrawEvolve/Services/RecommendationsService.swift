@@ -48,14 +48,31 @@ actor RecommendationsService {
 
     private let backendURL = "https://drawevolve-backend.trevorriggle.workers.dev"
 
+    /// Session-lived cache of the most recent successful recommendations
+    /// response. Added in the Phase 4 cost pass: the Evolution panel's
+    /// "Recommended next" section auto-loads on .task, which means every
+    /// navigation to the My Evolution tab was firing a fresh OpenAI call
+    /// (~$0.003 each). Caching for the app session means each user pays
+    /// for one set per launch — they can quit + relaunch (or, later, tap
+    /// a manual refresh affordance) to roll for a different mix.
+    ///
+    /// Cleared only on process death. No TTL, no auto-invalidation on
+    /// new critique writes — the recommendations are best-effort coaching,
+    /// not a real-time feed.
+    private var cachedResponse: RecommendationsResponse?
+
     private init() {}
 
-    /// Fetch 5 personalized subject recommendations. Single round-trip;
-    /// no streaming, no caching client-side (the worker is the source
-    /// of truth and re-rolls each call). Cost is small enough that a
-    /// user tapping "See suggestions" twice in a row to get a different
-    /// mix is fine — that's a feature, not a bug.
-    func fetchRecommendations() async throws -> RecommendationsResponse {
+    /// Fetch 5 personalized subject recommendations. Returns the
+    /// session-cached response when present so a user opening Evolution
+    /// three times in a row pays for one OpenAI call, not three.
+    /// Pass `forceRefresh: true` to bypass the cache (reserved for a
+    /// future "roll for new suggestions" affordance — no caller uses
+    /// it today).
+    func fetchRecommendations(forceRefresh: Bool = false) async throws -> RecommendationsResponse {
+        if !forceRefresh, let cached = cachedResponse {
+            return cached
+        }
         guard let client = SupabaseManager.shared.client else {
             throw RecommendationsServiceError.notAuthenticated
         }
@@ -113,7 +130,9 @@ actor RecommendationsService {
         switch http.statusCode {
         case 200:
             do {
-                return try JSONDecoder().decode(RecommendationsResponse.self, from: data)
+                let decoded = try JSONDecoder().decode(RecommendationsResponse.self, from: data)
+                self.cachedResponse = decoded
+                return decoded
             } catch {
                 throw RecommendationsServiceError.decoding(underlying: error)
             }
