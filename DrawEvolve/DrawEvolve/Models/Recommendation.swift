@@ -82,7 +82,16 @@ struct Recommendation: Identifiable, Codable, Equatable, Sendable {
         self.id = UUID()
         self.subject = try container.decode(String.self, forKey: .subject)
         self.rationale = try container.decode(String.self, forKey: .rationale)
-        self.focusArea = try container.decodeIfPresent(String.self, forKey: .focusArea) ?? ""
+        // Normalize focus_area at decode time: the worker's prompt
+        // forbids snake_case but historical models (v1/v2 of the
+        // recommendations prompt) leaked "line_control" /
+        // "shape_design_and_intent" — both showed up verbatim in the
+        // card UI and the "Area you want feedback on?" textbox. Belt-
+        // and-braces here so any model emitting underscored phrases
+        // still renders as plain English in iOS. Idempotent — phrases
+        // without underscores pass through unchanged.
+        let rawFocus = try container.decodeIfPresent(String.self, forKey: .focusArea) ?? ""
+        self.focusArea = rawFocus.replacingOccurrences(of: "_", with: " ")
         self.recommendationType = try container.decode(RecommendationType.self, forKey: .recommendationType)
     }
 

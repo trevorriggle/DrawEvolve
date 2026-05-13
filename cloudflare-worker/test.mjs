@@ -6717,8 +6717,8 @@ test('isRecommendationsEnabled is strict — only the literal string "true" enab
 
 // ---- RECOMMENDATIONS_SCHEMA + system prompt regression guards --------------
 
-test('RECOMMENDATIONS_PROMPT_VERSION is 2 (Phase 4 + brevity tightening)', () => {
-  assert.equal(RECOMMENDATIONS_PROMPT_VERSION, 2);
+test('RECOMMENDATIONS_PROMPT_VERSION is 3 (Phase 4 + brevity + capitalization + focus_area format)', () => {
+  assert.equal(RECOMMENDATIONS_PROMPT_VERSION, 3);
 });
 
 test('RECOMMENDATIONS_SYSTEM_PROMPT contains the three load-bearing mix rules', () => {
@@ -6740,6 +6740,24 @@ test('RECOMMENDATIONS_SYSTEM_PROMPT contains the brevity guardrails (v2)', () =>
   assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('headline only'));
   assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('GOOD SUBJECT LENGTHS'));
   assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('BAD SUBJECT LENGTHS'));
+});
+
+test('RECOMMENDATIONS_SYSTEM_PROMPT contains capitalization + focus_area format rules (v3)', () => {
+  // Live testing on 2026-05-13 evening showed the model emitting
+  // all-lowercase subjects ("one-page of single-stroke circles") and
+  // snake_case focus areas ("line_control"). v3 forces sentence-case
+  // subjects + plain-English focus phrases. Don't drop these without
+  // a version bump.
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('capital letter'),
+    'capitalization rule must be present');
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('NEVER all-lowercase'),
+    'NEVER all-lowercase rule must be present');
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('FOCUS AREA FORMAT'),
+    'focus_area format section header must be present');
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('Never snake_case'),
+    'snake_case prohibition must be present');
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('plain-English'),
+    'plain-English requirement must be present');
 });
 
 test('RECOMMENDATIONS_SCHEMA enforces minItems and maxItems at 5', () => {
