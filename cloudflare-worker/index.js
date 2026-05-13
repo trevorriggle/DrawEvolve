@@ -144,6 +144,7 @@ export {
 } from './lib/prompt.js';
 
 export { formatRelativeTime } from './lib/time.js';
+export { parseCritiqueSummary } from './lib/critique-summary.js';
 export {
   fetchUserDrawingRegistry,
   createConversation,
@@ -155,6 +156,7 @@ export {
   getConversationHistory,
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
+  fetchCoachingContext,
 } from './lib/supabase.js';
 
 export {
@@ -164,6 +166,7 @@ export {
   EVE_PRODUCT_CONTEXT_VERSION,
   buildEveSystemPrompt,
   buildEveMessages,
+  renderCoachingContextBlock,
 } from './lib/eve-prompt.js';
 
 export {

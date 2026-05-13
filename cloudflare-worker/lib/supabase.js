@@ -8,6 +8,7 @@
 // and parse the body. Throws only if env config is missing.
 
 import { formatRelativeTime } from './time.js';
+import { parseCritiqueSummary } from './critique-summary.js';
 
 export async function supabaseFetch(env, path, init = {}) {
   if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
@@ -566,5 +567,175 @@ function projectRegistryRow(row, history, now) {
     updated_at: typeof row.updated_at === 'string' ? row.updated_at : null,
     relative_time: formatRelativeTime(row.updated_at ?? row.created_at, now),
     most_recent_critique: mostRecentCritique,
+  };
+}
+
+// =============================================================================
+// Eve coaching context — Feature 2, Phase 2A.1
+// =============================================================================
+//
+// fetchCoachingContext pulls the data Eve needs to coach across the user's
+// portfolio without seeing the actual drawings: each drawing's title +
+// subject + timestamps + last-critique tag block, plus the most recent
+// critique summaries (bullet text from <!--summary-->) flattened across
+// all drawings newest-first.
+//
+// What this DOES NOT include:
+//   - Full critique markdown bodies (token bloat — Eve's own audit callout).
+//     Eve sees the SUMMARY of each critique, not the whole thing.
+//   - Storage paths or image data (Eve has no vision).
+//   - Layered drawing manifests / per-layer info.
+//
+// Filters:
+//   - excludeDrawingId: when scope='drawing', omit the current drawing
+//     from the projected drawing list — CURRENT CONTEXT already covers it.
+//   - excludeCritiqueSequence: when paired with excludeDrawingId, omit
+//     that specific critique from the summaries list. Other critiques
+//     on the same drawing remain eligible for summaries.
+//
+// Failure mode: returns { drawings: [], summaries: [] } on any error
+// (env missing, fetch non-ok, throw). Caller renders nothing. Eve falls
+// back to her general persona + product context posture.
+
+const COACHING_CONTEXT_FETCH_OVERSHOOT = 10;
+
+export async function fetchCoachingContext({
+  env,
+  userId,
+  drawingsLimit = 20,
+  summariesLimit = 10,
+  excludeDrawingId = null,
+  excludeCritiqueSequence = null,
+  now = Date.now(),
+  fetcher = fetch,
+}) {
+  const empty = { drawings: [], summaries: [] };
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) return empty;
+  if (!userId) return empty;
+
+  // Fetch slightly more than the drawing limit so the JS-side exclude
+  // filter (current drawing) still has enough rows to fill the projection.
+  const fetchLimit = Math.max(drawingsLimit + COACHING_CONTEXT_FETCH_OVERSHOOT, drawingsLimit);
+  const url = `${env.SUPABASE_URL}/rest/v1/drawings`
+    + `?user_id=eq.${encodeURIComponent(userId)}`
+    + `&select=id,title,context,created_at,updated_at,critique_history`
+    + `&order=updated_at.desc`
+    + `&limit=${fetchLimit}`;
+
+  let rows;
+  try {
+    const res = await fetcher(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        Accept: 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.error('[coaching-context] non-ok status', res.status);
+      return empty;
+    }
+    rows = await res.json();
+  } catch (err) {
+    console.error('[coaching-context] fetch threw', err?.message);
+    return empty;
+  }
+  if (!Array.isArray(rows)) return empty;
+
+  const excludeLower = typeof excludeDrawingId === 'string'
+    ? excludeDrawingId.toLowerCase()
+    : null;
+
+  // --- drawings projection ---
+  const drawings = [];
+  for (const row of rows) {
+    if (drawings.length >= drawingsLimit) break;
+    if (!row || typeof row.id !== 'string') continue;
+    if (excludeLower && row.id.toLowerCase() === excludeLower) continue;
+
+    const history = Array.isArray(row.critique_history) ? row.critique_history : [];
+    drawings.push(projectCoachingDrawing(row, history, now));
+  }
+
+  // --- summaries projection ---
+  // Walk every drawing's critique_history, flatten into a single list
+  // sorted by critique created_at desc, take the top N. The excluded
+  // (drawing, sequence) pair is dropped here too — that specific critique
+  // is already in CURRENT CONTEXT verbatim, no need to repeat its summary.
+  const flattened = [];
+  for (const row of rows) {
+    if (!row || typeof row.id !== 'string') continue;
+    const history = Array.isArray(row.critique_history) ? row.critique_history : [];
+    const isExcludedDrawing = excludeLower && row.id.toLowerCase() === excludeLower;
+    for (const entry of history) {
+      if (!entry || typeof entry !== 'object') continue;
+      if (isExcludedDrawing
+          && typeof excludeCritiqueSequence === 'number'
+          && entry.sequence_number === excludeCritiqueSequence) {
+        continue;
+      }
+      if (typeof entry.content !== 'string' || entry.content.length === 0) continue;
+      const bullets = parseCritiqueSummary(entry.content);
+      // Drop summaries that yielded no bullets — they'd render as an
+      // empty row with just a header, which is noise. The drawing
+      // itself still appears in the drawings list with its last-critique
+      // tag block; Eve has enough to reference it.
+      if (bullets.length === 0) continue;
+      flattened.push({
+        drawing_id: row.id,
+        drawing_title: typeof row.title === 'string' ? row.title : null,
+        drawing_subject: typeof row?.context?.subject === 'string' ? row.context.subject : null,
+        critique_created_at: typeof entry.created_at === 'string' ? entry.created_at : null,
+        critique_sequence: typeof entry.sequence_number === 'number'
+          ? entry.sequence_number : null,
+        primary_category: typeof entry?.tags?.primary_category === 'string'
+          ? entry.tags.primary_category : null,
+        focus_area_text: typeof entry?.tags?.focus_area_text === 'string'
+          ? entry.tags.focus_area_text : null,
+        severity: typeof entry?.tags?.severity === 'number' ? entry.tags.severity : null,
+        relative_time: formatRelativeTime(entry.created_at, now),
+        summary_bullets: bullets,
+      });
+    }
+  }
+  flattened.sort((a, b) => {
+    const aTs = a.critique_created_at ? Date.parse(a.critique_created_at) : 0;
+    const bTs = b.critique_created_at ? Date.parse(b.critique_created_at) : 0;
+    return bTs - aTs;
+  });
+  const summaries = flattened.slice(0, summariesLimit);
+
+  return { drawings, summaries };
+}
+
+function projectCoachingDrawing(row, history, now) {
+  const subject = typeof row?.context?.subject === 'string' ? row.context.subject : null;
+
+  let lastCritique = null;
+  if (history.length > 0) {
+    const lastEntry = history[history.length - 1];
+    if (lastEntry && typeof lastEntry === 'object') {
+      const tags = lastEntry.tags && typeof lastEntry.tags === 'object' ? lastEntry.tags : null;
+      lastCritique = {
+        created_at: typeof lastEntry.created_at === 'string' ? lastEntry.created_at : null,
+        relative_time: formatRelativeTime(lastEntry.created_at, now),
+        primary_category: tags && typeof tags.primary_category === 'string'
+          ? tags.primary_category : null,
+        focus_area_text: tags && typeof tags.focus_area_text === 'string'
+          ? tags.focus_area_text : null,
+        severity: tags && typeof tags.severity === 'number' ? tags.severity : null,
+      };
+    }
+  }
+
+  return {
+    drawing_id: row.id,
+    title: typeof row.title === 'string' ? row.title : null,
+    subject,
+    created_at: typeof row.created_at === 'string' ? row.created_at : null,
+    updated_at: typeof row.updated_at === 'string' ? row.updated_at : null,
+    relative_time: formatRelativeTime(row.updated_at ?? row.created_at, now),
+    total_critiques: history.length,
+    last_critique: lastCritique,
   };
 }

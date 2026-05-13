@@ -1,16 +1,21 @@
 // Eve system-prompt + OpenAI-messages assembly.
 //
-// The system prompt has three load-bearing sections in fixed order:
+// The system prompt has four load-bearing sections in fixed order
+// (Phase 2A.1 added section 3):
 //   1. EVE_PERSONA — who Eve is, what she's not (the critique voices)
 //   2. EVE_PRODUCT_CONTEXT — what the app can and cannot do
-//   3. CURRENT CONTEXT block — only when scope='drawing' AND a critique
+//   3. COACHING CONTEXT block — preloaded portfolio data (drawings +
+//      critique summaries). Always present when coachingContext is
+//      non-empty; lets Eve coach across the user's body of work without
+//      tool calls. NEVER includes full critique bodies, only summaries.
+//   4. CURRENT CONTEXT block — only when scope='drawing' AND a critique
 //      was hydrated server-side. Frames the critique as shared history
-//      the coach has already read.
+//      the coach has already read. INCLUDES the full critique body —
+//      this is the conversation anchor and needs full nuance for
+//      follow-up questions.
 //
-// CURRENT CONTEXT sits LAST because the model's later context wins more
-// often than not (same rationale as critique pipeline's iteration rules).
-// Putting the critique last means the model has fresh recall of the
-// specific drawing/critique when generating its first reply.
+// COACHING CONTEXT sits BEFORE CURRENT CONTEXT so the current critique
+// stays the freshest thing in the model's recall.
 //
 // The date line is intentionally omitted from CURRENT CONTEXT — relative
 // recency doesn't sharpen the coaching, and the absolute ISO date in a
@@ -35,13 +40,32 @@ export { EVE_PRODUCT_CONTEXT, EVE_PRODUCT_CONTEXT_VERSION };
  *     content: string (markdown)
  *   }
  *
+ * `coachingContext` shape (Phase 2A.1, fetched fresh per turn from
+ * lib/supabase.js fetchCoachingContext):
+ *   {
+ *     drawings: [{ drawing_id, title, subject, relative_time,
+ *                  total_critiques,
+ *                  last_critique: { relative_time, focus_area_text,
+ *                                   primary_category, severity } | null }],
+ *     summaries: [{ drawing_title, drawing_subject, relative_time,
+ *                   focus_area_text, primary_category, severity,
+ *                   summary_bullets: [string] }]
+ *   }
+ *
+ * The COACHING CONTEXT block renders only when coachingContext is present
+ * AND has at least one drawing or one summary. New users with no drawings
+ * get just the persona + product context — Eve introduces herself rather
+ * than referencing an empty portfolio.
+ *
  * When scope !== 'drawing' (or scope === 'drawing' but no critique was
- * hydrated — e.g. classifier-failed or pre-Phase-1 row), the CURRENT
- * CONTEXT block is omitted entirely and Eve falls back to her general
- * persona + product context posture.
+ * hydrated), the CURRENT CONTEXT block is omitted; COACHING CONTEXT
+ * remains.
  */
-export function buildEveSystemPrompt({ scope, critique }) {
+export function buildEveSystemPrompt({ scope, critique, coachingContext } = {}) {
   const sections = [EVE_PERSONA, EVE_PRODUCT_CONTEXT];
+
+  const coachingBlock = renderCoachingContextBlock(coachingContext);
+  if (coachingBlock) sections.push(coachingBlock);
 
   if (scope === 'drawing' && critique && typeof critique.content === 'string') {
     const title = (typeof critique.drawing_title === 'string' && critique.drawing_title.trim())
@@ -68,6 +92,87 @@ ${critique.content}
   }
 
   return sections.join('\n\n');
+}
+
+// =============================================================================
+// COACHING CONTEXT renderer
+// =============================================================================
+//
+// Renders the YOUR DRAWING JOURNEY block from a hydrated coachingContext.
+// Returns null when no drawings AND no summaries exist (block omitted from
+// the system prompt entirely — Eve falls back to persona + product context).
+//
+// The guardrail copy at the bottom of the block ("never imply you've seen
+// the actual drawings") is load-bearing — it's Eve's own audit
+// recommendation, verbatim intent. Without it she will at some point
+// describe a drawing she has not, in fact, seen.
+
+export function renderCoachingContextBlock(coachingContext) {
+  if (!coachingContext || typeof coachingContext !== 'object') return null;
+  const drawings = Array.isArray(coachingContext.drawings) ? coachingContext.drawings : [];
+  const summaries = Array.isArray(coachingContext.summaries) ? coachingContext.summaries : [];
+  if (drawings.length === 0 && summaries.length === 0) return null;
+
+  const parts = [
+    'YOUR DRAWING JOURNEY (preloaded — reference this naturally, don\'t quote it verbatim):',
+  ];
+
+  if (drawings.length > 0) {
+    parts.push('You\'re working on these drawings (newest activity first):');
+    parts.push(drawings.map(renderCoachingDrawingRow).join('\n'));
+  }
+
+  if (summaries.length > 0) {
+    parts.push('Recent critique summaries (newest first):');
+    parts.push(summaries.map(renderCoachingSummaryRow).join('\n\n'));
+  }
+
+  parts.push(
+`You may reference this data naturally — "your Forest at Dusk has been getting better on values over the last week" — but never quote it as a list, and never imply you've seen the actual drawings. You only know what the critiques said. If asked about the drawing itself ("did the eye look better in the new version?"), redirect: "I haven't seen it — what did the critique say?"
+
+You can say things like: "based on what the critique called out, you might want to focus on..." or "the value-grouping issue from your last Forest at Dusk critique would apply here too." That's coaching — connecting what's known across their work.`
+  );
+
+  return parts.join('\n\n');
+}
+
+function renderCoachingDrawingRow(row) {
+  const title = (typeof row?.title === 'string' && row.title.trim()) ? row.title.trim() : 'Untitled';
+  const subjectRaw = typeof row?.subject === 'string' ? row.subject.trim() : '';
+  const subjectPart = subjectRaw ? `${subjectRaw}, ` : '';
+  const when = typeof row?.relative_time === 'string' && row.relative_time
+    ? row.relative_time
+    : 'recently';
+  const total = typeof row?.total_critiques === 'number' ? row.total_critiques : 0;
+  const critiqueWord = total === 1 ? 'critique' : 'critiques';
+
+  if (total === 0 || !row?.last_critique) {
+    return `- "${title}" (${subjectPart}${when}, ${total} ${critiqueWord} — no critique yet)`;
+  }
+
+  const last = row.last_critique;
+  const lastWhen = typeof last.relative_time === 'string' && last.relative_time
+    ? last.relative_time
+    : 'recently';
+  const focus = (typeof last.focus_area_text === 'string' && last.focus_area_text.trim())
+    ? last.focus_area_text.trim()
+    : (typeof last.primary_category === 'string' && last.primary_category)
+      ? last.primary_category
+      : 'general critique';
+
+  return `- "${title}" (${subjectPart}${when}, ${total} ${critiqueWord} — last ${lastWhen}, ${focus})`;
+}
+
+function renderCoachingSummaryRow(row) {
+  const title = (typeof row?.drawing_title === 'string' && row.drawing_title.trim())
+    ? row.drawing_title.trim()
+    : 'Untitled';
+  const when = typeof row?.relative_time === 'string' && row.relative_time
+    ? row.relative_time
+    : 'recently';
+  const bullets = Array.isArray(row?.summary_bullets) ? row.summary_bullets : [];
+  const bulletLines = bullets.map((b) => `- ${b}`).join('\n');
+  return `[${when} — "${title}"]\n${bulletLines}`;
 }
 
 /**

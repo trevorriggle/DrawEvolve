@@ -108,6 +108,19 @@ EVE_PER_DAY_FREE = "60"
 EVE_PER_DAY_PRO = "600"
 EVE_MAX_TURNS_PER_CONVERSATION = "100"
 
+# Phase 2A.1 — per-user daily token cap. Worst-case ceiling on any single
+# user's combined critique + Eve token consumption in a UTC day. Pre-flight
+# rejection in middleware/rate-limit.js → enforceCostCeilings fires 429
+# per_user_token_cap_exceeded when current_tokens >= cap. Resets at UTC
+# midnight (new day = new KV key, 48h TTL).
+#
+# 75,000 tokens/user/day ≈ ~$0.38/user/day worst case at gpt-5.1 pricing
+# ($0.63/$5.00 per M for input/output). Heavy power user can do roughly
+# 30–50 Eve turns + several critiques before hitting it. If real usage
+# shows a user routinely hits the cap, that's a pricing-design signal
+# (Pro tier should have a different cap), not a bug.
+PER_USER_DAILY_TOKEN_CAP = "75000"
+
 # Workers Logs — without this, console.log output is silently dropped at the
 # Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for
 # cost control once volume warrants it.

@@ -22,6 +22,9 @@ import {
   EVE_PRODUCT_CONTEXT_VERSION,
   buildEveSystemPrompt,
   buildEveMessages,
+  renderCoachingContextBlock,
+  parseCritiqueSummary,
+  fetchCoachingContext,
   EVE_TIER_LIMITS,
   readEveTierLimits,
   readEveMaxTurnsPerConversation,
@@ -5930,5 +5933,760 @@ test('handleEve unrouted path returns 404; wrong method returns 405', async () =
     });
     const r2 = await handleEve(noMatch, env, ctx);
     assert.equal(r2.status, 404);
+  } finally { restore(); }
+});
+
+// =============================================================================
+// Feature 2, Phase 2A.1 — Eve coaching context + persona tightening
+// =============================================================================
+
+// ---- parseCritiqueSummary --------------------------------------------------
+
+test('parseCritiqueSummary tier 1: extracts bullets from closed comment block', () => {
+  const content = `**Quick Take**
+Some critique body.
+
+<!--summary-->
+- First takeaway
+- Second takeaway
+- Third takeaway
+<!--/summary-->`;
+  assert.deepEqual(
+    parseCritiqueSummary(content),
+    ['First takeaway', 'Second takeaway', 'Third takeaway'],
+  );
+});
+
+test('parseCritiqueSummary tier 1: tolerates whitespace + case variations in tags', () => {
+  const variants = [
+    '<!-- summary --> \n- a\n- b\n<!-- /summary -->',
+    '<!--SUMMARY-->\n- a\n- b\n<!--/SUMMARY-->',
+    '<!--summary-->\n- a\n- b\n<!--  /  summary  -->',
+  ];
+  for (const v of variants) {
+    assert.deepEqual(parseCritiqueSummary(v), ['a', 'b'], `failed on: ${v}`);
+  }
+});
+
+test('parseCritiqueSummary tier 1: last-wins when multiple blocks exist', () => {
+  // Model wrote a block, reconsidered, wrote another. We use the second.
+  const content = `<!--summary-->
+- old one
+- discarded
+<!--/summary-->
+
+later text...
+
+<!--summary-->
+- the real one
+- final
+<!--/summary-->`;
+  assert.deepEqual(parseCritiqueSummary(content), ['the real one', 'final']);
+});
+
+test('parseCritiqueSummary tier 1: skips non-bullet lines inside the block', () => {
+  const content = `<!--summary-->
+some preamble
+- real bullet 1
+random noise
+- real bullet 2
+<!--/summary-->`;
+  assert.deepEqual(parseCritiqueSummary(content), ['real bullet 1', 'real bullet 2']);
+});
+
+test('parseCritiqueSummary tier 1: accepts both - and * bullet markers', () => {
+  const content = `<!--summary-->
+- dashy bullet
+* starry bullet
+<!--/summary-->`;
+  assert.deepEqual(parseCritiqueSummary(content), ['dashy bullet', 'starry bullet']);
+});
+
+test('parseCritiqueSummary tier 2: opener with no closer treated as truncated', () => {
+  // The completion ran out of tokens mid-summary. We still extract what
+  // was written. This is a graceful-degradation path; the iOS parser
+  // has the same shape.
+  const content = `**Quick Take**
+body here
+
+<!--summary-->
+- got the first one in
+- second one too
+- maybe a third`;
+  assert.deepEqual(
+    parseCritiqueSummary(content),
+    ['got the first one in', 'second one too', 'maybe a third'],
+  );
+});
+
+test('parseCritiqueSummary tier 3: markdown header fallback (## Summary)', () => {
+  const content = `body text here
+
+## Summary
+- fallback bullet 1
+- fallback bullet 2`;
+  assert.deepEqual(parseCritiqueSummary(content), ['fallback bullet 1', 'fallback bullet 2']);
+});
+
+test('parseCritiqueSummary tier 3: markdown header fallback (**Summary**)', () => {
+  const content = `body text here
+
+**Summary:**
+- a
+- b`;
+  assert.deepEqual(parseCritiqueSummary(content), ['a', 'b']);
+});
+
+test('parseCritiqueSummary returns [] on legacy critique without any summary block', () => {
+  const content = `**Quick Take**
+Just a normal critique body, no summary at all.
+
+**Focus Area**
+Some focus area.`;
+  assert.deepEqual(parseCritiqueSummary(content), []);
+});
+
+test('parseCritiqueSummary returns [] on malformed / empty / non-string input', () => {
+  assert.deepEqual(parseCritiqueSummary(''), []);
+  assert.deepEqual(parseCritiqueSummary(null), []);
+  assert.deepEqual(parseCritiqueSummary(undefined), []);
+  assert.deepEqual(parseCritiqueSummary(42), []);
+  assert.deepEqual(parseCritiqueSummary('<!--summary--><!--/summary-->'), []); // empty block
+  assert.deepEqual(parseCritiqueSummary('<!--summary-->\n\n\n<!--/summary-->'), []); // no bullets
+});
+
+// ---- fetchCoachingContext --------------------------------------------------
+
+const COACHING_NOW = Date.UTC(2026, 4, 13, 12, 0, 0);
+const COACHING_USER = FREE_USER;
+const COACHING_CURRENT_DRAWING = '11111111-1111-1111-1111-111111111111';
+const COACHING_OTHER_DRAWING = '22222222-2222-2222-2222-222222222222';
+
+function fakeCoachingDrawingRow(overrides = {}) {
+  return {
+    id: COACHING_OTHER_DRAWING,
+    title: 'Forest at Dusk',
+    context: { subject: 'landscape' },
+    created_at: '2026-05-09T12:00:00.000Z',
+    updated_at: '2026-05-11T12:00:00.000Z',
+    critique_history: [{
+      sequence_number: 1,
+      created_at: '2026-05-11T12:00:00.000Z',
+      content: `Body of critique.
+
+<!--summary-->
+- value structure flat
+- try three-zone plan
+- squint test reveals it
+<!--/summary-->`,
+      tags: {
+        primary_category: 'value',
+        focus_area_text: 'value grouping',
+        severity: 3,
+      },
+    }],
+    ...overrides,
+  };
+}
+
+test('fetchCoachingContext returns empty on missing env config', async () => {
+  const out = await fetchCoachingContext({ env: {}, userId: COACHING_USER, now: COACHING_NOW });
+  assert.deepEqual(out, { drawings: [], summaries: [] });
+});
+
+test('fetchCoachingContext returns empty when userId is missing', async () => {
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: '', now: COACHING_NOW,
+  });
+  assert.deepEqual(out, { drawings: [], summaries: [] });
+});
+
+test('fetchCoachingContext returns empty on non-ok response', async () => {
+  const fetcher = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW, fetcher,
+  });
+  assert.deepEqual(out, { drawings: [], summaries: [] });
+});
+
+test('fetchCoachingContext returns empty when fetcher throws', async () => {
+  const fetcher = async () => { throw new Error('network'); };
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW, fetcher,
+  });
+  assert.deepEqual(out, { drawings: [], summaries: [] });
+});
+
+test('fetchCoachingContext projects drawing rows to the expected shape', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([fakeCoachingDrawingRow()]),
+  });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW, fetcher,
+  });
+  assert.equal(out.drawings.length, 1);
+  const d = out.drawings[0];
+  assert.equal(d.drawing_id, COACHING_OTHER_DRAWING);
+  assert.equal(d.title, 'Forest at Dusk');
+  assert.equal(d.subject, 'landscape');
+  assert.equal(d.total_critiques, 1);
+  assert.ok(d.last_critique);
+  assert.equal(d.last_critique.focus_area_text, 'value grouping');
+  assert.equal(d.last_critique.primary_category, 'value');
+  assert.equal(d.last_critique.severity, 3);
+});
+
+test('fetchCoachingContext projects summaries with parsed bullets, newest first', async () => {
+  // Three rows: A latest, B middle, C oldest. We expect A→B→C order in
+  // the summaries list regardless of which row came first from Postgres.
+  const rowA = fakeCoachingDrawingRow({
+    id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    title: 'A',
+    updated_at: '2026-05-11T12:00:00.000Z',
+    critique_history: [{
+      sequence_number: 1, created_at: '2026-05-11T12:00:00.000Z',
+      content: '<!--summary-->\n- A bullet 1\n- A bullet 2\n<!--/summary-->',
+      tags: { primary_category: 'composition' },
+    }],
+  });
+  const rowB = fakeCoachingDrawingRow({
+    id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    title: 'B',
+    updated_at: '2026-05-10T12:00:00.000Z',
+    critique_history: [{
+      sequence_number: 1, created_at: '2026-05-10T12:00:00.000Z',
+      content: '<!--summary-->\n- B bullet\n<!--/summary-->',
+      tags: { primary_category: 'value' },
+    }],
+  });
+  const rowC = fakeCoachingDrawingRow({
+    id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+    title: 'C',
+    updated_at: '2026-05-08T12:00:00.000Z',
+    critique_history: [{
+      sequence_number: 1, created_at: '2026-05-08T12:00:00.000Z',
+      content: '<!--summary-->\n- C bullet\n<!--/summary-->',
+      tags: { primary_category: 'line' },
+    }],
+  });
+  const fetcher = async () => ({ ok: true, json: async () => ([rowA, rowB, rowC]) });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW, fetcher,
+  });
+  assert.equal(out.summaries.length, 3);
+  assert.deepEqual(out.summaries.map((s) => s.drawing_title), ['A', 'B', 'C']);
+  assert.deepEqual(out.summaries[0].summary_bullets, ['A bullet 1', 'A bullet 2']);
+});
+
+test('fetchCoachingContext excludeDrawingId drops that drawing from drawings list', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([
+      fakeCoachingDrawingRow({ id: COACHING_CURRENT_DRAWING.toUpperCase(), title: 'current' }),
+      fakeCoachingDrawingRow({ id: 'd-keeper', title: 'keeper' }),
+    ]),
+  });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW,
+    excludeDrawingId: COACHING_CURRENT_DRAWING, fetcher,
+  });
+  assert.equal(out.drawings.length, 1);
+  assert.equal(out.drawings[0].title, 'keeper');
+});
+
+test('fetchCoachingContext excludeCritiqueSequence drops only that specific critique from summaries', async () => {
+  // Same drawing, two critiques. We exclude sequence 2 — sequence 1
+  // should still appear in summaries since it's on the same drawing
+  // but a different critique.
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([fakeCoachingDrawingRow({
+      id: COACHING_CURRENT_DRAWING,
+      title: 'Forest at Dusk',
+      critique_history: [
+        {
+          sequence_number: 1, created_at: '2026-05-08T12:00:00.000Z',
+          content: '<!--summary-->\n- seq 1 bullet\n<!--/summary-->',
+          tags: { primary_category: 'composition' },
+        },
+        {
+          sequence_number: 2, created_at: '2026-05-11T12:00:00.000Z',
+          content: '<!--summary-->\n- seq 2 bullet (excluded)\n<!--/summary-->',
+          tags: { primary_category: 'value' },
+        },
+      ],
+    })]),
+  });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW,
+    excludeDrawingId: COACHING_CURRENT_DRAWING,
+    excludeCritiqueSequence: 2,
+    fetcher,
+  });
+  // Drawing is excluded entirely from drawings list (it's the current).
+  assert.equal(out.drawings.length, 0);
+  // Summary for sequence 1 survives even though same drawing.
+  assert.equal(out.summaries.length, 1);
+  assert.equal(out.summaries[0].critique_sequence, 1);
+  assert.deepEqual(out.summaries[0].summary_bullets, ['seq 1 bullet']);
+});
+
+test('fetchCoachingContext respects drawingsLimit + summariesLimit', async () => {
+  // Build 30 drawings each with one critique that has a summary.
+  const rows = Array.from({ length: 30 }, (_, i) => fakeCoachingDrawingRow({
+    id: `d${i.toString().padStart(8, '0')}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`,
+    updated_at: new Date(COACHING_NOW - i * 86400000).toISOString(),
+    critique_history: [{
+      sequence_number: 1,
+      created_at: new Date(COACHING_NOW - i * 86400000).toISOString(),
+      content: '<!--summary-->\n- a bullet\n<!--/summary-->',
+      tags: { primary_category: 'composition' },
+    }],
+  }));
+  const fetcher = async () => ({ ok: true, json: async () => rows });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW,
+    drawingsLimit: 5, summariesLimit: 3, fetcher,
+  });
+  assert.equal(out.drawings.length, 5);
+  assert.equal(out.summaries.length, 3);
+});
+
+test('fetchCoachingContext drops summaries with no parseable bullets', async () => {
+  // Two rows: one with a real summary, one with no summary block.
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([
+      fakeCoachingDrawingRow({
+        id: 'with-summary-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        title: 'has-summary',
+        critique_history: [{
+          sequence_number: 1, created_at: '2026-05-11T12:00:00.000Z',
+          content: '<!--summary-->\n- real bullet\n<!--/summary-->',
+          tags: { primary_category: 'value' },
+        }],
+      }),
+      fakeCoachingDrawingRow({
+        id: 'no-summary-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        title: 'no-summary',
+        critique_history: [{
+          sequence_number: 1, created_at: '2026-05-11T12:00:00.000Z',
+          content: 'a critique without any summary block',
+          tags: { primary_category: 'value' },
+        }],
+      }),
+    ]),
+  });
+  const out = await fetchCoachingContext({
+    env: TEST_SUPABASE, userId: COACHING_USER, now: COACHING_NOW, fetcher,
+  });
+  // Both drawings appear in drawings list.
+  assert.equal(out.drawings.length, 2);
+  // Only the one with a parseable summary appears in summaries.
+  assert.equal(out.summaries.length, 1);
+  assert.equal(out.summaries[0].drawing_title, 'has-summary');
+});
+
+// ---- renderCoachingContextBlock --------------------------------------------
+
+test('renderCoachingContextBlock returns null on missing / empty coachingContext', () => {
+  assert.equal(renderCoachingContextBlock(null), null);
+  assert.equal(renderCoachingContextBlock(undefined), null);
+  assert.equal(renderCoachingContextBlock({}), null);
+  assert.equal(renderCoachingContextBlock({ drawings: [], summaries: [] }), null);
+});
+
+test('renderCoachingContextBlock renders drawings-only when summaries are empty', () => {
+  const block = renderCoachingContextBlock({
+    drawings: [{
+      drawing_id: 'd1', title: 'Forest at Dusk', subject: 'landscape',
+      relative_time: '3 days ago', total_critiques: 2,
+      last_critique: { relative_time: '2 days ago', focus_area_text: 'value grouping', primary_category: 'value', severity: 3 },
+    }],
+    summaries: [],
+  });
+  assert.ok(block.includes('YOUR DRAWING JOURNEY'));
+  assert.ok(block.includes('"Forest at Dusk"'));
+  assert.ok(block.includes('value grouping'));
+  assert.ok(!block.includes('Recent critique summaries'),
+    'summaries header must be absent when no summaries');
+});
+
+test('renderCoachingContextBlock renders summaries-only when drawings are empty', () => {
+  const block = renderCoachingContextBlock({
+    drawings: [],
+    summaries: [{
+      drawing_id: 'd1', drawing_title: 'Forest at Dusk', drawing_subject: 'landscape',
+      relative_time: '2 days ago',
+      summary_bullets: ['value structure flat', 'try three-zone plan'],
+    }],
+  });
+  assert.ok(block.includes('YOUR DRAWING JOURNEY'));
+  assert.ok(!block.includes("You're working on these drawings"),
+    'drawings header must be absent when no drawings');
+  assert.ok(block.includes('Recent critique summaries'));
+  assert.ok(block.includes('value structure flat'));
+});
+
+test('renderCoachingContextBlock applies fallbacks (Untitled, no subject, no last critique)', () => {
+  const block = renderCoachingContextBlock({
+    drawings: [{
+      drawing_id: 'd1', title: null, subject: '',
+      relative_time: '2 weeks ago', total_critiques: 0,
+      last_critique: null,
+    }],
+    summaries: [],
+  });
+  assert.ok(block.includes('"Untitled"'));
+  assert.ok(block.includes('no critique yet'));
+  // No empty subject parenthetical like "(, 2 weeks ago)".
+  assert.ok(!block.includes('(, '), `block contains stray comma: ${block}`);
+});
+
+test('renderCoachingContextBlock keeps the "never imply you have seen the drawings" guardrail', () => {
+  // Load-bearing per Eve's audit. Regression guard so future copy edits
+  // don't drop the anti-hallucination clause.
+  const block = renderCoachingContextBlock({
+    drawings: [{ drawing_id: 'd1', title: 'X', relative_time: 'today', total_critiques: 0, last_critique: null }],
+    summaries: [],
+  });
+  assert.ok(block.includes("never imply you've seen the actual drawings"),
+    'anti-hallucination clause is load-bearing — do not remove');
+  assert.ok(block.includes("I haven't seen it"),
+    'redirect line is load-bearing');
+});
+
+// ---- buildEveSystemPrompt with coachingContext -----------------------------
+
+test('buildEveSystemPrompt includes coaching context block when present', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'general',
+    critique: null,
+    coachingContext: {
+      drawings: [{ drawing_id: 'd1', title: 'Forest at Dusk', subject: 'landscape',
+                   relative_time: '3 days ago', total_critiques: 1,
+                   last_critique: { relative_time: '3 days ago', focus_area_text: 'value', primary_category: 'value', severity: 2 } }],
+      summaries: [],
+    },
+  });
+  assert.ok(sys.includes('YOUR DRAWING JOURNEY'));
+  assert.ok(sys.includes('"Forest at Dusk"'));
+});
+
+test('buildEveSystemPrompt omits coaching block when coachingContext is empty', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'general',
+    critique: null,
+    coachingContext: { drawings: [], summaries: [] },
+  });
+  assert.ok(!sys.includes('YOUR DRAWING JOURNEY'),
+    'empty coaching context must not render the block');
+});
+
+test('buildEveSystemPrompt omits coaching block when coachingContext is undefined (backwards compat)', () => {
+  const sys = buildEveSystemPrompt({ scope: 'general', critique: null });
+  assert.ok(!sys.includes('YOUR DRAWING JOURNEY'));
+  // Persona + product context still present.
+  assert.ok(sys.includes('You are Eve'));
+  assert.ok(sys.includes('ABOUT DRAWEVOLVE'));
+});
+
+test('buildEveSystemPrompt places coaching context BEFORE current context', () => {
+  // Order matters: the current critique is the conversation anchor and
+  // should be the freshest thing in the model's recall.
+  const sys = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: {
+      drawing_title: 'Current Piece',
+      drawing_subject: 'still life',
+      sequence_number: 2,
+      content: 'full critique markdown body',
+    },
+    coachingContext: {
+      drawings: [{ drawing_id: 'd1', title: 'Other Drawing', subject: 'portrait',
+                   relative_time: '5 days ago', total_critiques: 1,
+                   last_critique: { relative_time: '5 days ago', focus_area_text: 'edges', primary_category: 'line', severity: 2 } }],
+      summaries: [],
+    },
+  });
+  const coachingIdx = sys.indexOf('YOUR DRAWING JOURNEY');
+  const currentIdx = sys.indexOf('CURRENT CONTEXT:');
+  assert.ok(coachingIdx >= 0, 'coaching block must render');
+  assert.ok(currentIdx >= 0, 'current context block must render');
+  assert.ok(coachingIdx < currentIdx,
+    'coaching context must precede current context');
+});
+
+// ---- Persona / product-context regression guards ---------------------------
+
+test('EVE_PERSONA_VERSION is 3 (Phase 2A.1)', () => {
+  assert.equal(EVE_PERSONA_VERSION, 3);
+});
+
+test('EVE_PRODUCT_CONTEXT_VERSION is 2 (Phase 2A.1)', () => {
+  assert.equal(EVE_PRODUCT_CONTEXT_VERSION, 2);
+});
+
+test('EVE_PERSONA contains brevity ceiling, hard domain boundary, tool recommendations', () => {
+  // Load-bearing copy. Regression guards so future edits don't silently
+  // drop the rules that govern Eve's verbosity, domain scope, or tool
+  // recommendation behavior.
+  assert.ok(EVE_PERSONA.includes('Default response length: 1-3 sentences'));
+  assert.ok(EVE_PERSONA.includes('No headers, no bullet lists'));
+  assert.ok(EVE_PERSONA.includes('Use markdown structure'));
+  assert.ok(EVE_PERSONA.includes("That's outside what I help with"),
+    'hard domain boundary redirect line must be present');
+  assert.ok(EVE_PERSONA.includes('TOOL RECOMMENDATIONS:'));
+  assert.ok(EVE_PERSONA.includes('name both what it does and what to look for visually'),
+    'function-name-plus-icon-name instruction must be present');
+  // Pattern catalogue lives in the persona too.
+  assert.ok(EVE_PERSONA.includes('figure pose reference overlay'));
+  assert.ok(EVE_PERSONA.includes('blur adjustment'));
+});
+
+test('EVE_PRODUCT_CONTEXT contains tile-location naming for tools', () => {
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('left-side tool rail'));
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('filled drop icon'),
+    'paint bucket icon name must use the function+icon pattern');
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('figure-standing icon'));
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('raised-hand icon'));
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('right-side action column'),
+    'app chrome location should be distinct from tool rail');
+});
+
+// ---- Integration: handleSendMessage threads coaching context through ------
+
+test('handleEve POST /:id/messages fetches coaching context and includes it in the system prompt', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'general',
+      message_count: 0, scope_drawing_id: null, scope_critique_sequence: null,
+    };
+    let openaiCallSystemPrompt = '';
+    let coachingFetchHit = false;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/drawings')
+          && u.includes(`user_id=eq.${TEST_SUB}`)
+          && u.includes('select=id,title,context,created_at,updated_at,critique_history')) {
+        // This is the coaching-context fetch. Return one drawing with a summary.
+        coachingFetchHit = true;
+        return {
+          ok: true,
+          json: async () => ([{
+            id: 'd-coach-1', title: 'Test Drawing',
+            context: { subject: 'portrait' },
+            created_at: '2026-05-10T12:00:00.000Z',
+            updated_at: '2026-05-11T12:00:00.000Z',
+            critique_history: [{
+              sequence_number: 1, created_at: '2026-05-11T12:00:00.000Z',
+              content: '<!--summary-->\n- coaching bullet wired through\n<!--/summary-->',
+              tags: { primary_category: 'value' },
+            }],
+          }]),
+        };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${body.role}`, ...body }]) };
+      }
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        // Capture the system prompt the model would see so we can assert
+        // the coaching context made it in.
+        const body = JSON.parse(init.body);
+        openaiCallSystemPrompt = body.messages?.[0]?.content ?? '';
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 100, completion_tokens: 30 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'hi Eve',
+          client_request_id: 'aaaaaaaa-1111-1111-1111-111111111111',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    assert.equal(coachingFetchHit, true,
+      'handleSendMessage must fetch coaching context');
+    assert.ok(openaiCallSystemPrompt.includes('YOUR DRAWING JOURNEY'),
+      'OpenAI system prompt must include the coaching context block');
+    assert.ok(openaiCallSystemPrompt.includes('coaching bullet wired through'),
+      'OpenAI system prompt must include the parsed summary bullets');
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages on drawing scope excludes current drawing + sequence from coaching context', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const CURRENT_DRAWING = '33333333-3333-3333-3333-333333333333';
+    const conv = {
+      id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'drawing',
+      message_count: 0,
+      scope_drawing_id: CURRENT_DRAWING,
+      scope_critique_sequence: 2,
+    };
+    let openaiCallSystemPrompt = '';
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      // CURRENT critique fetch (for the CURRENT CONTEXT block) — matches
+      // a different select shape than coaching context.
+      if (u.includes('/rest/v1/drawings')
+          && u.includes(`id=eq.${CURRENT_DRAWING}`)
+          && u.includes('select=id,title,context,critique_history')) {
+        return {
+          ok: true,
+          json: async () => ([{
+            id: CURRENT_DRAWING, title: 'Current Anchor',
+            context: { subject: 'portrait' },
+            critique_history: [
+              { sequence_number: 2, created_at: '2026-05-11T12:00:00.000Z',
+                content: 'this is the full anchor critique body',
+                tags: { primary_category: 'value' } },
+            ],
+          }]),
+        };
+      }
+      // COACHING context fetch — returns the current drawing AND another.
+      // The current drawing should get filtered from the drawings list,
+      // and any summary tied to (current drawing, seq 2) should be filtered
+      // from summaries.
+      if (u.includes('/rest/v1/drawings')
+          && u.includes(`user_id=eq.${TEST_SUB}`)
+          && u.includes('select=id,title,context,created_at,updated_at,critique_history')) {
+        return {
+          ok: true,
+          json: async () => ([
+            // The current drawing — should NOT appear in coaching drawings.
+            {
+              id: CURRENT_DRAWING, title: 'Current Anchor',
+              context: { subject: 'portrait' },
+              created_at: '2026-05-09T12:00:00.000Z',
+              updated_at: '2026-05-11T12:00:00.000Z',
+              critique_history: [{
+                sequence_number: 2, created_at: '2026-05-11T12:00:00.000Z',
+                content: '<!--summary-->\n- excluded summary\n<!--/summary-->',
+                tags: { primary_category: 'value' },
+              }],
+            },
+            // Another drawing — SHOULD appear.
+            {
+              id: 'd-other-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+              title: 'Other Drawing',
+              context: { subject: 'landscape' },
+              created_at: '2026-05-05T12:00:00.000Z',
+              updated_at: '2026-05-08T12:00:00.000Z',
+              critique_history: [{
+                sequence_number: 1, created_at: '2026-05-08T12:00:00.000Z',
+                content: '<!--summary-->\n- KEEPER SUMMARY BULLET\n<!--/summary-->',
+                tags: { primary_category: 'composition' },
+              }],
+            },
+          ]),
+        };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${body.role}`, ...body }]) };
+      }
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        const body = JSON.parse(init.body);
+        openaiCallSystemPrompt = body.messages?.[0]?.content ?? '';
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 200, completion_tokens: 40 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'hi',
+          client_request_id: 'bbbbbbbb-2222-2222-2222-222222222222',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+
+    // Current drawing must NOT appear in the coaching context drawing list.
+    // We check for the keeper title positively and the excluded-via-summary
+    // bullet negatively.
+    assert.ok(openaiCallSystemPrompt.includes('"Other Drawing"'),
+      'other (non-current) drawing must appear in coaching block');
+    assert.ok(openaiCallSystemPrompt.includes('KEEPER SUMMARY BULLET'),
+      'other drawing\'s summary must appear');
+    assert.ok(!openaiCallSystemPrompt.includes('excluded summary'),
+      'current drawing + current sequence summary must NOT appear in coaching context');
+
+    // CURRENT CONTEXT block must include the full anchor critique.
+    assert.ok(openaiCallSystemPrompt.includes('CURRENT CONTEXT:'),
+      'CURRENT CONTEXT block must render');
+    assert.ok(openaiCallSystemPrompt.includes('this is the full anchor critique body'),
+      'full critique body must appear in CURRENT CONTEXT');
   } finally { restore(); }
 });

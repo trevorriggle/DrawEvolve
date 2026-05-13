@@ -49,6 +49,7 @@ import {
   getConversationHistory,
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
+  fetchCoachingContext,
 } from '../lib/supabase.js';
 import {
   buildEveSystemPrompt,
@@ -506,39 +507,73 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     return jsonResponse({ error: 'Internal server error' }, 500);
   }
 
-  // Scope hydration. For scope='drawing', look up the critique the user
-  // tapped "Ask Eve" from. Null on any failure → falls back to no-critique
-  // path which is identical to scope='general' behavior.
-  let critique = null;
-  if (conversation.scope === 'drawing' && conversation.scope_drawing_id) {
-    const seq = typeof conversation.scope_critique_sequence === 'number'
-      ? conversation.scope_critique_sequence
-      : null;
-    if (seq !== null) {
-      critique = await fetchCritiqueForConversation({
-        env,
-        userId,
-        drawingId: conversation.scope_drawing_id,
-        sequenceNumber: seq,
-      });
-    }
-  }
+  // Scope hydration runs in parallel with coaching-context fetch and
+  // conversation-history fetch. All three feed buildEveSystemPrompt /
+  // buildEveMessages, and they're independent of each other — no reason
+  // to serialize them. fetchCoachingContext + fetchCritiqueForConversation
+  // both return null/empty on failure, so a Supabase hiccup degrades
+  // gracefully instead of 500'ing the whole send.
+  //
+  // The exclude pair on coaching context keeps the current drawing /
+  // current critique out of the coaching block — CURRENT CONTEXT
+  // already carries the full critique, so repeating its summary would
+  // burn tokens and read redundantly.
+  const scopeDrawingId = conversation.scope === 'drawing'
+    ? conversation.scope_drawing_id
+    : null;
+  const scopeCritiqueSeq = (conversation.scope === 'drawing'
+    && typeof conversation.scope_critique_sequence === 'number')
+    ? conversation.scope_critique_sequence
+    : null;
 
-  // Conversation history — every prior turn, oldest first.
-  let history;
+  let critique = null;
+  let coachingContext = { drawings: [], summaries: [] };
+  let history = [];
   try {
-    history = await getConversationHistory({ env, conversationId });
+    const [critiqueResult, coachingResult, historyResult] = await Promise.all([
+      scopeDrawingId && scopeCritiqueSeq !== null
+        ? fetchCritiqueForConversation({
+            env, userId,
+            drawingId: scopeDrawingId,
+            sequenceNumber: scopeCritiqueSeq,
+          })
+        : Promise.resolve(null),
+      fetchCoachingContext({
+        env, userId,
+        drawingsLimit: 20,
+        summariesLimit: 10,
+        excludeDrawingId: scopeDrawingId,
+        excludeCritiqueSequence: scopeCritiqueSeq,
+      }),
+      getConversationHistory({ env, conversationId }),
+    ]);
+    critique = critiqueResult;
+    coachingContext = coachingResult;
+    history = historyResult;
   } catch (err) {
-    console.error('[eve] history fetch failed', err?.message);
+    console.error('[eve] parallel hydration failed', err?.message);
     return jsonResponse({ error: 'Internal server error' }, 500);
   }
   // The user message we just inserted will be in `history`. Strip it so
   // it isn't duplicated when we pass `userTurn` to buildEveMessages.
   const historyWithoutCurrent = history.filter((m) => m.id !== userMessage?.id);
 
+  // Telemetry: log coaching context size so a future "Eve quality dipped"
+  // investigation can correlate to whether the user had data preloaded.
+  // No new schema field — conversation_messages doesn't carry a
+  // prompt_config column, and adding one for two ints isn't worth a
+  // migration. wrangler tail captures these logs.
+  console.log('[eve] coaching context loaded', {
+    conversationId,
+    drawingCount: coachingContext?.drawings?.length ?? 0,
+    summaryCount: coachingContext?.summaries?.length ?? 0,
+    scope: conversation.scope,
+  });
+
   const systemPrompt = buildEveSystemPrompt({
     scope: conversation.scope,
     critique,
+    coachingContext,
   });
   const messages = buildEveMessages({
     systemPrompt,
