@@ -128,13 +128,16 @@ struct EveConversationView: View {
     }
 
     private var emptyOpener: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Spacer().frame(height: 24)
             Text(openerCopy)
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
+
+            starterChips
+
             Spacer().frame(height: 24)
         }
     }
@@ -148,6 +151,79 @@ struct EveConversationView: View {
         case .evolution:
             return "Looking at your work overall — what do you want to talk about?"
         }
+    }
+
+    // =============================================================================
+    // Starter chips
+    // =============================================================================
+    //
+    // Scope-aware tappable prompts solve the chatbot cold-start problem:
+    // a blank "Ask Eve…" field tells users nothing about what she knows or
+    // what to ask. Each chip both teaches a use case AND sends the
+    // message in one tap — Eve's response demonstrates her capability.
+    // Chips disappear naturally once messages.isEmpty flips false (the
+    // optimistic user-message append in sendDraft fires the moment they
+    // tap a chip).
+
+    private var starterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(starterPrompts, id: \.self) { prompt in
+                    Button {
+                        sendStarterPrompt(prompt)
+                    } label: {
+                        Text(prompt)
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule()
+                                    .fill(Color(uiColor: .secondarySystemBackground))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color(uiColor: .separator), lineWidth: 0.5)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(manager.conversation == nil || manager.sendState == .sending)
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private var starterPrompts: [String] {
+        switch manager.scope {
+        case .drawing:
+            return [
+                "Walk me through the last critique",
+                "What should I work on next?",
+                "Why doesn't this feel balanced?",
+                "Suggest a focused exercise",
+            ]
+        case .general:
+            return [
+                "What should I draw today?",
+                "How do I improve at proportions?",
+                "Recommend an exercise for shading",
+                "What are common beginner mistakes?",
+            ]
+        case .evolution:
+            return [
+                "What patterns do you see in my work?",
+                "Where am I improving fastest?",
+                "What should I focus on next month?",
+                "Which fundamental needs the most work?",
+            ]
+        }
+    }
+
+    private func sendStarterPrompt(_ prompt: String) {
+        manager.draft = prompt
+        Task { await manager.sendDraft() }
     }
 
     private var thinkingIndicator: some View {
