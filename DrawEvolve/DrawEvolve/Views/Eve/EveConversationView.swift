@@ -166,33 +166,39 @@ struct EveConversationView: View {
     // tap a chip).
 
     private var starterChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(starterPrompts, id: \.self) { prompt in
-                    Button {
-                        sendStarterPrompt(prompt)
-                    } label: {
-                        Text(prompt)
-                            .font(.subheadline)
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(
-                                Capsule()
-                                    .fill(Color(uiColor: .secondarySystemBackground))
-                            )
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color(uiColor: .separator), lineWidth: 0.5)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(manager.conversation == nil || manager.sendState == .sending)
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: 10),
+                GridItem(.flexible(), spacing: 10),
+            ],
+            spacing: 10,
+        ) {
+            ForEach(starterPrompts, id: \.self) { prompt in
+                Button {
+                    sendStarterPrompt(prompt)
+                } label: {
+                    Text(prompt)
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color(uiColor: .secondarySystemBackground))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color(uiColor: .separator), lineWidth: 0.5)
+                        )
                 }
+                .buttonStyle(.plain)
+                .disabled(manager.conversation == nil || manager.sendState == .sending)
             }
-            .padding(.horizontal, 16)
         }
+        .padding(.horizontal, 24)
     }
 
     private var starterPrompts: [String] {
