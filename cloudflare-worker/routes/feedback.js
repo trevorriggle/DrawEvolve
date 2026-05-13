@@ -23,7 +23,9 @@ import {
   selectCustomPromptParameters,
   isValidPresetId,
   DEFAULT_PRESET_ID,
+  REGISTRY_MIN_ROWS,
 } from '../lib/prompt.js';
+import { fetchUserDrawingRegistry } from '../lib/supabase.js';
 import {
   validateJWT,
   validateWorkerConfig,
@@ -225,6 +227,77 @@ export async function updateDrawingPresetId({ env, drawingId, presetId, fetcher 
   if (!res.ok) throw new Error(`updateDrawingPresetId HTTP ${res.status}`);
 }
 
+// =============================================================================
+// Cross-drawing context — Feature 1, Phase 1A
+// =============================================================================
+//
+// Two gates govern whether the registry block renders on a given request:
+//   1. CROSS_DRAWING_CONTEXT_ENABLED env flag — operational kill-switch.
+//      "false" / unset → entire feature off, zero Supabase reads added.
+//      Any other value (including missing) is treated as off so a deploy
+//      that forgets the flag fails closed.
+//   2. user_preferences.cross_drawing_context_enabled — per-user opt-out.
+//      Defaults to TRUE for every signup (migration 0011); a user who flips
+//      it off in Settings (UI lands later) gets no registry block.
+//
+// Both must be true for the registry to be fetched and rendered. The
+// persisted critique_history entry records the COMBINED effective state in
+// prompt_config.crossDrawingContextEnabled so a future analyst can answer
+// "did this critique have cross-drawing context available?" without joining
+// against the user_preferences table at the timestamp of the critique
+// (which would require historical tracking we don't have).
+
+/**
+ * Reads the env flag. Returns false when the var is missing or set to
+ * anything other than the literal string "true". Same fail-closed shape
+ * as isAppAttestRequired in middleware/app-attest.js.
+ */
+export function isCrossDrawingContextEnabled(env) {
+  return env?.CROSS_DRAWING_CONTEXT_ENABLED === 'true';
+}
+
+/**
+ * Fetches the per-user cross_drawing_context_enabled flag. Returns:
+ *   - the boolean from user_preferences when the row exists,
+ *   - true when the row is missing (signup trigger should have created it,
+ *     but a missing row is treated as the default rather than as a hard
+ *     error so the critique path never breaks on a Postgres hiccup),
+ *   - true on any fetch failure (graceful degradation — preference is an
+ *     opt-OUT toggle, so the conservative degraded state is "render as
+ *     if the user hadn't toggled it off"; env flag still gates the
+ *     feature, so the worst case is a user who opted out gets registry
+ *     context once during a Supabase outage).
+ *
+ * fetcher is dependency-injected for tests.
+ */
+export async function fetchCrossDrawingPreference({ env, userId, fetcher = fetch }) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) return true;
+  if (!userId) return true;
+  const url = `${env.SUPABASE_URL}/rest/v1/user_preferences`
+    + `?user_id=eq.${encodeURIComponent(userId)}`
+    + `&select=cross_drawing_context_enabled&limit=1`;
+  try {
+    const res = await fetcher(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        Accept: 'application/json',
+      },
+    });
+    if (!res.ok) {
+      console.error('[cross-drawing-pref] non-ok status', res.status);
+      return true;
+    }
+    const rows = await res.json();
+    const row = rows?.[0];
+    if (!row) return true;
+    return row.cross_drawing_context_enabled !== false;
+  } catch (err) {
+    console.error('[cross-drawing-pref] threw', err?.message);
+    return true;
+  }
+}
+
 /**
  * PATCH user_preferences.preferred_preset_id. The signup trigger guarantees
  * the row exists; if the trigger ever fails to seed it, the PATCH 404s, the
@@ -278,6 +351,18 @@ export function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usa
     prompt_config: {
       tier,
       includeHistoryCount: config.includeHistoryCount,
+      // Feature 1, Phase 1A — cross-drawing registry telemetry. Records
+      // BOTH the effective on/off state (env flag AND user preference, see
+      // isCrossDrawingContextEnabled / fetchCrossDrawingPreference) and the
+      // actual row count passed to the model. `includeRegistryCount` may be
+      // less than what the registry held if it was below REGISTRY_MIN_ROWS
+      // (rendered as zero — same as disabled) or absent. Future analysts:
+      // "how often does cross-drawing context fire on free vs pro" reads
+      // off these two fields without joining anywhere.
+      includeRegistryCount: typeof config.includeRegistryCount === 'number'
+        ? config.includeRegistryCount
+        : 0,
+      crossDrawingContextEnabled: config.crossDrawingContextEnabled === true,
       styleModifier: config.styleModifier ?? null,
       // Snapshot the bounded-knob parameters used for THIS critique. Stored
       // even when empty so the schema is uniform across rows. Preserves
@@ -643,7 +728,55 @@ export async function handleFeedback(request, env, ctx) {
     }
 
     const baseConfig = selectConfig(tier, promptPreferences);
-    const { history, presetId: existingPresetId } = await fetchCritiqueHistory(drawingIdLower, env);
+
+    // Feature 1, Phase 1A — cross-drawing registry fetch runs in parallel
+    // with critique-history fetch. The env flag is checked synchronously
+    // first; when off, we don't fetch the preference or the registry at all
+    // (zero added Supabase reads when the feature is disabled). When on,
+    // we still gate on the per-user preference, but the pref read happens
+    // alongside the history read so the registry call only blocks the
+    // critical path if the user has it enabled.
+    const envEnabled = isCrossDrawingContextEnabled(env);
+
+    // Two-tier pattern: skip the pref + registry round-trips entirely when
+    // the env flag is off. When on, fan out history + pref reads, then
+    // (only if the user hasn't opted out) the registry read.
+    let history, existingPresetId, userPrefEnabled, registry;
+    if (envEnabled) {
+      const [historyResult, prefResult] = await Promise.all([
+        fetchCritiqueHistory(drawingIdLower, env),
+        fetchCrossDrawingPreference({ env, userId }),
+      ]);
+      history = historyResult.history;
+      existingPresetId = historyResult.presetId;
+      userPrefEnabled = prefResult;
+      registry = userPrefEnabled
+        ? await fetchUserDrawingRegistry({
+            env,
+            userId,
+            excludeDrawingId: drawingIdLower,
+            limit: 10,
+            now,
+          })
+        : [];
+    } else {
+      const historyResult = await fetchCritiqueHistory(drawingIdLower, env);
+      history = historyResult.history;
+      existingPresetId = historyResult.presetId;
+      userPrefEnabled = false;
+      registry = [];
+    }
+
+    // Effective state for both the prompt path and the persisted entry.
+    // The model receives a registry block only when BOTH gates pass AND
+    // the registry has enough rows (REGISTRY_MIN_ROWS); telemetry on the
+    // entry distinguishes "feature was on, registry was thin" (renders
+    // 0 rows) from "feature was off" (also renders 0 rows) via the
+    // separate crossDrawingContextEnabled boolean.
+    const crossDrawingContextEffectiveOn = envEnabled && userPrefEnabled;
+    const willRenderRegistry =
+      crossDrawingContextEffectiveOn && registry.length >= REGISTRY_MIN_ROWS;
+    const includeRegistryCount = willRenderRegistry ? registry.length : 0;
 
     // Resolve preset_id. For custom:<uuid>, this verifies the row exists
     // AND belongs to this user. Hardcoded preset IDs short-circuit
@@ -675,10 +808,17 @@ export async function handleFeedback(request, env, ctx) {
       ...baseConfig,
       systemPrompt: assembleSystemPrompt(voice),
       customPromptModifier,
+      // Feature 1, Phase 1A — both fields flow into buildCritiqueEntry's
+      // prompt_config. includeRegistryCount mirrors the actual number of
+      // rows passed to the model (0 when below floor or disabled);
+      // crossDrawingContextEnabled records the COMBINED effective state
+      // for retrospective analytics.
+      includeRegistryCount,
+      crossDrawingContextEnabled: crossDrawingContextEffectiveOn,
     };
 
     const systemPrompt = buildSystemPrompt(config, context ?? {});
-    const userContent = buildUserMessage(config, history, image);
+    const userContent = buildUserMessage(config, history, image, registry);
 
     // Pre-flight cost ceilings — both fail-closed with 429 and a stable
     // error code the iOS client surfaces as "Daily limit reached, try again

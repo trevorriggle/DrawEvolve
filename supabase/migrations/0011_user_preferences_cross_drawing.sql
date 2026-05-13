@@ -1,0 +1,41 @@
+-- Feature 1, Phase 1A — cross-drawing iterative coaching: per-user opt-out.
+-- =========================================================================
+-- How to apply:
+--   1. Open the Supabase dashboard for project `jkjfcjptzvieaonrmkzd`.
+--   2. SQL Editor → + New query → paste this file → Run.
+--   3. Re-runnable safely (every statement is idempotent).
+--
+-- What it does:
+--   - Adds public.user_preferences.cross_drawing_context_enabled (bool,
+--     default true). Per-user opt-out for the cross-drawing coaching
+--     feature shipping in this PR.
+--
+-- What it does NOT do:
+--   - Create the user_preferences table — that landed in migration 0005.
+--   - Add UI for the toggle — Settings entry ships in a later iOS PR.
+--   - Change any RLS policy — the existing four user_preferences policies
+--     (read / insert / update / delete own) already cover this column.
+--   - Touch the create_user_preferences_on_signup trigger — the new column
+--     is filled by its `default true` for both existing and future rows.
+--
+-- Design rationale (deferred decision recorded for future readers):
+--   The flag lives on user_preferences rather than as JWT app_metadata
+--   because:
+--     1. JWT staleness — a user toggling this in Settings would not see
+--        the change reflected until their next JWT refresh (~1h).
+--     2. The user_preferences row already exists for every authed user
+--        (signup trigger + backfill in 0005), so reading from it adds
+--        no new failure modes and matches how preferred_preset_id works.
+--     3. We may want to expose this preference to the iOS client by-the-
+--        same-mechanism as other user prefs in the future; keeping all
+--        user-tier preferences in one place is the lower-friction path.
+--
+-- Pattern conventions match 0005 / 0001:
+--   - `add column if not exists` for idempotent re-runs
+--   - `not null` is safe because of `default true`; existing rows
+--     backfill to TRUE implicitly during the ALTER TABLE
+--   - feature is opt-OUT by spec, so default=true matches "default on"
+-- =========================================================================
+
+alter table public.user_preferences
+    add column if not exists cross_drawing_context_enabled boolean not null default true;

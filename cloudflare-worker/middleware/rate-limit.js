@@ -387,3 +387,157 @@ export async function recordRequestUsage({ env, userId, dayKey, usage }) {
     await incrementUserTokensToday(env, userId, dayKey, tokens);
   }
 }
+
+// =============================================================================
+// Eve conversational coach — Feature 2, Phase 2A
+// =============================================================================
+//
+// Eve message sends share the global daily-spend cap and the per-user
+// daily-token cap with critiques (one wallet, two paths — a user blowing
+// through tokens on Eve shouldn't get a free critique on top), but get
+// their OWN per-minute and per-day MESSAGE counts so a user can have a
+// rapid back-and-forth with Eve without burning their critique allowance.
+//
+//   eve_quota:<user_id>:<utc-day>   daily message counter, 48h TTL
+//   eve_rate:<user_id>              rolling 60s window of timestamps
+//
+// EVE_MAX_TURNS_PER_CONVERSATION lives in env, but is enforced at the
+// per-conversation level inside routes/eve.js (a SELECT count on the
+// message table) — it's a structural ceiling, not a rate gate, so it
+// doesn't belong in the per-user KV layer.
+
+export const EVE_TIER_LIMITS = {
+  free: { perMinute: 10, perDay: 60  },
+  pro:  { perMinute: 30, perDay: 600 },
+};
+
+function readEveLimit(env, key, fallback) {
+  const raw = env?.[key];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const parsed = typeof raw === 'number' ? raw : parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * Resolve Eve's per-tier limits from env (which the wrangler vars set
+ * as strings). Pulls each axis independently so a partial override still
+ * gets defaults for the others.
+ */
+export function readEveTierLimits(env) {
+  return {
+    free: {
+      perMinute: readEveLimit(env, 'EVE_PER_MINUTE_FREE', EVE_TIER_LIMITS.free.perMinute),
+      perDay:    readEveLimit(env, 'EVE_PER_DAY_FREE',    EVE_TIER_LIMITS.free.perDay),
+    },
+    pro: {
+      perMinute: readEveLimit(env, 'EVE_PER_MINUTE_PRO',  EVE_TIER_LIMITS.pro.perMinute),
+      perDay:    readEveLimit(env, 'EVE_PER_DAY_PRO',     EVE_TIER_LIMITS.pro.perDay),
+    },
+  };
+}
+
+export function readEveMaxTurnsPerConversation(env) {
+  return readEveLimit(env, 'EVE_MAX_TURNS_PER_CONVERSATION', 100);
+}
+
+function eveDailyMessage(tier, limit, retryAfterSeconds) {
+  const reset = formatDuration(retryAfterSeconds);
+  if (tier === 'pro') {
+    return `You've reached the Pro tier limit of ${limit} Eve messages today. Your quota resets at midnight UTC (in ${reset}).`;
+  }
+  return `You've reached the free tier limit of ${limit} Eve messages today. Your quota resets at midnight UTC (in ${reset}).`;
+}
+
+function eveMinuteMessage(retryAfterSeconds) {
+  return `Slow down a moment — you're sending messages to Eve too quickly. Try again in ${formatDuration(retryAfterSeconds)}.`;
+}
+
+/**
+ * Same shape as enforceRateLimits but uses Eve's own counters + Eve's
+ * own messaging. Returns a rejection decision or a ctx for the post-
+ * flight increment.
+ *
+ * Eve does NOT enforce a per-IP backstop in 2A — the critique flow's
+ * per-IP cap already gates the same JWT/user/IP triple at a coarser
+ * level. Adding a second per-IP bucket here would double-count without
+ * adding real protection.
+ */
+export async function enforceEveRateLimits({ env, userId, tier, now }) {
+  const limits = readEveTierLimits(env)[tier] ?? readEveTierLimits(env).free;
+  const dayKey = utcDayKey(now);
+
+  const dailyKey  = `eve_quota:${userId}:${dayKey}`;
+  const minuteKey = `eve_rate:${userId}`;
+
+  const [dailyRaw, minuteRaw] = await Promise.all([
+    env.QUOTA_KV.get(dailyKey),
+    env.QUOTA_KV.get(minuteKey),
+  ]);
+
+  const dailyCount = parseInt(dailyRaw ?? '0', 10) || 0;
+  if (dailyCount >= limits.perDay) {
+    const retryAfter = secondsUntilNextUtcMidnight(now);
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'eve_quota_exceeded',
+        scope: 'daily',
+        tier,
+        limit: limits.perDay,
+        used: dailyCount,
+        retryAfter,
+        message: eveDailyMessage(tier, limits.perDay, retryAfter),
+      },
+    };
+  }
+
+  let recent = [];
+  if (minuteRaw) {
+    try {
+      const parsed = JSON.parse(minuteRaw);
+      if (Array.isArray(parsed)) {
+        recent = parsed.filter((t) => typeof t === 'number' && now - t < 60_000);
+      }
+    } catch {
+      recent = [];
+    }
+  }
+  if (recent.length >= limits.perMinute) {
+    const oldest = Math.min(...recent);
+    const retryAfter = Math.max(1, Math.ceil((60_000 - (now - oldest)) / 1000));
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'eve_rate_limited',
+        scope: 'minute',
+        tier,
+        limit: limits.perMinute,
+        used: recent.length,
+        retryAfter,
+        message: eveMinuteMessage(retryAfter),
+      },
+    };
+  }
+
+  // Per-minute bucket records pre-OpenAI so concurrent bursts can't slip
+  // past the gate. Daily increments only on a delivered assistant turn.
+  await env.QUOTA_KV.put(minuteKey, JSON.stringify([...recent, now]), { expirationTtl: 120 });
+
+  return {
+    ok: true,
+    ctx: { dailyKey, dailyCount, tier, userId, limits },
+  };
+}
+
+/**
+ * Increment the Eve daily message counter after a successful assistant
+ * turn. Pairs with enforceEveRateLimits. Fire-and-forget — failure
+ * never blocks the user response.
+ */
+export async function recordSuccessfulEveTurn({ env, ctx }) {
+  const { dailyKey, dailyCount } = ctx;
+  const next = dailyCount + 1;
+  await env.QUOTA_KV.put(dailyKey, String(next), { expirationTtl: 48 * 3600 });
+}

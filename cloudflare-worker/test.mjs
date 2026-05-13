@@ -16,7 +16,34 @@ import {
   assembleSystemPrompt,
   DEFAULT_FREE_CONFIG,
   DEFAULT_PRO_CONFIG,
+  EVE_PERSONA,
+  EVE_PERSONA_VERSION,
+  EVE_PRODUCT_CONTEXT,
+  EVE_PRODUCT_CONTEXT_VERSION,
+  buildEveSystemPrompt,
+  buildEveMessages,
+  EVE_TIER_LIMITS,
+  readEveTierLimits,
+  readEveMaxTurnsPerConversation,
+  enforceEveRateLimits,
+  recordSuccessfulEveTurn,
+  createConversation,
+  getConversation,
+  listConversations,
+  softDeleteConversation,
+  appendMessage,
+  getConversationHistory,
+  findMessageByClientRequestId,
+  fetchCritiqueForConversation,
+  handleEve,
   HISTORY_FRAMING_DEFAULT,
+  REGISTRY_FRAMING,
+  REGISTRY_MIN_ROWS,
+  formatRegistryEntries,
+  formatRelativeTime,
+  fetchUserDrawingRegistry,
+  isCrossDrawingContextEnabled,
+  fetchCrossDrawingPreference,
   selectConfig,
   buildSystemPrompt,
   buildUserMessage,
@@ -3574,6 +3601,718 @@ test('buildCritiqueEntry stores null customPromptModifier when none is set', () 
 });
 
 // =============================================================================
+// Feature 1, Phase 1A — cross-drawing iterative coaching
+// =============================================================================
+//
+// Three layers exercised here:
+//   1. formatRelativeTime — pure bucket boundaries, no clock.
+//   2. formatRegistryEntries — row rendering with fallback chain
+//      (focus_area_text → primary_category → "previous critique exists",
+//       plus "no critique yet" for in-progress drawings).
+//   3. buildUserMessage with the new fourth `registry` argument:
+//      sub-floor / at-floor / mixed / interaction with same-drawing history.
+//   4. fetchUserDrawingRegistry — query shape + projection + graceful
+//      failure (empty array on non-ok, throw, missing env).
+//   5. fetchCrossDrawingPreference + isCrossDrawingContextEnabled — the
+//      two-gate machinery on the wire.
+//   6. buildCritiqueEntry — telemetry fields land in prompt_config.
+//   7. Handler integration: env kill-switch off → no registry/pref reads,
+//      persisted entry records crossDrawingContextEnabled=false +
+//      includeRegistryCount=0.
+
+// ---- formatRelativeTime -----------------------------------------------------
+
+test('formatRelativeTime buckets match the approved spec exactly', () => {
+  const now = Date.UTC(2026, 4, 13, 12, 0, 0); // 2026-05-13T12:00:00Z
+  const days = (n) => now - n * 24 * 60 * 60 * 1000;
+
+  assert.equal(formatRelativeTime(days(0), now),   'today');
+  assert.equal(formatRelativeTime(days(1), now),   'yesterday');
+  assert.equal(formatRelativeTime(days(2), now),   '2 days ago');
+  assert.equal(formatRelativeTime(days(6), now),   '6 days ago');
+  assert.equal(formatRelativeTime(days(7), now),   'last week');
+  assert.equal(formatRelativeTime(days(13), now),  'last week');
+  assert.equal(formatRelativeTime(days(14), now),  '2 weeks ago');
+  assert.equal(formatRelativeTime(days(21), now),  '3 weeks ago');
+  assert.equal(formatRelativeTime(days(29), now),  '4 weeks ago');
+  assert.equal(formatRelativeTime(days(30), now),  'last month');
+  assert.equal(formatRelativeTime(days(59), now),  'last month');
+  assert.equal(formatRelativeTime(days(60), now),  '2 months ago');
+  assert.equal(formatRelativeTime(days(364), now), '12 months ago');
+  assert.equal(formatRelativeTime(days(365), now), 'over a year ago');
+  assert.equal(formatRelativeTime(days(1000), now),'over a year ago');
+});
+
+test('formatRelativeTime accepts ISO strings, numbers, and Date instances', () => {
+  const now = Date.UTC(2026, 4, 13, 12, 0, 0);
+  const threeDaysAgoIso = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
+  assert.equal(formatRelativeTime(threeDaysAgoIso, now), '3 days ago');
+  assert.equal(formatRelativeTime(now - 3 * 24 * 60 * 60 * 1000, now), '3 days ago');
+  assert.equal(formatRelativeTime(new Date(now - 3 * 24 * 60 * 60 * 1000), now), '3 days ago');
+});
+
+test('formatRelativeTime falls back to "recently" on malformed input', () => {
+  assert.equal(formatRelativeTime(undefined),        'recently');
+  assert.equal(formatRelativeTime(null),             'recently');
+  assert.equal(formatRelativeTime(''),               'recently');
+  assert.equal(formatRelativeTime('not a date'),     'recently');
+  // Negative diff (future date) → also "recently" — defensive but it would
+  // be weird to label a future row "in 3 days from now" inside a coach prompt.
+  const now = Date.UTC(2026, 4, 13, 12, 0, 0);
+  const future = now + 5 * 24 * 60 * 60 * 1000;
+  assert.equal(formatRelativeTime(future, now), 'recently');
+});
+
+// ---- formatRegistryEntries --------------------------------------------------
+
+function registryRow(overrides = {}) {
+  return {
+    drawing_id: 'd-1',
+    title: 'Forest at Dusk',
+    subject: 'landscape',
+    relative_time: '3 days ago',
+    most_recent_critique: {
+      sequence_number: 2,
+      created_at: '2026-05-10T12:00:00.000Z',
+      primary_category: 'value',
+      focus_area_text: 'value grouping',
+      severity: 3,
+    },
+    ...overrides,
+  };
+}
+
+test('formatRegistryEntries renders the full focus_area_text + severity case', () => {
+  const text = formatRegistryEntries([registryRow()]);
+  assert.equal(
+    text,
+    '- "Forest at Dusk" (landscape, 3 days ago) — last critique focused on value grouping (severity 3)',
+  );
+});
+
+test('formatRegistryEntries falls back to primary_category when focus_area_text is null', () => {
+  const text = formatRegistryEntries([registryRow({
+    most_recent_critique: {
+      ...registryRow().most_recent_critique,
+      focus_area_text: null,
+    },
+  })]);
+  // Falls back to 'value' (primary_category) — severity 3 still present.
+  assert.ok(text.includes('— last critique focused on value (severity 3)'),
+    `expected primary_category fallback, got: ${text}`);
+});
+
+test('formatRegistryEntries uses "previous critique exists" when both classifier fields are null', () => {
+  const text = formatRegistryEntries([registryRow({
+    most_recent_critique: {
+      sequence_number: 1,
+      created_at: '2026-05-10T12:00:00.000Z',
+      primary_category: null,
+      focus_area_text: null,
+      severity: null,
+    },
+  })]);
+  // Approved-tweak wording: WHOLE phrase changes, no severity, no "focused on".
+  assert.ok(text.includes('— previous critique exists'),
+    `expected previous-critique-exists fallback, got: ${text}`);
+  assert.ok(!text.includes('focused on'),
+    'should not say "focused on" when both classifier fields are null');
+  assert.ok(!text.includes('severity'),
+    'should not append severity when the focus phrase falls all the way through');
+});
+
+test('formatRegistryEntries renders "no critique yet" when most_recent_critique is null', () => {
+  const text = formatRegistryEntries([registryRow({ most_recent_critique: null })]);
+  assert.equal(
+    text,
+    '- "Forest at Dusk" (landscape, 3 days ago) — no critique yet',
+  );
+});
+
+test('formatRegistryEntries falls back to "Untitled" when title is blank or missing', () => {
+  const blank = formatRegistryEntries([registryRow({ title: '   ' })]);
+  const missing = formatRegistryEntries([registryRow({ title: null })]);
+  assert.ok(blank.startsWith('- "Untitled" '));
+  assert.ok(missing.startsWith('- "Untitled" '));
+});
+
+test('formatRegistryEntries omits the subject clause when subject is blank', () => {
+  const text = formatRegistryEntries([registryRow({ subject: '' })]);
+  // Expected shape: '- "Title" (3 days ago) — ...', NOT '- "Title" (, 3 days ago) — ...'
+  assert.ok(text.startsWith('- "Forest at Dusk" (3 days ago) — '),
+    `unexpected: ${text}`);
+  assert.ok(!text.includes('(, '), 'should not leave a stray leading comma');
+});
+
+test('formatRegistryEntries omits the (severity N) parenthetical when severity is null', () => {
+  const text = formatRegistryEntries([registryRow({
+    most_recent_critique: {
+      ...registryRow().most_recent_critique,
+      severity: null,
+    },
+  })]);
+  assert.ok(!text.includes('(severity'),
+    `should drop severity parenthetical: ${text}`);
+  assert.ok(text.includes('— last critique focused on value grouping'));
+});
+
+test('formatRegistryEntries handles an empty/null registry without throwing', () => {
+  assert.equal(formatRegistryEntries([]), '');
+  assert.equal(formatRegistryEntries(null), '');
+  assert.equal(formatRegistryEntries(undefined), '');
+});
+
+// ---- buildUserMessage with registry ----------------------------------------
+
+function makeRegistryFixture(n, { withCritiques = true } = {}) {
+  return Array.from({ length: n }, (_, i) => registryRow({
+    drawing_id: `d-${i + 1}`,
+    title: `Drawing ${i + 1}`,
+    subject: i % 2 === 0 ? 'portrait' : 'landscape',
+    relative_time: `${i + 2} days ago`,
+    most_recent_critique: withCritiques ? {
+      sequence_number: 1,
+      created_at: '2026-05-10T12:00:00.000Z',
+      primary_category: 'composition',
+      focus_area_text: `focus area ${i + 1}`,
+      severity: 2,
+    } : null,
+  }));
+}
+
+test('buildUserMessage with an empty registry renders no registry block (current behavior preserved)', () => {
+  const config = selectConfig('free', null);
+  const text = buildUserMessage(config, [], 'IMG', [])[0].text;
+  assert.equal(text, 'Please critique this drawing.');
+  assert.ok(!text.includes(REGISTRY_FRAMING));
+});
+
+test('buildUserMessage with a sub-floor registry (2 rows) skips the registry block', () => {
+  assert.equal(REGISTRY_MIN_ROWS, 3, 'floor sanity — guards the test against silent floor changes');
+  const config = selectConfig('free', null);
+  const text = buildUserMessage(config, [], 'IMG', makeRegistryFixture(2))[0].text;
+  // No history, sub-floor registry → falls back to "Please critique this drawing."
+  assert.equal(text, 'Please critique this drawing.');
+  assert.ok(!text.includes(REGISTRY_FRAMING));
+});
+
+test('buildUserMessage renders the registry block at floor (3 rows, no history)', () => {
+  const config = selectConfig('free', null);
+  const registry = makeRegistryFixture(3);
+  const text = buildUserMessage(config, [], 'IMG', registry)[0].text;
+  assert.ok(text.includes(REGISTRY_FRAMING), 'framing should appear');
+  for (let i = 1; i <= 3; i++) {
+    assert.ok(text.includes(`"Drawing ${i}"`), `drawing ${i} should appear`);
+  }
+  // Trailer must follow — registry section uses the same trailer the
+  // history section uses, so the model gets a clean "now critique this".
+  assert.ok(text.endsWith('Now critique the current state of the drawing below.'));
+});
+
+test('buildUserMessage renders a 5-row registry with all rows in order', () => {
+  const config = selectConfig('free', null);
+  const registry = makeRegistryFixture(5);
+  const text = buildUserMessage(config, [], 'IMG', registry)[0].text;
+  for (let i = 1; i <= 5; i++) {
+    assert.ok(text.includes(`"Drawing ${i}"`), `drawing ${i} present`);
+  }
+  // Order check: drawing 1 line index < drawing 5 line index.
+  assert.ok(text.indexOf('"Drawing 1"') < text.indexOf('"Drawing 5"'));
+});
+
+test('buildUserMessage renders a 10-row mixed (critiqued + in-progress) registry correctly', () => {
+  const config = selectConfig('free', null);
+  // 8 critiqued + 2 in-progress (mirrors the uncritiquedSlots cap in fetchUserDrawingRegistry).
+  const registry = [
+    ...makeRegistryFixture(8, { withCritiques: true }),
+    ...makeRegistryFixture(2, { withCritiques: false }).map((row, i) => ({
+      ...row,
+      drawing_id: `inprog-${i + 1}`,
+      title: `In-Progress ${i + 1}`,
+    })),
+  ];
+  const text = buildUserMessage(config, [], 'IMG', registry)[0].text;
+
+  // 8 critiqued rows should mention "last critique focused on focus area N".
+  for (let i = 1; i <= 8; i++) {
+    assert.ok(text.includes(`"Drawing ${i}"`), `critiqued row ${i} should appear`);
+    assert.ok(text.includes(`focus area ${i}`), `critiqued row ${i} should carry its focus`);
+  }
+  // 2 in-progress rows should say "no critique yet" each.
+  const inProgressMatches = (text.match(/— no critique yet/g) ?? []).length;
+  assert.equal(inProgressMatches, 2,
+    'two in-progress rows should render with "— no critique yet"');
+});
+
+test('buildUserMessage renders BOTH history and registry when both are present', () => {
+  const config = selectConfig('pro', null);
+  const history = [
+    productionCritiqueRow({ sequence_number: 1, content: 'Same-drawing history A.' }),
+    productionCritiqueRow({ sequence_number: 2, content: 'Same-drawing history B.' }),
+  ];
+  const registry = makeRegistryFixture(3);
+  const text = buildUserMessage(config, history, 'IMG', registry)[0].text;
+
+  // History framing first, then registry framing, then trailer.
+  const histIdx = text.indexOf(HISTORY_FRAMING_DEFAULT);
+  const regIdx = text.indexOf(REGISTRY_FRAMING);
+  const trailerIdx = text.indexOf('Now critique the current state');
+
+  assert.ok(histIdx >= 0,   'history framing should be present');
+  assert.ok(regIdx >= 0,    'registry framing should be present');
+  assert.ok(trailerIdx >= 0,'trailer should be present');
+  assert.ok(histIdx < regIdx, 'history block must precede registry block');
+  assert.ok(regIdx < trailerIdx, 'registry block must precede trailer');
+
+  // Both critique bodies should be present.
+  assert.ok(text.includes('Same-drawing history A.'));
+  assert.ok(text.includes('Same-drawing history B.'));
+  // First registry row should be present.
+  assert.ok(text.includes('"Drawing 1"'));
+});
+
+test('buildUserMessage falls back to default behavior when registry argument is omitted', () => {
+  const config = selectConfig('free', null);
+  // Three-arg call — backward-compat path for existing callers.
+  const text3 = buildUserMessage(config, [], 'IMG')[0].text;
+  // Four-arg call with empty registry — should produce identical output.
+  const text4 = buildUserMessage(config, [], 'IMG', [])[0].text;
+  assert.equal(text3, text4);
+  assert.equal(text3, 'Please critique this drawing.');
+});
+
+test('buildUserMessage tolerates a non-array registry argument', () => {
+  const config = selectConfig('free', null);
+  // Defensive: a future caller bug passing null/undefined/object should
+  // never throw — same shape of safety as Array.isArray(history) check above.
+  const fromNull = buildUserMessage(config, [], 'IMG', null)[0].text;
+  const fromObj  = buildUserMessage(config, [], 'IMG', { not: 'an array' })[0].text;
+  assert.equal(fromNull, 'Please critique this drawing.');
+  assert.equal(fromObj,  'Please critique this drawing.');
+});
+
+// ---- isCrossDrawingContextEnabled ------------------------------------------
+
+test('isCrossDrawingContextEnabled is strict — only the literal string "true" enables', () => {
+  assert.equal(isCrossDrawingContextEnabled({ CROSS_DRAWING_CONTEXT_ENABLED: 'true' }), true);
+  assert.equal(isCrossDrawingContextEnabled({ CROSS_DRAWING_CONTEXT_ENABLED: 'false' }), false);
+  assert.equal(isCrossDrawingContextEnabled({ CROSS_DRAWING_CONTEXT_ENABLED: '' }), false);
+  assert.equal(isCrossDrawingContextEnabled({ CROSS_DRAWING_CONTEXT_ENABLED: 'TRUE' }), false);
+  assert.equal(isCrossDrawingContextEnabled({ CROSS_DRAWING_CONTEXT_ENABLED: '1' }), false);
+  assert.equal(isCrossDrawingContextEnabled({ CROSS_DRAWING_CONTEXT_ENABLED: true }), false);
+  assert.equal(isCrossDrawingContextEnabled({}), false);
+  assert.equal(isCrossDrawingContextEnabled(null), false);
+  assert.equal(isCrossDrawingContextEnabled(undefined), false);
+});
+
+// ---- fetchCrossDrawingPreference -------------------------------------------
+
+test('fetchCrossDrawingPreference returns false when the row explicitly opts out', async () => {
+  const env = { ...TEST_SUPABASE };
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([{ cross_drawing_context_enabled: false }]),
+  });
+  const pref = await fetchCrossDrawingPreference({ env, userId: FREE_USER, fetcher });
+  assert.equal(pref, false);
+});
+
+test('fetchCrossDrawingPreference returns true when the row opts in', async () => {
+  const env = { ...TEST_SUPABASE };
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([{ cross_drawing_context_enabled: true }]),
+  });
+  const pref = await fetchCrossDrawingPreference({ env, userId: FREE_USER, fetcher });
+  assert.equal(pref, true);
+});
+
+test('fetchCrossDrawingPreference defaults to true when the row is missing', async () => {
+  // Trigger should have created the row at signup, but a missing row should
+  // NOT break the request path. Default-on shape.
+  const env = { ...TEST_SUPABASE };
+  const fetcher = async () => ({ ok: true, json: async () => ([]) });
+  const pref = await fetchCrossDrawingPreference({ env, userId: FREE_USER, fetcher });
+  assert.equal(pref, true);
+});
+
+test('fetchCrossDrawingPreference defaults to true on a non-ok fetch (graceful degradation)', async () => {
+  const env = { ...TEST_SUPABASE };
+  const fetcher = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  const pref = await fetchCrossDrawingPreference({ env, userId: FREE_USER, fetcher });
+  assert.equal(pref, true);
+});
+
+test('fetchCrossDrawingPreference defaults to true when the fetcher throws', async () => {
+  const env = { ...TEST_SUPABASE };
+  const fetcher = async () => { throw new Error('network'); };
+  const pref = await fetchCrossDrawingPreference({ env, userId: FREE_USER, fetcher });
+  assert.equal(pref, true);
+});
+
+test('fetchCrossDrawingPreference defaults to true when env is missing config', async () => {
+  const pref = await fetchCrossDrawingPreference({ env: {}, userId: FREE_USER });
+  assert.equal(pref, true);
+});
+
+test('fetchCrossDrawingPreference targets the user_preferences row by user_id', async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push(String(url));
+    return { ok: true, json: async () => ([{ cross_drawing_context_enabled: true }]) };
+  };
+  await fetchCrossDrawingPreference({ env: TEST_SUPABASE, userId: FREE_USER, fetcher });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].includes('/rest/v1/user_preferences'));
+  assert.ok(calls[0].includes(`user_id=eq.${FREE_USER}`));
+  assert.ok(calls[0].includes('select=cross_drawing_context_enabled'));
+  assert.ok(calls[0].includes('limit=1'));
+});
+
+// ---- fetchUserDrawingRegistry ----------------------------------------------
+
+const REGISTRY_NOW = Date.UTC(2026, 4, 13, 12, 0, 0);
+const REGISTRY_USER = FREE_USER;
+const REGISTRY_CURRENT_DRAWING = '11111111-1111-1111-1111-111111111111';
+
+function fakeDrawingRow(overrides = {}) {
+  return {
+    id: '22222222-2222-2222-2222-222222222222',
+    title: 'A Drawing',
+    context: { subject: 'portrait' },
+    created_at: '2026-05-10T12:00:00.000Z',
+    updated_at: '2026-05-10T12:00:00.000Z',
+    critique_history: [{
+      sequence_number: 1,
+      created_at: '2026-05-10T12:00:00.000Z',
+      content: 'critique body',
+      tags: {
+        primary_category: 'composition',
+        focus_area_text: 'rule of thirds',
+        severity: 2,
+      },
+    }],
+    ...overrides,
+  };
+}
+
+test('fetchUserDrawingRegistry returns [] when env is missing config', async () => {
+  const rows = await fetchUserDrawingRegistry({ env: {}, userId: REGISTRY_USER, now: REGISTRY_NOW });
+  assert.deepEqual(rows, []);
+});
+
+test('fetchUserDrawingRegistry returns [] when userId is missing', async () => {
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: '', now: REGISTRY_NOW,
+  });
+  assert.deepEqual(rows, []);
+});
+
+test('fetchUserDrawingRegistry returns [] on non-ok response (graceful)', async () => {
+  const fetcher = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher,
+  });
+  assert.deepEqual(rows, []);
+});
+
+test('fetchUserDrawingRegistry returns [] when the fetcher throws', async () => {
+  const fetcher = async () => { throw new Error('network'); };
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher,
+  });
+  assert.deepEqual(rows, []);
+});
+
+test('fetchUserDrawingRegistry projects to the documented registry shape and pre-computes relative_time', async () => {
+  // Row updated_at = REGISTRY_NOW - 3 days → 3 days ago.
+  const threeDaysAgo = new Date(REGISTRY_NOW - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([fakeDrawingRow({
+      id: 'd-1',
+      title: 'Forest at Dusk',
+      context: { subject: 'landscape' },
+      updated_at: threeDaysAgo,
+    })]),
+  });
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher,
+  });
+  assert.equal(rows.length, 1);
+  const row = rows[0];
+  assert.equal(row.drawing_id, 'd-1');
+  assert.equal(row.title, 'Forest at Dusk');
+  assert.equal(row.subject, 'landscape');
+  assert.equal(row.relative_time, '3 days ago');
+  assert.equal(row.most_recent_critique.primary_category, 'composition');
+  assert.equal(row.most_recent_critique.focus_area_text, 'rule of thirds');
+  assert.equal(row.most_recent_critique.severity, 2);
+});
+
+test('fetchUserDrawingRegistry excludes the drawing being critiqued (case-insensitive match)', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([
+      fakeDrawingRow({ id: REGISTRY_CURRENT_DRAWING.toUpperCase() }),
+      fakeDrawingRow({ id: 'd-keeper' }),
+    ]),
+  });
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE,
+    userId: REGISTRY_USER,
+    excludeDrawingId: REGISTRY_CURRENT_DRAWING,
+    now: REGISTRY_NOW,
+    fetcher,
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].drawing_id, 'd-keeper');
+});
+
+test('fetchUserDrawingRegistry caps results to opts.limit', async () => {
+  // 25 critiqued rows → query asks for limit+overshoot, projection caps at limit.
+  const rows25 = Array.from({ length: 25 }, (_, i) => fakeDrawingRow({ id: `d-${i + 1}` }));
+  const fetcher = async () => ({ ok: true, json: async () => rows25 });
+  const out = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher, limit: 10,
+  });
+  assert.equal(out.length, 10);
+});
+
+test('fetchUserDrawingRegistry surfaces at most 2 uncritiqued in-progress drawings', async () => {
+  // Mix: 1 critiqued + 4 uncritiqued. Should yield 1 critiqued + 2 uncritiqued
+  // = 3 total. The remaining 2 uncritiqued drawings are dropped.
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([
+      fakeDrawingRow({ id: 'd-critique' }),
+      fakeDrawingRow({ id: 'd-prog-1', critique_history: [] }),
+      fakeDrawingRow({ id: 'd-prog-2', critique_history: [] }),
+      fakeDrawingRow({ id: 'd-prog-3', critique_history: [] }),
+      fakeDrawingRow({ id: 'd-prog-4', critique_history: [] }),
+    ]),
+  });
+  const out = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher, limit: 10,
+  });
+  assert.equal(out.length, 3);
+  const ids = out.map((r) => r.drawing_id);
+  assert.ok(ids.includes('d-critique'));
+  assert.ok(ids.includes('d-prog-1'));
+  assert.ok(ids.includes('d-prog-2'));
+  assert.ok(!ids.includes('d-prog-3'));
+  assert.ok(!ids.includes('d-prog-4'));
+});
+
+test('fetchUserDrawingRegistry projects most_recent_critique=null when critique_history is empty', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([fakeDrawingRow({ id: 'd-uncritiqued', critique_history: [] })]),
+  });
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher,
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].most_recent_critique, null);
+});
+
+test('fetchUserDrawingRegistry handles entries with no tags (pre-Phase-1 rows) gracefully', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([fakeDrawingRow({
+      critique_history: [{ sequence_number: 1, content: 'old critique', created_at: '2026-04-01T00:00:00Z' }],
+    })]),
+  });
+  const rows = await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher,
+  });
+  assert.equal(rows.length, 1);
+  const c = rows[0].most_recent_critique;
+  assert.ok(c, 'should still produce a most_recent_critique projection');
+  assert.equal(c.primary_category, null);
+  assert.equal(c.focus_area_text, null);
+  assert.equal(c.severity, null);
+});
+
+test('fetchUserDrawingRegistry asks Postgres for the right columns + ordering', async () => {
+  const calls = [];
+  const fetcher = async (url) => {
+    calls.push(String(url));
+    return { ok: true, json: async () => ([]) };
+  };
+  await fetchUserDrawingRegistry({
+    env: TEST_SUPABASE, userId: REGISTRY_USER, now: REGISTRY_NOW, fetcher,
+  });
+  assert.equal(calls.length, 1);
+  const url = calls[0];
+  assert.ok(url.includes('/rest/v1/drawings'));
+  assert.ok(url.includes(`user_id=eq.${REGISTRY_USER}`));
+  assert.ok(url.includes('select=id,title,context,created_at,updated_at,critique_history'));
+  assert.ok(url.includes('order=updated_at.desc'));
+  // Overshoot must be respected: the URL must request strictly more rows
+  // than `limit`, to let the JS-side filter (exclude/critiqued/in-progress)
+  // still find `limit` rows after dropping the current drawing + capped
+  // uncritiqued slots.
+  assert.match(url, /limit=(\d+)/);
+  const match = url.match(/limit=(\d+)/);
+  const requestedLimit = Number(match?.[1]);
+  assert.ok(requestedLimit >= 30, `limit should overshoot the projection cap; got ${requestedLimit}`);
+});
+
+// ---- buildCritiqueEntry telemetry fields -----------------------------------
+
+test('buildCritiqueEntry records includeRegistryCount + crossDrawingContextEnabled in prompt_config', () => {
+  const config = {
+    ...selectConfig('free', null),
+    includeRegistryCount: 5,
+    crossDrawingContextEnabled: true,
+  };
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config,
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+    presetId: 'studio_mentor',
+  });
+  assert.equal(entry.prompt_config.includeRegistryCount, 5);
+  assert.equal(entry.prompt_config.crossDrawingContextEnabled, true);
+});
+
+test('buildCritiqueEntry defaults the new telemetry fields when config does not set them', () => {
+  // Backward compat — older code paths (or hypothetical future ones) that
+  // build an entry without the new config fields must still produce a
+  // schema-uniform row. Default to 0 / false.
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config: selectConfig('free', null),
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+    presetId: 'studio_mentor',
+  });
+  assert.equal(entry.prompt_config.includeRegistryCount, 0);
+  assert.equal(entry.prompt_config.crossDrawingContextEnabled, false);
+});
+
+test('buildCritiqueEntry preserves existing prompt_config fields alongside the new ones', () => {
+  // Regression guard: adding telemetry fields must not drop tier / styleModifier /
+  // includeHistoryCount / customPromptModifier. Future analytics queries depend on
+  // every field continuing to land.
+  const config = {
+    ...selectConfig('pro', { styleModifier: 'Reference Sargent.' }),
+    customPromptModifier: { focus: 'anatomy' },
+    includeRegistryCount: 7,
+    crossDrawingContextEnabled: true,
+  };
+  const entry = buildCritiqueEntry({
+    feedback: 'x',
+    sequenceNumber: 1,
+    config,
+    tier: 'pro',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: FIXED_NOW,
+    presetId: 'studio_mentor',
+  });
+  assert.equal(entry.prompt_config.tier, 'pro');
+  assert.equal(entry.prompt_config.includeHistoryCount, DEFAULT_PRO_CONFIG.includeHistoryCount);
+  assert.equal(entry.prompt_config.styleModifier, 'Reference Sargent.');
+  assert.deepEqual(entry.prompt_config.customPromptModifier, { focus: 'anatomy' });
+  assert.equal(entry.prompt_config.includeRegistryCount, 7);
+  assert.equal(entry.prompt_config.crossDrawingContextEnabled, true);
+});
+
+// ---- SHARED_SYSTEM_RULES placement -----------------------------------------
+
+test('SHARED_SYSTEM_RULES contains the CROSS-DRAWING COACHING block adjacent to ITERATIVE COACHING', () => {
+  const sysPrompt = buildSystemPrompt(selectConfig('free', null), baseContext);
+  const iterIdx = sysPrompt.indexOf('ITERATIVE COACHING — READ THIS CAREFULLY:');
+  const crossIdx = sysPrompt.indexOf('CROSS-DRAWING COACHING — READ THIS CAREFULLY:');
+  const summaryIdx = sysPrompt.indexOf('SUMMARY BLOCK');
+
+  assert.ok(iterIdx > 0,    'ITERATIVE COACHING block must be present');
+  assert.ok(crossIdx > 0,   'CROSS-DRAWING COACHING block must be present');
+  assert.ok(summaryIdx > 0, 'SUMMARY BLOCK must be present');
+  assert.ok(iterIdx < crossIdx,   'cross-drawing block must follow iterative-coaching');
+  assert.ok(crossIdx < summaryIdx,'cross-drawing block must precede summary');
+
+  // Anti-hallucination clauses are load-bearing (see MEMORY.md). Don't drift.
+  assert.ok(sysPrompt.includes('Never reference a drawing that isn\'t in the registry'),
+    'anti-invent clause #1 must be present');
+  assert.ok(sysPrompt.includes('never invent details about a drawing that is'),
+    'anti-invent clause #2 must be present');
+});
+
+// ---- Integration: CROSS_DRAWING_CONTEXT_ENABLED=false kill-switch ----------
+//
+// When the env flag is off, the handler MUST NOT fetch the user_preferences
+// row, MUST NOT fetch the registry, and MUST persist an entry whose
+// prompt_config records crossDrawingContextEnabled=false +
+// includeRegistryCount=0. Spec-mandated.
+
+test('handler integration: CROSS_DRAWING_CONTEXT_ENABLED unset skips both Supabase reads and records crossDrawingContextEnabled=false', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const { env: baseEnv, ctx, restore } = await setupHappyPathHandlerEnv({ jwksKey: jwk });
+  // Disable App Attest enforcement for this test — we're verifying the
+  // cross-drawing kill-switch in isolation, not the attest gate. Matches
+  // the production wrangler.toml shipping state (APP_ATTEST_REQUIRED='false').
+  // Leaving attest enforcement on would require building a real assertion,
+  // which the dedicated attest integration tests already cover above.
+  const env = { ...baseEnv, APP_ATTEST_REQUIRED: 'false' };
+  try {
+    // Sanity: env intentionally has no CROSS_DRAWING_CONTEXT_ENABLED.
+    assert.equal(env.CROSS_DRAWING_CONTEXT_ENABLED, undefined,
+      'test env must not set the flag — that\'s the whole point of this test');
+
+    // Track fetch calls so we can assert the negative case (registry +
+    // user_preferences endpoints were NEVER touched).
+    const seenUrls = [];
+    const persistedRpcBodies = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      seenUrls.push(u);
+      if (u.includes('/rest/v1/rpc/append_critique')) {
+        persistedRpcBodies.push(JSON.parse(init.body));
+      }
+      return originalFetch(url, init);
+    };
+
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const req = await buildIntegrationRequest({ jwt });
+    const res = await handler.fetch(req, env, ctx);
+    assert.equal(res.status, 200, `expected SUCCESS, got ${res.status}`);
+
+    // Negative assertions: registry endpoint shape never hit.
+    const hitRegistry = seenUrls.some((u) =>
+      u.includes('/rest/v1/drawings')
+      && u.includes('select=id,title,context,created_at,updated_at,critique_history'),
+    );
+    assert.equal(hitRegistry, false,
+      'registry endpoint must never be called when the kill-switch is off');
+
+    // user_preferences endpoint never hit either.
+    const hitPrefs = seenUrls.some((u) => u.includes('/rest/v1/user_preferences'));
+    assert.equal(hitPrefs, false,
+      'user_preferences must never be read when the kill-switch is off');
+
+    // Persisted critique entry: telemetry must read off, includeRegistryCount=0.
+    assert.equal(persistedRpcBodies.length, 1, 'one persistCritique call expected');
+    const entry = persistedRpcBodies[0].p_entry;
+    assert.equal(entry.prompt_config.crossDrawingContextEnabled, false,
+      'persisted entry should record crossDrawingContextEnabled=false');
+    assert.equal(entry.prompt_config.includeRegistryCount, 0,
+      'persisted entry should record includeRegistryCount=0');
+  } finally {
+    restore();
+  }
+});
+
+// =============================================================================
 // My Evolution Phase 1 — critique classifier
 // =============================================================================
 
@@ -4104,4 +4843,1007 @@ test('buildEvolutionResponseV2: reel row exposes excerpt_raw via extractExcerpt'
   );
   const out = buildEvolutionResponseV2([d], { ...EVO_DEFAULT_WINDOW, now });
   assert.equal(out.reel[0].excerpt_raw, 'Compared to last time the eyes are tighter.');
+});
+
+// =============================================================================
+// Feature 2, Phase 2A — Eve conversational coach
+// =============================================================================
+//
+// Layers exercised here:
+//   1. buildEveSystemPrompt — persona + product context always; CURRENT
+//      CONTEXT only when scope='drawing' AND a critique is hydrated.
+//   2. buildEveMessages — system + history + new user turn; skips tool
+//      turns; defensive against missing/malformed history rows.
+//   3. Rate-limit machinery — readEveTierLimits with env overrides,
+//      enforceEveRateLimits per-minute + per-day gates, recordSuccessful-
+//      EveTurn increments the daily counter.
+//   4. lib/supabase Eve helpers — createConversation, getConversation,
+//      listConversations, softDeleteConversation, appendMessage, getConver-
+//      sationHistory, findMessageByClientRequestId, fetchCritiqueForConver-
+//      sation. All against stubbed fetchers.
+//   5. handleEve integration — POST create, GET list, GET detail,
+//      DELETE soft-delete, POST send-message with full OpenAI mock,
+//      idempotency replay, conversation_full ceiling.
+
+// ---- buildEveSystemPrompt --------------------------------------------------
+
+test('buildEveSystemPrompt with scope=general renders persona + product context, no CURRENT CONTEXT', () => {
+  const sys = buildEveSystemPrompt({ scope: 'general', critique: null });
+  assert.ok(sys.includes('You are Eve, the coach inside DrawEvolve'),
+    'persona must be present');
+  assert.ok(sys.includes('ABOUT DRAWEVOLVE:'),
+    'product context header must be present');
+  assert.ok(!sys.includes('CURRENT CONTEXT:'),
+    'no CURRENT CONTEXT block for scope=general');
+});
+
+test('buildEveSystemPrompt with scope=drawing + critique renders all three sections', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: {
+      drawing_title: 'Forest at Dusk',
+      drawing_subject: 'landscape',
+      sequence_number: 2,
+      content: 'Sample critique markdown.',
+    },
+  });
+  assert.ok(sys.includes('You are Eve'),
+    'persona present');
+  assert.ok(sys.includes('ABOUT DRAWEVOLVE:'),
+    'product context present');
+  assert.ok(sys.includes('CURRENT CONTEXT:'),
+    'CURRENT CONTEXT block present');
+  assert.ok(sys.includes('"Forest at Dusk"'),
+    'title is quoted in the context block');
+  assert.ok(sys.includes('Subject: landscape'),
+    'subject appears on its own line');
+  assert.ok(sys.includes('Critique sequence number: 2'),
+    'sequence number appears');
+  assert.ok(sys.includes('Sample critique markdown.'),
+    'critique body appears inside the triple-quoted block');
+  // Date line must NOT appear — approved spec is to omit absolute dates.
+  assert.ok(!sys.includes('Critique date:'),
+    'date line must not be present in the CURRENT CONTEXT block');
+});
+
+test('buildEveSystemPrompt fallbacks: Untitled / "not specified" / "?" when fields are missing', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: {
+      drawing_title: null,
+      drawing_subject: '   ',
+      sequence_number: null,
+      content: 'body',
+    },
+  });
+  assert.ok(sys.includes('"Untitled"'),
+    'title falls back to Untitled when null');
+  assert.ok(sys.includes('Subject: not specified'),
+    'subject falls back to "not specified" when blank');
+  assert.ok(sys.includes('Critique sequence number: ?'),
+    'sequence falls back to ?');
+});
+
+test('buildEveSystemPrompt omits CURRENT CONTEXT when scope=drawing but no critique hydrated', () => {
+  const sys = buildEveSystemPrompt({ scope: 'drawing', critique: null });
+  assert.ok(sys.includes('You are Eve'));
+  assert.ok(sys.includes('ABOUT DRAWEVOLVE:'));
+  assert.ok(!sys.includes('CURRENT CONTEXT:'),
+    'should fall back to no-critique posture when hydration fails');
+});
+
+test('buildEveSystemPrompt omits CURRENT CONTEXT when critique.content is missing or non-string', () => {
+  const a = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: { drawing_title: 't', sequence_number: 1, content: null },
+  });
+  const b = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: { drawing_title: 't', sequence_number: 1, content: 42 },
+  });
+  assert.ok(!a.includes('CURRENT CONTEXT:'));
+  assert.ok(!b.includes('CURRENT CONTEXT:'));
+});
+
+test('EVE_PERSONA and EVE_PRODUCT_CONTEXT version constants are >= 1 (no zero-version regressions)', () => {
+  assert.ok(Number.isInteger(EVE_PERSONA_VERSION) && EVE_PERSONA_VERSION >= 1);
+  assert.ok(Number.isInteger(EVE_PRODUCT_CONTEXT_VERSION) && EVE_PRODUCT_CONTEXT_VERSION >= 1);
+});
+
+test('EVE_PERSONA contains the load-bearing distinguishing language vs critique voices', () => {
+  // Regression guard against accidental rewrites that erase Eve's identity.
+  assert.ok(EVE_PERSONA.includes('You are Eve'));
+  assert.ok(EVE_PERSONA.includes('warm but direct'));
+  assert.ok(EVE_PERSONA.includes('You are not one of the critique voices'));
+  assert.ok(EVE_PERSONA.includes('redirect them to the Get Feedback flow'));
+});
+
+test('EVE_PRODUCT_CONTEXT lists the load-bearing "does not exist" anti-hallucination block', () => {
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('WHAT DOES NOT EXIST IN DRAWEVOLVE YET'));
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('no sharing, following'));
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('AI image generation'));
+  assert.ok(EVE_PRODUCT_CONTEXT.includes('mentor, not replacement'));
+});
+
+// ---- buildEveMessages ------------------------------------------------------
+
+test('buildEveMessages produces system + history (user/assistant) + new user turn in order', () => {
+  const messages = buildEveMessages({
+    systemPrompt: 'SYSTEM',
+    history: [
+      { role: 'user', content: 'first ask' },
+      { role: 'assistant', content: 'first reply' },
+      { role: 'user', content: 'second ask' },
+      { role: 'assistant', content: 'second reply' },
+    ],
+    userTurn: 'third ask',
+  });
+  assert.equal(messages.length, 6);
+  assert.deepEqual(messages[0], { role: 'system', content: 'SYSTEM' });
+  assert.deepEqual(messages[1], { role: 'user', content: 'first ask' });
+  assert.deepEqual(messages[5], { role: 'user', content: 'third ask' });
+});
+
+test('buildEveMessages skips role=tool turns in 2A (no tools yet)', () => {
+  const messages = buildEveMessages({
+    systemPrompt: 'S',
+    history: [
+      { role: 'user', content: 'hi' },
+      { role: 'tool', content: 'tool result that should be dropped' },
+      { role: 'assistant', content: 'hello' },
+    ],
+    userTurn: 'next',
+  });
+  // Expect: [system, user, assistant, user-next] — tool row dropped.
+  assert.equal(messages.length, 4);
+  for (const m of messages) {
+    assert.notEqual(m.role, 'tool', 'tool turn must not be passed to OpenAI in 2A');
+  }
+});
+
+test('buildEveMessages silently drops malformed history rows', () => {
+  const messages = buildEveMessages({
+    systemPrompt: 'S',
+    history: [
+      null,
+      undefined,
+      { role: 'user' }, // missing content
+      { role: 'user', content: 123 }, // non-string content
+      { role: 'user', content: 'good row' },
+    ],
+    userTurn: 'q',
+  });
+  // Expect: [system, good row, q] — three rows dropped.
+  assert.equal(messages.length, 3);
+  assert.equal(messages[1].content, 'good row');
+});
+
+test('buildEveMessages omits userTurn when it is empty or missing', () => {
+  const a = buildEveMessages({ systemPrompt: 'S', history: [], userTurn: '' });
+  const b = buildEveMessages({ systemPrompt: 'S', history: [], userTurn: undefined });
+  assert.equal(a.length, 1);
+  assert.equal(b.length, 1);
+  assert.equal(a[0].role, 'system');
+});
+
+test('buildEveMessages tolerates non-array history without throwing', () => {
+  const messages = buildEveMessages({ systemPrompt: 'S', history: null, userTurn: 'q' });
+  // Defensive: should produce [system, user] without blowing up.
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].content, 'q');
+});
+
+// ---- Eve rate-limit machinery ----------------------------------------------
+
+test('readEveTierLimits returns defaults when env vars are unset', () => {
+  const limits = readEveTierLimits({});
+  assert.deepEqual(limits.free, EVE_TIER_LIMITS.free);
+  assert.deepEqual(limits.pro, EVE_TIER_LIMITS.pro);
+});
+
+test('readEveTierLimits parses env overrides for both tiers', () => {
+  const limits = readEveTierLimits({
+    EVE_PER_MINUTE_FREE: '7',
+    EVE_PER_MINUTE_PRO: '25',
+    EVE_PER_DAY_FREE: '45',
+    EVE_PER_DAY_PRO: '500',
+  });
+  assert.deepEqual(limits.free, { perMinute: 7, perDay: 45 });
+  assert.deepEqual(limits.pro, { perMinute: 25, perDay: 500 });
+});
+
+test('readEveTierLimits ignores invalid values and falls back per-axis', () => {
+  const limits = readEveTierLimits({
+    EVE_PER_MINUTE_FREE: 'banana',
+    EVE_PER_DAY_FREE: '-3',
+    EVE_PER_MINUTE_PRO: '0',
+    EVE_PER_DAY_PRO: '',
+  });
+  assert.deepEqual(limits.free, EVE_TIER_LIMITS.free);
+  assert.deepEqual(limits.pro, EVE_TIER_LIMITS.pro);
+});
+
+test('readEveMaxTurnsPerConversation default + override', () => {
+  assert.equal(readEveMaxTurnsPerConversation({}), 100);
+  assert.equal(readEveMaxTurnsPerConversation({ EVE_MAX_TURNS_PER_CONVERSATION: '40' }), 40);
+  assert.equal(readEveMaxTurnsPerConversation({ EVE_MAX_TURNS_PER_CONVERSATION: 'oops' }), 100);
+});
+
+test('enforceEveRateLimits passes when no prior counters exist', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const decision = await enforceEveRateLimits({
+    env, userId: FREE_USER, tier: 'free', now: FIXED_NOW,
+  });
+  assert.equal(decision.ok, true);
+  assert.equal(decision.ctx.tier, 'free');
+  // Per-minute bucket should have a single timestamp now.
+  const minuteRaw = await kv.get(`eve_rate:${FREE_USER}`);
+  assert.deepEqual(JSON.parse(minuteRaw), [FIXED_NOW]);
+});
+
+test('enforceEveRateLimits returns 429 eve_quota_exceeded when daily cap is hit', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const dayKey = utcDayKey(FIXED_NOW);
+  await kv.put(`eve_quota:${FREE_USER}:${dayKey}`, '60', { expirationTtl: 48 * 3600 });
+
+  const decision = await enforceEveRateLimits({
+    env, userId: FREE_USER, tier: 'free', now: FIXED_NOW,
+  });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'eve_quota_exceeded');
+  assert.equal(decision.body.scope, 'daily');
+  assert.equal(decision.body.tier, 'free');
+  assert.equal(decision.body.limit, 60);
+});
+
+test('enforceEveRateLimits returns 429 eve_rate_limited when per-minute cap is hit', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // 10 timestamps in the last 60s — at the free per-minute cap of 10.
+  const recent = Array.from({ length: 10 }, (_, i) => FIXED_NOW - i * 1000);
+  await kv.put(`eve_rate:${FREE_USER}`, JSON.stringify(recent), { expirationTtl: 120 });
+
+  const decision = await enforceEveRateLimits({
+    env, userId: FREE_USER, tier: 'free', now: FIXED_NOW,
+  });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'eve_rate_limited');
+  assert.equal(decision.body.scope, 'minute');
+  assert.ok(decision.body.retryAfter >= 1);
+});
+
+test('enforceEveRateLimits drops timestamps older than 60s before counting', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  // 10 entries but all > 60s old.
+  const old = Array.from({ length: 10 }, (_, i) => FIXED_NOW - 90_000 - i * 1000);
+  await kv.put(`eve_rate:${FREE_USER}`, JSON.stringify(old), { expirationTtl: 120 });
+
+  const decision = await enforceEveRateLimits({
+    env, userId: FREE_USER, tier: 'free', now: FIXED_NOW,
+  });
+  // Stale entries don't count — request passes.
+  assert.equal(decision.ok, true);
+});
+
+test('enforceEveRateLimits uses pro tier limits when tier=pro', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const dayKey = utcDayKey(FIXED_NOW);
+  await kv.put(`eve_quota:${PRO_USER}:${dayKey}`, '60', { expirationTtl: 48 * 3600 });
+
+  // Free user with 60 sends would be blocked; pro user with 60 should pass.
+  const decision = await enforceEveRateLimits({
+    env, userId: PRO_USER, tier: 'pro', now: FIXED_NOW,
+  });
+  assert.equal(decision.ok, true);
+});
+
+test('recordSuccessfulEveTurn increments the daily message counter by 1', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const dayKey = utcDayKey(FIXED_NOW);
+  const dailyKey = `eve_quota:${FREE_USER}:${dayKey}`;
+
+  // Simulate a passing rate-limit gate then a successful turn.
+  await kv.put(dailyKey, '3', { expirationTtl: 48 * 3600 });
+  await recordSuccessfulEveTurn({
+    env,
+    ctx: { dailyKey, dailyCount: 3, tier: 'free', userId: FREE_USER, limits: EVE_TIER_LIMITS.free },
+  });
+  assert.equal(await kv.get(dailyKey), '4');
+});
+
+// ---- Eve supabase helpers (stubbed fetcher) --------------------------------
+
+const EVE_USER = FREE_USER;
+const EVE_CONVERSATION_ID = 'eeeeeeee-1111-2222-3333-444444444444';
+const EVE_MESSAGE_ID = 'eeeeeeee-5555-6666-7777-888888888888';
+
+test('createConversation POSTs the expected payload and returns the row', async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      ok: true,
+      json: async () => ([{ id: EVE_CONVERSATION_ID, user_id: EVE_USER, scope: 'general' }]),
+    };
+  };
+  const row = await createConversation({
+    env: TEST_SUPABASE,
+    userId: EVE_USER,
+    scope: 'general',
+    fetcher,
+  });
+  assert.equal(row.id, EVE_CONVERSATION_ID);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, 'POST');
+  assert.ok(calls[0].url.endsWith('/rest/v1/conversations'));
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.user_id, EVE_USER);
+  assert.equal(body.scope, 'general');
+  assert.equal(body.scope_drawing_id, null);
+  // Prefer header gates representation return.
+  assert.equal(calls[0].init.headers.Prefer, 'return=representation');
+});
+
+test('createConversation throws with Supabase error body on non-ok', async () => {
+  const fetcher = async () => ({
+    ok: false, status: 409,
+    text: async () => '{"message":"duplicate key value"}',
+  });
+  await assert.rejects(
+    () => createConversation({ env: TEST_SUPABASE, userId: EVE_USER, scope: 'general', fetcher }),
+    /HTTP 409: \{"message":"duplicate key value"\}/,
+  );
+});
+
+test('getConversation returns null when row missing, scopes by user + soft-delete', async () => {
+  let capturedUrl = '';
+  const fetcher = async (url) => {
+    capturedUrl = String(url);
+    return { ok: true, json: async () => ([]) };
+  };
+  const out = await getConversation({
+    env: TEST_SUPABASE,
+    userId: EVE_USER,
+    conversationId: EVE_CONVERSATION_ID,
+    fetcher,
+  });
+  assert.equal(out, null);
+  assert.ok(capturedUrl.includes(`id=eq.${EVE_CONVERSATION_ID}`));
+  assert.ok(capturedUrl.includes(`user_id=eq.${EVE_USER}`));
+  assert.ok(capturedUrl.includes('deleted_at=is.null'));
+  assert.ok(capturedUrl.includes('limit=1'));
+});
+
+test('listConversations orders by last_message_at desc and filters soft-deletes', async () => {
+  let capturedUrl = '';
+  const fetcher = async (url) => {
+    capturedUrl = String(url);
+    return { ok: true, json: async () => ([{ id: 'a' }, { id: 'b' }]) };
+  };
+  const out = await listConversations({ env: TEST_SUPABASE, userId: EVE_USER, fetcher });
+  assert.equal(out.length, 2);
+  assert.ok(capturedUrl.includes('order=last_message_at.desc'));
+  assert.ok(capturedUrl.includes('deleted_at=is.null'));
+});
+
+test('softDeleteConversation PATCHes deleted_at and returns true on affected row', async () => {
+  let capturedBody = '';
+  const fetcher = async (url, init) => {
+    capturedBody = init.body;
+    return { ok: true, json: async () => ([{ id: EVE_CONVERSATION_ID }]) };
+  };
+  const ok = await softDeleteConversation({
+    env: TEST_SUPABASE,
+    userId: EVE_USER,
+    conversationId: EVE_CONVERSATION_ID,
+    fetcher,
+  });
+  assert.equal(ok, true);
+  const body = JSON.parse(capturedBody);
+  assert.ok(typeof body.deleted_at === 'string');
+  // Verify it parses back as a valid ISO date.
+  assert.ok(!Number.isNaN(Date.parse(body.deleted_at)));
+});
+
+test('softDeleteConversation returns false when no rows were affected (already deleted)', async () => {
+  const fetcher = async () => ({ ok: true, json: async () => ([]) });
+  const ok = await softDeleteConversation({
+    env: TEST_SUPABASE,
+    userId: EVE_USER,
+    conversationId: EVE_CONVERSATION_ID,
+    fetcher,
+  });
+  assert.equal(ok, false);
+});
+
+test('appendMessage POSTs the canonical message shape', async () => {
+  let capturedBody = '';
+  const fetcher = async (url, init) => {
+    capturedBody = init.body;
+    return { ok: true, json: async () => ([{ id: EVE_MESSAGE_ID }]) };
+  };
+  const row = await appendMessage({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    role: 'assistant',
+    content: 'hello',
+    personaVersion: 1,
+    productContextVersion: 1,
+    promptTokenCount: 100,
+    completionTokenCount: 50,
+    fetcher,
+  });
+  assert.equal(row.id, EVE_MESSAGE_ID);
+  const body = JSON.parse(capturedBody);
+  assert.equal(body.conversation_id, EVE_CONVERSATION_ID);
+  assert.equal(body.role, 'assistant');
+  assert.equal(body.content, 'hello');
+  assert.equal(body.persona_version, 1);
+  assert.equal(body.product_context_version, 1);
+  assert.equal(body.prompt_token_count, 100);
+  assert.equal(body.completion_token_count, 50);
+});
+
+test('getConversationHistory orders by created_at asc and respects limit', async () => {
+  let capturedUrl = '';
+  const fetcher = async (url) => {
+    capturedUrl = String(url);
+    return { ok: true, json: async () => ([]) };
+  };
+  await getConversationHistory({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    limit: 25,
+    fetcher,
+  });
+  assert.ok(capturedUrl.includes('order=created_at.asc'));
+  assert.ok(capturedUrl.includes('limit=25'));
+  assert.ok(capturedUrl.includes(`conversation_id=eq.${EVE_CONVERSATION_ID}`));
+});
+
+test('findMessageByClientRequestId returns row when assistant message exists; null otherwise', async () => {
+  const row = { id: 'msg', role: 'assistant', content: 'reply' };
+  const okFetcher = async () => ({ ok: true, json: async () => ([row]) });
+  const out = await findMessageByClientRequestId({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    clientRequestId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    fetcher: okFetcher,
+  });
+  assert.deepEqual(out, row);
+
+  const emptyFetcher = async () => ({ ok: true, json: async () => ([]) });
+  const out2 = await findMessageByClientRequestId({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    clientRequestId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    fetcher: emptyFetcher,
+  });
+  assert.equal(out2, null);
+});
+
+test('findMessageByClientRequestId returns null when either id is missing (defensive)', async () => {
+  const fetcher = async () => { throw new Error('should not be called'); };
+  assert.equal(
+    await findMessageByClientRequestId({ env: TEST_SUPABASE, conversationId: null, clientRequestId: 'x', fetcher }),
+    null,
+  );
+  assert.equal(
+    await findMessageByClientRequestId({ env: TEST_SUPABASE, conversationId: EVE_CONVERSATION_ID, clientRequestId: null, fetcher }),
+    null,
+  );
+});
+
+test('fetchCritiqueForConversation projects to the shape buildEveSystemPrompt expects', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([{
+      id: 'drawing-id',
+      title: 'Forest at Dusk',
+      context: { subject: 'landscape' },
+      critique_history: [
+        { sequence_number: 1, content: 'first critique' },
+        { sequence_number: 2, content: 'second critique' },
+      ],
+    }]),
+  });
+  const out = await fetchCritiqueForConversation({
+    env: TEST_SUPABASE,
+    userId: EVE_USER,
+    drawingId: 'drawing-id',
+    sequenceNumber: 2,
+    fetcher,
+  });
+  assert.deepEqual(out, {
+    drawing_title: 'Forest at Dusk',
+    drawing_subject: 'landscape',
+    sequence_number: 2,
+    content: 'second critique',
+  });
+});
+
+test('fetchCritiqueForConversation returns null when the sequence does not exist', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ([{
+      id: 'drawing-id',
+      title: 't',
+      context: {},
+      critique_history: [{ sequence_number: 1, content: 'only one' }],
+    }]),
+  });
+  const out = await fetchCritiqueForConversation({
+    env: TEST_SUPABASE,
+    userId: EVE_USER,
+    drawingId: 'drawing-id',
+    sequenceNumber: 99,
+    fetcher,
+  });
+  assert.equal(out, null);
+});
+
+test('fetchCritiqueForConversation returns null on missing inputs / config / non-ok / throw', async () => {
+  const okEmpty = async () => ({ ok: true, json: async () => ([]) });
+  assert.equal(await fetchCritiqueForConversation({ env: {}, userId: EVE_USER, drawingId: 'd', sequenceNumber: 1 }), null);
+  assert.equal(await fetchCritiqueForConversation({ env: TEST_SUPABASE, userId: EVE_USER, drawingId: null, sequenceNumber: 1 }), null);
+  assert.equal(await fetchCritiqueForConversation({ env: TEST_SUPABASE, userId: EVE_USER, drawingId: 'd', sequenceNumber: 'x' }), null);
+  assert.equal(await fetchCritiqueForConversation({ env: TEST_SUPABASE, userId: EVE_USER, drawingId: 'd', sequenceNumber: 1, fetcher: okEmpty }), null);
+  const nonOk = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  assert.equal(await fetchCritiqueForConversation({ env: TEST_SUPABASE, userId: EVE_USER, drawingId: 'd', sequenceNumber: 1, fetcher: nonOk }), null);
+  const throws = async () => { throw new Error('boom'); };
+  assert.equal(await fetchCritiqueForConversation({ env: TEST_SUPABASE, userId: EVE_USER, drawingId: 'd', sequenceNumber: 1, fetcher: throws }), null);
+});
+
+// ---- handleEve integration -------------------------------------------------
+//
+// Full handler-level tests that drive POST/GET/DELETE against Eve routes
+// via handler.fetch. They follow the same pattern as the Phase 1A handler
+// integration test: real JWT, App Attest kill-switch off, mocked globalThis.fetch
+// for Supabase + OpenAI. Each test sets up its own fake fetch matcher
+// because each route hits a different combination of endpoints.
+
+function eveAuthHeaders(jwt) {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${jwt}`,
+  };
+}
+
+// Builds a JWT-only env (App Attest disabled) with a signed JWT helper.
+async function setupEveEnv() {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const baseEnv = {
+    ...TEST_JWT_ENV,
+    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+    OPENAI_API_KEY: 'test-openai-key',
+    QUOTA_KV: new FakeKV(),
+    APP_ATTEST_REQUIRED: 'false', // skip attest gate for these tests
+  };
+  const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+  const ctx = {
+    waitUntil: (p) => { Promise.resolve(p).catch(() => {}); },
+  };
+
+  // Stash the public key for handleEve's JWT validation.
+  const originalFetch = globalThis.fetch;
+  // Default fetch handler — tests override per-suite by replacing globalThis.fetch
+  // after calling this helper. We pre-install the JWKS handler so JWT validation
+  // works without each test repeating it.
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk]  }) };
+    }
+    return { ok: true, json: async () => ({}), text: async () => '' };
+  };
+
+  return {
+    env: baseEnv,
+    ctx,
+    jwt,
+    jwk,
+    restore: () => { globalThis.fetch = originalFetch; },
+  };
+}
+
+test('handleEve POST /v1/eve/conversations creates a general-scope conversation', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const created = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      created_at: '2026-05-13T12:00:00.000Z',
+      message_count: 0,
+    };
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      calls.push({ url: u, method: init?.method ?? 'GET' });
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations') && init?.method === 'POST') {
+        return { ok: true, json: async () => ([created]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'POST',
+      headers: eveAuthHeaders(jwt),
+      body: JSON.stringify({ scope: 'general' }),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.conversation.id, EVE_CONVERSATION_ID);
+    assert.equal(body.conversation.scope, 'general');
+  } finally { restore(); }
+});
+
+test('handleEve POST /v1/eve/conversations rejects scope=evolution in 2A', async () => {
+  const { env, ctx, jwt, restore } = await setupEveEnv();
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'POST',
+      headers: eveAuthHeaders(jwt),
+      body: JSON.stringify({ scope: 'evolution' }),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /unsupported scope/i);
+  } finally { restore(); }
+});
+
+test('handleEve POST /v1/eve/conversations rejects scope=drawing without scope_drawing_id', async () => {
+  const { env, ctx, jwt, restore } = await setupEveEnv();
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'POST',
+      headers: eveAuthHeaders(jwt),
+      body: JSON.stringify({ scope: 'drawing' }),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 400);
+  } finally { restore(); }
+});
+
+test('handleEve GET /v1/eve/conversations lists the calling user\'s active conversations', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const rows = [
+      { id: 'c1', user_id: TEST_SUB, scope: 'general' },
+      { id: 'c2', user_id: TEST_SUB, scope: 'drawing' },
+    ];
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations')) {
+        return { ok: true, json: async () => rows };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'GET',
+      headers: eveAuthHeaders(jwt),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.conversations.map((c) => c.id), ['c1', 'c2']);
+  } finally { restore(); }
+});
+
+test('handleEve GET /v1/eve/conversations/:id returns conversation + messages', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = { id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'general' };
+    const msgs = [
+      { id: 'm1', role: 'user', content: 'hi' },
+      { id: 'm2', role: 'assistant', content: 'hello' },
+    ];
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations') && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')) {
+        return { ok: true, json: async () => msgs };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request(`https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}`, {
+      method: 'GET',
+      headers: eveAuthHeaders(jwt),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.conversation.id, EVE_CONVERSATION_ID);
+    assert.equal(body.messages.length, 2);
+  } finally { restore(); }
+});
+
+test('handleEve GET /v1/eve/conversations/:id returns 404 when the row is missing or not owned', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request(`https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}`, {
+      method: 'GET',
+      headers: eveAuthHeaders(jwt),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 404);
+  } finally { restore(); }
+});
+
+test('handleEve DELETE /v1/eve/conversations/:id soft-deletes and returns ok', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      calls.push({ url: u, method: init?.method ?? 'GET' });
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ([{ id: EVE_CONVERSATION_ID }]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+    const req = new Request(`https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}`, {
+      method: 'DELETE',
+      headers: eveAuthHeaders(jwt),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    // Must have made a PATCH request to conversations (the soft delete).
+    assert.ok(calls.some((c) => c.method === 'PATCH' && c.url.includes('/rest/v1/conversations')));
+  } finally { restore(); }
+});
+
+test('handleEve POST /v1/eve/conversations/:id/messages full happy path (general scope)', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      message_count: 0,
+      scope_drawing_id: null,
+      scope_critique_sequence: null,
+    };
+    const userRow = { id: 'umsg', role: 'user', content: 'hi Eve' };
+    const assistantRow = { id: 'amsg', role: 'assistant', content: 'Hello back!' };
+    let openaiCalls = 0;
+
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      // Idempotency lookup
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      // Conversation fetch (both pre- and post-bump call this)
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      // Conversation history (no prior turns yet)
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      // Append user message + append assistant message
+      if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        return { ok: true, json: async () => ([body.role === 'user' ? userRow : assistantRow]) };
+      }
+      // Conversation counters PATCH
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      // OpenAI
+      if (u.includes('api.openai.com/v1/chat/completions')) {
+        openaiCalls += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'Hello back!' } }],
+            usage: { prompt_tokens: 200, completion_tokens: 80 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'hi Eve',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200, 'expected 200 on happy path');
+    const body = await res.json();
+    assert.equal(body.user_message.role, 'user');
+    assert.equal(body.assistant_message.role, 'assistant');
+    assert.equal(body.assistant_message.content, 'Hello back!');
+    assert.equal(openaiCalls, 1, 'OpenAI must be called exactly once');
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages returns cached assistant row on retry (idempotency replay)', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'general',
+      message_count: 2, scope_drawing_id: null,
+    };
+    const cachedAssistant = {
+      id: 'cached', role: 'assistant',
+      content: 'cached reply', client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    };
+    let openaiCalls = 0;
+
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations') && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        // Existing assistant row → idempotent replay.
+        return { ok: true, json: async () => ([cachedAssistant]) };
+      }
+      if (u.includes('api.openai.com')) openaiCalls += 1;
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'retry of an already-answered question',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('X-Idempotent-Replay'), '1');
+    const body = await res.json();
+    assert.equal(body.assistant_message.id, 'cached');
+    assert.equal(openaiCalls, 0, 'OpenAI must not be called on replay');
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages returns 409 conversation_full when at the turn ceiling', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    // Set the cap low so we don't have to seed hundreds of messages.
+    env.EVE_MAX_TURNS_PER_CONVERSATION = '3';
+    const conv = {
+      id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'general',
+      message_count: 6, // = 3 turns * 2 messages — at the ceiling
+      scope_drawing_id: null,
+    };
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations') && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      // Idempotency lookup returns nothing.
+      if (u.includes('/rest/v1/conversation_messages')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'one more',
+          client_request_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.error, 'conversation_full');
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages rejects oversize content', async () => {
+  const { env, ctx, jwt, restore } = await setupEveEnv();
+  try {
+    const huge = 'A'.repeat(9 * 1024); // 9 KB — over the 8 KB cap
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: huge,
+          client_request_id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /exceeds/);
+  } finally { restore(); }
+});
+
+test('handleEve unrouted path returns 404; wrong method returns 405', async () => {
+  const { env, ctx, jwt, restore } = await setupEveEnv();
+  try {
+    // Wrong method on /v1/eve/conversations
+    const badMethod = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'PUT',
+      headers: eveAuthHeaders(jwt),
+    });
+    const r1 = await handleEve(badMethod, env, ctx);
+    assert.equal(r1.status, 405);
+
+    // Unmatched sub-path
+    const noMatch = new Request('https://drawevolve-backend.test/v1/eve/conversations/xxxx/something', {
+      method: 'GET',
+      headers: eveAuthHeaders(jwt),
+    });
+    const r2 = await handleEve(noMatch, env, ctx);
+    assert.equal(r2.status, 404);
+  } finally { restore(); }
 });

@@ -94,6 +94,9 @@ If you are shown prior critiques on this drawing, you are not starting fresh. Yo
 - The "stay on ONE issue" rule above still applies, but on critique #2+ the choice of WHICH issue is constrained by what came before. Do not optimize for "most impactful" in isolation — optimize for continuity of coaching.
 - When you reference a prior critique in your response, do so naturally ("last time we worked on the value structure"), not by quoting yourself.
 
+CROSS-DRAWING COACHING — READ THIS CAREFULLY:
+You are the user's ongoing coach across all their drawings, not just this one. When their other recent drawings are listed, treat them as part of your shared history. Call back to specific drawings by title only when it genuinely sharpens the critique — to acknowledge progress, surface a pattern, or suggest a connection. Never reference a drawing that isn't in the registry, and never invent details about a drawing that is. If the registry lists a drawing's last focus as "value grouping (severity 3)," you may reference that focus — but you do not know what the drawing looked like, what colors it used, or what subject was depicted beyond what's listed. If the registry is empty or absent, behave exactly as before.
+
 SUMMARY BLOCK — APPEND AFTER THE CLOSING ASIDE, BEFORE ENDING THE RESPONSE:
 
 After the 💬 closing aside (or after the final section if you omitted the aside), append a summary block in this EXACT format with no other text after it:
@@ -164,6 +167,71 @@ Stay within ~700 words. Be dense and specific. Every sentence should earn its pl
 };
 
 export const HISTORY_FRAMING_DEFAULT = `Prior critiques on this drawing, oldest first:`;
+
+// =============================================================================
+// Cross-drawing registry framing — Feature 1, Phase 1A
+// =============================================================================
+//
+// Rendered as a separate section of the user-role message when the registry
+// has at least REGISTRY_MIN_ROWS rows. The framing copy is load-bearing —
+// the SHARED_SYSTEM_RULES `CROSS-DRAWING COACHING` block establishes the
+// behavior; this block delivers the data the model is allowed to reference.
+//
+// formatRegistryEntries assumes each row already carries a pre-computed
+// `relative_time` string (computed against a single `now` upstream — keeps
+// this module pure and tests deterministic against frozen rows).
+//
+// Fallback chain for the focus phrase, per spec:
+//   focus_area_text → primary_category → "previous critique exists"
+// The third bucket changes the WHOLE phrase rather than substituting a
+// noun, because "last critique focused on general critique" reads
+// uselessly when both classifier fields are null (pre-Phase-1 row, or
+// classifier swallowed an error).
+
+export const REGISTRY_FRAMING = `You are this user's ongoing coach. Here are their other recent drawings, newest first, with the focus the last critique landed on. Reference them by title when it's genuinely useful — to acknowledge progress, name a pattern (positive or critical), or surface a connection across their work. Don't manufacture a callback; only call back when it makes the critique better.`;
+
+export const REGISTRY_MIN_ROWS = 3;
+
+export function formatRegistryEntries(registry) {
+  if (!Array.isArray(registry)) return '';
+  return registry
+    .map((row) => {
+      const title = (typeof row?.title === 'string' && row.title.trim())
+        ? row.title.trim()
+        : 'Untitled';
+      const subjectRaw = typeof row?.subject === 'string' ? row.subject.trim() : '';
+      const subjectPart = subjectRaw ? `${subjectRaw}, ` : '';
+      const when = (typeof row?.relative_time === 'string' && row.relative_time)
+        ? row.relative_time
+        : 'recently';
+
+      const critique = row?.most_recent_critique;
+      if (!critique) {
+        return `- "${title}" (${subjectPart}${when}) — no critique yet`;
+      }
+
+      const focusRaw = typeof critique.focus_area_text === 'string'
+        ? critique.focus_area_text.trim()
+        : '';
+      const categoryRaw = typeof critique.primary_category === 'string'
+        ? critique.primary_category.trim()
+        : '';
+      const focus = focusRaw || categoryRaw;
+
+      if (!focus) {
+        // Both classifier fields are absent — we know a critique exists but
+        // not what it landed on. Don't fabricate "general critique"; say
+        // exactly what we know.
+        return `- "${title}" (${subjectPart}${when}) — previous critique exists`;
+      }
+
+      const severityPart = typeof critique.severity === 'number'
+        ? ` (severity ${critique.severity})`
+        : '';
+      return `- "${title}" (${subjectPart}${when}) — last critique focused on ${focus}${severityPart}`;
+    })
+    .join('\n');
+}
 
 export const DEFAULT_FREE_CONFIG = {
   systemPrompt: BASE_SYSTEM_PROMPT,
@@ -268,18 +336,40 @@ export function renderTruncationMarker(droppedCount) {
   return `(${droppedCount} earlier ${noun} on this drawing ${verb} but ${aux} shown here.)`;
 }
 
-export function buildUserMessage(config, history, base64Image) {
+// `registry` is the optional fourth positional argument added for the cross-
+// drawing coaching feature. Defaults to []: every existing caller and test
+// that calls buildUserMessage(config, history, image) keeps its exact prior
+// behavior. When the registry has >= REGISTRY_MIN_ROWS entries, a second
+// labeled section renders between the same-drawing history block and the
+// trailer. Sub-floor or empty registries omit the section entirely; the
+// CROSS-DRAWING COACHING rule in SHARED_SYSTEM_RULES tells the model to
+// behave as if there were no cross-drawing context in that case.
+export function buildUserMessage(config, history, base64Image, registry = []) {
   const fullHistory = Array.isArray(history) ? history : [];
   const slice = fullHistory.slice(-config.includeHistoryCount);
   const droppedCount = fullHistory.length - slice.length;
 
-  const parts = [];
-  if (config.includeHistoryCount > 0 && slice.length > 0) {
+  const safeRegistry = Array.isArray(registry) ? registry : [];
+  const sameDrawingHistory = config.includeHistoryCount > 0 && slice.length > 0;
+  const renderRegistry = safeRegistry.length >= REGISTRY_MIN_ROWS;
+
+  const sections = [];
+
+  if (sameDrawingHistory) {
     const marker = renderTruncationMarker(droppedCount);
     const truncationBlock = marker ? `${marker}\n\n` : '';
+    sections.push(`${config.historyFraming}\n\n${truncationBlock}${formatHistoryEntries(slice)}`);
+  }
+
+  if (renderRegistry) {
+    sections.push(`${REGISTRY_FRAMING}\n\n${formatRegistryEntries(safeRegistry)}`);
+  }
+
+  const parts = [];
+  if (sections.length > 0) {
     parts.push({
       type: 'text',
-      text: `${config.historyFraming}\n\n${truncationBlock}${formatHistoryEntries(slice)}\n\nNow critique the current state of the drawing below.`,
+      text: `${sections.join('\n\n')}\n\nNow critique the current state of the drawing below.`,
     });
   } else {
     parts.push({ type: 'text', text: 'Please critique this drawing.' });

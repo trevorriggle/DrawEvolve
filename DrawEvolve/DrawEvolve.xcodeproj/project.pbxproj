@@ -27,7 +27,6 @@
 		DE000021 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = DE100021 /* Shaders.metal */; };
 		DE000024 /* DrawingStorageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100024 /* DrawingStorageManager.swift */; };
 		DE000025 /* Drawing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100025 /* Drawing.swift */; };
-		DE000096 /* CritiqueSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100096 /* CritiqueSummary.swift */; };
 		DE000028 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100028 /* GalleryView.swift */; };
 		DE000029 /* AnonymousUserManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100029 /* AnonymousUserManager.swift */; };
 		DE000030 /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100030 /* FloatingFeedbackPanel.swift */; };
@@ -39,7 +38,6 @@
 		DE000037 /* CanvasStateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100037 /* CanvasStateManager.swift */; };
 		DE000038 /* SelectionOverlays.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100038 /* SelectionOverlays.swift */; };
 		DE000039 /* ToolButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100039 /* ToolButton.swift */; };
-		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DE000040 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100040 /* AppConfig.swift */; };
 		DE000041 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100041 /* SupabaseManager.swift */; };
 		DE000042 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100042 /* AuthManager.swift */; };
@@ -92,9 +90,20 @@
 		DE000093 /* BrushSizeRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100093 /* BrushSizeRail.swift */; };
 		DE000094 /* FloatingTextCaretIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100094 /* FloatingTextCaretIndicator.swift */; };
 		DE000095 /* BrushSizeRailHorizontal.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100095 /* BrushSizeRailHorizontal.swift */; };
+		DE000096 /* CritiqueSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100096 /* CritiqueSummary.swift */; };
 		DE000101 /* EvolutionSkillRadarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100101 /* EvolutionSkillRadarView.swift */; };
 		DE000102 /* EvolutionStudioWallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100102 /* EvolutionStudioWallView.swift */; };
 		DE000103 /* LaunchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100103 /* LaunchHomeView.swift */; };
+		DE000104 /* EveConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100104 /* EveConversation.swift */; };
+		DE000105 /* EveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100105 /* EveService.swift */; };
+		DE000106 /* EveConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100106 /* EveConversationManager.swift */; };
+		DE000107 /* EveIconButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100107 /* EveIconButton.swift */; };
+		DE000108 /* EveMessageBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100108 /* EveMessageBubble.swift */; };
+		DE000109 /* EveContextChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100109 /* EveContextChip.swift */; };
+		DE000110 /* EveInputBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100110 /* EveInputBar.swift */; };
+		DE000111 /* EveConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100111 /* EveConversationView.swift */; };
+		DE000112 /* EveSheetHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100112 /* EveSheetHost.swift */; };
+		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -122,7 +131,6 @@
 		DE100021 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		DE100024 /* DrawingStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingStorageManager.swift; sourceTree = "<group>"; };
 		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
-		DE100096 /* CritiqueSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueSummary.swift; sourceTree = "<group>"; };
 		DE100028 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
 		DE100029 /* AnonymousUserManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnonymousUserManager.swift; sourceTree = "<group>"; };
 		DE100030 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
@@ -134,7 +142,6 @@
 		DE100037 /* CanvasStateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasStateManager.swift; sourceTree = "<group>"; };
 		DE100038 /* SelectionOverlays.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionOverlays.swift; sourceTree = "<group>"; };
 		DE100039 /* ToolButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolButton.swift; sourceTree = "<group>"; };
-		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE100040 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		DE100041 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
 		DE100042 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
@@ -186,9 +193,20 @@
 		DE100093 /* BrushSizeRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSizeRail.swift; sourceTree = "<group>"; };
 		DE100094 /* FloatingTextCaretIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingTextCaretIndicator.swift; sourceTree = "<group>"; };
 		DE100095 /* BrushSizeRailHorizontal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSizeRailHorizontal.swift; sourceTree = "<group>"; };
+		DE100096 /* CritiqueSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueSummary.swift; sourceTree = "<group>"; };
 		DE100101 /* EvolutionSkillRadarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionSkillRadarView.swift; sourceTree = "<group>"; };
 		DE100102 /* EvolutionStudioWallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionStudioWallView.swift; sourceTree = "<group>"; };
 		DE100103 /* LaunchHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchHomeView.swift; sourceTree = "<group>"; };
+		DE100104 /* EveConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversation.swift; sourceTree = "<group>"; };
+		DE100105 /* EveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveService.swift; sourceTree = "<group>"; };
+		DE100106 /* EveConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversationManager.swift; sourceTree = "<group>"; };
+		DE100107 /* EveIconButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveIconButton.swift; sourceTree = "<group>"; };
+		DE100108 /* EveMessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveMessageBubble.swift; sourceTree = "<group>"; };
+		DE100109 /* EveContextChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveContextChip.swift; sourceTree = "<group>"; };
+		DE100110 /* EveInputBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveInputBar.swift; sourceTree = "<group>"; };
+		DE100111 /* EveConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversationView.swift; sourceTree = "<group>"; };
+		DE100112 /* EveSheetHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveSheetHost.swift; sourceTree = "<group>"; };
+		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -274,6 +292,7 @@
 				DE000317 /* Evolution */,
 				DE000316 /* Components */,
 				DE000320 /* Pose */,
+				DE000322 /* Eve */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -294,6 +313,7 @@
 				DE100067 /* TextSettings.swift */,
 				DE100068 /* FloatingText.swift */,
 				DE100070 /* CodableColor.swift */,
+				DE100104 /* EveConversation.swift */,
 				DE000319 /* Pose */,
 			);
 			path = Models;
@@ -318,29 +338,11 @@
 				DE100066 /* DeviceIdiom.swift */,
 				DE100071 /* PathSmoothing.swift */,
 				DE100072 /* TextOnPathRenderer.swift */,
+				DE100105 /* EveService.swift */,
 				DE000318 /* Vision */,
 				DE000321 /* Pose */,
 			);
 			path = Services;
-			sourceTree = "<group>";
-		};
-		DE000318 /* Vision */ = {
-			isa = PBXGroup;
-			children = (
-				DE100077 /* VisionService.swift */,
-				DE100078 /* VisionPoseService.swift */,
-			);
-			path = Vision;
-			sourceTree = "<group>";
-		};
-		DE000319 /* Pose */ = {
-			isa = PBXGroup;
-			children = (
-				DE100079 /* PoseSkeleton.swift */,
-				DE100080 /* PoseTopology.swift */,
-				DE100081 /* PoseDetectionResult.swift */,
-			);
-			path = Pose;
 			sourceTree = "<group>";
 		};
 		DE000313 /* Config */ = {
@@ -366,6 +368,7 @@
 				DE100037 /* CanvasStateManager.swift */,
 				DE100055 /* EvolutionViewModel.swift */,
 				DE100082 /* PoseOverlayManager.swift */,
+				DE100106 /* EveConversationManager.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -400,6 +403,25 @@
 			path = Evolution;
 			sourceTree = "<group>";
 		};
+		DE000318 /* Vision */ = {
+			isa = PBXGroup;
+			children = (
+				DE100077 /* VisionService.swift */,
+				DE100078 /* VisionPoseService.swift */,
+			);
+			path = Vision;
+			sourceTree = "<group>";
+		};
+		DE000319 /* Pose */ = {
+			isa = PBXGroup;
+			children = (
+				DE100079 /* PoseSkeleton.swift */,
+				DE100080 /* PoseTopology.swift */,
+				DE100081 /* PoseDetectionResult.swift */,
+			);
+			path = Pose;
+			sourceTree = "<group>";
+		};
 		DE000320 /* Pose */ = {
 			isa = PBXGroup;
 			children = (
@@ -419,6 +441,19 @@
 				DE100088 /* PoseRasterizer.swift */,
 			);
 			path = Pose;
+			sourceTree = "<group>";
+		};
+		DE000322 /* Eve */ = {
+			isa = PBXGroup;
+			children = (
+				DE100107 /* EveIconButton.swift */,
+				DE100108 /* EveMessageBubble.swift */,
+				DE100109 /* EveContextChip.swift */,
+				DE100110 /* EveInputBar.swift */,
+				DE100111 /* EveConversationView.swift */,
+				DE100112 /* EveSheetHost.swift */,
+			);
+			path = Eve;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -586,6 +621,15 @@
 				DE000101 /* EvolutionSkillRadarView.swift in Sources */,
 				DE000102 /* EvolutionStudioWallView.swift in Sources */,
 				DE000103 /* LaunchHomeView.swift in Sources */,
+				DE000104 /* EveConversation.swift in Sources */,
+				DE000105 /* EveService.swift in Sources */,
+				DE000106 /* EveConversationManager.swift in Sources */,
+				DE000107 /* EveIconButton.swift in Sources */,
+				DE000108 /* EveMessageBubble.swift in Sources */,
+				DE000109 /* EveContextChip.swift in Sources */,
+				DE000110 /* EveInputBar.swift in Sources */,
+				DE000111 /* EveConversationView.swift in Sources */,
+				DE000112 /* EveSheetHost.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -735,7 +779,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rigtech.drawevolve;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -769,7 +813,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rigtech.drawevolve;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

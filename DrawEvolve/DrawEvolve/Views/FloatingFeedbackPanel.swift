@@ -11,6 +11,17 @@ struct FloatingFeedbackPanel: View {
     let feedback: String?
     let critiqueHistory: [CritiqueEntry]
     @Binding var isPresented: Bool
+
+    /// Optional callback that fires when the user taps "Ask Eve" in the
+    /// bottom row of the expanded panel. Parent supplies a closure that
+    /// presents EveSheetHost scoped to the currently-displayed critique.
+    /// Pass nil to suppress the Ask Eve row entirely (used by any caller
+    /// that doesn't want to surface Eve from this panel — currently none,
+    /// but the nil-tolerance keeps the signature additive).
+    /// Carries the critique sequence the user is currently viewing so
+    /// the parent knows which one to anchor the conversation on.
+    var onAskEve: ((_ critiqueSequence: Int?) -> Void)? = nil
+
     @State private var isExpanded = true
     @State private var position: CGPoint = .zero
     @State private var dragOffset: CGSize = .zero
@@ -87,6 +98,7 @@ struct FloatingFeedbackPanel: View {
             phoneHeader
             Divider()
             critiqueContent
+            askEveBar
         }
         .background(Color(uiColor: .systemBackground))
         .onAppear {
@@ -149,6 +161,60 @@ struct FloatingFeedbackPanel: View {
     // stay in one place across both idioms. See the body comment above
     // for why this extraction is a justified, contained deviation from
     // the wholesale-quote rule.
+
+    // MARK: - Ask Eve row
+    //
+    // Optional bottom row that hands off to EveSheetHost. Renders only
+    // when:
+    //   - the parent supplied an `onAskEve` callback (Eve is plumbed)
+    //   - there is a critique to talk about (feedback != nil)
+    //   - the user has navigated to a row that exists in critique_history
+    //     (so we have a sequence number to anchor the conversation on)
+    //
+    // Visual: a small bar with the EVE compact icon + a one-line label,
+    // sitting on a subtle secondary background to differentiate from
+    // the critique scroll. Tap surface is the whole row, not just the
+    // icon, so it reads as a single affordance.
+
+    @ViewBuilder
+    private var askEveBar: some View {
+        if let onAskEve, feedback != nil {
+            let sequenceForCallback: Int? = {
+                guard !critiqueHistory.isEmpty,
+                      selectedHistoryIndex < critiqueHistory.count else {
+                    return nil
+                }
+                return critiqueHistory[selectedHistoryIndex].sequenceNumber
+            }()
+            Button(action: { onAskEve(sequenceForCallback) }) {
+                HStack(spacing: 12) {
+                    EveIconButton(action: { onAskEve(sequenceForCallback) }, size: .compact)
+                        // The inner button handles the tap. The outer
+                        // Button below makes the whole row tappable for
+                        // discoverability; disable hit-testing on the
+                        // icon button so it doesn't double-fire.
+                        .allowsHitTesting(false)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Ask Eve about this critique")
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                        Text("Follow-up questions, what to try next")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
 
     @ViewBuilder
     private var critiqueContent: some View {
@@ -279,6 +345,7 @@ struct FloatingFeedbackPanel: View {
                         // see `critiqueContent` for the markdown view +
                         // timestamp header).
                         critiqueContent
+                        askEveBar
                     }
                     .frame(width: actualExpandedSize.width, height: actualExpandedSize.height)
                     .background(Color(uiColor: .systemBackground))

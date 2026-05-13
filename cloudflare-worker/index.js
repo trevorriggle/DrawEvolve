@@ -27,6 +27,7 @@ import {
 } from './routes/profiles.js';
 import { handlePrompts } from './routes/prompts.js';
 import { handleEvolution, handleEvolutionRefresh } from './routes/evolution.js';
+import { handleEve } from './routes/eve.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 // Methods allowed on the legacy POST-only routes (/, /attest/*). The new
@@ -82,6 +83,14 @@ export default {
       return handlePrompts(request, env, ctx);
     }
 
+    // /v1/eve/conversations[/...] dispatches all methods to handleEve; that
+    // route owns its own method gating and 405s.
+    if (pathname === '/v1/eve/conversations'
+        || /^\/v1\/eve\/conversations\/[^/]+$/.test(pathname)
+        || /^\/v1\/eve\/conversations\/[^/]+\/messages$/.test(pathname)) {
+      return handleEve(request, env, ctx);
+    }
+
     if (POST_ONLY_PATHS.has(pathname) && request.method !== 'POST') {
       return jsonResponse({ error: 'Method not allowed' }, 405);
     }
@@ -107,6 +116,9 @@ export {
   assembleSystemPrompt,
   SHARED_SYSTEM_RULES,
   HISTORY_FRAMING_DEFAULT,
+  REGISTRY_FRAMING,
+  REGISTRY_MIN_ROWS,
+  formatRegistryEntries,
   DEFAULT_FREE_CONFIG,
   DEFAULT_PRO_CONFIG,
   selectConfig,
@@ -130,6 +142,39 @@ export {
   renderCustomPromptModifier,
   selectCustomPromptParameters,
 } from './lib/prompt.js';
+
+export { formatRelativeTime } from './lib/time.js';
+export {
+  fetchUserDrawingRegistry,
+  createConversation,
+  getConversation,
+  listConversations,
+  softDeleteConversation,
+  appendMessage,
+  bumpConversationCounters,
+  getConversationHistory,
+  findMessageByClientRequestId,
+  fetchCritiqueForConversation,
+} from './lib/supabase.js';
+
+export {
+  EVE_PERSONA,
+  EVE_PERSONA_VERSION,
+  EVE_PRODUCT_CONTEXT,
+  EVE_PRODUCT_CONTEXT_VERSION,
+  buildEveSystemPrompt,
+  buildEveMessages,
+} from './lib/eve-prompt.js';
+
+export {
+  EVE_TIER_LIMITS,
+  readEveTierLimits,
+  readEveMaxTurnsPerConversation,
+  enforceEveRateLimits,
+  recordSuccessfulEveTurn,
+} from './middleware/rate-limit.js';
+
+export { handleEve } from './routes/eve.js';
 
 export {
   validateJWT,
@@ -190,6 +235,8 @@ export {
   validateContextLengths,
   updateDrawingPresetId,
   updateUserPreferredPreset,
+  isCrossDrawingContextEnabled,
+  fetchCrossDrawingPreference,
   buildCritiqueEntry,
   persistCritique,
   REQUEST_STATUS,

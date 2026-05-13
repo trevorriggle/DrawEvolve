@@ -138,6 +138,16 @@ struct DrawingCanvasView: View {
     @State private var showSavedConfirmation = false
     @State private var showGallery = false
     @State private var showSettings = false   // Phase 6 — gear in collapsible chrome
+
+    // Eve coach sheet state. `showEve` toggles the iPad floating overlay /
+    // iPhone sheet; `eveScope` + `eveCritiqueSequence` + `eveDrawingTitle`
+    // configure the conversation being opened. Cleared between sessions so
+    // closing the sheet and re-opening from a different entry point gets
+    // a fresh scope. See Feature 2, Phase 2A in DrawEvolve-Three-Big-Features.md.
+    @State private var showEve = false
+    @State private var eveScope: EveScope = .general
+    @State private var eveCritiqueSequence: Int? = nil
+    @State private var eveDrawingTitle: String? = nil
     /// Opt-in trigger for the beta-transparency notice. Was auto-presented
     /// on first launch via ContentView's cascade; replaced with a manual
     /// (!) info button below the gear — see `betaInfoButton` and the
@@ -685,11 +695,34 @@ struct DrawingCanvasView: View {
                     FloatingFeedbackPanel(
                         feedback: canvasState.feedback,
                         critiqueHistory: critiqueHistory,
-                        isPresented: $showFeedback
+                        isPresented: $showFeedback,
+                        onAskEve: { sequence in
+                            // Dismiss critique sheet first; the Eve sheet
+                            // opens via the .sheet modifier on the parent
+                            // body so we can't stack two presentations.
+                            showFeedback = false
+                            openEve(scope: .drawing, critiqueSequence: sequence)
+                        }
                     )
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
                 }
+            }
+            // Eve sheet — iPhone. Half-sheet that matches the critique
+            // panel's presentation. iPad uses the in-place overlay in
+            // padBody; same EveSheetHost component, two presentation
+            // shapes (DeviceIdiom branches at the call site, not inside
+            // the component, mirroring how FloatingFeedbackPanel works).
+            .sheet(isPresented: $showEve) {
+                EveSheetHost(
+                    scope: eveScope,
+                    drawingId: eveScope == .drawing ? currentDrawingID : nil,
+                    critiqueSequence: eveCritiqueSequence,
+                    drawingTitle: eveDrawingTitle,
+                    onClose: { showEve = false }
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
             }
         }
     }
@@ -1353,8 +1386,38 @@ struct DrawingCanvasView: View {
                 FloatingFeedbackPanel(
                     feedback: canvasState.feedback,
                     critiqueHistory: critiqueHistory,
-                    isPresented: $showFeedback
+                    isPresented: $showFeedback,
+                    onAskEve: { sequence in
+                        openEve(scope: .drawing, critiqueSequence: sequence)
+                    }
                 )
+            }
+
+            // Eve floating panel — iPad. Renders in the same ZStack as the
+            // feedback panel so the canvas remains visible behind both.
+            // Right-edge drawer shape; transition slides in from the right
+            // and out the same way. Manager + presentation state live on
+            // showEve / eveScope / eveCritiqueSequence so each open creates
+            // a fresh conversation per Phase 2A spec (no list view yet).
+            if showEve {
+                GeometryReader { geo in
+                    HStack {
+                        Spacer()
+                        EveSheetHost(
+                            scope: eveScope,
+                            drawingId: eveScope == .drawing ? currentDrawingID : nil,
+                            critiqueSequence: eveCritiqueSequence,
+                            drawingTitle: eveDrawingTitle,
+                            onClose: { showEve = false }
+                        )
+                        .frame(width: 460, height: min(720, geo.size.height - 80))
+                        .background(Color(uiColor: .systemBackground))
+                        .cornerRadius(16)
+                        .shadow(radius: 12)
+                        .padding(.trailing, 16)
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
             // Selection actions overlay — iPad positioning. The card
@@ -1394,6 +1457,18 @@ struct DrawingCanvasView: View {
                                 .clipShape(Circle())
                                 .shadow(radius: 4)
                         }
+
+                        // Eve coach — Feature 2, Phase 2A. Sits in the
+                        // always-visible tier alongside Gallery (above
+                        // the collapsible group) so the user can reach
+                        // Eve even when the toolbar's hidden for focus.
+                        // Lower visual weight than Gallery (44×44 with
+                        // .primary monochrome treatment) so it doesn't
+                        // visually compete with the "Get Feedback" CTA.
+                        // iPhone path defers this affordance — iPhone
+                        // users reach Eve via Ask Eve on FloatingFeedback-
+                        // Panel only (per Phase 2A spec).
+                        EveIconButton(action: { openEve(scope: .general) })
 
                         if !isToolbarCollapsed {
                             settingsGearButton
@@ -1736,6 +1811,31 @@ struct DrawingCanvasView: View {
             }
         }
         .transition(.move(edge: .trailing).combined(with: .opacity))
+    }
+
+    /// Opens the Eve coach sheet/panel with the given scope. Reads the
+    /// current drawing's title from in-memory storage so the EveContextChip
+    /// can render "About your drawing 'Forest at Dusk'" without an extra
+    /// round-trip. iPad presents an in-place overlay (see padBody); iPhone
+    /// uses a .sheet attached to the body wrapper. Both paths key off
+    /// `showEve` so the dismiss button works the same in both idioms.
+    private func openEve(scope: EveScope, critiqueSequence: Int? = nil) {
+        eveScope = scope
+        eveCritiqueSequence = critiqueSequence
+        eveDrawingTitle = currentDrawingTitle
+        // Use a soft animation on iPad so the panel slides in; iPhone's
+        // sheet has its own animation.
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+            showEve = true
+        }
+    }
+
+    /// Best-effort lookup of the current drawing's title for the Eve
+    /// context chip. Returns nil when no drawing is saved yet (fresh
+    /// canvas — Eve will fall back to a generic chip label).
+    private var currentDrawingTitle: String? {
+        guard let id = currentDrawingID else { return nil }
+        return storageManager.drawings.first(where: { $0.id == id })?.title
     }
 
     private var settingsGearButton: some View {

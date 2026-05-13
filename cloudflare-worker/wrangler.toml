@@ -76,6 +76,38 @@ APP_ATTEST_ENV = "development"             # "development" | "production"
 # protected-route round-trip end-to-end.
 APP_ATTEST_REQUIRED = "false"              # "true" | "false"
 
+# Feature 1, Phase 1A — cross-drawing iterative coaching kill-switch.
+# When "true", the feedback handler fetches the user's other recent
+# drawings + their per-user opt-out preference, and (when both gates pass
+# AND the registry has at least 3 rows) renders a registry block in the
+# user-role message so the coach can reference other drawings by title.
+# When "false" or unset, the entire feature is bypassed end-to-end —
+# zero added Supabase reads, zero prompt-block delta, behavior is bit-for-
+# bit identical to pre-feature production. The persisted critique entry
+# still records prompt_config.crossDrawingContextEnabled (always false in
+# this state) so post-launch analytics can distinguish flag-off requests
+# from user-opt-out requests.
+#
+# Per-user opt-out lives in user_preferences.cross_drawing_context_enabled
+# (migration 0011, default true). Settings UI ships in a later iOS PR.
+CROSS_DRAWING_CONTEXT_ENABLED = "true"     # "true" | "false"
+
+# Feature 2, Phase 2A — Eve conversational coach rate limits.
+# Eve sends share the global DAILY_SPEND_CAP and PER_USER_DAILY_TOKEN_CAP
+# with the critique flow (one wallet, two paths). The per-minute and
+# per-day MESSAGE counts below are Eve-specific, so a user can have a
+# rapid back-and-forth with Eve without burning their critique allowance.
+#
+# EVE_MAX_TURNS_PER_CONVERSATION is the per-conversation hard ceiling.
+# At the limit, /v1/eve/conversations/:id/messages returns 409
+# conversation_full and the client should prompt the user to start a new
+# conversation. One "turn" = one user message + one assistant message.
+EVE_PER_MINUTE_FREE = "10"
+EVE_PER_MINUTE_PRO = "30"
+EVE_PER_DAY_FREE = "60"
+EVE_PER_DAY_PRO = "600"
+EVE_MAX_TURNS_PER_CONVERSATION = "100"
+
 # Workers Logs — without this, console.log output is silently dropped at the
 # Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for
 # cost control once volume warrants it.
