@@ -1393,41 +1393,12 @@ struct DrawingCanvasView: View {
                 )
             }
 
-            // Eve floating panel — iPad. Centered on the canvas with a
-            // scale-fade transition. Earlier iteration was right-edged
-            // (drawer shape) but clipped behind the right-side action
-            // column (Gallery / EVE / Settings / etc.) on every iPad
-            // size, so the panel moved to center where it has room and
-            // no z-order fights with chrome. Tradeoff: the canvas is
-            // occluded mid-screen while Eve is open — accepted, since
-            // a focused conversation is the goal, not draw-while-talk.
-            //
-            // Width 560 reads well on landscape (~half-screen) and
-            // portrait (~70% of the narrower axis). Height caps at 820
-            // with 80pt of breathing room so the panel never butts up
-            // against the canvas edges on smaller iPads. Both axes
-            // clamp against the geometry so an unusually small split-
-            // screen pane still fits the panel.
-            if showEve {
-                GeometryReader { geo in
-                    EveSheetHost(
-                        scope: eveScope,
-                        drawingId: eveScope == .drawing ? currentDrawingID : nil,
-                        critiqueSequence: eveCritiqueSequence,
-                        drawingTitle: eveDrawingTitle,
-                        onClose: { showEve = false }
-                    )
-                    .frame(
-                        width: min(560, geo.size.width - 40),
-                        height: min(820, geo.size.height - 80)
-                    )
-                    .background(Color(uiColor: .systemBackground))
-                    .cornerRadius(16)
-                    .shadow(radius: 12)
-                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                }
-                .transition(.scale(scale: 0.95).combined(with: .opacity))
-            }
+            // Eve floating panel renders at the END of padBody (below) so
+            // it's the topmost layer in the ZStack — above the action
+            // column, the bottom-right CTAs, and the canvas itself. The
+            // earlier in-stack position let the action column win the
+            // z-fight and let canvas touches pass through to the brush
+            // pipeline. See the `// Eve modal — iPad` block below.
 
             // Selection actions overlay — iPad positioning. The card
             // content (caption + Cancel + Delete pills) lives in the
@@ -1500,6 +1471,53 @@ struct DrawingCanvasView: View {
             // button landed in Phase 6.
             if !isToolbarCollapsed {
                 bottomRightActionButtons
+            }
+
+            // Eve modal — iPad. Renders LAST in the padBody ZStack so the
+            // dim backdrop and the panel sit above everything else (canvas,
+            // tool rail, action column, bottom CTAs). The dim layer absorbs
+            // touches via the default hit-testing — without it the user
+            // could keep drawing / switching tools / tapping Get Feedback
+            // while Eve was open, which broke the "focused conversation"
+            // promise. Tap-outside dismisses, matching the iPhone .sheet
+            // behavior (which provides this for free) and standard iOS
+            // modal convention.
+            //
+            // Width 560 reads well on landscape (~half-screen) and
+            // portrait (~70% of the narrower axis). Height caps at 820
+            // with 80pt of breathing room. Both axes clamp against the
+            // geometry so an unusually small split-screen pane still
+            // fits the panel.
+            if showEve {
+                Color.black
+                    .opacity(0.35)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                            showEve = false
+                        }
+                    }
+                    .transition(.opacity)
+
+                GeometryReader { geo in
+                    EveSheetHost(
+                        scope: eveScope,
+                        drawingId: eveScope == .drawing ? currentDrawingID : nil,
+                        critiqueSequence: eveCritiqueSequence,
+                        drawingTitle: eveDrawingTitle,
+                        onClose: { showEve = false }
+                    )
+                    .frame(
+                        width: min(560, geo.size.width - 40),
+                        height: min(820, geo.size.height - 80)
+                    )
+                    .background(Color(uiColor: .systemBackground))
+                    .cornerRadius(16)
+                    .shadow(radius: 12)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
+                .transition(.scale(scale: 0.95).combined(with: .opacity))
             }
         }
         // Note: sheets / alerts / fullScreenCover / onChange / onAppear /
