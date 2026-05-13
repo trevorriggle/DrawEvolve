@@ -4,21 +4,24 @@
 //
 //  Custom color picker (Phase 3 — Color System Overhaul, 2026-05-13).
 //
-//  Refactor preserves the external surface: AdvancedColorPicker is still
-//  presented from DrawingCanvasView with the same @Binding<UIColor>
-//  signature. Internals are entirely new:
-//    - Picker opens to the exact current color (no more "reset to vivid"
-//      that the v1 implementation did on every open).
-//    - HSB / RGB segmented control switches slider modes non-
-//      destructively.
-//    - Hex field with live validation and commit-on-Return.
-//    - Active palette section reads from PaletteManager, with a Menu-
-//      based switcher and a "Generate from canvas" button.
-//    - Recent colors strip at the bottom shows the last 16 colors used.
+//  Phase 3.1 picker UI redesign (2026-05-13):
+//    - Horizontal pill row replaces Menu switcher; active palette is
+//      always one tap away.
+//    - Trailing dashed "+" pill creates a new palette and immediately
+//      enters inline rename mode.
+//    - Explicit Edit toggle governs BOTH the pill row (× = delete,
+//      long-press = rename) AND the swatch grid (× = remove swatch).
+//    - "+ add current" trailing slot in the swatch grid previews the
+//      active color and saves it to the active palette on tap; a brief
+//      checkmark fade confirms.
+//    - Long-press on pills (in either mode) opens inline rename.
+//    - Manage-palettes sheet and per-swatch context menus removed —
+//      edit mode is the only mutation surface.
 //
-//  External callers should pass `compositeImage` if they want the
-//  "Generate from canvas" button to function (the picker can't fetch
-//  the canvas composite on its own — that's a caller concern).
+//  External surface preserved: AdvancedColorPicker is still presented
+//  from DrawingCanvasView with the same @Binding<UIColor> signature.
+//  Backing data layer (PaletteManager, BrushSettings persistence,
+//  recent-color dedupe) is untouched — this is a view rewrite only.
 //
 
 import SwiftUI
@@ -46,21 +49,37 @@ struct AdvancedColorPicker: View {
     @State private var blue: Double = 0
 
     @State private var hexText: String = "#000000"
-    @State private var hexFieldFocused: Bool = false
     @State private var hexFieldInvalid: Bool = false
 
     @State private var sliderMode: SliderMode = .hsb
 
     /// Captured at .onAppear so we can decide whether to write a
-    /// recent-color entry on .onDisappear. If the user opens and
-    /// closes the picker without changing anything, no recent-color
-    /// entry is written (the previous active color is still active).
+    /// recent-color entry on .onDisappear.
     @State private var openingColor: UIColor = .black
 
     @State private var showGeneratedPreview: Bool = false
     @State private var generatedColors: [UIColor] = []
     @State private var isGenerating: Bool = false
     @State private var generationError: String? = nil
+
+    // MARK: - Edit mode + rename state (Phase 3.1)
+
+    /// Single mode flag that gates BOTH pill deletes and swatch deletes.
+    /// While true: × buttons appear on pills and swatches, tap-to-activate
+    /// is suppressed on pills, tap-to-pick is suppressed on swatches, and
+    /// the "+ add current" trailing slot hides.
+    @State private var isEditMode: Bool = false
+
+    /// When non-nil, the matching pill swaps its text for an inline
+    /// TextField focused for renaming. Submit / focus-loss commits;
+    /// empty after trim cancels.
+    @State private var pendingRenameID: UUID? = nil
+    @State private var pendingRenameText: String = ""
+    @FocusState private var renameFocused: Bool
+
+    /// Briefly true after "+ add current" succeeds — drives the
+    /// checkmark fade on the trailing slot's badge.
+    @State private var addCurrentJustSaved: Bool = false
 
     enum SliderMode: String, CaseIterable, Identifiable {
         case hsb = "HSB"
@@ -86,15 +105,9 @@ struct AdvancedColorPicker: View {
             syncStateFromSelectedColor()
         }
         .onChange(of: selectedColor) { _, newValue in
-            // External writes to the binding (eyedropper, palette taps
-            // from outside this view) should keep the slider state in
-            // sync without firing the slider→color writeback loop.
             syncStateFromSelectedColor(skipFor: newValue)
         }
         .onDisappear {
-            // Commit the final color to recents when the picker
-            // dismisses, if it changed during the session. Dedupe in
-            // PaletteManager.addRecentColor absorbs accidental dupes.
             if !PaletteManager.colorsAreEqualForRecent(openingColor, selectedColor) {
                 paletteManager.addRecentColor(selectedColor)
             }
@@ -122,8 +135,6 @@ struct AdvancedColorPicker: View {
 
     private var activeColorAndInputs: some View {
         HStack(alignment: .top, spacing: 16) {
-            // Preview swatch with a checkerboard pattern behind so
-            // alpha is visible at a glance.
             ZStack {
                 CheckerboardBackground()
                     .frame(width: 96, height: 96)
@@ -163,9 +174,6 @@ struct AdvancedColorPicker: View {
                 )
                 .onSubmit { commitHex() }
                 .onChange(of: hexText) { _, newValue in
-                    // Live validation: turn the border red on invalid,
-                    // commit on valid 6-digit hex without waiting for
-                    // Return.
                     if let color = parseHex(newValue) {
                         hexFieldInvalid = false
                         applyColor(color)
@@ -333,29 +341,12 @@ struct AdvancedColorPicker: View {
         }
     }
 
-    // MARK: - Section: Active palette + generate
+    // MARK: - Section: Palette pill row + swatches (Phase 3.1)
 
     private var paletteSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                paletteSwitcherMenu
-                Spacer(minLength: 8)
-                if compositeImage != nil {
-                    Button(action: triggerGenerate) {
-                        if isGenerating {
-                            HStack(spacing: 6) {
-                                ProgressView().controlSize(.small)
-                                Text("Generating…").font(.subheadline)
-                            }
-                        } else {
-                            Label("Generate from canvas", systemImage: "wand.and.stars")
-                                .font(.subheadline.weight(.medium))
-                        }
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(isGenerating)
-                }
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            paletteHeader
+            palettePillRow
 
             if let message = generationError {
                 Text(message)
@@ -367,56 +358,210 @@ struct AdvancedColorPicker: View {
         }
     }
 
-    private var paletteSwitcherMenu: some View {
-        Menu {
-            ForEach(paletteManager.palettes) { p in
-                Button(action: { paletteManager.activePaletteID = p.id }) {
-                    if p.id == paletteManager.activePaletteID {
-                        Label(p.name, systemImage: "checkmark")
+    private var paletteHeader: some View {
+        HStack(spacing: 12) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { isEditMode.toggle() } }) {
+                Text(isEditMode ? "Done" : "Edit")
+                    .font(.subheadline.weight(.medium))
+            }
+            .buttonStyle(.borderless)
+            .disabled(paletteManager.palettes.isEmpty)
+
+            Spacer()
+
+            if compositeImage != nil {
+                Button(action: triggerGenerate) {
+                    if isGenerating {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Generating…").font(.subheadline)
+                        }
                     } else {
-                        Text(p.name)
+                        Label("Generate from canvas", systemImage: "wand.and.stars")
+                            .font(.subheadline.weight(.medium))
                     }
                 }
+                .buttonStyle(.borderless)
+                .disabled(isGenerating || isEditMode)
             }
-            Divider()
-            Button(action: { /* hook in PaletteManagerView in a follow-up */ }) {
-                Label("Manage palettes…", systemImage: "slider.horizontal.3")
-            }
-            .disabled(true)
-        } label: {
-            HStack(spacing: 4) {
-                Text(activePaletteName)
-                    .font(.headline)
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.bold))
-            }
-            .foregroundStyle(.primary)
         }
     }
 
-    private var activePaletteName: String {
-        if let id = paletteManager.activePaletteID,
-           let p = paletteManager.palettes.first(where: { $0.id == id }) {
-            return p.name
+    private var palettePillRow: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(paletteManager.palettes) { p in
+                        palettePill(p)
+                            .id(p.id)
+                    }
+                    createPalettePill
+                        .id("create-palette-pill")
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 1)
+            }
+            .onChange(of: paletteManager.activePaletteID) { _, newID in
+                guard let id = newID else { return }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
         }
-        return paletteManager.palettes.first?.name ?? "No palette"
+    }
+
+    private func palettePill(_ p: Palette) -> some View {
+        let isActive = p.id == paletteManager.activePaletteID
+        let isRenaming = pendingRenameID == p.id
+
+        return HStack(spacing: 6) {
+            if isRenaming {
+                TextField("Name", text: $pendingRenameText)
+                    .focused($renameFocused)
+                    .submitLabel(.done)
+                    .onSubmit { commitRename() }
+                    .onChange(of: renameFocused) { _, focused in
+                        // Tapping anywhere outside the field commits.
+                        if !focused && pendingRenameID == p.id {
+                            commitRename()
+                        }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(isActive ? .white : .primary)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .frame(minWidth: 80, maxWidth: 160)
+            } else {
+                Text(p.name)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(isActive ? .white : .primary)
+                    .lineLimit(1)
+            }
+
+            if isEditMode && !isRenaming {
+                Button {
+                    Task { try? await paletteManager.deletePalette(id: p.id) }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(isActive ? Color.white.opacity(0.85) : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(isActive ? Color.accentColor : Color(uiColor: .tertiarySystemFill))
+        )
+        .contentShape(Capsule())
+        .onTapGesture {
+            guard !isRenaming else { return }
+            // Edit-mode tap is a no-op on pills — × is the only mutator.
+            guard !isEditMode else { return }
+            paletteManager.activePaletteID = p.id
+        }
+        .onLongPressGesture(minimumDuration: 0.4) {
+            beginRename(p)
+        }
+    }
+
+    private var createPalettePill: some View {
+        Button(action: handleCreatePalette) {
+            Image(systemName: "plus")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .strokeBorder(
+                            Color(uiColor: .separator),
+                            style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]),
+                        )
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isEditMode)
+        .opacity(isEditMode ? 0.4 : 1.0)
     }
 
     private var paletteSwatches: some View {
-        let palette = paletteManager.palettes.first { $0.id == paletteManager.activePaletteID }
+        let activePalette = paletteManager.palettes.first { $0.id == paletteManager.activePaletteID }
             ?? paletteManager.palettes.first
-        let colors = palette?.colors.map { $0.uiColor } ?? []
+        let colors = activePalette?.colors.map { $0.uiColor } ?? []
+        let activeID = activePalette?.id
+
         return LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 8),
-            spacing: 10
+            spacing: 10,
         ) {
-            ForEach(Array(colors.enumerated()), id: \.offset) { _, color in
-                ColorSwatch(color: color, isActive: PaletteManager.colorsAreEqualForRecent(color, selectedColor))
-                    .onTapGesture {
-                        applyColor(color)
-                        paletteManager.addRecentColor(color)
-                    }
+            ForEach(Array(colors.enumerated()), id: \.offset) { index, color in
+                swatchCell(color: color, index: index, paletteID: activeID)
             }
+            if !isEditMode, let pid = activeID {
+                addCurrentSlot(paletteID: pid)
+            }
+        }
+    }
+
+    private func swatchCell(color: UIColor, index: Int, paletteID: UUID?) -> some View {
+        let isActive = PaletteManager.colorsAreEqualForRecent(color, selectedColor)
+        return ZStack(alignment: .topTrailing) {
+            ColorSwatch(color: color, isActive: isActive)
+                .onTapGesture {
+                    guard !isEditMode else { return }
+                    applyColor(color)
+                    paletteManager.addRecentColor(color)
+                }
+
+            if isEditMode, let pid = paletteID {
+                Button {
+                    Task { try? await paletteManager.removeColor(at: index, fromPaletteID: pid) }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .background(Circle().fill(Color(uiColor: .systemBackground)))
+                }
+                .buttonStyle(.plain)
+                .offset(x: 4, y: -4)
+            }
+        }
+    }
+
+    /// Trailing "+" cell in the swatch grid. Previews the active color so
+    /// the user sees what they're about to save; tapping appends it to
+    /// the active palette and flashes a checkmark for ~0.5s.
+    private func addCurrentSlot(paletteID: UUID) -> some View {
+        ZStack(alignment: .topTrailing) {
+            ZStack {
+                CheckerboardBackground()
+                    .clipShape(Circle())
+                Circle().fill(Color(selectedColor))
+            }
+            .frame(width: 32, height: 32)
+            .overlay(
+                Circle().stroke(Color(uiColor: .separator), lineWidth: 1)
+            )
+
+            ZStack {
+                Circle()
+                    .fill(addCurrentJustSaved ? Color.green : Color.accentColor)
+                    .frame(width: 16, height: 16)
+                Image(systemName: addCurrentJustSaved ? "checkmark" : "plus")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            .offset(x: 4, y: -4)
+            .animation(.easeInOut(duration: 0.2), value: addCurrentJustSaved)
+        }
+        .frame(width: 32, height: 32)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Task { await handleAddCurrent(paletteID: paletteID) }
         }
     }
 
@@ -432,14 +577,62 @@ struct AdvancedColorPicker: View {
                         ColorSwatch(color: color, isActive: PaletteManager.colorsAreEqualForRecent(color, selectedColor))
                             .onTapGesture {
                                 applyColor(color)
-                                // Recent tap also bumps the color back
-                                // to the front of the recent list (most-
-                                // recently-used semantics).
                                 paletteManager.addRecentColor(color)
                             }
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Palette mutation helpers (Phase 3.1)
+
+    private func beginRename(_ p: Palette) {
+        pendingRenameID = p.id
+        pendingRenameText = p.name
+        renameFocused = true
+    }
+
+    private func commitRename() {
+        guard let id = pendingRenameID else { return }
+        let trimmed = pendingRenameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalName = paletteManager.palettes.first(where: { $0.id == id })?.name
+        pendingRenameID = nil
+        pendingRenameText = ""
+        renameFocused = false
+        // Empty-after-trim or unchanged → no-op.
+        guard !trimmed.isEmpty, trimmed != originalName else { return }
+        Task { try? await paletteManager.renamePalette(id: id, to: trimmed) }
+    }
+
+    private func handleCreatePalette() {
+        Task {
+            do {
+                try await paletteManager.createPalette(name: "New palette", colors: [])
+                if let newID = paletteManager.activePaletteID {
+                    // Small yield so the pill renders before we focus the
+                    // TextField — SwiftUI .focused needs the field in the
+                    // hierarchy first.
+                    try? await Task.sleep(for: .milliseconds(80))
+                    pendingRenameID = newID
+                    pendingRenameText = "New palette"
+                    renameFocused = true
+                }
+            } catch {
+                // Optimistic insert rolled back inside PaletteManager.
+            }
+        }
+    }
+
+    private func handleAddCurrent(paletteID: UUID) async {
+        do {
+            try await paletteManager.addColor(selectedColor, toPaletteID: paletteID)
+            paletteManager.addRecentColor(selectedColor)
+            addCurrentJustSaved = true
+            try? await Task.sleep(for: .milliseconds(500))
+            addCurrentJustSaved = false
+        } catch {
+            // Optimistic insert rolled back; surface nothing for now.
         }
     }
 
@@ -453,14 +646,9 @@ struct AdvancedColorPicker: View {
     // to keep them coherent. The .onChange(of: selectedColor) handler
     // catches outside writes (eyedropper, palette tap from another
     // view) and syncs the same way.
-    //
-    // We track whether the write came from us or from outside via the
-    // skipFor parameter on syncStateFromSelectedColor — without it we
-    // could ping-pong on every slider drag.
 
     private func applyColor(_ color: UIColor) {
         selectedColor = color
-        // syncStateFromSelectedColor will fire via the .onChange handler.
     }
 
     private func syncStateFromSelectedColor(skipFor _: UIColor? = nil) {
@@ -489,13 +677,9 @@ struct AdvancedColorPicker: View {
 
     private func writeBackFromHSB() {
         let newColor = UIColor(hue: hue, saturation: saturation, brightness: brightness, alpha: alpha)
-        // Only apply if changed enough — float precision in HSB↔RGB
-        // round-trips can otherwise cause invisible feedback loops.
         if !PaletteManager.colorsAreEqualForRecent(newColor, selectedColor) {
             applyColor(newColor)
         } else if newColor != selectedColor {
-            // Within tolerance but not bit-equal — write through so the
-            // user's slider drag is reflected exactly.
             selectedColor = newColor
             syncStateFromSelectedColor()
         }
@@ -530,9 +714,6 @@ struct AdvancedColorPicker: View {
         let r = CGFloat((value >> 16) & 0xff) / 255.0
         let g = CGFloat((value >> 8) & 0xff) / 255.0
         let b = CGFloat(value & 0xff) / 255.0
-        // Hex doesn't carry alpha (6-digit only, per spec) — preserve
-        // the picker's current alpha so the opacity slider is the
-        // sole source of truth for alpha.
         return UIColor(red: r, green: g, blue: b, alpha: alpha)
     }
 
@@ -721,10 +902,6 @@ struct ColorPresets {
 }
 
 // MARK: - Tolerance helper on PaletteManager
-//
-// Exposed at type-level so views can compare colors without re-implementing
-// the Euclidean-distance math. Kept in extension so the picker doesn't
-// import a redundant copy.
 
 extension PaletteManager {
     static func colorsAreEqualForRecent(_ a: UIColor, _ b: UIColor, threshold: CGFloat = 12.0) -> Bool {
