@@ -30,6 +30,12 @@ struct EvolutionPanelView: View {
     let isRefreshing: Bool
     let onRefresh: () -> Void
 
+    /// Phase 4 — when the user taps a card in the "Recommended next"
+    /// section, this fires with the picked recommendation. Optional
+    /// so existing callers without recommendations wiring still
+    /// compile (the section just hides when nil).
+    var onUseRecommendation: ((Recommendation) -> Void)? = nil
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -39,6 +45,14 @@ struct EvolutionPanelView: View {
                     isRefreshing: isRefreshing,
                     onRefresh: onRefresh
                 )
+
+                // Phase 4 — Recommended next. Renders only when the
+                // parent supplied an onUseRecommendation callback (so
+                // the section can route the user to the new-canvas
+                // setup screen with the subject pre-filled).
+                if let onUseRecommendation {
+                    RecommendedNextSection(onUseRecommendation: onUseRecommendation)
+                }
 
                 // v3 — Skill Radar (compact) + Studio Wall (hero).
                 // The radar shows shape change ("Then vs Now"); the
@@ -53,6 +67,121 @@ struct EvolutionPanelView: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
+        }
+    }
+}
+
+// =============================================================================
+// Recommended Next section — Phase 4
+// =============================================================================
+//
+// Inline section near the top of the Evolution panel. Fetches up to
+// 5 recommendations on appear; shows the first 3 as compact cards
+// with a "See all 5" affordance that opens the full RecommendationsView
+// sheet. Tap a card → onUseRecommendation fires with that pick.
+//
+// Failure shape is silent: if the recommendations fetch fails (worker
+// down, kill switch off, rate-limited), the section hides itself
+// rather than showing a red error in the middle of the dashboard.
+// Recommendations are a bonus, not a primary surface.
+
+private struct RecommendedNextSection: View {
+    let onUseRecommendation: (Recommendation) -> Void
+
+    @State private var recommendations: [Recommendation] = []
+    @State private var loadState: LoadState = .idle
+    @State private var showFullSheet = false
+
+    enum LoadState: Equatable {
+        case idle
+        case loading
+        case loaded
+        case failed
+    }
+
+    var body: some View {
+        Group {
+            switch loadState {
+            case .idle, .loading:
+                loadingState
+            case .failed:
+                EmptyView()
+            case .loaded:
+                if recommendations.isEmpty {
+                    EmptyView()
+                } else {
+                    loadedState
+                }
+            }
+        }
+        .task {
+            await load()
+        }
+        .sheet(isPresented: $showFullSheet) {
+            RecommendationsView(onPick: { rec in
+                showFullSheet = false
+                onUseRecommendation(rec)
+            })
+        }
+    }
+
+    private var loadingState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader
+            HStack {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Looking for what to draw next…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var loadedState: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader
+            VStack(spacing: 8) {
+                ForEach(Array(recommendations.prefix(3))) { rec in
+                    RecommendationCard(
+                        recommendation: rec,
+                        onTap: { onUseRecommendation(rec) },
+                        style: .compact,
+                    )
+                }
+            }
+            if recommendations.count > 3 {
+                Button {
+                    showFullSheet = true
+                } label: {
+                    Text("See all \(recommendations.count) suggestions")
+                        .font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(.borderless)
+                .padding(.top, 2)
+            }
+        }
+    }
+
+    private var sectionHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Recommended next")
+                .font(.headline)
+            Spacer()
+        }
+    }
+
+    private func load() async {
+        if loadState == .loading || loadState == .loaded { return }
+        loadState = .loading
+        do {
+            let response = try await RecommendationsService.shared.fetchRecommendations()
+            self.recommendations = response.recommendations
+            self.loadState = .loaded
+        } catch {
+            self.loadState = .failed
         }
     }
 }

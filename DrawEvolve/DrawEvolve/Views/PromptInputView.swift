@@ -12,6 +12,13 @@ struct PromptInputView: View {
     @Binding var isPresented: Bool
     @State private var showGallery = false
 
+    /// Phase 4 — Subject Recommendations. When true, the recommendations
+    /// sheet is presented over the questionnaire. Picking a recommendation
+    /// pre-fills context.subject (and context.focus when the recommendation
+    /// carries a focus area), then dismisses the sheet — the user stays
+    /// on the questionnaire to confirm and proceed.
+    @State private var showRecommendations = false
+
     var body: some View {
         Group {
             if DeviceIdiom.isPhone {
@@ -22,6 +29,19 @@ struct PromptInputView: View {
         }
         .fullScreenCover(isPresented: $showGallery) {
             GalleryView()
+        }
+        .sheet(isPresented: $showRecommendations) {
+            // Phase 4 — when the user picks a recommendation, pre-fill
+            // the subject (always) and the focus area (when present and
+            // the focus field is currently empty — don't clobber what
+            // the user has already typed in the optional focus slot).
+            RecommendationsView(onPick: { rec in
+                context.subject = rec.subject
+                if context.focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    context.focus = rec.focusArea
+                }
+                showRecommendations = false
+            })
         }
     }
 
@@ -65,6 +85,14 @@ struct PromptInputView: View {
                         .textInputAutocapitalization(.sentences)
                         .textContentType(.none)
                         .autocorrectionDisabled()
+                    Button {
+                        showRecommendations = true
+                    } label: {
+                        Label("See suggestions", systemImage: "sparkles")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(.top, 2)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -214,6 +242,14 @@ struct PromptInputView: View {
                                 .textInputAutocapitalization(.sentences)
                                 .textContentType(.none)
                                 .autocorrectionDisabled()
+                            Button {
+                                showRecommendations = true
+                            } label: {
+                                Label("See suggestions", systemImage: "sparkles")
+                                    .font(.subheadline.weight(.medium))
+                            }
+                            .buttonStyle(.borderless)
+                            .padding(.top, 2)
                         }
 
                         VStack(alignment: .leading, spacing: 8) {

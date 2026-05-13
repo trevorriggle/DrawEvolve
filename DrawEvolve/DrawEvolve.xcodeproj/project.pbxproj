@@ -103,6 +103,10 @@
 		DE000110 /* EveInputBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100110 /* EveInputBar.swift */; };
 		DE000111 /* EveConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100111 /* EveConversationView.swift */; };
 		DE000112 /* EveSheetHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100112 /* EveSheetHost.swift */; };
+		DE000113 /* Recommendation.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100113 /* Recommendation.swift */; };
+		DE000114 /* RecommendationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100114 /* RecommendationsService.swift */; };
+		DE000115 /* RecommendationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100115 /* RecommendationCard.swift */; };
+		DE000116 /* RecommendationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100116 /* RecommendationsView.swift */; };
 		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
@@ -206,6 +210,10 @@
 		DE100110 /* EveInputBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveInputBar.swift; sourceTree = "<group>"; };
 		DE100111 /* EveConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversationView.swift; sourceTree = "<group>"; };
 		DE100112 /* EveSheetHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveSheetHost.swift; sourceTree = "<group>"; };
+		DE100113 /* Recommendation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recommendation.swift; sourceTree = "<group>"; };
+		DE100114 /* RecommendationsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationsService.swift; sourceTree = "<group>"; };
+		DE100115 /* RecommendationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationCard.swift; sourceTree = "<group>"; };
+		DE100116 /* RecommendationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationsView.swift; sourceTree = "<group>"; };
 		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -293,6 +301,7 @@
 				DE000316 /* Components */,
 				DE000320 /* Pose */,
 				DE000322 /* Eve */,
+				DE000323 /* Recommendations */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -314,6 +323,7 @@
 				DE100068 /* FloatingText.swift */,
 				DE100070 /* CodableColor.swift */,
 				DE100104 /* EveConversation.swift */,
+				DE100113 /* Recommendation.swift */,
 				DE000319 /* Pose */,
 			);
 			path = Models;
@@ -339,6 +349,7 @@
 				DE100071 /* PathSmoothing.swift */,
 				DE100072 /* TextOnPathRenderer.swift */,
 				DE100105 /* EveService.swift */,
+				DE100114 /* RecommendationsService.swift */,
 				DE000318 /* Vision */,
 				DE000321 /* Pose */,
 			);
@@ -454,6 +465,15 @@
 				DE100112 /* EveSheetHost.swift */,
 			);
 			path = Eve;
+			sourceTree = "<group>";
+		};
+		DE000323 /* Recommendations */ = {
+			isa = PBXGroup;
+			children = (
+				DE100115 /* RecommendationCard.swift */,
+				DE100116 /* RecommendationsView.swift */,
+			);
+			path = Recommendations;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -630,6 +650,10 @@
 				DE000110 /* EveInputBar.swift in Sources */,
 				DE000111 /* EveConversationView.swift in Sources */,
 				DE000112 /* EveSheetHost.swift in Sources */,
+				DE000113 /* Recommendation.swift in Sources */,
+				DE000114 /* RecommendationsService.swift in Sources */,
+				DE000115 /* RecommendationCard.swift in Sources */,
+				DE000116 /* RecommendationsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

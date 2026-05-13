@@ -28,6 +28,7 @@ import {
 import { handlePrompts } from './routes/prompts.js';
 import { handleEvolution, handleEvolutionRefresh } from './routes/evolution.js';
 import { handleEve } from './routes/eve.js';
+import { handleRecommendations } from './routes/recommendations.js';
 import { CORS_HEADERS, jsonResponse } from './lib/http.js';
 
 // Methods allowed on the legacy POST-only routes (/, /attest/*). The new
@@ -89,6 +90,13 @@ export default {
         || /^\/v1\/eve\/conversations\/[^/]+$/.test(pathname)
         || /^\/v1\/eve\/conversations\/[^/]+\/messages$/.test(pathname)) {
       return handleEve(request, env, ctx);
+    }
+
+    // /v1/recommendations — Phase 4 subject-recommendations endpoint.
+    // POST only; handleRecommendations owns its own method gating and
+    // returns 405 for anything else (kept symmetric with handleEve).
+    if (pathname === '/v1/recommendations') {
+      return handleRecommendations(request, env, ctx);
     }
 
     if (POST_ONLY_PATHS.has(pathname) && request.method !== 'POST') {
@@ -178,6 +186,22 @@ export {
 } from './middleware/rate-limit.js';
 
 export { handleEve } from './routes/eve.js';
+
+export {
+  handleRecommendations,
+  isRecommendationsEnabled,
+} from './routes/recommendations.js';
+
+export {
+  RECOMMENDATIONS_SYSTEM_PROMPT,
+  RECOMMENDATIONS_PROMPT_VERSION,
+  buildRecommendationsUserMessage,
+} from './lib/recommendations-prompt.js';
+
+export {
+  RECOMMENDATIONS_SCHEMA,
+  validateRecommendations,
+} from './lib/recommendations-validation.js';
 
 export {
   validateJWT,

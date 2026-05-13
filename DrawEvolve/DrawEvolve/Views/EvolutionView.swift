@@ -32,6 +32,15 @@ struct EvolutionView: View {
     /// populated panel renders `EvolutionFeed.preview()`.
     @State private var showingPreview: Bool = false
 
+    /// Phase 4 — Subject Recommendations. When the user taps a card in
+    /// the "Recommended next" section (rendered inside EvolutionPanelView),
+    /// this callback fires with the picked recommendation. The parent
+    /// (GalleryView via GalleryContent) handles routing — typically by
+    /// pre-filling drawingContext + presenting the PromptInputView cover.
+    /// Optional so existing callers without recommendations wiring still
+    /// compile and run (Evolution still works without it).
+    var onUseRecommendation: ((Recommendation) -> Void)? = nil
+
     var body: some View {
         ZStack(alignment: .top) {
             Group {
@@ -89,7 +98,8 @@ struct EvolutionView: View {
                 isRefreshing: viewModel.isRefreshingInsights,
                 onRefresh: {
                     Task { await viewModel.refreshInsights() }
-                }
+                },
+                onUseRecommendation: onUseRecommendation
             )
         }
     }

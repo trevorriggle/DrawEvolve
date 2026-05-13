@@ -79,7 +79,19 @@ struct GalleryView: View {
         GalleryContent(
             selectedDrawing: $selectedDrawing,
             detailEditedTitle: $detailEditedTitle,
-            showPromptFirst: $showPromptFirst
+            showPromptFirst: $showPromptFirst,
+            onApplyRecommendation: { rec in
+                // Phase 4 — tapping a recommendation card in Evolution
+                // pre-fills the drawing context and pops the prompt-
+                // input cover. drawingContext lives on this shell view
+                // (line 76), so mutating it from a closure plays nicely
+                // with the shell's stable cover modifiers.
+                drawingContext.subject = rec.subject
+                if drawingContext.focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    drawingContext.focus = rec.focusArea
+                }
+                showPromptFirst = true
+            }
         )
         .fullScreenCover(item: $selectedDrawing) { drawing in
             DrawingDetailView(
@@ -147,6 +159,13 @@ private struct GalleryContent: View {
     @Binding var detailEditedTitle: String
     @Binding var showPromptFirst: Bool
 
+    /// Phase 4 — closure into the shell that pre-fills drawingContext
+    /// and triggers the prompt-input cover. Lives on the shell because
+    /// drawingContext is owned there (the shell's stability is the
+    /// whole point of the file's architectural split — see header). A
+    /// closure threads the action without breaking that stability.
+    let onApplyRecommendation: (Recommendation) -> Void
+
     // State internal to the content view — sheets, alerts, tab
     // selection. Nothing here triggers a cover at the shell level.
     @State private var showPromptEditor = false
@@ -196,7 +215,7 @@ private struct GalleryContent: View {
                     case .prompts:
                         myPromptsView
                     case .evolution:
-                        EvolutionView()
+                        EvolutionView(onUseRecommendation: onApplyRecommendation)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

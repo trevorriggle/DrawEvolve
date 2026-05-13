@@ -25,6 +25,13 @@ import {
   renderCoachingContextBlock,
   parseCritiqueSummary,
   fetchCoachingContext,
+  handleRecommendations,
+  isRecommendationsEnabled,
+  RECOMMENDATIONS_SYSTEM_PROMPT,
+  RECOMMENDATIONS_PROMPT_VERSION,
+  buildRecommendationsUserMessage,
+  RECOMMENDATIONS_SCHEMA,
+  validateRecommendations,
   EVE_TIER_LIMITS,
   readEveTierLimits,
   readEveMaxTurnsPerConversation,
@@ -6689,4 +6696,469 @@ test('handleEve POST /:id/messages on drawing scope excludes current drawing + s
     assert.ok(openaiCallSystemPrompt.includes('this is the full anchor critique body'),
       'full critique body must appear in CURRENT CONTEXT');
   } finally { restore(); }
+});
+
+// =============================================================================
+// Phase 4 — Subject Recommendations
+// =============================================================================
+
+// ---- isRecommendationsEnabled (kill switch) --------------------------------
+
+test('isRecommendationsEnabled is strict — only the literal string "true" enables', () => {
+  assert.equal(isRecommendationsEnabled({ RECOMMENDATIONS_ENABLED: 'true' }), true);
+  assert.equal(isRecommendationsEnabled({ RECOMMENDATIONS_ENABLED: 'false' }), false);
+  assert.equal(isRecommendationsEnabled({ RECOMMENDATIONS_ENABLED: '' }), false);
+  assert.equal(isRecommendationsEnabled({ RECOMMENDATIONS_ENABLED: 'TRUE' }), false);
+  assert.equal(isRecommendationsEnabled({ RECOMMENDATIONS_ENABLED: '1' }), false);
+  assert.equal(isRecommendationsEnabled({ RECOMMENDATIONS_ENABLED: true }), false);
+  assert.equal(isRecommendationsEnabled({}), false);
+  assert.equal(isRecommendationsEnabled(null), false);
+});
+
+// ---- RECOMMENDATIONS_SCHEMA + system prompt regression guards --------------
+
+test('RECOMMENDATIONS_PROMPT_VERSION is 1 (Phase 4 initial)', () => {
+  assert.equal(RECOMMENDATIONS_PROMPT_VERSION, 1);
+});
+
+test('RECOMMENDATIONS_SYSTEM_PROMPT contains the three load-bearing mix rules', () => {
+  // Regression guard: don't drop the skill_targeting / variety / stretch
+  // mix rule without a deliberate version bump.
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('Skill targeting'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('Variety'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('Stretch'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('exactly 5'));
+  assert.ok(RECOMMENDATIONS_SYSTEM_PROMPT.includes('fundamentals'),
+    'empty-portfolio fallback instruction must be present');
+});
+
+test('RECOMMENDATIONS_SCHEMA enforces minItems and maxItems at 5', () => {
+  assert.equal(RECOMMENDATIONS_SCHEMA.schema.properties.recommendations.minItems, 5);
+  assert.equal(RECOMMENDATIONS_SCHEMA.schema.properties.recommendations.maxItems, 5);
+  assert.equal(RECOMMENDATIONS_SCHEMA.strict, true);
+  // additionalProperties: false on both levels — OpenAI's strict mode
+  // requires this on every object in the schema.
+  assert.equal(RECOMMENDATIONS_SCHEMA.schema.additionalProperties, false);
+  assert.equal(RECOMMENDATIONS_SCHEMA.schema.properties.recommendations.items.additionalProperties, false);
+});
+
+test('RECOMMENDATIONS_SCHEMA enum stays at the agreed 3 values', () => {
+  const enums = RECOMMENDATIONS_SCHEMA.schema.properties.recommendations.items
+    .properties.recommendation_type.enum;
+  assert.deepEqual(enums, ['skill_targeting', 'variety', 'stretch']);
+});
+
+// ---- buildRecommendationsUserMessage ---------------------------------------
+
+test('buildRecommendationsUserMessage uses fundamentals path on empty portfolio', () => {
+  const msg = buildRecommendationsUserMessage({ drawings: [], summaries: [] });
+  assert.ok(msg.includes('new user with no drawings yet'));
+  assert.ok(msg.includes('fundamentals'));
+  assert.ok(msg.includes('exactly 5'));
+});
+
+test('buildRecommendationsUserMessage renders drawing rows + summary blocks when present', () => {
+  const msg = buildRecommendationsUserMessage({
+    drawings: [{
+      drawing_id: 'd1', title: 'Forest at Dusk', subject: 'landscape',
+      relative_time: '3 days ago', total_critiques: 2,
+      last_critique: { focus_area_text: 'value grouping', primary_category: 'value' },
+    }],
+    summaries: [{
+      drawing_id: 'd1', drawing_title: 'Forest at Dusk',
+      relative_time: '3 days ago',
+      summary_bullets: ['values flat', 'try three-zone'],
+    }],
+  });
+  assert.ok(msg.includes('"Forest at Dusk"'));
+  assert.ok(msg.includes('landscape'));
+  assert.ok(msg.includes('3 days ago'));
+  assert.ok(msg.includes('value grouping'));
+  assert.ok(msg.includes('values flat'));
+  // No Eve guardrails — recommendations don't reference drawings the
+  // user could ask about, they generate new ones.
+  assert.ok(!msg.includes('never imply'),
+    'Eve guardrail copy must not appear in recommendations user message');
+  assert.ok(!msg.includes('YOUR DRAWING JOURNEY'),
+    'coaching header is Eve-specific, not for recommendations');
+});
+
+test('buildRecommendationsUserMessage gracefully handles malformed coaching context', () => {
+  assert.ok(buildRecommendationsUserMessage(null).length > 0);
+  assert.ok(buildRecommendationsUserMessage({}).length > 0);
+  assert.ok(buildRecommendationsUserMessage({ drawings: 'not-an-array' }).length > 0);
+});
+
+// ---- validateRecommendations -----------------------------------------------
+
+function validRec(overrides = {}) {
+  return {
+    subject: 'still life with three glass objects',
+    rationale: 'You have not done a glass study yet and your value work is ready for it.',
+    focus_area: 'value structure',
+    recommendation_type: 'skill_targeting',
+    ...overrides,
+  };
+}
+
+function validPayload(recs) {
+  return { recommendations: recs ?? Array.from({ length: 5 }, () => validRec()) };
+}
+
+test('validateRecommendations accepts a well-formed 5-item payload', () => {
+  const out = validateRecommendations(validPayload());
+  assert.equal(out.ok, true);
+  assert.equal(out.value.length, 5);
+  assert.equal(out.value[0].subject, 'still life with three glass objects');
+});
+
+test('validateRecommendations trims string fields', () => {
+  const out = validateRecommendations(validPayload([
+    validRec({ subject: '  trim me  ', rationale: '  trim this rationale too  ', focus_area: '  values  ' }),
+    validRec(), validRec(), validRec(), validRec(),
+  ]));
+  assert.equal(out.ok, true);
+  assert.equal(out.value[0].subject, 'trim me');
+  assert.equal(out.value[0].rationale, 'trim this rationale too');
+  assert.equal(out.value[0].focus_area, 'values');
+});
+
+test('validateRecommendations rejects wrong count', () => {
+  assert.equal(validateRecommendations({ recommendations: [validRec(), validRec(), validRec()] }).ok, false);
+  assert.equal(validateRecommendations({ recommendations: Array(6).fill(validRec()) }).ok, false);
+  assert.equal(validateRecommendations({ recommendations: [] }).ok, false);
+});
+
+test('validateRecommendations rejects missing required fields', () => {
+  const baseRecs = Array.from({ length: 4 }, () => validRec());
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, { rationale: 'no subject', focus_area: 'x', recommendation_type: 'variety' }] }).ok, false);
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ subject: '' })] }).ok, false);
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ rationale: 'too short' }) /* < 10 chars */] }).ok, false);
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ recommendation_type: 'unknown_type' })] }).ok, false);
+});
+
+test('validateRecommendations rejects oversized strings', () => {
+  const baseRecs = Array.from({ length: 4 }, () => validRec());
+  // subject max 100
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ subject: 'a'.repeat(101) })] }).ok, false);
+  // rationale max 200
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ rationale: 'a'.repeat(201) })] }).ok, false);
+  // focus_area max 50
+  assert.equal(validateRecommendations({ recommendations: [...baseRecs, validRec({ focus_area: 'a'.repeat(51) })] }).ok, false);
+});
+
+test('validateRecommendations rejects non-object / non-array shapes', () => {
+  assert.equal(validateRecommendations(null).ok, false);
+  assert.equal(validateRecommendations({}).ok, false);
+  assert.equal(validateRecommendations({ recommendations: 'not-an-array' }).ok, false);
+  assert.equal(validateRecommendations(undefined).ok, false);
+});
+
+// ---- handleRecommendations integration -------------------------------------
+
+test('handleRecommendations: 405 on non-POST', async () => {
+  _resetJwksCacheForTests();
+  const env = { ...TEST_JWT_ENV, RECOMMENDATIONS_ENABLED: 'true', APP_ATTEST_REQUIRED: 'false' };
+  const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+    method: 'GET',
+  });
+  const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+  assert.equal(res.status, 405);
+});
+
+test('handleRecommendations: 503 when kill switch is off', async () => {
+  _resetJwksCacheForTests();
+  const env = { ...TEST_JWT_ENV, APP_ATTEST_REQUIRED: 'false' /* RECOMMENDATIONS_ENABLED unset */ };
+  const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+    method: 'POST',
+    body: '',
+  });
+  const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.equal(body.error, 'recommendations_disabled');
+});
+
+test('handleRecommendations: 401 on missing / invalid JWT', async () => {
+  _resetJwksCacheForTests();
+  const { publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const env = {
+    ...TEST_JWT_ENV,
+    RECOMMENDATIONS_ENABLED: 'true',
+    APP_ATTEST_REQUIRED: 'false',
+    QUOTA_KV: new FakeKV(),
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    OPENAI_API_KEY: 'fake',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  try {
+    const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '',
+    });
+    const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+    assert.equal(res.status, 401);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('handleRecommendations: happy path returns 5 valid recommendations with empty portfolio', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const env = {
+    ...TEST_JWT_ENV,
+    RECOMMENDATIONS_ENABLED: 'true',
+    APP_ATTEST_REQUIRED: 'false',
+    QUOTA_KV: new FakeKV(),
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    OPENAI_API_KEY: 'fake',
+  };
+
+  const fiveRecs = Array.from({ length: 5 }, (_, i) => ({
+    subject: `subject ${i + 1} with enough chars`,
+    rationale: `rationale ${i + 1} that meets the minimum length cap.`,
+    focus_area: `focus${i}`,
+    recommendation_type: 'skill_targeting',
+  }));
+
+  const originalFetch = globalThis.fetch;
+  let openaiCalls = 0;
+  let openaiBody = null;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    // Coaching context fetch — empty portfolio.
+    if (u.includes('/rest/v1/drawings')
+        && u.includes('select=id,title,context,created_at,updated_at,critique_history')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    // OpenAI.
+    if (u.includes('api.openai.com')) {
+      openaiCalls += 1;
+      openaiBody = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ recommendations: fiveRecs }) } }],
+          usage: { prompt_tokens: 500, completion_tokens: 300 },
+        }),
+        text: async () => '',
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: '',
+    });
+    const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.recommendations.length, 5);
+    assert.equal(body.context_summary.drawing_count, 0);
+    assert.equal(body.context_summary.summary_count, 0);
+    assert.equal(openaiCalls, 1, 'OpenAI must be called exactly once');
+    // Confirm strict json_schema mode was used.
+    assert.equal(openaiBody.response_format?.type, 'json_schema');
+    assert.equal(openaiBody.response_format?.json_schema?.name, 'recommendations');
+    assert.equal(openaiBody.response_format?.json_schema?.strict, true);
+    // Empty-portfolio user message present.
+    const sysMsg = openaiBody.messages[0].content;
+    const userMsg = openaiBody.messages[1].content;
+    assert.ok(sysMsg.includes('You are a drawing coach'));
+    assert.ok(userMsg.includes('new user with no drawings yet'));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('handleRecommendations: 502 when model returns malformed JSON', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const env = {
+    ...TEST_JWT_ENV,
+    RECOMMENDATIONS_ENABLED: 'true',
+    APP_ATTEST_REQUIRED: 'false',
+    QUOTA_KV: new FakeKV(),
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    OPENAI_API_KEY: 'fake',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    if (u.includes('/rest/v1/drawings')
+        && u.includes('select=id,title,context,created_at,updated_at,critique_history')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    if (u.includes('api.openai.com')) {
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: '{not-valid-json' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+        text: async () => '',
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: '',
+    });
+    const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+    assert.equal(res.status, 502);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('handleRecommendations: 502 when validation rejects model output (wrong count)', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const env = {
+    ...TEST_JWT_ENV,
+    RECOMMENDATIONS_ENABLED: 'true',
+    APP_ATTEST_REQUIRED: 'false',
+    QUOTA_KV: new FakeKV(),
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    OPENAI_API_KEY: 'fake',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    if (u.includes('/rest/v1/drawings')
+        && u.includes('select=id,title,context,created_at,updated_at,critique_history')) {
+      return { ok: true, json: async () => ([]) };
+    }
+    if (u.includes('api.openai.com')) {
+      // Model returns only 3 recommendations — schema would catch this,
+      // but if the schema is ever loosened the validator still bites.
+      const onlyThree = Array.from({ length: 3 }, () => validRec());
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ recommendations: onlyThree }) } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+        text: async () => '',
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: '',
+    });
+    const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+    assert.equal(res.status, 502);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('handleRecommendations: happy path with realistic portfolio includes drawings + summaries in user message', async () => {
+  _resetJwksCacheForTests();
+  const { privateKey, publicKey } = await generateES256Keypair();
+  const jwk = await exportPublicJWK(publicKey);
+  const env = {
+    ...TEST_JWT_ENV,
+    RECOMMENDATIONS_ENABLED: 'true',
+    APP_ATTEST_REQUIRED: 'false',
+    QUOTA_KV: new FakeKV(),
+    SUPABASE_SERVICE_ROLE_KEY: 'fake',
+    OPENAI_API_KEY: 'fake',
+  };
+
+  const fiveRecs = Array.from({ length: 5 }, (_, i) => ({
+    subject: `subject ${i + 1} with enough chars`,
+    rationale: `rationale ${i + 1} reasonable length.`,
+    focus_area: `focus${i}`,
+    recommendation_type: i === 0 ? 'skill_targeting' : i === 1 ? 'variety' : 'stretch',
+  }));
+
+  const originalFetch = globalThis.fetch;
+  let userMsgSeen = '';
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.endsWith('/.well-known/jwks.json')) {
+      return { ok: true, json: async () => ({ keys: [jwk] }) };
+    }
+    if (u.includes('/rest/v1/drawings')
+        && u.includes('select=id,title,context,created_at,updated_at,critique_history')) {
+      return {
+        ok: true,
+        json: async () => ([{
+          id: 'd-fixture-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          title: 'Forest at Dusk',
+          context: { subject: 'landscape' },
+          created_at: '2026-05-09T12:00:00.000Z',
+          updated_at: '2026-05-11T12:00:00.000Z',
+          critique_history: [{
+            sequence_number: 1, created_at: '2026-05-11T12:00:00.000Z',
+            content: '<!--summary-->\n- values flat\n- try three-zone plan\n<!--/summary-->',
+            tags: { primary_category: 'value', focus_area_text: 'value grouping', severity: 3 },
+          }],
+        }]),
+      };
+    }
+    if (u.includes('api.openai.com')) {
+      const body = JSON.parse(init.body);
+      userMsgSeen = body.messages[1].content;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ recommendations: fiveRecs }) } }],
+          usage: { prompt_tokens: 800, completion_tokens: 300 },
+        }),
+        text: async () => '',
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  };
+  try {
+    const jwt = await signES256JWT({ privateKey, payload: realNowBasePayload() });
+    const req = new Request('https://drawevolve-backend.test/v1/recommendations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: '',
+    });
+    const res = await handleRecommendations(req, env, { waitUntil: () => {} });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.recommendations.length, 5);
+    assert.equal(body.context_summary.drawing_count, 1);
+    assert.equal(body.context_summary.summary_count, 1);
+    // User message must include the portfolio context.
+    assert.ok(userMsgSeen.includes('Forest at Dusk'));
+    assert.ok(userMsgSeen.includes('values flat'));
+    assert.ok(userMsgSeen.includes('value grouping'));
+    assert.ok(!userMsgSeen.includes('new user with no drawings'),
+      'realistic portfolio must NOT trigger the empty-portfolio path');
+  } finally { globalThis.fetch = originalFetch; }
 });

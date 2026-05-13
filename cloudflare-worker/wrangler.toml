@@ -121,6 +121,15 @@ EVE_MAX_TURNS_PER_CONVERSATION = "100"
 # (Pro tier should have a different cap), not a bug.
 PER_USER_DAILY_TOKEN_CAP = "75000"
 
+# Phase 4 — Subject Recommendations kill-switch.
+# When "true", POST /v1/recommendations is live. When "false" or unset,
+# the endpoint returns 503 recommendations_disabled and iOS shows an
+# inline error state in the recommendations sheet. Flip via the
+# Cloudflare dashboard for a fast disable without redeploy. Same
+# fail-closed shape as CROSS_DRAWING_CONTEXT_ENABLED: only the literal
+# string "true" enables.
+RECOMMENDATIONS_ENABLED = "true"
+
 # Workers Logs — without this, console.log output is silently dropped at the
 # Cloudflare edge. head_sampling_rate=1 captures 100% of requests; lower for
 # cost control once volume warrants it.
