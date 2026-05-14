@@ -366,8 +366,22 @@ final class CompositionAnalysisService: ObservableObject {
     }
 
     /// Lanczos-upscale the 68×68 attention heatmap to the composite's
-    /// pixel size. M1 ships monochrome; M5 swaps in the viridis ramp
-    /// via CIColorMap.
+    /// pixel size, then map through a viridis 1D color ramp via
+    /// CIColorMap so the result is perceptually uniform and reads
+    /// at a glance (M5).
+    ///
+    /// Why viridis: monochrome was the M1 default but plain
+    /// black-to-white doesn't distinguish hot vs cold regions well
+    /// when overlaid on a drawing. Viridis is the matplotlib
+    /// scientific default — perceptually uniform across the dynamic
+    /// range, colorblind-friendly, and reads cleanly as
+    /// "low = dark purple → high = yellow" without needing a legend.
+    ///
+    /// Path 3 fallback (Metal compute shader): NOT taken in M5. Core
+    /// Image's Lanczos + CIColorMap output was deemed acceptable for
+    /// v1. If design review later rejects the quality, replace this
+    /// function's body with a Metal pipeline; the call sites don't
+    /// change.
     private static func renderAttentionHeatmap(
         from observation: VNSaliencyImageObservation?,
         targetSize: CGSize
@@ -390,6 +404,83 @@ final class CompositionAnalysisService: ObservableObject {
 
         let context = CIContext()
         let extent = CGRect(origin: .zero, size: targetSize)
+
+        // Apply the viridis ramp via CIColorMap. The filter takes the
+        // input pixel's color (effectively the luminance of our
+        // single-channel saliency map) and indexes into the gradient.
+        // If the ramp generation fails for any reason, fall through to
+        // the monochrome upscale rather than dropping the heatmap.
+        if let ramp = makeViridisRampCIImage() {
+            let colored = scaled.applyingFilter("CIColorMap", parameters: [
+                "inputGradientImage": ramp
+            ])
+            if let cg = context.createCGImage(colored, from: extent) {
+                return cg
+            }
+        }
         return context.createCGImage(scaled, from: extent)
+    }
+
+    /// Viridis color stops, sampled at ~10 evenly-spaced points.
+    /// Generated procedurally rather than shipped as a PNG asset —
+    /// keeps the bundle thin and avoids a new asset-catalog entry
+    /// just for a 256×1 lookup texture.
+    private static let viridisStops: [(r: CGFloat, g: CGFloat, b: CGFloat)] = [
+        (0.267, 0.005, 0.329),
+        (0.282, 0.140, 0.458),
+        (0.254, 0.265, 0.530),
+        (0.207, 0.372, 0.553),
+        (0.164, 0.471, 0.558),
+        (0.128, 0.567, 0.551),
+        (0.135, 0.659, 0.518),
+        (0.267, 0.749, 0.441),
+        (0.478, 0.821, 0.318),
+        (0.741, 0.873, 0.150),
+        (0.993, 0.906, 0.144),
+    ]
+
+    /// Build a 256×1 CIImage from `viridisStops` so CIColorMap has a
+    /// smooth gradient to index into. Cached at the class level would
+    /// be a future optimization; for now the function is cheap
+    /// (sub-millisecond) and runs once per heatmap render.
+    private static func makeViridisRampCIImage() -> CIImage? {
+        let width = 256
+        let height = 1
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo: UInt32 = CGImageAlphaInfo.premultipliedLast.rawValue
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return nil
+        }
+
+        let colors: [CGColor] = viridisStops.map { stop in
+            CGColor(srgbRed: stop.r, green: stop.g, blue: stop.b, alpha: 1.0)
+        }
+        let locations: [CGFloat] = (0..<viridisStops.count).map {
+            CGFloat($0) / CGFloat(viridisStops.count - 1)
+        }
+        guard let gradient = CGGradient(
+            colorsSpace: colorSpace,
+            colors: colors as CFArray,
+            locations: locations
+        ) else {
+            return nil
+        }
+        context.drawLinearGradient(
+            gradient,
+            start: .zero,
+            end: CGPoint(x: width, y: 0),
+            options: []
+        )
+        guard let cgImage = context.makeImage() else { return nil }
+        return CIImage(cgImage: cgImage)
     }
 }
