@@ -269,7 +269,7 @@ struct ReferenceImageView: View {
     /// fix for "insanely jittery" — no per-frame publishes during drag,
     /// no full DrawingCanvasView body re-evaluation per touch event.
     private var bodyDragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .updating($dragOffset) { value, state, _ in
                 state = value.translation
             }
@@ -288,7 +288,7 @@ struct ReferenceImageView: View {
     /// bodyDragGesture. The controls inside the chrome bar intercept
     /// their own touches before this gesture sees them.
     private var chromeDragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .updating($dragOffset) { value, state, _ in
                 state = value.translation
             }
@@ -310,7 +310,7 @@ struct ReferenceImageView: View {
     /// manager only learns about the new scale on onEnded. Same deferred-
     /// commit pattern as the drag — no per-frame publish storm.
     private var resizeGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 let outward = -value.translation.width + value.translation.height
                 if resizeStart == nil {
