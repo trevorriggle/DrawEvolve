@@ -113,8 +113,9 @@
 		DE000120 /* PaletteGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100120 /* PaletteGenerator.swift */; };
 		DE000121 /* ReferenceImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100121 /* ReferenceImage.swift */; };
 		DE000122 /* ReferenceImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100122 /* ReferenceImageView.swift */; };
-		DE000130 /* CompositionSpike.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100130 /* CompositionSpike.swift */; };
+		DE000130 /* CompositionAnalysisService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100130 /* CompositionAnalysisService.swift */; };
 		DE000131 /* CompositionSpikeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100131 /* CompositionSpikeView.swift */; };
+		DE000132 /* CompositionAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100132 /* CompositionAnalysis.swift */; };
 		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
@@ -228,8 +229,9 @@
 		DE100120 /* PaletteGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteGenerator.swift; sourceTree = "<group>"; };
 		DE100121 /* ReferenceImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceImage.swift; sourceTree = "<group>"; };
 		DE100122 /* ReferenceImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceImageView.swift; sourceTree = "<group>"; };
-		DE100130 /* CompositionSpike.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionSpike.swift; sourceTree = "<group>"; };
+		DE100130 /* CompositionAnalysisService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionAnalysisService.swift; sourceTree = "<group>"; };
 		DE100131 /* CompositionSpikeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionSpikeView.swift; sourceTree = "<group>"; };
+		DE100132 /* CompositionAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionAnalysis.swift; sourceTree = "<group>"; };
 		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -342,6 +344,7 @@
 				DE100113 /* Recommendation.swift */,
 				DE100117 /* Palette.swift */,
 				DE100121 /* ReferenceImage.swift */,
+				DE100132 /* CompositionAnalysis.swift */,
 				DE000319 /* Pose */,
 			);
 			path = Models;
@@ -442,7 +445,7 @@
 			children = (
 				DE100077 /* VisionService.swift */,
 				DE100078 /* VisionPoseService.swift */,
-				DE100130 /* CompositionSpike.swift */,
+				DE100130 /* CompositionAnalysisService.swift */,
 			);
 			path = Vision;
 			sourceTree = "<group>";
@@ -684,8 +687,9 @@
 				DE000120 /* PaletteGenerator.swift in Sources */,
 				DE000121 /* ReferenceImage.swift in Sources */,
 				DE000122 /* ReferenceImageView.swift in Sources */,
-				DE000130 /* CompositionSpike.swift in Sources */,
+				DE000130 /* CompositionAnalysisService.swift in Sources */,
 				DE000131 /* CompositionSpikeView.swift in Sources */,
+				DE000132 /* CompositionAnalysis.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
