@@ -284,8 +284,13 @@ struct ReferenceImageView: View {
     /// offset state, so cancellation doesn't snap back. Also brings the
     /// reference to the front on drag-end (so dragging a back reference
     /// surfaces it).
+    ///
+    /// minimumDistance: 0 = 1:1 finger tracking from pixel one. With
+    /// any non-zero threshold the gesture's first onChanged arrives
+    /// with translation already past the threshold, which feels like
+    /// a "jump" — the cause of the jittery-drag complaint.
     private var bodyDragGesture: some Gesture {
-        DragGesture(minimumDistance: 4)
+        DragGesture(minimumDistance: 0)
             .updating($dragStart) { _, state, _ in
                 if state == nil { state = reference.center }
             }
@@ -306,7 +311,7 @@ struct ReferenceImageView: View {
     /// isolation, flip, delete) intercept their own touches before
     /// this gesture sees them, so slider drags don't move the reference.
     private var chromeDragGesture: some Gesture {
-        DragGesture(minimumDistance: 4)
+        DragGesture(minimumDistance: 0)
             .updating($dragStart) { _, state, _ in
                 if state == nil { state = reference.center }
             }
