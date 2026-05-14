@@ -62,6 +62,7 @@ import {
   fetchCrossDrawingPreference,
   selectConfig,
   buildSystemPrompt,
+  renderCompositionFindingsBlock,
   buildUserMessage,
   renderTruncationMarker,
   renderSkillCalibration,
@@ -7568,4 +7569,273 @@ test('handlePalettes GET /v1/palettes/:id rejects invalid UUID', async () => {
     const res = await handlePalettes(req, env, ctx);
     assert.equal(res.status, 400);
   } finally { restore(); }
+});
+
+// =============================================================================
+// Eye Test (Composition Analysis) — M4 worker integration
+// =============================================================================
+
+test('renderCompositionFindingsBlock returns empty string for nil/non-object input', () => {
+  assert.equal(renderCompositionFindingsBlock(null), '');
+  assert.equal(renderCompositionFindingsBlock(undefined), '');
+  assert.equal(renderCompositionFindingsBlock('not an object'), '');
+});
+
+test('renderCompositionFindingsBlock always includes the locked limitation framing', () => {
+  const block = renderCompositionFindingsBlock({
+    attention_hotspots: [
+      { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+    ],
+    objectness_hotspots: [],
+    confidence_low: false,
+    readiness_reason: null,
+    intent_marker: null,
+  });
+  assert.match(block, /COMPOSITION ANALYSIS \(ON-DEVICE SALIENCY/);
+  assert.match(block, /photographic-trained model/);
+  assert.match(block, /weight them lightly/);
+  assert.match(block, /trust your visual reading over the saliency data/);
+});
+
+test('renderCompositionFindingsBlock surfaces readiness-gate refusal and omits hotspots', () => {
+  const block = renderCompositionFindingsBlock({
+    attention_hotspots: [],
+    objectness_hotspots: [],
+    confidence_low: false,
+    readiness_reason: 'tooSparse',
+    intent_marker: null,
+  });
+  assert.match(block, /too sparse/);
+  assert.match(block, /Do not infer focal points/);
+  assert.doesNotMatch(block, /x=0\./);
+});
+
+test('renderCompositionFindingsBlock flags confidence_low and suppresses positions', () => {
+  const block = renderCompositionFindingsBlock({
+    attention_hotspots: [
+      { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.3 },
+    ],
+    objectness_hotspots: [],
+    confidence_low: true,
+    readiness_reason: null,
+    intent_marker: null,
+  });
+  assert.match(block, /could not read this drawing clearly/);
+  assert.match(block, /Do not cite hotspot positions/);
+});
+
+test('renderCompositionFindingsBlock notes when student has not marked intent', () => {
+  const block = renderCompositionFindingsBlock({
+    attention_hotspots: [
+      { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+    ],
+    objectness_hotspots: [],
+    confidence_low: false,
+    readiness_reason: null,
+    intent_marker: null,
+  });
+  assert.match(block, /has not marked an intended focal point/);
+  assert.match(block, /do not speculate on the student's intent/);
+});
+
+test('renderCompositionFindingsBlock includes intent marker when set and frames as perspective check', () => {
+  const block = renderCompositionFindingsBlock({
+    attention_hotspots: [
+      { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+    ],
+    objectness_hotspots: [],
+    confidence_low: false,
+    readiness_reason: null,
+    intent_marker: { x: 0.43, y: 0.28 },
+  });
+  assert.match(block, /Student's intended focal point/);
+  assert.match(block, /x=0\.430 y=0\.280/);
+  assert.match(block, /perspective check, not a verdict/);
+});
+
+test('buildCritiqueEntry persists composition_findings at top level alongside tags', () => {
+  const entry = buildCritiqueEntry({
+    feedback: 'critique body',
+    sequenceNumber: 1,
+    config: DEFAULT_FREE_CONFIG,
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: Date.parse('2026-05-14T18:00:00Z'),
+    presetId: 'studio_mentor',
+    compositionFindings: {
+      attention_hotspots: [
+        { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+      ],
+      objectness_hotspots: [],
+      confidence_low: false,
+      readiness_reason: null,
+      intent_marker: { x: 0.5, y: 0.5 },
+    },
+  });
+  assert.equal(typeof entry.composition_findings, 'object');
+  assert.equal(entry.composition_findings.attention_hotspots.length, 1);
+  assert.equal(entry.composition_findings.intent_marker.x, 0.5);
+  // Not buried inside prompt_config.
+  assert.equal(entry.prompt_config.composition_findings, undefined);
+});
+
+test('buildCritiqueEntry defaults composition_findings to null when not provided', () => {
+  const entry = buildCritiqueEntry({
+    feedback: 'critique body',
+    sequenceNumber: 1,
+    config: DEFAULT_FREE_CONFIG,
+    tier: 'free',
+    usage: { prompt_tokens: 100, completion_tokens: 50 },
+    now: Date.parse('2026-05-14T18:00:00Z'),
+    presetId: 'studio_mentor',
+  });
+  assert.equal(entry.composition_findings, null);
+});
+
+test('buildSystemPrompt includes composition section when config.compositionFindings is set', () => {
+  const config = {
+    ...selectConfig('free', null),
+    systemPrompt: assembleSystemPrompt(VOICE_STUDIO_MENTOR),
+    compositionFindings: {
+      attention_hotspots: [
+        { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+      ],
+      objectness_hotspots: [],
+      confidence_low: false,
+      readiness_reason: null,
+      intent_marker: null,
+    },
+  };
+  const prompt = buildSystemPrompt(config, baseContext);
+  assert.match(prompt, /COMPOSITION ANALYSIS/);
+  assert.match(prompt, /photographic-trained model/);
+});
+
+test('buildSystemPrompt omits composition section when config.compositionFindings is absent', () => {
+  const config = {
+    ...selectConfig('free', null),
+    systemPrompt: assembleSystemPrompt(VOICE_STUDIO_MENTOR),
+  };
+  const prompt = buildSystemPrompt(config, baseContext);
+  assert.doesNotMatch(prompt, /COMPOSITION ANALYSIS/);
+});
+
+test('Eve coaching context fetchCoachingContext projects composition_findings into summaries', async () => {
+  // Build a row + entry shape mimicking what fetchCoachingContext reads.
+  const compositionFindings = {
+    attention_hotspots: [
+      { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+    ],
+    objectness_hotspots: [],
+    confidence_low: false,
+    readiness_reason: null,
+    intent_marker: { x: 0.4, y: 0.6 },
+  };
+  // The fetchCoachingContext helper is parameterized via env, so we mock
+  // its fetch via a stub. Simpler check: confirm the projection field
+  // appears in the summaries output by simulating one drawing-and-entry.
+  const rows = [{
+    id: '11111111-1111-1111-1111-111111111111',
+    title: 'Forest at Dusk',
+    context: { subject: 'forest landscape' },
+    created_at: '2026-05-14T16:00:00.000Z',
+    updated_at: '2026-05-14T16:00:00.000Z',
+    critique_history: [{
+      sequence_number: 1,
+      content: 'Some critique body.\n<!-- summary -->\n- warm cast works\n- tighten edge contrast\n<!-- /summary -->',
+      created_at: '2026-05-14T16:00:00.000Z',
+      tags: { primary_category: 'composition', focus_area_text: 'edge contrast', severity: 2 },
+      composition_findings: compositionFindings,
+    }],
+  }];
+  const envMock = {
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-test-key',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(rows), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  try {
+    const ctx = await fetchCoachingContext({
+      env: envMock,
+      userId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      drawingsLimit: 5,
+      summariesLimit: 5,
+    });
+    assert.ok(Array.isArray(ctx.summaries));
+    assert.equal(ctx.summaries.length, 1);
+    assert.deepEqual(ctx.summaries[0].composition_findings, compositionFindings);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('renderCoachingContextBlock summary line surfaces composition findings to Eve', () => {
+  const ctx = {
+    drawings: [],
+    summaries: [{
+      drawing_title: 'Forest at Dusk',
+      relative_time: '2 days ago',
+      summary_bullets: ['warm cast works', 'tighten edge contrast'],
+      composition_findings: {
+        attention_hotspots: [
+          { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.8 },
+          { rect: { x: 0.5, y: 0.5, width: 0.1, height: 0.1 }, confidence: 0.3 },
+        ],
+        objectness_hotspots: [],
+        confidence_low: false,
+        readiness_reason: null,
+        intent_marker: { x: 0.4, y: 0.6 },
+      },
+    }],
+  };
+  const block = renderCoachingContextBlock(ctx);
+  assert.match(block, /Composition:/);
+  assert.match(block, /top-2 attention hotspots/);
+  assert.match(block, /1 tentative/);
+  assert.match(block, /40% across, 60% down/);
+});
+
+test('renderCoachingContextBlock summary line for low-confidence findings says so', () => {
+  const ctx = {
+    drawings: [],
+    summaries: [{
+      drawing_title: 'WIP Sketch',
+      relative_time: 'yesterday',
+      summary_bullets: ['needs more values'],
+      composition_findings: {
+        attention_hotspots: [
+          { rect: { x: 0.2, y: 0.3, width: 0.1, height: 0.1 }, confidence: 0.3 },
+        ],
+        objectness_hotspots: [],
+        confidence_low: true,
+        readiness_reason: null,
+        intent_marker: null,
+      },
+    }],
+  };
+  const block = renderCoachingContextBlock(ctx);
+  assert.match(block, /low-confidence/);
+});
+
+test('renderCoachingContextBlock summary line for gate-refused findings says so', () => {
+  const ctx = {
+    drawings: [],
+    summaries: [{
+      drawing_title: 'Blank Canvas',
+      relative_time: 'today',
+      summary_bullets: ['just getting started'],
+      composition_findings: {
+        attention_hotspots: [],
+        objectness_hotspots: [],
+        confidence_low: false,
+        readiness_reason: 'tooSparse',
+        intent_marker: null,
+      },
+    }],
+  };
+  const block = renderCoachingContextBlock(ctx);
+  assert.match(block, /refused by the readiness gate/);
 });

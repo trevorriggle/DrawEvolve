@@ -1441,7 +1441,11 @@ class CanvasStateManager: ObservableObject {
     /// `drawings.critique_history` and returns the canonical entry. The
     /// caller reads `lastCritiqueEntry` after this call returns to update
     /// local UI state — no local synthesis or appending.
-    func requestFeedback(for context: DrawingContext, drawingId: UUID) async {
+    func requestFeedback(
+        for context: DrawingContext,
+        drawingId: UUID,
+        compositionFindings: CompositionFindingsPayload? = nil
+    ) async {
         guard let image = exportImage() else {
             showError(message: "Failed to export drawing")
             return
@@ -1451,7 +1455,8 @@ class CanvasStateManager: ObservableObject {
             let response = try await OpenAIManager.shared.requestFeedback(
                 image: image,
                 context: context,
-                drawingId: drawingId
+                drawingId: drawingId,
+                compositionFindings: compositionFindings
             )
             feedback = response.feedback
             lastCritiqueEntry = response.critiqueEntry

@@ -158,6 +158,7 @@ export {
   validatePromptParameters,
   renderCustomPromptModifier,
   selectCustomPromptParameters,
+  renderCompositionFindingsBlock,
 } from './lib/prompt.js';
 
 export { formatRelativeTime } from './lib/time.js';

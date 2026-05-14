@@ -172,7 +172,60 @@ function renderCoachingSummaryRow(row) {
     : 'recently';
   const bullets = Array.isArray(row?.summary_bullets) ? row.summary_bullets : [];
   const bulletLines = bullets.map((b) => `- ${b}`).join('\n');
-  return `[${when} — "${title}"]\n${bulletLines}`;
+  const compositionLine = renderCompositionSummaryLine(row?.composition_findings);
+  const tail = compositionLine ? `\n${compositionLine}` : '';
+  return `[${when} — "${title}"]\n${bulletLines}${tail}`;
+}
+
+/**
+ * One-line composition-findings summary for the coaching context
+ * block. Designed to be lightweight — the heavyweight limitation
+ * framing lives in the per-critique system prompt
+ * (renderCompositionFindingsBlock in lib/prompt.js), not here. This
+ * function just gives Eve enough context to acknowledge composition
+ * findings exist across the user's history without restating the
+ * caveats every row.
+ *
+ * Returns null if there are no findings to summarize.
+ *
+ * Eve must not cite saliency findings as authoritative — that
+ * constraint is set elsewhere in the system prompt (Eve persona
+ * + the per-critique block). This summary is informational.
+ */
+function renderCompositionSummaryLine(findings) {
+  if (!findings || typeof findings !== 'object') return null;
+
+  if (typeof findings.readiness_reason === 'string' && findings.readiness_reason) {
+    return '- Composition: on-device saliency was refused by the readiness gate (canvas was too sparse or lacked value structure).';
+  }
+
+  const intent = findings.intent_marker;
+  const hasIntent = intent && typeof intent === 'object'
+    && typeof intent.x === 'number' && typeof intent.y === 'number';
+  const confidenceLow = findings.confidence_low === true;
+
+  if (confidenceLow) {
+    const intentPart = hasIntent
+      ? ' Student had marked an intended focal point.'
+      : '';
+    return `- Composition: saliency findings were low-confidence (Vision couldn't read the drawing clearly).${intentPart}`;
+  }
+
+  const hotspots = Array.isArray(findings.attention_hotspots) ? findings.attention_hotspots : [];
+  if (hotspots.length === 0 && !hasIntent) return null;
+
+  const parts = [];
+  if (hotspots.length > 0) {
+    const tentativeCount = hotspots.filter((h) => h && typeof h.confidence === 'number' && h.confidence < 0.5).length;
+    const tentativeNote = tentativeCount > 0 ? ` (${tentativeCount} tentative)` : '';
+    parts.push(`top-${hotspots.length} attention hotspots recorded${tentativeNote}`);
+  }
+  if (hasIntent) {
+    parts.push(`student marked intended focal point at ${(intent.x * 100).toFixed(0)}% across, ${(intent.y * 100).toFixed(0)}% down`);
+  } else {
+    parts.push('no intended focal point marked');
+  }
+  return `- Composition: ${parts.join('; ')}.`;
 }
 
 /**

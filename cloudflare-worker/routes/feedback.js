@@ -340,7 +340,7 @@ export async function updateUserPreferredPreset({ env, userId, presetId, fetcher
 //     quota IS counted (the OpenAI cost was real), idempotency cache IS
 //     written (so the same request_id won't double-spend).
 
-export function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usage, now, presetId }) {
+export function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usage, now, presetId, compositionFindings }) {
   return {
     sequence_number: sequenceNumber,
     // preset_id sits at the top level (not inside prompt_config) because it
@@ -348,6 +348,13 @@ export function buildCritiqueEntry({ feedback, sequenceNumber, config, tier, usa
     // Future analytics queries are cleaner this way.
     preset_id: presetId ?? DEFAULT_PRESET_ID,
     content: feedback,
+    // Eye Test M4 — first-class field on the row, parallel to `tags`,
+    // not buried inside `prompt_config`. Future analytics ("how often
+    // does the readiness gate refuse?", "are confidenceLow critiques
+    // worse on engagement?") read cleanly off the top level. nil
+    // when iOS didn't send a payload (feature flag off, or no local
+    // analysis available).
+    composition_findings: compositionFindings ?? null,
     prompt_config: {
       tier,
       includeHistoryCount: config.includeHistoryCount,
@@ -704,6 +711,26 @@ export async function handleFeedback(request, env, ctx) {
       return jsonResponse({ error: 'set_as_default must be a boolean.' }, 400);
     }
 
+    // Eye Test composition findings — sent by iOS when the
+    // `eye_test_eve_integration` client-side feature flag is on AND
+    // the local analysis produced a result (.ready or .notReady with
+    // structured reason). Optional. Absent = no findings, no
+    // composition section in the system prompt.
+    //
+    // Permissive shape validation — we accept any object so future v2
+    // extensions don't require a coordinated server release. Hard
+    // reject only obviously malformed payloads (wrong top-level type).
+    // The prompt builder (renderCompositionFindingsBlock) defensively
+    // checks fields as it renders.
+    if (body.compositionFindings !== undefined && body.compositionFindings !== null) {
+      if (typeof body.compositionFindings !== 'object' || Array.isArray(body.compositionFindings)) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({ error: 'compositionFindings must be an object.' }, 400);
+      }
+    }
+
     const { tier, promptPreferences } = getUserTier(payload);
 
     // Phase 5c — rate limits. Run before the ownership query so we don't
@@ -815,6 +842,12 @@ export async function handleFeedback(request, env, ctx) {
       // for retrospective analytics.
       includeRegistryCount,
       crossDrawingContextEnabled: crossDrawingContextEffectiveOn,
+      // Eye Test M4 — when the iOS client has the eye_test_eve_integration
+      // flag on and the local analysis produced a payload, it rides on
+      // the request body. renderCompositionFindingsBlock injects the
+      // locked-copy limitation framing + the structured findings into
+      // the system prompt after RESPONSE_FORMAT_TEMPLATE.
+      compositionFindings: body.compositionFindings ?? null,
     };
 
     const systemPrompt = buildSystemPrompt(config, context ?? {});
@@ -899,6 +932,7 @@ export async function handleFeedback(request, env, ctx) {
       usage: data.usage,
       now,
       presetId: resolvedPresetId,
+      compositionFindings: body.compositionFindings ?? null,
     });
 
     // My Evolution Phase 1 — classify the critique into structured tags for

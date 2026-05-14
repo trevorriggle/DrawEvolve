@@ -86,7 +86,19 @@ actor OpenAIManager {
     /// `client_request_id`. The Worker caches the response under that key
     /// for 1h so retries on flaky networks don't double-charge OpenAI or
     /// double-write to Postgres.
-    func requestFeedback(image: UIImage, context: DrawingContext, drawingId: UUID) async throws -> FeedbackResponse {
+    ///
+    /// `compositionFindings` (Eye Test M4): when non-nil, the worker
+    /// adds a COMPOSITION ANALYSIS section to the system prompt and
+    /// persists the structured payload on the critique row. Callers
+    /// should pass nil whenever the `eye_test_eve_integration`
+    /// feature flag is off — the gate lives on the caller side so
+    /// the OpenAIManager remains feature-agnostic.
+    func requestFeedback(
+        image: UIImage,
+        context: DrawingContext,
+        drawingId: UUID,
+        compositionFindings: CompositionFindingsPayload? = nil
+    ) async throws -> FeedbackResponse {
         // Convert image to base64
         guard let imageData = image.jpegData(compressionQuality: 0.8) else {
             let error = OpenAIError.imageEncodingFailed
@@ -129,7 +141,7 @@ actor OpenAIManager {
         // AppStorage default in the view — three sources, one value.
         let selectedPresetID = UserDefaults.standard.string(forKey: "selectedPresetID") ?? "studio_mentor"
 
-        let requestBody: [String: Any] = [
+        var requestBody: [String: Any] = [
             "image": base64Image,
             "drawingId": drawingId.uuidString.lowercased(),
             "client_request_id": clientRequestId,
@@ -148,6 +160,29 @@ actor OpenAIManager {
                 "preset_id": selectedPresetID,
             ],
         ]
+
+        // Eye Test M4 — when the caller passes a CompositionFindingsPayload
+        // (controlled by the eye_test_eve_integration feature flag), encode
+        // it to a plain dict so it round-trips through JSONSerialization
+        // alongside the existing top-level fields. Field name matches the
+        // worker's body validator (`compositionFindings`, camelCase) at
+        // routes/feedback.js:700-ish.
+        if let compositionFindings = compositionFindings {
+            do {
+                let encoder = JSONEncoder()
+                let data = try encoder.encode(compositionFindings)
+                if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    requestBody["compositionFindings"] = dict
+                }
+            } catch {
+                #if DEBUG
+                print("[OpenAIManager] compositionFindings encode failed: \(error.localizedDescription) — sending request without it")
+                #endif
+                // Silent fall-through: the critique should still succeed
+                // without composition findings; we don't want a local
+                // serialization bug to block the critique.
+            }
+        }
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody),
               let url = URL(string: backendURL) else {

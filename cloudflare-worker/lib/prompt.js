@@ -293,6 +293,20 @@ export function buildSystemPrompt(config, context) {
     `CONTEXT (use what's provided, ignore empty fields):\n${renderContextBlock(context)}`,
     RESPONSE_FORMAT_TEMPLATE(skillLevel),
   ];
+  // Composition findings — from on-device Apple Vision saliency,
+  // shipped with the critique request when the user's iOS client
+  // has the Composition / "Eye Test" feature enabled (controlled
+  // by the `eye_test_eve_integration` flag iOS-side). Section sits
+  // after RESPONSE_FORMAT_TEMPLATE so output structure is locked
+  // before composition guidance is layered in. The limitation
+  // framing inside the block is locked verbatim per condition 5
+  // of the Eye Test M4 build plan — do not weaken it.
+  if (config.compositionFindings) {
+    const block = renderCompositionFindingsBlock(config.compositionFindings);
+    if (block) {
+      sections.push(block);
+    }
+  }
   if (config.styleModifier) {
     sections.push(`ADDITIONAL STYLE GUIDANCE (per user preference):\n${config.styleModifier}`);
   }
@@ -307,6 +321,91 @@ export function buildSystemPrompt(config, context) {
     }
   }
   return sections.join('\n\n');
+}
+
+/**
+ * Render the composition-findings section of the system prompt.
+ *
+ * Locked limitation framing per condition 5 of the M4 build plan:
+ *   "These are estimates from a photographic-trained model and may be
+ *    unreliable on stylized or in-progress work — weight them lightly.
+ *    If the findings conflict with what you visually observe in the
+ *    drawing, trust your visual reading over the saliency data."
+ *
+ * Do not weaken. Eve must not cite saliency findings as authoritative.
+ *
+ * `findings` is the iOS CompositionFindingsPayload shape:
+ *   {
+ *     attention_hotspots: [{ rect: {x,y,width,height}, confidence }],
+ *     objectness_hotspots: [{ rect, confidence }],
+ *     confidence_low: bool,
+ *     readiness_reason: 'tooSparse' | 'lacksValueStructure' | 'analysisFailed' | null,
+ *     intent_marker: { x, y } | null
+ *   }
+ *
+ * Rects are Vision-normalized: origin bottom-left, axes 0..1. The
+ * intent marker is in *iOS document coords* (top-left origin). We
+ * leave the coord systems documented inline so the model can be
+ * explicit about geometry when describing positions.
+ */
+export function renderCompositionFindingsBlock(findings) {
+  if (!findings || typeof findings !== 'object') return '';
+
+  const limitationFraming =
+    'These are estimates from a photographic-trained model and may be unreliable on stylized or in-progress work — weight them lightly. ' +
+    'If the findings conflict with what you visually observe in the drawing, trust your visual reading over the saliency data.';
+
+  const lines = [
+    'COMPOSITION ANALYSIS (ON-DEVICE SALIENCY — APPROXIMATE):',
+    limitationFraming,
+    '',
+  ];
+
+  if (findings.readiness_reason) {
+    const reasonText =
+      findings.readiness_reason === 'tooSparse'
+        ? 'the canvas was too sparse (mostly white space)'
+        : findings.readiness_reason === 'lacksValueStructure'
+        ? "the drawing lacks midtone value range (it's mostly extremes)"
+        : 'the analysis could not run';
+    lines.push(`Note: the on-device readiness gate refused to run saliency because ${reasonText}. No hotspots provided. Do not infer focal points; comment on composition only from what you visually observe.`);
+    return lines.join('\n');
+  }
+
+  if (findings.confidence_low) {
+    lines.push('Note: every saliency hotspot the model returned was below the tentative-confidence threshold. The model could not read this drawing clearly. Do not cite hotspot positions; comment on composition only from what you visually observe.');
+    lines.push('');
+  }
+
+  const attention = Array.isArray(findings.attention_hotspots) ? findings.attention_hotspots : [];
+  if (attention.length > 0 && !findings.confidence_low) {
+    lines.push('Top attention hotspots (Vision-normalized, origin bottom-left, axes 0..1):');
+    attention.forEach((hot, i) => {
+      const r = hot && hot.rect ? hot.rect : null;
+      if (!r) return;
+      const conf = typeof hot.confidence === 'number' ? hot.confidence.toFixed(2) : '?';
+      const tentative = typeof hot.confidence === 'number' && hot.confidence < 0.5 ? ' (tentative)' : '';
+      lines.push(`  ${i + 1}. x=${formatN(r.x)} y=${formatN(r.y)} w=${formatN(r.width)} h=${formatN(r.height)} conf=${conf}${tentative}`);
+    });
+    lines.push('');
+  }
+
+  if (findings.intent_marker && typeof findings.intent_marker === 'object') {
+    const m = findings.intent_marker;
+    if (typeof m.x === 'number' && typeof m.y === 'number') {
+      lines.push(`Student's intended focal point (document coords, top-left origin, 0..1): x=${formatN(m.x)} y=${formatN(m.y)}`);
+      lines.push('');
+      lines.push('If the student has marked an intent and the saliency hotspots disagree, you may name the gap — but frame it as a perspective check, not a verdict. Never state intent as fact when the student has not marked one.');
+    }
+  } else {
+    lines.push('The student has not marked an intended focal point. Use the saliency findings (if any) as one perspective on attention pull; do not speculate on the student\'s intent.');
+  }
+
+  return lines.join('\n');
+}
+
+function formatN(value) {
+  return typeof value === 'number' ? value.toFixed(3) : '?';
 }
 
 export function formatHistoryEntries(entries) {

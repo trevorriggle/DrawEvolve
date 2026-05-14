@@ -695,6 +695,17 @@ export async function fetchCoachingContext({
         severity: typeof entry?.tags?.severity === 'number' ? entry.tags.severity : null,
         relative_time: formatRelativeTime(entry.created_at, now),
         summary_bullets: bullets,
+        // Eye Test M4 — project the composition findings (if any)
+        // into Eve's coaching context. Without this projection,
+        // cross-drawing coaching ignores Composition findings.
+        // renderCoachingSummaryRow consumes this in lib/eve-prompt.js.
+        // Note: the prompt-side limitation framing
+        // (renderCompositionFindingsBlock in lib/prompt.js) lives in
+        // the per-critique system prompt, not Eve's context — Eve's
+        // context renders only the lightweight summary below.
+        composition_findings: entry && typeof entry.composition_findings === 'object'
+          ? entry.composition_findings
+          : null,
       });
     }
   }
