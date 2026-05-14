@@ -651,7 +651,17 @@ class CanvasStateManager: ObservableObject {
         if floatingText != nil {
             commitFloatingText()
         }
-        let ft = FloatingText(content: content, settings: textSettings, anchor: location)
+        // Bake the inverse canvas rotation so the text reads horizontal on
+        // SCREEN at placement time. The canvas's own rotation transform
+        // composes with this, netting to zero on screen. When the canvas
+        // later un-rotates, the text persists at the angle it was placed
+        // at — "type appears where indicated regardless of canvas angle".
+        let ft = FloatingText(
+            content: content,
+            settings: textSettings,
+            anchor: location,
+            rotation: Angle(radians: -canvasRotation.radians),
+        )
         floatingText = ft
         rasterizeFloatingTextNow()
     }
@@ -782,7 +792,8 @@ class CanvasStateManager: ObservableObject {
         var ft = FloatingText(
             content: content,
             settings: textSettings,
-            anchor: smoothed.first?.point ?? .zero
+            anchor: smoothed.first?.point ?? .zero,
+            rotation: Angle(radians: -canvasRotation.radians),
         )
         ft.path = path
         ft.pathLUT = lut
@@ -824,7 +835,8 @@ class CanvasStateManager: ObservableObject {
             // Anchor at the LUT's first sample (top of the circle in
             // the parameterisation; matches where pathStartOffset = 0
             // lands).
-            anchor: lut.first?.point ?? center
+            anchor: lut.first?.point ?? center,
+            rotation: Angle(radians: -canvasRotation.radians),
         )
         ft.path = path
         ft.pathLUT = lut
