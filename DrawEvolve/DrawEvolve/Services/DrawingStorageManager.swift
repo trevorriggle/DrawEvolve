@@ -428,6 +428,63 @@ final class CloudDrawingStorageManager: ObservableObject {
         print("☁️ Renamed drawing on cloud: \(id) → '\(trimmed)'")
     }
 
+    /// Set or clear the Composition / "Eye Test" intent marker on a
+    /// drawing (M3). Same shape as renameDrawing: in-memory + local
+    /// cache update synchronously, then a direct PostgREST PATCH that
+    /// touches only `intent_marker` + `updated_at`. critique_history
+    /// is untouched (Worker is the sole writer per CLAUDE.md).
+    ///
+    /// Pass `marker = nil` to clear an existing marker. No retry queue
+    /// — like rename, this is cheap to redo manually and we don't want
+    /// a stale set to stomp a later legitimate PATCH that won the race.
+    ///
+    /// Requires migration 0015 to have run. If the column is missing,
+    /// PostgREST returns 400 (PGRST204) and this throws. See
+    /// `scripts/verify_postgrest_unknown_column.sh`.
+    func setIntentMarker(id: UUID, marker: IntentMarker?) async throws {
+        guard let index = drawings.firstIndex(where: { $0.id == id }) else {
+            throw DrawingStorageError.drawingNotFound
+        }
+
+        var drawing = drawings[index]
+        drawing.intentMarker = marker
+        drawing.updatedAt = Date()
+        try persistLocally(drawing: drawing, imageData: nil)
+        drawings[index] = drawing
+        print("💾 Updated intent marker locally: \(id) → \(marker.map { "(\($0.x), \($0.y))" } ?? "nil")")
+
+        guard let client = SupabaseManager.shared.client else {
+            throw DrawingStorageError.saveFailed
+        }
+
+        struct IntentPatch: Encodable {
+            let intent_marker: IntentMarker?
+            let updated_at: String
+
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(intent_marker, forKey: .intent_marker)
+                try container.encode(updated_at, forKey: .updated_at)
+            }
+            enum CodingKeys: String, CodingKey {
+                case intent_marker
+                case updated_at
+            }
+        }
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let patch = IntentPatch(
+            intent_marker: marker,
+            updated_at: isoFormatter.string(from: drawing.updatedAt)
+        )
+        try await client
+            .from("drawings")
+            .update(patch)
+            .eq("id", value: id.uuidString.lowercased())
+            .execute()
+        print("☁️ Updated intent marker on cloud: \(id)")
+    }
+
     func updateDrawing(
         id: UUID,
         title: String? = nil,

@@ -25,6 +25,19 @@ struct EyeTestPanel: View {
     @ObservedObject var service: CompositionAnalysisService
     @ObservedObject var canvasState: CanvasStateManager
     @Binding var showHeatmap: Bool
+    /// Current intent marker on the drawing, if any. Source of truth
+    /// lives on Drawing.intentMarker; the parent passes it down so
+    /// the panel reflects the latest persisted state.
+    let intentMarker: IntentMarker?
+    /// User tapped "Mark intent" / "Re-mark intent". Parent dismisses
+    /// the panel and engages tap-to-mark mode on the canvas. The
+    /// mode shows the mandatory banner ("Tap to mark your intended
+    /// focal point. Tap Done to exit.") per condition 3 of the M3
+    /// build plan.
+    let onMarkIntent: () -> Void
+    /// User tapped "Clear intent." Parent persists `nil` and the
+    /// panel re-renders without the intent section.
+    let onClearIntent: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -60,15 +73,57 @@ struct EyeTestPanel: View {
 
     @ViewBuilder
     private var bodyContent: some View {
-        switch service.lastResult {
-        case nil:
-            firstOpenContent
-        case .ready(let findings):
-            readyContent(findings: findings)
-        case .notReady(let report):
-            notReadyContent(report: report)
-        case .visionError(let message):
-            errorContent(message: message)
+        VStack(alignment: .leading, spacing: 20) {
+            switch service.lastResult {
+            case nil:
+                firstOpenContent
+            case .ready(let findings):
+                readyContent(findings: findings)
+            case .notReady(let report):
+                notReadyContent(report: report)
+            case .visionError(let message):
+                errorContent(message: message)
+            }
+
+            Divider()
+
+            intentSection
+        }
+    }
+
+    /// Intent-marker affordance. v1 single point; v2 may extend to a
+    /// ranked list (note left in code per the M3 build plan).
+    @ViewBuilder
+    private var intentSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Intended focal point")
+                .font(.headline)
+            if let marker = intentMarker {
+                Label(
+                    "Marked at \(Int((marker.x * 100).rounded()))% across, \(Int((marker.y * 100).rounded()))% down",
+                    systemImage: "scope"
+                )
+                .font(.callout)
+                .foregroundStyle(.primary)
+                HStack {
+                    Button(action: onMarkIntent) {
+                        Label("Re-mark", systemImage: "scope")
+                    }
+                    .buttonStyle(.bordered)
+                    Button(role: .destructive, action: onClearIntent) {
+                        Label("Clear", systemImage: "xmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else {
+                Text("Marking your intended focal point lets the panel compare where you wanted attention to fall against where the model thinks it actually does.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button(action: onMarkIntent) {
+                    Label("Mark intent", systemImage: "scope")
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 

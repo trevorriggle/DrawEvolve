@@ -41,6 +41,13 @@ struct Drawing: Codable, Identifiable {
     var totalBytes: Int64?         // sum of layer + composite + thumb bytes
     var version: Int               // optimistic-concurrency token (server bumps on UPDATE)
 
+    // Composition / "Eye Test" intent marker (migration 0015). User's
+    // intended focal point in normalized document coords, top-left
+    // origin. Optional — most drawings will never have one. v1 stores
+    // a single point; v2 may extend to a ranked list (`IntentMarker`'s
+    // Codable shape would change).
+    var intentMarker: IntentMarker?
+
     enum CodingKeys: String, CodingKey {
         case id
         case userId = "user_id"
@@ -56,6 +63,7 @@ struct Drawing: Codable, Identifiable {
         case layerCount = "layer_count"
         case totalBytes = "total_bytes"
         case version
+        case intentMarker = "intent_marker"
     }
 
     init(from decoder: Decoder) throws {
@@ -82,6 +90,7 @@ struct Drawing: Codable, Identifiable {
         // Pre-0010 cached rows have no `version`; default to 1 so optimistic-
         // concurrency comparisons against fresh server rows still make sense.
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        intentMarker = try container.decodeIfPresent(IntentMarker.self, forKey: .intentMarker)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -107,6 +116,7 @@ struct Drawing: Codable, Identifiable {
         try container.encodeIfPresent(layerCount, forKey: .layerCount)
         try container.encodeIfPresent(totalBytes, forKey: .totalBytes)
         try container.encode(version, forKey: .version)
+        try container.encodeIfPresent(intentMarker, forKey: .intentMarker)
     }
 
     init(
@@ -123,7 +133,8 @@ struct Drawing: Codable, Identifiable {
         formatVersion: Int? = nil,
         layerCount: Int? = nil,
         totalBytes: Int64? = nil,
-        version: Int = 1
+        version: Int = 1,
+        intentMarker: IntentMarker? = nil
     ) {
         self.id = id
         self.userId = userId
@@ -139,6 +150,7 @@ struct Drawing: Codable, Identifiable {
         self.layerCount = layerCount
         self.totalBytes = totalBytes
         self.version = version
+        self.intentMarker = intentMarker
     }
 
     /// True iff this drawing has a layered representation (manifest + per-layer PNGs)
@@ -178,6 +190,7 @@ struct DrawingUpsertPayload: Encodable {
         case formatVersion = "format_version"
         case layerCount = "layer_count"
         case totalBytes = "total_bytes"
+        case intentMarker = "intent_marker"
         // critiqueHistory + version deliberately omitted — see doc comment above.
     }
 
@@ -195,5 +208,6 @@ struct DrawingUpsertPayload: Encodable {
         try container.encodeIfPresent(drawing.formatVersion, forKey: .formatVersion)
         try container.encodeIfPresent(drawing.layerCount, forKey: .layerCount)
         try container.encodeIfPresent(drawing.totalBytes, forKey: .totalBytes)
+        try container.encodeIfPresent(drawing.intentMarker, forKey: .intentMarker)
     }
 }

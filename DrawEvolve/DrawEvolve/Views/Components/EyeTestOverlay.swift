@@ -65,6 +65,11 @@ import SwiftUI
 struct EyeTestOverlay: View {
     let findings: CompositionFindings?
     let showHeatmap: Bool
+    /// Persisted intent marker for the current drawing, normalized
+    /// document coords (top-left origin). Renders independently of
+    /// `findings` so the user can see their intent even when the
+    /// gate refused or the service hasn't run yet.
+    let intentMarker: IntentMarker?
     @ObservedObject var canvasState: CanvasStateManager
 
     var body: some View {
@@ -79,8 +84,38 @@ struct EyeTestOverlay: View {
                     }
                 }
             }
+            if let intentMarker = intentMarker {
+                intentMarkerView(intentMarker)
+            }
         }
         .allowsHitTesting(false)
+    }
+
+    // MARK: - Intent marker
+
+    /// Renders the user's intended focal point. Larger, distinct
+    /// chrome from the saliency hotspots so the two signals don't
+    /// blur together visually — saliency is "where the model thinks
+    /// the eye goes," intent is "where the user wanted it to go."
+    private func intentMarkerView(_ marker: IntentMarker) -> some View {
+        let docPoint = CGPoint(
+            x: marker.x * canvasState.documentSize.width,
+            y: marker.y * canvasState.documentSize.height
+        )
+        let screenPoint = canvasState.documentToScreen(docPoint)
+        let size: CGFloat = 36
+        return ZStack {
+            Circle()
+                .stroke(Color.purple, lineWidth: 3)
+                .frame(width: size, height: size)
+            Circle()
+                .fill(Color.purple)
+                .frame(width: 6, height: 6)
+            Image(systemName: "scope")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(Color.purple.opacity(0.85))
+        }
+        .position(x: screenPoint.x, y: screenPoint.y)
     }
 
     // MARK: - Heatmap
