@@ -17,23 +17,35 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Vision
+import CoreImage
 
 /// One floating reference image. Position is in canvas-view (screen)
 /// coords, not document coords — references stay put when the canvas
 /// pans/zooms, like photos on a desk next to your paper.
-///
-/// Equatable note (Phase 2 follow-up): UIImage equality is pointer
-/// identity, not pixel content. Fine for Phase 1 since `image` is only
-/// set at init and never mutated; when Phase 2 adds `isolatedImage`,
-/// revisit whether two references with the same source image but
-/// different isolation states should compare equal.
 struct ReferenceImage: Identifiable, Equatable {
     let id: UUID
     var image: UIImage
-    /// Phase 2 (Vision subject isolation). Always nil in Phase 1.
+    /// Subject-isolated version (Vision). Populated by
+    /// ReferenceImageManager.requestIsolation; nil until the user has
+    /// asked for isolation at least once on this reference.
     var isolatedImage: UIImage? = nil
-    /// Phase 2. UI hidden in Phase 1; field reserved.
+    /// Which version to render. Flips between original and isolated.
+    /// User toggles via the chrome button.
     var isIsolated: Bool = false
+    /// True while a Vision request is in flight. Drives the chrome
+    /// button's spinner; the button is disabled to prevent re-queueing.
+    var isIsolating: Bool = false
+    /// True if the most recent isolation attempt returned no foreground
+    /// (Vision couldn't find a subject in the image). Reset to false on
+    /// retry. Shown as a subtle indicator next to the isolation button.
+    var lastIsolationFailed: Bool = false
+
+    /// When true, the image body is non-hit-testable: brush strokes pass
+    /// straight through to the canvas underneath. Default false on add
+    /// so the user can drag the reference into position immediately;
+    /// they tap lock when they want to draw over it.
+    var isLocked: Bool = false
 
     /// Center of the displayed rect in canvas-view (screen) coords.
     var center: CGPoint
@@ -108,6 +120,80 @@ final class ReferenceImageManager: ObservableObject {
 
     func clearAll() {
         references.removeAll()
+    }
+
+    /// Toggle the lock state on the reference at the given id.
+    /// Locked = brush strokes pass through the body; unlocked =
+    /// body is interactive (drag, resize).
+    func toggleLock(id: UUID) {
+        guard let i = references.firstIndex(where: { $0.id == id }) else { return }
+        references[i].isLocked.toggle()
+    }
+
+    /// Subject-isolate the reference at the given id using Vision's
+    /// VNGenerateForegroundInstanceMaskRequest. First call kicks off
+    /// the async request, sets isIsolating, and on completion either
+    /// populates isolatedImage + flips isIsolated true, or sets
+    /// lastIsolationFailed if no foreground was found. Subsequent
+    /// calls just flip isIsolated between original and cached isolated.
+    /// Idempotent: re-entrant calls during in-flight work are no-ops.
+    func requestIsolation(id: UUID) async {
+        guard let i = references.firstIndex(where: { $0.id == id }) else { return }
+        guard !references[i].isIsolating else { return }
+
+        // Cached: just toggle on. Clear any prior failure flag.
+        if references[i].isolatedImage != nil {
+            references[i].isIsolated.toggle()
+            references[i].lastIsolationFailed = false
+            return
+        }
+
+        references[i].isIsolating = true
+        references[i].lastIsolationFailed = false
+        let source = references[i].image
+
+        let result: UIImage? = await Task.detached(priority: .userInitiated) {
+            ReferenceImageManager.isolateSubject(in: source)
+        }.value
+
+        guard let j = references.firstIndex(where: { $0.id == id }) else { return }
+        references[j].isIsolating = false
+        if let isolated = result {
+            references[j].isolatedImage = isolated
+            references[j].isIsolated = true
+            references[j].lastIsolationFailed = false
+        } else {
+            references[j].lastIsolationFailed = true
+        }
+    }
+
+    /// Vision foreground-instance mask request. Returns a UIImage with
+    /// alpha zeroed outside the detected subject, or nil if Vision
+    /// can't find a foreground. Runs off-main via Task.detached.
+    /// iOS 17+ (VNGenerateForegroundInstanceMaskRequest requires it).
+    nonisolated private static func isolateSubject(in image: UIImage) -> UIImage? {
+        guard let cgImage = image.cgImage else { return nil }
+
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage)
+
+        do {
+            try handler.perform([request])
+            guard let observation = request.results?.first else { return nil }
+            let pixelBuffer = try observation.generateMaskedImage(
+                ofInstances: observation.allInstances,
+                from: handler,
+                croppedToInstancesExtent: false,
+            )
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let context = CIContext()
+            guard let outputCG = context.createCGImage(ciImage, from: ciImage.extent) else {
+                return nil
+            }
+            return UIImage(cgImage: outputCG, scale: image.scale, orientation: image.imageOrientation)
+        } catch {
+            return nil
+        }
     }
 
     /// Aspect-fit downsample to maxEdgePixels using UIGraphicsImageRenderer.

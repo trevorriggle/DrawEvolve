@@ -1605,10 +1605,11 @@ struct DrawingCanvasView: View {
     // position.
 
     /// Floating reference images layered above the Metal canvas. Each
-    /// reference has its own chrome bar (drag/opacity/flip/delete) and
-    /// corner-handle resize affordances; the image body is non-hit-
-    /// testable so brush strokes pass through to the canvas. Sorted by
-    /// zOrder so the most-recently-touched is on top.
+    /// reference has its own chrome bar (lock/opacity/isolation/flip/
+    /// delete) and corner-handle resize affordances. When unlocked the
+    /// body is interactive (drag from anywhere, corner resize); when
+    /// locked the body is non-hit-testable so brush strokes pass
+    /// through. Sorted by zOrder so the most-recently-touched is on top.
     private var referenceOverlay: some View {
         ZStack {
             ForEach(referenceManager.references.sorted { $0.zOrder < $1.zOrder }) { ref in
@@ -1617,6 +1618,9 @@ struct DrawingCanvasView: View {
                     onUpdate: { referenceManager.update($0) },
                     onDelete: { referenceManager.remove(id: ref.id) },
                     onBringToFront: { referenceManager.bringToFront(id: ref.id) },
+                    onRequestIsolation: {
+                        Task { await referenceManager.requestIsolation(id: ref.id) }
+                    },
                 )
             }
         }
