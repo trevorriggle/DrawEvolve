@@ -13,6 +13,9 @@ struct LayerPanelView: View {
     let onAddLayer: () -> Void
     let onDeleteLayer: (Int) -> Void
     let onMoveLayer: (Int, Int) -> Void
+    /// Eyeball-tap path. Routed through CanvasStateManager so the
+    /// canvas actually redraws (see toggleLayerVisibility's doc).
+    let onToggleVisibility: (Int) -> Void
     let onBeginOpacityDrag: (Int) -> Void
     let onEndOpacityDrag: (Int) -> Void
     let onBeginRename: (Int) -> Void
@@ -128,6 +131,7 @@ struct LayerPanelView: View {
                 guard draggingLayerId != layer.id else { return }
                 selectedIndex = index
             },
+            onToggleVisibility: { onToggleVisibility(index) },
             onToggleExpand: {
                 if expandedLayerIds.contains(layer.id) {
                     expandedLayerIds.remove(layer.id)
@@ -152,21 +156,26 @@ struct LayerPanelView: View {
                 y: isDragging ? 4 : 0)
         .opacity(isDragging ? 0.95 : 1.0)
         .zIndex(isDragging ? 1 : 0)
-        // Sequenced long-press → drag, attached as a high-priority gesture
-        // so it wins over the parent ScrollView's pan recognizer (which
-        // otherwise eats the touch on second-and-later sheet reopens —
-        // see the prior simultaneousGesture attempt's regression).
+        // Sequenced long-press → drag, attached as a SIMULTANEOUS gesture
+        // (single, not two — the prior failed attempt was two separate
+        // simultaneousGesture recognizers, where the drag's per-frame
+        // jitter tripped the LongPress's maximumDistance check). A
+        // single .simultaneousGesture(sequenced) lets the row's child
+        // Buttons (eyeball, lock, expand chevron, delete) fire on quick
+        // taps without being swallowed by the gesture, while still
+        // recognizing held-and-dragged reorders.
         //
-        // Notes that took two failed attempts to learn:
-        //   • LongPressGesture defaults to maximumDistance: 10pt — far too
-        //     tight for finger jitter on a real iPad. We pass 50.
-        //   • Splitting into two .simultaneousGesture recognizers (a
-        //     LongPress + a DragGesture(minimumDistance: 0)) does NOT
-        //     work. The drag's per-frame jitter trips the long-press's
-        //     maximumDistance check and silently cancels pickup. The
-        //     sequenced form is the right primitive: drag isn't even
-        //     active until the press has succeeded.
-        .highPriorityGesture(reorderGesture(index: index, layer: layer))
+        // Trade-off: this drops the explicit "wins over ScrollView's
+        // pan" guarantee that .highPriorityGesture gave us. The
+        // scrollDisabled(draggingLayerId != nil) below covers the
+        // active-drag phase. If the ScrollView regression returns
+        // during the pre-LongPress activation window, escalate to
+        // Option C in the diagnosis doc: dedicated drag handle.
+        //
+        // LongPressGesture's maximumDistance: 50 is intentional —
+        // iPad fingers jitter more than the 10pt default during a hold,
+        // and the default produces pickup-roulette.
+        .simultaneousGesture(reorderGesture(index: index, layer: layer))
     }
 
     @ViewBuilder
@@ -330,6 +339,9 @@ private struct LayerRow: View {
     let isDragging: Bool
     let isOnlyLayer: Bool
     let onTapRow: () -> Void
+    /// Eyeball-tap. Routed to CanvasStateManager.toggleLayerVisibility
+    /// so the canvas redraws (see the comment on that method).
+    let onToggleVisibility: () -> Void
     let onToggleExpand: () -> Void
     let onBeginOpacityDrag: () -> Void
     let onEndOpacityDrag: () -> Void
@@ -378,7 +390,7 @@ private struct LayerRow: View {
 
     private var collapsedBar: some View {
         HStack(spacing: 10) {
-            Button(action: { layer.isVisible.toggle() }) {
+            Button(action: onToggleVisibility) {
                 Image(systemName: layer.isVisible ? "eye.fill" : "eye.slash.fill")
                     .foregroundColor(layer.isVisible ? .primary : .secondary)
                     .frame(width: 24, height: 24)
@@ -517,6 +529,7 @@ private struct LayerRow: View {
             onAddLayer: {},
             onDeleteLayer: { _ in },
             onMoveLayer: { _, _ in },
+            onToggleVisibility: { _ in },
             onBeginOpacityDrag: { _ in },
             onEndOpacityDrag: { _ in },
             onBeginRename: { _ in },

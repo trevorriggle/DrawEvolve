@@ -386,6 +386,26 @@ class CanvasStateManager: ObservableObject {
         bumpLayerMutation()
     }
 
+    /// Toggle a layer's isVisible flag AND trigger a canvas redraw.
+    ///
+    /// The eyeball button in the layer panel calls this rather than
+    /// mutating `layer.isVisible` directly. The reason: DrawingLayer is
+    /// a class with @Published properties, so mutating `layer.isVisible`
+    /// directly fires the layer's own objectWillChange (which updates
+    /// LayerRow's icon), but NOT the @Published var layers array on
+    /// this manager — class-instance property mutations don't change
+    /// the array reference. Under render-on-demand (Fix 1.1 of the
+    /// perf-quick-wins PR), the MTKView only redraws when something
+    /// calls setNeedsDisplay, which is wired to `updateUIView` on
+    /// SwiftUI state changes. Bumping the layer-mutation counter here
+    /// propagates through DrawingCanvasView's body → updateUIView →
+    /// setNeedsDisplay, so the canvas reflects the visibility change.
+    func toggleLayerVisibility(at index: Int) {
+        guard layers.indices.contains(index) else { return }
+        layers[index].isVisible.toggle()
+        bumpLayerMutation()
+    }
+
     func deleteLayer(at index: Int) {
         guard layers.count > 1, layers.indices.contains(index) else { return }
         let layer = layers[index]
