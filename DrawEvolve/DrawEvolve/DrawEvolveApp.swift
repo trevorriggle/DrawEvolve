@@ -15,6 +15,13 @@ struct DrawEvolveApp: App {
         // Initialize crash reporting + boot the auth state listener early.
         _ = CrashReporter.shared
         _ = AuthManager.shared
+        // Start the remote feature-flag refresher. The singleton kicks
+        // off an initial fetch in its init; this turns on the hourly
+        // background refresh so flag flips picked up by the
+        // TestFlight cohort don't wait for an app restart.
+        Task { @MainActor in
+            AppFeatureFlags.shared.startAutoRefresh()
+        }
     }
 
     var body: some Scene {
