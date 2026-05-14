@@ -9,18 +9,6 @@ import SwiftUI
 import PhotosUI
 @preconcurrency import Metal
 
-/// PreferenceKey for capturing the canvas Group's global (window-coord)
-/// frame so the type-tool keyboard-avoidance handler can convert
-/// document-space text positions to window space exactly. See
-/// DrawingCanvasView.handleTypeKeyboardShow for the conversion. Bug B
-/// in the 2026-05-14 type-tool fixes.
-private struct CanvasGlobalFrameKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
-    }
-}
-
 struct DrawingCanvasView: View {
     /// Visual scaffolding for upcoming social features. Defaults to true so
     /// the icon appears in normal builds; flip to false pre-archive to hide
@@ -188,33 +176,6 @@ struct DrawingCanvasView: View {
     // Dark mode toggle
     @AppStorage("userPreferredColorScheme") private var userPreferredColorScheme: String = "light"
 
-    // MARK: - Type-tool keyboard avoidance (Bug B, 2026-05-14)
-    //
-    // When the on-screen keyboard rises and the user is typing in the
-    // lower half of the canvas, shift the Group up by the exact overlap
-    // delta so the floating text is visible above the keyboard. The
-    // shift goes on the Group, NOT the trailing overlay chain — TypeBarView
-    // has its own keyboard observer and shouldn't double-shift.
-
-    /// How far to shift the canvas Group up. Driven by the keyboard
-    /// notifications below. Always 0 when no floatingText is active.
-    @State private var typeKeyboardCanvasShift: CGFloat = 0
-
-    /// Cached duration from the most recent keyboard-show event, used by
-    /// the watchdog (.onChange of floatingText becoming nil) to animate
-    /// the shift-reset with the same curve.
-    @State private var typeKeyboardAnimationDuration: Double = 0.25
-
-    /// Canvas Group's frame in window (global) coordinates. Captured via
-    /// GeometryReader + PreferenceKey so we can convert document-space
-    /// text positions to window space exactly (UIScreen-relative slop
-    /// rejected during PR review).
-    @State private var canvasGlobalFrame: CGRect = .zero
-
-    /// Breathing room above the keyboard's top edge. 24pt — text-bottom
-    /// edge lands 24pt above the keyboard, not flush against it.
-    private let typeKeyboardClearance: CGFloat = 24
-
     var body: some View {
         // Body is split iPhone vs. iPad inside a Group wrapper so the
         // sheets / alerts / fullScreenCover / onChange / onAppear /
@@ -233,51 +194,11 @@ struct DrawingCanvasView: View {
                 padBody
             }
         }
-        // Bug B: shift the canvas Group up by the exact overlap delta
-        // when the keyboard would otherwise hide the floating text.
-        // Computed in handleTypeKeyboardShow below.
-        .offset(y: -typeKeyboardCanvasShift)
-        // GeometryReader captures the Group's window-coord frame so
-        // handleTypeKeyboardShow can convert documentToScreen output
-        // to window space exactly (no UIScreen-based slop).
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .preference(
-                        key: CanvasGlobalFrameKey.self,
-                        value: geo.frame(in: .global),
-                    )
-            }
-            .allowsHitTesting(false)
-        )
-        .onPreferenceChange(CanvasGlobalFrameKey.self) { canvasGlobalFrame = $0 }
         .overlay(typingPathOverlay)
         .overlay(typeBarOverlay)
         .overlay(alignment: .top) {
             autoSaveStatusIndicator
                 .allowsHitTesting(false)
-        }
-        // Bug B keyboard observers. Mirror TypeBarView's pattern (which
-        // shifts the floating control bar independently in the trailing
-        // overlay chain). Show: compute exact overlap delta from the
-        // floating text's displayed-rect corners in window coords.
-        // Hide: reset to 0 with matching animation curve.
-        .onReceive(NotificationCenter.default.publisher(
-            for: UIResponder.keyboardWillShowNotification,
-        )) { handleTypeKeyboardShow($0) }
-        .onReceive(NotificationCenter.default.publisher(
-            for: UIResponder.keyboardWillHideNotification,
-        )) { handleTypeKeyboardHide($0) }
-        // Watchdog: keyboardWillHide can occasionally fail to fire on
-        // certain dismiss paths (e.g., specific drag-dismiss gestures).
-        // The floating text clearing to nil is the canonical signal
-        // that the type session is over — reset the shift defensively.
-        .onChange(of: canvasState.floatingText == nil) { _, isNil in
-            if isNil && typeKeyboardCanvasShift != 0 {
-                withAnimation(.easeInOut(duration: typeKeyboardAnimationDuration)) {
-                    typeKeyboardCanvasShift = 0
-                }
-            }
         }
         // Dirty signal — `bumpLayerMutation()` increments
         // `layerMutationCounter` at every real pixel commit. Viewport
@@ -555,59 +476,6 @@ struct DrawingCanvasView: View {
     // stack, dirty bit) persists behind the cover. A "Close" button
     // would imply discard/dismiss, which is wrong from a fresh canvas
     // launch and ambiguous mid-session.
-
-    // MARK: - Type-tool keyboard avoidance (Bug B handlers)
-
-    /// Compute the canvas Group shift so the floating text's displayed
-    /// rect is fully visible above the on-screen keyboard. No-op when
-    /// there's no active floatingText — keyboard events from other
-    /// sources (settings sheets, etc.) shouldn't displace the canvas.
-    private func handleTypeKeyboardShow(_ note: Notification) {
-        guard let info = note.userInfo,
-              let frameValue = info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue,
-              let duration = info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double else {
-            return
-        }
-        let kbFrame = frameValue.cgRectValue
-
-        // Hardware keyboard attached: iOS reports a frame with height 0
-        // or off-screen minY. Treat as "no keyboard, don't move." Same
-        // guard pattern as TypeBarView.handleKeyboardShow.
-        guard kbFrame.height > 0,
-              kbFrame.minY < UIScreen.main.bounds.height - 1 else {
-            return
-        }
-        guard let ft = canvasState.floatingText else { return }
-
-        typeKeyboardAnimationDuration = duration
-
-        // Compute the displayed rect's bottom-most corner in window
-        // coords. The rect is doc-space; documentToScreen returns
-        // canvas-view coords; canvasGlobalFrame.minY adds the canvas
-        // view's window origin. Take the max-y across all four corners
-        // because the float may be rotated (post Bug A fix, it usually
-        // is when the canvas is rotated).
-        let dr = ft.displayedRect
-        let p1 = canvasState.documentToScreen(CGPoint(x: dr.minX, y: dr.minY))
-        let p2 = canvasState.documentToScreen(CGPoint(x: dr.maxX, y: dr.minY))
-        let p3 = canvasState.documentToScreen(CGPoint(x: dr.minX, y: dr.maxY))
-        let p4 = canvasState.documentToScreen(CGPoint(x: dr.maxX, y: dr.maxY))
-        let textBottomCanvasY = max(p1.y, p2.y, p3.y, p4.y)
-        let textBottomWindowY = canvasGlobalFrame.minY + textBottomCanvasY
-
-        let needed = max(0, textBottomWindowY + typeKeyboardClearance - kbFrame.minY)
-        withAnimation(.easeInOut(duration: duration)) {
-            typeKeyboardCanvasShift = needed
-        }
-    }
-
-    private func handleTypeKeyboardHide(_ note: Notification) {
-        let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
-            as? Double) ?? typeKeyboardAnimationDuration
-        withAnimation(.easeInOut(duration: duration)) {
-            typeKeyboardCanvasShift = 0
-        }
-    }
 
     private var phoneBody: some View {
         NavigationStack {

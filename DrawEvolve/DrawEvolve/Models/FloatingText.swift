@@ -134,8 +134,7 @@ struct FloatingText {
         content: String,
         settings: TextSettings,
         anchor: CGPoint,
-        bounds: CGRect = .zero,
-        rotation: Angle = .zero
+        bounds: CGRect = .zero
     ) {
         self.id = id
         self.content = content
@@ -143,7 +142,7 @@ struct FloatingText {
         self.anchor = anchor
         self.bounds = bounds
         self.scale = CGSize(width: 1, height: 1)
-        self.rotation = rotation
+        self.rotation = .zero
     }
 
     /// Doc-space rect where the text is displayed at the current scale,
