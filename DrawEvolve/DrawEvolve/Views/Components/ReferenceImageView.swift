@@ -2,42 +2,28 @@
 //  ReferenceImageView.swift
 //  DrawEvolve
 //
-//  Pass 2 (2026-05-14): chrome-bar interaction model with the Pass-1
-//  bugs fixed plus lock + body-drag + subject isolation + visual refresh.
+//  Pass 3 (2026-05-14): deferred-commit drag + single diagonal resize.
 //
-//  Key architectural decisions:
+//  The "insanely jittery" drag from Pass 2 was caused by per-frame
+//  publishes through ReferenceImageManager. Every onChanged event
+//  called onUpdate(r), which mutated the @Published references array,
+//  which re-rendered DrawingCanvasView's entire body (because it owns
+//  the manager via @StateObject). The body is large; re-evaluating it
+//  60-120 times per second during a drag drops frames.
 //
-//  Two scoped drag gestures, not one whole-frame drag.
-//    The Pass-1 spec called for a single drag gesture on the entire
-//    frame, but that conflicts with the slider thumb inside the chrome
-//    bar — both would fire when the user drags the slider sideways.
-//    Pass-2 splits the drag into two: one on the image body (when
-//    unlocked), one on the chrome bar's empty background space. The
-//    controls (lock, slider, isolation, flip, delete) intercept their
-//    own touches before the chrome's drag can see them.
+//  Pass-3 fix: hold the in-flight drag offset and resize delta in
+//  local view state (@GestureState / @State). The view's rendered
+//  position is `manager.center + dragOffset`; the displayed scale is
+//  `manager.scale * inFlightScaleFactor`. Manager mutates ONLY on
+//  drag/resize-end. During the gesture, only THIS view re-renders, and
+//  its body is small (chrome + image + one handle).
 //
-//  Bring-to-front is a separate TapGesture.
-//    DragGesture(minimumDistance: 4) doesn't fire onEnded for quick
-//    taps below the threshold, so we can't piggy-back the bring-to-
-//    front on the drag. A simultaneousGesture(TapGesture()) fires on
-//    quick taps; the drag fires on actual drags; bring-to-front lives
-//    on the tap.
-//
-//  Lock toggle controls hit-testing.
-//    Unlocked (default on add): body is hit-testable, drag/resize work
-//    on the whole body. Locked: body has .allowsHitTesting(false),
-//    brush strokes pass through to the canvas. Chrome and corner
-//    handles still work for the explicit controls.
-//
-//  Bug fixes:
-//    A) Corner-handle drift — startWidth used to be captured on each
-//       view render (so it tracked the live scale during the drag,
-//       breaking the math). Now both startScale and startWidth are
-//       captured in a single @GestureState at gesture-begin.
-//    B) Header drag snap-back / jitter — the Pass-1 two-phase pattern
-//       (offset during drag, commit on end) could leave the reference
-//       stuck in a half-state on gesture cancellation. Pass-2 mutates
-//       reference.center continuously in onChanged; no deferred state.
+//  Single resize handle in the bottom-left. The four corner anchors
+//  were drifting out of sync with the reference under Pass 2's
+//  startWidth bug (since fixed). User preferred to eliminate the
+//  per-corner complexity entirely: one diagonal arrow at bottom-left,
+//  drag down-and-left to grow, up-and-right to shrink. Projected onto
+//  the diagonal so any drag direction contributes proportionally.
 //
 
 import SwiftUI
@@ -49,27 +35,42 @@ struct ReferenceImageView: View {
     let onBringToFront: () -> Void
     let onRequestIsolation: () -> Void
 
-    @GestureState private var dragStart: CGPoint? = nil
-    @GestureState private var resizeStart: ResizeStart? = nil
+    /// In-flight drag offset from the committed center. Auto-resets to
+    /// .zero when the gesture ends (or is cancelled). Manager only sees
+    /// the new center when onEnded fires — no per-frame publishes.
+    @GestureState private var dragOffset: CGSize = .zero
+
+    /// In-flight resize state. nil when no resize is happening; non-nil
+    /// during a drag of the resize handle. Holds the scale at gesture-
+    /// begin (for stable math) and the outward delta in pixels.
+    @State private var resizeStart: ResizeStart? = nil
 
     private struct ResizeStart {
         let scale: CGFloat
-        let width: CGFloat
+        let outwardDelta: CGFloat
     }
 
     private let headerHeight: CGFloat = 32
-    private let cornerHandleSize: CGFloat = 18
+    private let resizeHandleSize: CGFloat = 28
 
-    /// Single source of truth for the rendered image — original or isolated.
     private var displayImage: UIImage {
         (reference.isIsolated ? reference.isolatedImage : reference.image)
             ?? reference.image
     }
 
+    /// Effective scale: committed scale × in-flight scale factor.
+    /// Driven by resizeStart's outwardDelta during an active resize.
+    private var effectiveScale: CGFloat {
+        guard let r = resizeStart else { return reference.scale }
+        let startWidth = reference.image.size.width * r.scale
+        let scaleFactor = 1.0 + r.outwardDelta / max(startWidth, 1)
+        return max(0.1, r.scale * scaleFactor)
+    }
+
     private var displayedSize: CGSize {
         CGSize(
-            width: reference.image.size.width * reference.scale,
-            height: reference.image.size.height * reference.scale,
+            width: reference.image.size.width * effectiveScale,
+            height: reference.image.size.height * effectiveScale,
         )
     }
 
@@ -81,23 +82,21 @@ struct ReferenceImageView: View {
         .frame(width: displayedSize.width, height: displayedSize.height + headerHeight)
         .background(frameBackground)
         .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
-        .position(x: reference.center.x, y: reference.center.y)
-        .overlay(cornerHandles)
+        .position(
+            x: reference.center.x + dragOffset.width,
+            y: reference.center.y + dragOffset.height,
+        )
     }
 
     // MARK: - Chrome bar
 
     private var chromeBar: some View {
         ZStack {
-            // Bottom layer: drag-detecting empty space. Touches on
-            // controls (top layer) intercept first; touches on empty
-            // space fall through to this drag gesture.
             Color.clear
                 .contentShape(Rectangle())
                 .gesture(chromeDragGesture)
                 .simultaneousGesture(bringToFrontTapGesture)
 
-            // Top layer: controls.
             HStack(spacing: 12) {
                 lockButton
                 opacitySlider
@@ -171,8 +170,6 @@ struct ReferenceImageView: View {
                         .foregroundColor(.white)
                 }
 
-                // Subtle failure indicator — Vision returned no
-                // foreground last time. Cleared on next attempt.
                 if reference.lastIsolationFailed && !reference.isIsolating {
                     Circle()
                         .fill(Color.orange)
@@ -223,40 +220,28 @@ struct ReferenceImageView: View {
             .scaleEffect(x: reference.isFlipped ? -1 : 1, y: 1)
             .opacity(reference.opacity)
             .contentShape(Rectangle())
-            // Locked = brush strokes pass through. Unlocked = body
-            // accepts touches for drag/tap-to-front.
             .allowsHitTesting(!reference.isLocked)
             .gesture(reference.isLocked ? nil : bodyDragGesture)
             .simultaneousGesture(reference.isLocked ? nil : bringToFrontTapGesture)
-    }
-
-    // MARK: - Corner handles
-
-    /// Corner handles only render when unlocked. Locked = drawing mode,
-    /// handles would just clutter the canvas.
-    @ViewBuilder
-    private var cornerHandles: some View {
-        if !reference.isLocked {
-            let w = displayedSize.width
-            let h = displayedSize.height + headerHeight
-            ZStack {
-                cornerHandle(at: CGPoint(x: 0, y: 0), signX: -1)
-                cornerHandle(at: CGPoint(x: w, y: 0), signX: +1)
-                cornerHandle(at: CGPoint(x: 0, y: h), signX: -1)
-                cornerHandle(at: CGPoint(x: w, y: h), signX: +1)
+            .overlay(alignment: .bottomLeading) {
+                if !reference.isLocked {
+                    resizeHandle.padding(6)
+                }
             }
-            .frame(width: w, height: h, alignment: .topLeading)
-        }
     }
 
-    private func cornerHandle(at point: CGPoint, signX: CGFloat) -> some View {
-        Circle()
-            .fill(Color.accentColor)
-            .overlay(Circle().stroke(Color.white, lineWidth: 2))
-            .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-            .frame(width: cornerHandleSize, height: cornerHandleSize)
-            .position(x: point.x, y: point.y)
-            .gesture(resizeGesture(signX: signX))
+    // MARK: - Resize handle (single, bottom-left)
+
+    private var resizeHandle: some View {
+        Image(systemName: "arrow.down.left.and.arrow.up.right")
+            .font(.system(size: 12, weight: .bold))
+            .foregroundColor(.white)
+            .frame(width: resizeHandleSize, height: resizeHandleSize)
+            .background(Circle().fill(Color.accentColor))
+            .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+            .contentShape(Circle())
+            .gesture(resizeGesture)
     }
 
     // MARK: - Frame background
@@ -273,82 +258,82 @@ struct ReferenceImageView: View {
 
     // MARK: - Gestures
 
-    /// Quick tap → bring this reference to the front of z-order.
-    /// Used as .simultaneousGesture alongside the drag gestures so quick
-    /// taps register even when the drag has minimumDistance > 0.
+    /// Quick-tap-to-front. Fires on touch-release with no significant
+    /// movement; runs alongside the drag gestures via simultaneousGesture.
     private var bringToFrontTapGesture: some Gesture {
         TapGesture().onEnded { onBringToFront() }
     }
 
-    /// Drag on the image body. Continuous-center mutation — no deferred
-    /// offset state, so cancellation doesn't snap back. Also brings the
-    /// reference to the front on drag-end (so dragging a back reference
-    /// surfaces it).
-    ///
-    /// minimumDistance: 0 = 1:1 finger tracking from pixel one. With
-    /// any non-zero threshold the gesture's first onChanged arrives
-    /// with translation already past the threshold, which feels like
-    /// a "jump" — the cause of the jittery-drag complaint.
+    /// Body drag — deferred commit. dragOffset is in-flight; the manager
+    /// only learns about the new center when onEnded fires. This is the
+    /// fix for "insanely jittery" — no per-frame publishes during drag,
+    /// no full DrawingCanvasView body re-evaluation per touch event.
     private var bodyDragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
-            .updating($dragStart) { _, state, _ in
-                if state == nil { state = reference.center }
+            .updating($dragOffset) { value, state, _ in
+                state = value.translation
             }
-            .onChanged { value in
-                guard let start = dragStart else { return }
+            .onEnded { value in
                 var r = reference
                 r.center = CGPoint(
-                    x: start.x + value.translation.width,
-                    y: start.y + value.translation.height,
+                    x: reference.center.x + value.translation.width,
+                    y: reference.center.y + value.translation.height,
                 )
                 onUpdate(r)
+                onBringToFront()
             }
-            .onEnded { _ in onBringToFront() }
     }
 
-    /// Drag on the chrome bar's empty background. Same continuous-
-    /// center pattern as bodyDragGesture. The controls (lock, slider,
-    /// isolation, flip, delete) intercept their own touches before
-    /// this gesture sees them, so slider drags don't move the reference.
+    /// Chrome bar empty-space drag. Same deferred-commit pattern as
+    /// bodyDragGesture. The controls inside the chrome bar intercept
+    /// their own touches before this gesture sees them.
     private var chromeDragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
-            .updating($dragStart) { _, state, _ in
-                if state == nil { state = reference.center }
+            .updating($dragOffset) { value, state, _ in
+                state = value.translation
             }
-            .onChanged { value in
-                guard let start = dragStart else { return }
+            .onEnded { value in
                 var r = reference
                 r.center = CGPoint(
-                    x: start.x + value.translation.width,
-                    y: start.y + value.translation.height,
+                    x: reference.center.x + value.translation.width,
+                    y: reference.center.y + value.translation.height,
                 )
                 onUpdate(r)
+                onBringToFront()
             }
-            .onEnded { _ in onBringToFront() }
     }
 
-    /// Resize from a corner. Captures BOTH startScale AND startWidth
-    /// in the same @GestureState snapshot — fixes the Pass-1 drift
-    /// where startWidth was recomputed on each render with the live
-    /// scale, breaking the math.
-    private func resizeGesture(signX: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 2)
-            .updating($resizeStart) { _, state, _ in
-                if state == nil {
-                    state = ResizeStart(
+    /// Single diagonal resize. Drag down-and-left = grow; up-and-right
+    /// = shrink. Both axes contribute symmetrically (sum, not max).
+    ///
+    /// In-flight resizeStart drives effectiveScale during the drag; the
+    /// manager only learns about the new scale on onEnded. Same deferred-
+    /// commit pattern as the drag — no per-frame publish storm.
+    private var resizeGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let outward = -value.translation.width + value.translation.height
+                if resizeStart == nil {
+                    resizeStart = ResizeStart(
                         scale: reference.scale,
-                        width: reference.image.size.width * reference.scale,
+                        outwardDelta: outward,
+                    )
+                } else {
+                    resizeStart = ResizeStart(
+                        scale: resizeStart!.scale,  // immutable start scale
+                        outwardDelta: outward,
                     )
                 }
             }
-            .onChanged { value in
-                guard let begin = resizeStart else { return }
-                let signedDelta = signX * value.translation.width
-                let scaleFactor = 1.0 + signedDelta / max(begin.width, 1)
-                let newScale = max(0.1, begin.scale * scaleFactor)
+            .onEnded { _ in
+                guard let start = resizeStart else { return }
+                let startWidth = reference.image.size.width * start.scale
+                let scaleFactor = 1.0 + start.outwardDelta / max(startWidth, 1)
+                let newScale = max(0.1, start.scale * scaleFactor)
                 var r = reference
                 r.scale = newScale
                 onUpdate(r)
+                resizeStart = nil
             }
     }
 }
