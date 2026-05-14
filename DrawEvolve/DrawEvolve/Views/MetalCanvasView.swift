@@ -87,6 +87,21 @@ struct MetalCanvasView: UIViewRepresentable {
     /// pattern as `canvasState`.
     var symmetry: SymmetryConfig
 
+    /// Back-canvas reference images. Pushed to the Coordinator each
+    /// updateUIView; the Coordinator caches textures by id and renders
+    /// them BETWEEN the white-paper pass and the layer composite. These
+    /// references are NEVER added to `layers` and NEVER enter the AI/
+    /// save/export composite — they live only in the to-screen path.
+    var backCanvasReferences: [ReferenceImage] = []
+
+    /// Apple Pencil hover callback (iPadOS 16.1+, iPad Pro M2+). Fires
+    /// with the hover screen point while the pencil is detected above
+    /// the screen, and with nil when the pencil leaves hover range or
+    /// touches down. UIHoverGestureRecognizer is a no-op on hardware
+    /// without hover support, so there's no compatibility branching
+    /// needed — non-supported devices simply never invoke this closure.
+    var onHoverChange: ((CGPoint?) -> Void)? = nil
+
     func makeUIView(context: Context) -> MTKView {
         let metalView = TouchEnabledMTKView()
 
@@ -152,7 +167,13 @@ struct MetalCanvasView: UIViewRepresentable {
         rotationGesture.delegate = context.coordinator
         metalView.addGestureRecognizer(rotationGesture)
 
-        print("MetalCanvasView: MTKView configured successfully with gesture recognizers (pinch, pan, rotation)")
+        // Apple Pencil hover (iPadOS 16.1+, iPad Pro M2+ / Pencil 2/Pro).
+        // Inert on unsupported hardware — never fires. No compatibility
+        // branching needed; the closure on Coordinator just stays unused.
+        let hoverGesture = UIHoverGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleHover(_:)))
+        metalView.addGestureRecognizer(hoverGesture)
+
+        print("MetalCanvasView: MTKView configured successfully with gesture recognizers (pinch, pan, rotation, hover)")
 
         return metalView
     }
@@ -166,6 +187,12 @@ struct MetalCanvasView: UIViewRepresentable {
         // @AppStorage-backed value passed in here; the Coordinator
         // branches on this in the .textOnPath touch handlers.
         context.coordinator.typeOnPathMode = typeOnPathMode
+
+        // Push the latest back-canvas references. The Coordinator handles
+        // texture caching (upload on first sight, drop when removed) and
+        // renders them in draw(in:) before the layer composite. Never
+        // enters compositeLayersToTexture / the AI/save path.
+        context.coordinator.backCanvasReferences = backCanvasReferences
 
         // Just trigger a redraw when something changes
         uiView.setNeedsDisplay()
@@ -182,7 +209,8 @@ struct MetalCanvasView: UIViewRepresentable {
             onTextOnPathRequest: onTextOnPathRequest,
             onTextOnPathCircleRequest: onTextOnPathCircleRequest,
             typeOnPathMode: typeOnPathMode,
-            symmetry: symmetry
+            symmetry: symmetry,
+            onHoverChange: onHoverChange
         )
     }
 
@@ -328,6 +356,26 @@ struct MetalCanvasView: UIViewRepresentable {
         /// Coordinator doesn't pin the view's lifetime.
         weak var metalView: MTKView?
 
+        /// Back-canvas references pushed in from MetalCanvasView each
+        /// updateUIView. Read in draw(in:) to render the pre-layer pass.
+        var backCanvasReferences: [ReferenceImage] = []
+
+        /// MTLTexture cache for back-canvas references, keyed by ref id.
+        /// Lazily populated on first sight in draw(in:); entries are
+        /// dropped when the id is no longer in backCanvasReferences. The
+        /// images themselves are immutable post-import (subject isolation
+        /// produces a new image but stores it as `isolatedImage` on the
+        /// reference; we cache one entry per reference id regardless).
+        private var referenceTextureCache: [UUID: MTLTexture] = [:]
+        /// Tracks whether the cached texture is for the original or
+        /// isolated image — flipping the toggle invalidates the cache.
+        private var referenceTextureCacheKey: [UUID: Bool] = [:]
+
+        /// Apple Pencil hover callback, set from MetalCanvasView's init.
+        /// Invoked with the screen-space hover point while the pencil
+        /// is detected above the screen, and with nil on hover-end.
+        var onHoverChange: ((CGPoint?) -> Void)?
+
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
@@ -341,7 +389,8 @@ struct MetalCanvasView: UIViewRepresentable {
             onTextOnPathCircleRequest: ((_ center: CGPoint,
                                         _ radius: CGFloat) -> Void)?,
             typeOnPathMode: TypeOnPathPathMode,
-            symmetry: SymmetryConfig
+            symmetry: SymmetryConfig,
+            onHoverChange: ((CGPoint?) -> Void)?
         ) {
             _layers = layers
             _currentTool = currentTool
@@ -353,6 +402,7 @@ struct MetalCanvasView: UIViewRepresentable {
             self.onTextOnPathCircleRequest = onTextOnPathCircleRequest
             self.typeOnPathMode = typeOnPathMode
             self.symmetry = symmetry
+            self.onHoverChange = onHoverChange
 
             super.init()
 
@@ -488,6 +538,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
                 flipState: flipState
             )
+
+            // Back-canvas references — rendered AFTER the white paper
+            // and BEFORE the layer composite, so strokes paint on top.
+            // ARCHITECTURAL INVARIANT: these references never enter the
+            // layer stack or compositeLayersToTexture. The AI/save/export
+            // composite path is entirely unaware of them.
+            renderBackCanvasReferences(view: view, encoder: renderEncoder)
 
             // Selection-drag preview state (read once so the layer loop and the
             // floating overlay below see a consistent snapshot).
@@ -2396,6 +2453,109 @@ struct MetalCanvasView: UIViewRepresentable {
             view.setNeedsDisplay()
         }
 
+        // MARK: - Back-canvas references
+
+        /// Render each back-canvas reference via the renderer's
+        /// reference-quad pass. Manages the texture cache (load on first
+        /// sight, drop when removed, reload when isolation state flips).
+        /// Sorted by zOrder so layered references composite correctly.
+        private func renderBackCanvasReferences(view: MTKView, encoder: MTLRenderCommandEncoder) {
+            guard !backCanvasReferences.isEmpty, let renderer = renderer else { return }
+
+            syncReferenceTextureCache()
+
+            let drawableSize = view.drawableSize
+            let scale = Float(view.contentScaleFactor)
+            let viewport = SIMD2<Float>(Float(drawableSize.width), Float(drawableSize.height))
+
+            // Snapshot canvas transform once per frame for follow-mode refs.
+            let canvasZoom: CGFloat
+            let canvasRotationRad: CGFloat
+            if let cs = canvasState {
+                (canvasZoom, canvasRotationRad) = MainActor.assumeIsolated {
+                    (cs.zoomScale, cs.canvasRotation.radians)
+                }
+            } else {
+                (canvasZoom, canvasRotationRad) = (1.0, 0.0)
+            }
+
+            for ref in backCanvasReferences.sorted(by: { $0.zOrder < $1.zOrder }) {
+                guard let texture = referenceTextureCache[ref.id] else { continue }
+
+                // Resolve effective screen-space center, scale, rotation.
+                // Follow mode: reference.center is doc-space; transform
+                // it via canvasState.documentToScreen (this applies
+                // canvas pan/zoom/rotation in one shot). Apparent size
+                // scales with canvas zoom. Apparent rotation = canvas
+                // rotation.
+                let screenCenter: CGPoint
+                let displayedScale: CGFloat
+                let rotationRad: CGFloat
+                if ref.followsCanvas, let cs = canvasState {
+                    screenCenter = MainActor.assumeIsolated { cs.documentToScreen(ref.center) }
+                    displayedScale = ref.scale * canvasZoom
+                    rotationRad = canvasRotationRad
+                } else {
+                    screenCenter = ref.center
+                    displayedScale = ref.scale
+                    rotationRad = 0
+                }
+
+                let displayedPointWidth = Float(ref.image.size.width * displayedScale)
+                let displayedPointHeight = Float(ref.image.size.height * displayedScale)
+
+                renderer.renderReferenceBehindLayers(
+                    texture,
+                    center: SIMD2<Float>(
+                        Float(screenCenter.x) * scale,
+                        Float(screenCenter.y) * scale,
+                    ),
+                    displayedSize: SIMD2<Float>(
+                        displayedPointWidth * scale,
+                        displayedPointHeight * scale,
+                    ),
+                    viewportSize: viewport,
+                    opacity: Float(ref.opacity),
+                    flipX: ref.isFlipped,
+                    flipY: ref.isFlippedY,
+                    rotation: Float(rotationRad),
+                    to: encoder,
+                )
+            }
+        }
+
+        /// Maintain `referenceTextureCache` against the current list:
+        /// upload textures for newly-seen ids, drop entries for ids that
+        /// have disappeared, reload when the isolation flag flipped.
+        private func syncReferenceTextureCache() {
+            let currentIDs = Set(backCanvasReferences.map(\.id))
+            for id in referenceTextureCache.keys where !currentIDs.contains(id) {
+                referenceTextureCache.removeValue(forKey: id)
+                referenceTextureCacheKey.removeValue(forKey: id)
+            }
+
+            guard let device = metalView?.device else { return }
+            let loader = MTKTextureLoader(device: device)
+
+            for ref in backCanvasReferences {
+                let needsReload = referenceTextureCacheKey[ref.id] != ref.isIsolated
+                if referenceTextureCache[ref.id] == nil || needsReload {
+                    let source = (ref.isIsolated ? ref.isolatedImage : ref.image) ?? ref.image
+                    guard let cgImage = source.cgImage else { continue }
+                    if let texture = try? loader.newTexture(
+                        cgImage: cgImage,
+                        options: [
+                            .SRGB: NSNumber(value: true),
+                            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+                        ],
+                    ) {
+                        referenceTextureCache[ref.id] = texture
+                        referenceTextureCacheKey[ref.id] = ref.isIsolated
+                    }
+                }
+            }
+        }
+
         // MARK: - Symmetry mirroring
         //
         // Single source of truth used by BOTH the brush/eraser path
@@ -2982,6 +3142,25 @@ struct MetalCanvasView: UIViewRepresentable {
             case .ended, .cancelled:
                 print("Two-finger pan ended")
 
+            default:
+                break
+            }
+        }
+
+        /// Apple Pencil hover (iPadOS 16.1+, iPad Pro M2+ / Pencil 2/Pro).
+        /// UIHoverGestureRecognizer is inert on hardware without hover
+        /// support — this method simply never fires on unsupported
+        /// devices. Trackpad/mouse hover on iPad with a Magic Keyboard
+        /// or pointer device also fires this; the cursor still reads
+        /// as useful in those cases.
+        @objc func handleHover(_ gesture: UIHoverGestureRecognizer) {
+            let view = gesture.view
+            let point = gesture.location(in: view)
+            switch gesture.state {
+            case .began, .changed:
+                onHoverChange?(point)
+            case .ended, .cancelled, .failed:
+                onHoverChange?(nil)
             default:
                 break
             }

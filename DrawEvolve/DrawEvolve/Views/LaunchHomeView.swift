@@ -14,6 +14,8 @@ struct LaunchHomeView: View {
     let onNewCanvas: () -> Void
     let onOpenGallery: () -> Void
 
+    @EnvironmentObject private var authManager: AuthManager
+
     var body: some View {
         VStack(spacing: 32) {
             Spacer()
@@ -57,12 +59,31 @@ struct LaunchHomeView: View {
             .frame(maxWidth: 480)
 
             Spacer()
+
+            signedInFooter
+                .padding(.bottom, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemBackground))
+    }
+
+    /// Small "Signed in as <email>" line at the bottom of the launch
+    /// screen. Reads from AuthManager (injected via ContentView's
+    /// .environmentObject). Falls back to "—" if email isn't available
+    /// (e.g., debug-bypass user has no Supabase session).
+    private var signedInFooter: some View {
+        HStack(spacing: 4) {
+            Text("Signed in as")
+                .foregroundStyle(.secondary)
+            Text(authManager.currentUser?.email ?? "—")
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+        }
+        .font(.footnote)
     }
 }
 
 #Preview {
     LaunchHomeView(onNewCanvas: {}, onOpenGallery: {})
+        .environmentObject(AuthManager.shared)
 }

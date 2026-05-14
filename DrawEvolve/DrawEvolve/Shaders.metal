@@ -995,3 +995,98 @@ kernel void floodFillKernel(texture2d<float, access::read>  inputTexture [[textu
 
     backMask.write(float4(neighborMarked ? 1.0 : 0.0, 0.0, 0.0, 1.0), gid);
 }
+
+// MARK: - Reference Image: behind-canvas pass
+//
+// Renders a single reference image as a textured quad positioned in
+// screen (drawable-pixel) space, with optional horizontal/vertical
+// flip and opacity. Used by the to-screen draw path when a reference
+// is in "behind canvas" mode — the quad is encoded AFTER the canvas's
+// white-paper render and BEFORE the layer composite, so layer strokes
+// composite ON TOP of the reference visually.
+//
+// ARCHITECTURAL INVARIANT: this shader is ONLY invoked from the
+// to-screen path. compositeLayersToTexture (the save/AI/export
+// composite) never calls it. References in back-canvas mode are just
+// as excluded from the AI feedback as references in front mode.
+
+struct ReferenceQuadUniforms {
+    float2 center;          // in drawable pixels
+    float2 halfSize;        // in drawable pixels (width/2, height/2)
+    float2 viewportSize;    // drawable size in pixels
+    float opacity;
+    float flipX;            // 1.0 = no flip, -1.0 = flipped
+    float flipY;            // 1.0 = no flip, -1.0 = flipped
+    float rotation;         // radians, CCW around center. 0 when ref is
+                            // screen-fixed; canvas rotation when ref
+                            // follows the canvas.
+};
+
+struct ReferenceQuadOut {
+    float4 position [[position]];
+    float2 texCoord;
+};
+
+vertex ReferenceQuadOut referenceQuadVertexShader(
+    uint vertexID [[vertex_id]],
+    constant ReferenceQuadUniforms& U [[buffer(0)]]
+) {
+    // Unit quad — 2 triangles, 6 vertices.
+    float2 corners[6] = {
+        float2(-1.0, -1.0), float2( 1.0, -1.0), float2(-1.0,  1.0),
+        float2(-1.0,  1.0), float2( 1.0, -1.0), float2( 1.0,  1.0),
+    };
+    float2 texCoords[6] = {
+        float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0),
+        float2(0.0, 0.0), float2(1.0, 1.0), float2(1.0, 0.0),
+    };
+
+    float2 corner = corners[vertexID];
+
+    // Scale corner to halfSize, rotate, translate to center.
+    // R(-θ) in Y-down pixel space matches the canvas main shader's
+    // R(θ) in Y-up pixel space — both visually rotate the same
+    // direction for the same canvasRotation value. The rotation
+    // gesture handler at MetalCanvasView:3144 negates the gesture's
+    // raw rotation before storing in canvasRotation, so positive
+    // user-CW gestures end up as NEGATIVE canvasRotation values; this
+    // R(-θ) formula then rotates CW visually in Y-down for negative
+    // input, matching the canvas content.
+    float2 scaled = corner * U.halfSize;
+    float c = cos(U.rotation);
+    float s = sin(U.rotation);
+    float2 rotated = float2(
+        scaled.x * c + scaled.y * s,
+        -scaled.x * s + scaled.y * c
+    );
+    float2 pixelPos = U.center + rotated;
+
+    // Pixel → NDC. Y-flip for Metal's clip-space convention (UIKit Y-down).
+    float2 ndc;
+    ndc.x = (pixelPos.x / U.viewportSize.x) * 2.0 - 1.0;
+    ndc.y = 1.0 - (pixelPos.y / U.viewportSize.y) * 2.0;
+
+    // Apply flip to texture coords (image content mirrors, position unchanged).
+    float2 tc = texCoords[vertexID];
+    if (U.flipX < 0.0) { tc.x = 1.0 - tc.x; }
+    if (U.flipY < 0.0) { tc.y = 1.0 - tc.y; }
+
+    ReferenceQuadOut out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.texCoord = tc;
+    return out;
+}
+
+fragment float4 referenceQuadFragmentShader(
+    ReferenceQuadOut in [[stage_in]],
+    texture2d<float> referenceTexture [[texture(0)]],
+    constant float& opacity [[buffer(0)]]
+) {
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
+    float4 color = referenceTexture.sample(textureSampler, in.texCoord);
+    color.a *= opacity;
+    // Premultiplied alpha so the standard (one, oneMinusSrcAlpha) blend
+    // in the pipeline state composites correctly over the white paper.
+    color.rgb *= color.a;
+    return color;
+}

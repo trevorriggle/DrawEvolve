@@ -16,10 +16,13 @@ struct SettingsView: View {
     @State private var showSignOutConfirm = false
     @State private var showDeleteSheet = false
     @State private var signOutInFlight = false
+    @State private var showBetaNotice = false
+    @State private var showHowItWorks = false
 
     var body: some View {
         NavigationStack {
             Form {
+                infoSection
                 accountSection
                 actionsSection
                 legalSection
@@ -43,10 +46,59 @@ struct SettingsView: View {
             .sheet(isPresented: $showDeleteSheet) {
                 DeleteAccountConfirmationSheet()
             }
+            .fullScreenCover(isPresented: $showBetaNotice) {
+                BetaTransparencyPopup(isPresented: $showBetaNotice)
+            }
+            .fullScreenCover(isPresented: $showHowItWorks) {
+                OnboardingPopup(isPresented: $showHowItWorks)
+            }
         }
     }
 
     // MARK: - Sections
+
+    /// Beta Notice + How It Works — re-access path for the first-launch
+    /// popups. Side-by-side buttons rendered as a single Form row with
+    /// clear background so they read as floating actions, not list rows.
+    private var infoSection: some View {
+        Section {
+            HStack(spacing: 12) {
+                Button {
+                    showBetaNotice = true
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "info.bubble")
+                            .font(.title3)
+                        Text("Beta Notice")
+                            .font(.footnote.weight(.medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showHowItWorks = true
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "questionmark.circle")
+                            .font(.title3)
+                        Text("How It Works")
+                            .font(.footnote.weight(.medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            .listRowBackground(Color.clear)
+        }
+    }
 
     private var accountSection: some View {
         Section("Account") {

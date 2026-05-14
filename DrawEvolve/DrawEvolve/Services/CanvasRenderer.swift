@@ -11,6 +11,21 @@ import MetalKit
 import UIKit
 import CoreText
 
+/// Mirror of `ReferenceQuadUniforms` in Shaders.metal. Field order and
+/// alignment match the MSL struct exactly. Total stride 40 bytes:
+/// 8*3 (three float2) + 4*4 (four float — opacity, flipX, flipY,
+/// rotation) = 24 + 16 = 40. The float2 alignment of 8 forces the
+/// struct stride up to a multiple of 8 (40 is already a multiple of 8).
+fileprivate struct ReferenceQuadUniforms {
+    var center: SIMD2<Float>
+    var halfSize: SIMD2<Float>
+    var viewportSize: SIMD2<Float>
+    var opacity: Float
+    var flipX: Float
+    var flipY: Float
+    var rotation: Float
+}
+
 class CanvasRenderer: NSObject {
     let device: MTLDevice // Public for GPU sync
     // Long-lived per-device command queue. Exposed so callers (MTKView delegate)
@@ -43,6 +58,12 @@ class CanvasRenderer: NSObject {
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
     private var floatingTexturePipelineState: MTLRenderPipelineState? // For floating selection drag preview
+    /// Pipeline for reference-image quads rendered in screen space BETWEEN
+    /// the canvas's white paper and the layer composite. ONLY used by the
+    /// to-screen path; the save/AI/export composite (compositeLayersToTexture)
+    /// never touches this. References in back-canvas mode are visible on
+    /// screen but excluded from the export by construction.
+    private var referenceQuadPipelineState: MTLRenderPipelineState?
     // Blur tool family (PR 1) — separable Gaussian + masked variant + stamp deposit.
     // gaussianBlurPipelineState writes its result with no blending (raw replace).
     // gaussianBlurMaskedPipelineState ditto; the mask handling is in the shader.
@@ -313,6 +334,22 @@ class CanvasRenderer: NSObject {
         floatingTextureDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         floatingTextureDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Reference-quad pipeline — screen-space positioned textured quad
+        // for back-canvas reference rendering. Premultiplied-alpha blend
+        // matches the rest of the to-screen passes so layered strokes
+        // composite correctly on top of the reference.
+        let referenceQuadDescriptor = MTLRenderPipelineDescriptor()
+        referenceQuadDescriptor.vertexFunction = library.makeFunction(name: "referenceQuadVertexShader")
+        referenceQuadDescriptor.fragmentFunction = library.makeFunction(name: "referenceQuadFragmentShader")
+        referenceQuadDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        referenceQuadDescriptor.colorAttachments[0].isBlendingEnabled = true
+        referenceQuadDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        referenceQuadDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        referenceQuadDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        referenceQuadDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        referenceQuadDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        referenceQuadDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         // Gaussian blur pipelines (no blending — raw replace into intermediate
         // textures). Both the unmasked and the masked variants write opaque
         // RGBA to their target.
@@ -379,6 +416,7 @@ class CanvasRenderer: NSObject {
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
             floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
+            referenceQuadPipelineState = try device.makeRenderPipelineState(descriptor: referenceQuadDescriptor)
             gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
             gaussianBlurMaskedPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurMaskedDescriptor)
             stampBlurDepositPipelineState = try device.makeRenderPipelineState(descriptor: stampBlurDepositDescriptor)
@@ -881,6 +919,66 @@ class CanvasRenderer: NSObject {
         renderEncoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 3)
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
+    // MARK: - Reference Image (back-canvas mode)
+
+    /// Render a reference image as a screen-positioned textured quad.
+    /// ONLY called from the to-screen draw path between the canvas's
+    /// white-paper render and the layer composite. Strokes render on
+    /// top because this pass paints first.
+    ///
+    /// ARCHITECTURAL INVARIANT (also documented at
+    /// compositeLayersToTexture): this method is NEVER invoked by the
+    /// save/AI/export composite path. Reference textures are passed
+    /// directly here and never enter the `layers` array. The AI never
+    /// sees references regardless of front-or-back mode.
+    ///
+    /// `center` and `displayedSize` are in DRAWABLE PIXELS (caller
+    /// multiplies screen-points by contentScaleFactor).
+    func renderReferenceBehindLayers(
+        _ texture: MTLTexture,
+        center: SIMD2<Float>,
+        displayedSize: SIMD2<Float>,
+        viewportSize: SIMD2<Float>,
+        opacity: Float,
+        flipX: Bool,
+        flipY: Bool,
+        rotation: Float,
+        to renderEncoder: MTLRenderCommandEncoder,
+    ) {
+        guard let pipelineState = referenceQuadPipelineState else {
+            print("⚠️ renderReferenceBehindLayers: pipeline state missing")
+            return
+        }
+
+        renderEncoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setFragmentTexture(texture, index: 0)
+
+        // Mirror layout matches Shaders.metal's ReferenceQuadUniforms.
+        var uniforms = ReferenceQuadUniforms(
+            center: center,
+            halfSize: SIMD2<Float>(displayedSize.x * 0.5, displayedSize.y * 0.5),
+            viewportSize: viewportSize,
+            opacity: opacity,
+            flipX: flipX ? -1.0 : 1.0,
+            flipY: flipY ? -1.0 : 1.0,
+            rotation: rotation,
+        )
+        renderEncoder.setVertexBytes(
+            &uniforms,
+            length: MemoryLayout<ReferenceQuadUniforms>.stride,
+            index: 0,
+        )
+
+        var opacityValue = opacity
+        renderEncoder.setFragmentBytes(
+            &opacityValue,
+            length: MemoryLayout<Float>.stride,
+            index: 0,
+        )
+
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 

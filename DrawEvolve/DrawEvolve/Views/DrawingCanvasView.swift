@@ -148,15 +148,35 @@ struct DrawingCanvasView: View {
     @State private var eveScope: EveScope = .general
     @State private var eveCritiqueSequence: Int? = nil
     @State private var eveDrawingTitle: String? = nil
-    /// Opt-in trigger for the beta-transparency notice. Was auto-presented
-    /// on first launch via ContentView's cascade; replaced with a manual
-    /// (!) info button below the gear — see `betaInfoButton` and the
-    /// iPhone toolbar item near the settings gear.
-    @State private var showBetaInfo = false
-    /// Opt-in trigger for the onboarding walkthrough. Same pattern as
-    /// `showBetaInfo` — auto-trigger killed in ContentView; surfaced
-    /// via the (?) button under the (!) info button.
-    @State private var showOnboardingInfo = false
+
+    // Composition / "Eye Test" panel. Gated by the
+    // `eye_test_panel` feature flag — both Eye Test flags default
+    // off in the feature_flags table; the beta cohort gets the
+    // panel flipped on first. The Eve integration flag stays off
+    // until panel data justifies enabling it.
+    //
+    // Heatmap visibility resets to false on each panel open to keep
+    // the lighter-weight markers-only mode as the default surface.
+    @StateObject private var compositionAnalysisService = CompositionAnalysisService()
+    @ObservedObject private var appFeatureFlags = AppFeatureFlags.shared
+    @State private var showEyeTestPanel: Bool = false
+    @State private var showEyeTestHeatmap: Bool = false
+    /// Tap-to-mark-intent mode (M3). Engaged when the user taps
+    /// "Mark intent" / "Re-mark intent" in EyeTestPanel — the panel
+    /// dismisses, the active-mode banner appears at the top of the
+    /// canvas ("Tap to mark your intended focal point. Tap Done to
+    /// exit."), and a single tap on the canvas captures the
+    /// normalized document coord as the new intent marker. The
+    /// banner is non-optional per condition 3.
+    @State private var isTapToMarkActive: Bool = false
+
+    /// Apple Pencil hover point (iPadOS 16.1+, iPad Pro M2+ / Pencil
+    /// 2/Pro). Set from MetalCanvasView's onHoverChange callback. Local
+    /// @State (not @Published on canvasState) so 60-120Hz hover events
+    /// only re-render the cursor overlay view, not the full DrawingCanvasView
+    /// body. nil when no hover is active.
+    @State private var hoverCursorPoint: CGPoint? = nil
+
     @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
@@ -206,6 +226,7 @@ struct DrawingCanvasView: View {
         }
         .overlay(typingPathOverlay)
         .overlay(typeBarOverlay)
+        .overlay(hoverCursorOverlay)
         .overlay(alignment: .top) {
             autoSaveStatusIndicator
                 .allowsHitTesting(false)
@@ -386,11 +407,33 @@ struct DrawingCanvasView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
-        .sheet(isPresented: $showBetaInfo) {
-            BetaTransparencyPopup(isPresented: $showBetaInfo)
-        }
-        .sheet(isPresented: $showOnboardingInfo) {
-            OnboardingPopup(isPresented: $showOnboardingInfo)
+        .sheet(isPresented: $showEyeTestPanel, onDismiss: { showEyeTestHeatmap = false }) {
+            EyeTestPanel(
+                service: compositionAnalysisService,
+                canvasState: canvasState,
+                showHeatmap: $showEyeTestHeatmap,
+                intentMarker: currentDrawingIntentMarker,
+                onMarkIntent: {
+                    showEyeTestPanel = false
+                    isTapToMarkActive = true
+                },
+                onClearIntent: {
+                    Task { await clearIntentMarker() }
+                },
+                onAskEve: {
+                    // M6 handoff: dismiss the panel and open Eve in
+                    // `.drawing` scope so the conversation context is
+                    // anchored to the current drawing. openEve always
+                    // starts a fresh sheet — EveConversationManager
+                    // creates a new conversation when none exists for
+                    // (drawing, critique) — so this does not continue
+                    // an existing thread, per condition 6 of the M6
+                    // build plan.
+                    showEyeTestPanel = false
+                    openEve(scope: .drawing)
+                },
+                onClose: { showEyeTestPanel = false }
+            )
         }
         .alert("Feedback Error", isPresented: $canvasState.showError) {
             Button("OK", role: .cancel) {}
@@ -554,7 +597,9 @@ struct DrawingCanvasView: View {
                         )
                     },
                     typeOnPathMode: typeOnPathPathMode,
-                    symmetry: symmetry
+                    symmetry: symmetry,
+                    backCanvasReferences: referenceManager.references.filter { $0.isBehindCanvas },
+                    onHoverChange: { hoverCursorPoint = $0 }
                 )
                 .ignoresSafeArea()
                 .background(Color(uiColor: .systemGray6))
@@ -563,6 +608,15 @@ struct DrawingCanvasView: View {
                 // CanvasRenderer.compositeLayersToTexture for the
                 // architectural commitment.
                 .overlay { referenceOverlay }
+                // Composition / Eye Test markers + heatmap. Same
+                // SwiftUI-overlay-never-in-composite pattern as
+                // reference images. iPhone has no entry point in v1
+                // (skip per condition 9 of the M2 build plan), but
+                // attaching the overlay here is harmless when
+                // showEyeTestPanel == false.
+                .overlay { eyeTestOverlay }
+                .overlay { tapToMarkCaptureOverlay }
+                .overlay(alignment: .top) { tapToMarkBanner }
 
                 // Selection overlays — parity with padBody. Without these
                 // iPhone users got no rubber-band preview while dragging
@@ -693,18 +747,9 @@ struct DrawingCanvasView: View {
                     }
                     .accessibilityLabel("Settings")
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showBetaInfo = true }) {
-                        Image(systemName: "exclamationmark.circle")
-                    }
-                    .accessibilityLabel("Beta information")
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showOnboardingInfo = true }) {
-                        Image(systemName: "questionmark.circle")
-                    }
-                    .accessibilityLabel("How DrawEvolve works")
-                }
+                // Beta Notice + How It Works moved into SettingsView
+                // (see infoSection there). Their iPhone toolbar icons
+                // were removed to declutter the nav bar.
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 8) {
@@ -824,7 +869,9 @@ struct DrawingCanvasView: View {
                     )
                 },
                 typeOnPathMode: typeOnPathPathMode,
-                symmetry: symmetry
+                symmetry: symmetry,
+                backCanvasReferences: referenceManager.references.filter { $0.isBehindCanvas },
+                onHoverChange: { hoverCursorPoint = $0 }
             )
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
@@ -833,6 +880,14 @@ struct DrawingCanvasView: View {
             // CanvasRenderer.compositeLayersToTexture for the
             // architectural commitment.
             .overlay { referenceOverlay }
+            // Composition / Eye Test markers + heatmap. Same
+            // SwiftUI-overlay-never-in-composite pattern as
+            // reference images. Only renders when the panel is open
+            // AND the service has a .ready result; harmless no-op
+            // otherwise.
+            .overlay { eyeTestOverlay }
+            .overlay { tapToMarkCaptureOverlay }
+            .overlay(alignment: .top) { tapToMarkBanner }
 
             // Selection overlays use the MTKView's full-screen coordinate
             // space (the MTKView ignores safe area at line 70). Without
@@ -1517,13 +1572,24 @@ struct DrawingCanvasView: View {
                         // Panel only (per Phase 2A spec).
                         EveIconButton(action: { openEve(scope: .general) })
 
+                        // Composition / "Eye Test" entry. Sits immediately
+                        // below Eve in the always-visible chrome tier so
+                        // the user can reach it without expanding the
+                        // toolbar. Gated by the `eye_test_panel` remote
+                        // feature flag — when the flag is off, the
+                        // button doesn't mount at all (no flicker, no
+                        // empty-state).
+                        if appFeatureFlags.isEnabled(FeatureFlagName.eyeTestPanel) {
+                            EyeTestIconButton(action: { showEyeTestPanel = true })
+                        }
+
                         if !isToolbarCollapsed {
                             settingsGearButton
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
-                            betaInfoButton
-                                .transition(.move(edge: .trailing).combined(with: .opacity))
-                            onboardingInfoButton
-                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                            // Beta Notice + How It Works moved into
+                            // SettingsView (see settingsView.infoSection).
+                            // Their per-canvas icons were removed here
+                            // to declutter the floating chrome.
                         }
                     }
                     .padding(.top, 12)
@@ -1604,6 +1670,46 @@ struct DrawingCanvasView: View {
     // screen-space bounds for drag-clamping and the default first-launch
     // position.
 
+    /// Apple Pencil hover cursor — a thin circle outline at the
+    /// pencil's hover position, sized to the current brush's
+    /// screen-projected diameter. Renders only when:
+    ///   • a hover point is active (pencil within ~1cm of the screen
+    ///     on supported hardware, OR trackpad pointer on an iPad with
+    ///     a Magic Keyboard)
+    ///   • the current tool actually uses a brush (no cursor for
+    ///     selection / move / text / etc.)
+    /// On hardware without hover support, hoverCursorPoint stays nil
+    /// and this overlay never renders.
+    private var hoverCursorOverlay: some View {
+        Group {
+            if let point = hoverCursorPoint, toolUsesBrushCursor {
+                let raw = canvasState.stampScreenDiameter(forBrushSize: canvasState.brushSettings.size)
+                let diameter = max(raw, 6)
+                ZStack {
+                    Circle()
+                        .strokeBorder(Color.black.opacity(0.45), lineWidth: 2.5)
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.9), lineWidth: 1)
+                }
+                .frame(width: diameter, height: diameter)
+                .position(point)
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// Tools that paint with a brush size — the only ones where a
+    /// brush-shaped hover cursor makes visual sense.
+    private var toolUsesBrushCursor: Bool {
+        switch canvasState.currentTool {
+        case .brush, .eraser, .pencil, .inkPen, .marker, .airbrush,
+             .charcoal, .blur, .smudge, .line, .rectangle, .circle:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Floating reference images layered above the Metal canvas. Each
     /// reference has its own chrome bar (lock/opacity/isolation/flip/
     /// delete) and corner-handle resize affordances. When unlocked the
@@ -1615,6 +1721,7 @@ struct DrawingCanvasView: View {
             ForEach(referenceManager.references.sorted { $0.zOrder < $1.zOrder }) { ref in
                 ReferenceImageView(
                     reference: ref,
+                    canvasState: canvasState,
                     onUpdate: { referenceManager.update($0) },
                     onDelete: { referenceManager.remove(id: ref.id) },
                     onBringToFront: { referenceManager.bringToFront(id: ref.id) },
@@ -1969,6 +2076,122 @@ struct DrawingCanvasView: View {
         return renderer.textureToUIImage(composite)
     }
 
+    /// On-canvas overlay for the Composition / "Eye Test" panel.
+    /// Findings render only when the panel is open AND the service has
+    /// produced a `.ready` result. The intent marker renders whenever
+    /// it's persisted on the drawing — independent of panel state —
+    /// so the user can see their intent without the panel open.
+    @ViewBuilder
+    private var eyeTestOverlay: some View {
+        let findings: CompositionFindings? = {
+            guard showEyeTestPanel else { return nil }
+            if case .ready(let f) = compositionAnalysisService.lastResult {
+                return f
+            }
+            return nil
+        }()
+        EyeTestOverlay(
+            findings: findings,
+            showHeatmap: showEyeTestHeatmap,
+            intentMarker: currentDrawingIntentMarker,
+            canvasState: canvasState
+        )
+    }
+
+    /// Current intent marker for the drawing being edited, if any.
+    /// Reads from CloudDrawingStorageManager's @Published `drawings`
+    /// array — changes via `setIntentMarker(id:marker:)` re-trigger
+    /// view updates automatically.
+    private var currentDrawingIntentMarker: IntentMarker? {
+        guard let id = currentDrawingID else { return nil }
+        return storageManager.drawings.first(where: { $0.id == id })?.intentMarker
+    }
+
+    /// Persist a new intent marker for the current drawing. Requires
+    /// a saved drawing — pre-save drawings can't be marked yet (no
+    /// row to PATCH). Errors are logged; user retry path is to tap
+    /// again.
+    private func setIntentMarker(_ marker: IntentMarker) async {
+        guard let id = currentDrawingID else { return }
+        do {
+            try await storageManager.setIntentMarker(id: id, marker: marker)
+        } catch {
+            print("⚠️ setIntentMarker failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Clear the intent marker for the current drawing.
+    private func clearIntentMarker() async {
+        guard let id = currentDrawingID else { return }
+        do {
+            try await storageManager.setIntentMarker(id: id, marker: nil)
+        } catch {
+            print("⚠️ clearIntentMarker failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Tap-to-mark gesture handler. Converts the screen-coord tap into
+    /// normalized document coords, persists, and exits the mode.
+    private func handleTapToMark(at screenPoint: CGPoint) {
+        let docPoint = canvasState.screenToDocument(screenPoint)
+        let docSize = canvasState.documentSize
+        guard docSize.width > 0, docSize.height > 0 else { return }
+        let marker = IntentMarker(
+            x: max(0, min(1, Double(docPoint.x / docSize.width))),
+            y: max(0, min(1, Double(docPoint.y / docSize.height)))
+        )
+        isTapToMarkActive = false
+        Task { await setIntentMarker(marker) }
+    }
+
+    /// Banner overlay shown at the top of the canvas while
+    /// tap-to-mark mode is active. Copy is locked per condition 3 of
+    /// the M3 build plan ("Tap to mark your intended focal point. Tap
+    /// Done to exit."). Without this banner, users would mark intent
+    /// accidentally or not know they were in the mode — non-optional.
+    @ViewBuilder
+    private var tapToMarkBanner: some View {
+        if isTapToMarkActive {
+            HStack(spacing: 12) {
+                Image(systemName: "scope")
+                    .font(.system(size: 16, weight: .semibold))
+                Text("Tap to mark your intended focal point. Tap Done to exit.")
+                    .font(.callout)
+                Spacer(minLength: 8)
+                Button("Done") {
+                    isTapToMarkActive = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color(uiColor: .systemBackground).opacity(0.97))
+            .cornerRadius(10)
+            .shadow(radius: 4)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// Tap-capture overlay. Mounted above all other canvas overlays
+    /// when isTapToMarkActive is true; transparent otherwise. The
+    /// SpatialTapGesture supplies the tap location in screen coords.
+    @ViewBuilder
+    private var tapToMarkCaptureOverlay: some View {
+        if isTapToMarkActive {
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    SpatialTapGesture()
+                        .onEnded { value in
+                            handleTapToMark(at: value.location)
+                        }
+                )
+        }
+    }
+
     private var settingsGearButton: some View {
         Button(action: { showSettings = true }) {
             Image(systemName: "gearshape")
@@ -1982,39 +2205,9 @@ struct DrawingCanvasView: View {
         .accessibilityLabel("Settings")
     }
 
-    /// Opt-in trigger for the beta-transparency notice. Sits under the
-    /// settings gear in the floating chrome so the same place that
-    /// houses meta-info (settings) also surfaces meta-info (beta state).
-    /// The popup itself is presented via the `.sheet(isPresented:
-    /// $showBetaInfo)` binding on the body.
-    private var betaInfoButton: some View {
-        Button(action: { showBetaInfo = true }) {
-            Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 22))
-                .foregroundColor(.primary)
-                .frame(width: 44, height: 44)
-                .background(Color(uiColor: .systemBackground).opacity(0.95))
-                .clipShape(Circle())
-                .shadow(radius: 4)
-        }
-        .accessibilityLabel("Beta information")
-    }
-
-    /// Opt-in trigger for the onboarding walkthrough — "how DrawEvolve
-    /// works" content. Sits directly under `betaInfoButton`, mirroring
-    /// its style with a (?) glyph instead of (!).
-    private var onboardingInfoButton: some View {
-        Button(action: { showOnboardingInfo = true }) {
-            Image(systemName: "questionmark.circle")
-                .font(.system(size: 22))
-                .foregroundColor(.primary)
-                .frame(width: 44, height: 44)
-                .background(Color(uiColor: .systemBackground).opacity(0.95))
-                .clipShape(Circle())
-                .shadow(radius: 4)
-        }
-        .accessibilityLabel("How DrawEvolve works")
-    }
+    // Beta-info and onboarding-info buttons were here. They moved to
+    // SettingsView's infoSection. Their @State triggers, .sheet bindings,
+    // toolbar items, and computed views are all removed.
 
     // saveToGalleryButton and getFeedbackButton scale themselves down on
     // iPhone via internal DeviceIdiom branches. Padding, icon size, font,
@@ -3281,7 +3474,28 @@ struct DrawingCanvasView: View {
         Task {
             do {
                 let drawingId = try await ensureDrawingPersistedToCloud()
-                await canvasState.requestFeedback(for: context, drawingId: drawingId)
+                // Eye Test M4 — when both Eye Test feature flags are on
+                // (panel + Eve integration) AND the local service has a
+                // payload to share, pass it along. The panel flag gates
+                // the surface; the Eve flag gates the wire-up to the
+                // critique pipeline. Either off → critique runs without
+                // composition findings. Both on, but no result yet → also
+                // nil (the user can still get a critique without having
+                // opened the panel).
+                let compositionFindings: CompositionFindingsPayload? = {
+                    guard appFeatureFlags.isEnabled(FeatureFlagName.eyeTestPanel),
+                          appFeatureFlags.isEnabled(FeatureFlagName.eyeTestEveIntegration) else {
+                        return nil
+                    }
+                    return compositionAnalysisService.currentFindingsPayload(
+                        intentMarker: currentDrawingIntentMarker
+                    )
+                }()
+                await canvasState.requestFeedback(
+                    for: context,
+                    drawingId: drawingId,
+                    compositionFindings: compositionFindings
+                )
             } catch {
                 print("❌ requestFeedback prerequisites failed: \(error.localizedDescription)")
                 canvasState.errorMessage = error.localizedDescription

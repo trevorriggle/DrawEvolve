@@ -2,126 +2,181 @@
 //  ReferenceImageView.swift
 //  DrawEvolve
 //
-//  Pass 3 (2026-05-14): deferred-commit drag + single diagonal resize.
+//  Pass 5 (2026-05-14): adds "Move & Scale with canvas" mode.
+//  When followsCanvas is true, the reference's center is in DOC-space
+//  and the canvas's pan/zoom/rotation transform is applied at render
+//  time — the reference visually pans / zooms / rotates with the canvas
+//  like a real layer. When false (default), reference is screen-fixed.
 //
-//  The "insanely jittery" drag from Pass 2 was caused by per-frame
-//  publishes through ReferenceImageManager. Every onChanged event
-//  called onUpdate(r), which mutated the @Published references array,
-//  which re-rendered DrawingCanvasView's entire body (because it owns
-//  the manager via @StateObject). The body is large; re-evaluating it
-//  60-120 times per second during a drag drops frames.
+//  Toggling between modes preserves the visible state at the moment of
+//  the flip via a smooth coordinate conversion. Special-cased for the
+//  "uncheck while canvas is rotated" path the user requested: the
+//  reference keeps its visible size and stays at the same screen
+//  position, but un-rotates to upright.
 //
-//  Pass-3 fix: hold the in-flight drag offset and resize delta in
-//  local view state (@GestureState / @State). The view's rendered
-//  position is `manager.center + dragOffset`; the displayed scale is
-//  `manager.scale * inFlightScaleFactor`. Manager mutates ONLY on
-//  drag/resize-end. During the gesture, only THIS view re-renders, and
-//  its body is small (chrome + image + one handle).
+//  Architecturally: this view stays a SwiftUI overlay above the Metal
+//  canvas. Front-mode follow-canvas refs render entirely in SwiftUI via
+//  .position + .rotationEffect + sized .frame. Back-mode follow-canvas
+//  refs are rendered by the Metal pass in MetalCanvasView's Coordinator;
+//  this SwiftUI view keeps its image at opacity 0 but renders its chrome
+//  (controls) at the same screen position so the user can still interact.
 //
-//  Single resize handle in the bottom-left. The four corner anchors
-//  were drifting out of sync with the reference under Pass 2's
-//  startWidth bug (since fixed). User preferred to eliminate the
-//  per-corner complexity entirely: one diagonal arrow at bottom-left,
-//  drag down-and-left to grow, up-and-right to shrink. Projected onto
-//  the diagonal so any drag direction contributes proportionally.
+//  Drag/resize math: drag deltas are in screen-space (coordinateSpace:
+//  .global). When following, drag-end converts the new screen position
+//  back to doc-space. Resize uses screen-pixel width as the denominator
+//  so the 1:1 finger-tracking feel works regardless of zoom.
 //
 
 import SwiftUI
 
 struct ReferenceImageView: View {
     let reference: ReferenceImage
+    @ObservedObject var canvasState: CanvasStateManager
     let onUpdate: (ReferenceImage) -> Void
     let onDelete: () -> Void
     let onBringToFront: () -> Void
     let onRequestIsolation: () -> Void
 
-    /// In-flight drag offset from the committed center. Auto-resets to
-    /// .zero when the gesture ends (or is cancelled). Manager only sees
-    /// the new center when onEnded fires — no per-frame publishes.
     @GestureState private var dragOffset: CGSize = .zero
-
-    /// In-flight resize state. nil when no resize is happening; non-nil
-    /// during a drag of the resize handle. Holds the scale at gesture-
-    /// begin (for stable math) and the outward delta in pixels.
     @State private var resizeStart: ResizeStart? = nil
+    @State private var showProperties: Bool = false
 
     private struct ResizeStart {
         let scale: CGFloat
         let outwardDelta: CGFloat
+        /// Width of the reference IN SCREEN PIXELS at gesture-begin.
+        /// In follow mode this includes the canvas's zoom factor so the
+        /// 1:1 finger-tracking math works correctly.
+        let screenWidth: CGFloat
     }
 
-    private let headerHeight: CGFloat = 32
-    private let resizeHandleSize: CGFloat = 28
+    private let cornerHandleSize: CGFloat = 28
+    private let chromeIconSize: CGFloat = 28
 
     private var displayImage: UIImage {
         (reference.isIsolated ? reference.isolatedImage : reference.image)
             ?? reference.image
     }
 
-    /// Effective scale: committed scale × in-flight scale factor.
-    /// Driven by resizeStart's outwardDelta during an active resize.
-    private var effectiveScale: CGFloat {
+    /// Effective screen-space center of the reference. Doc→screen
+    /// transform when following the canvas; identity otherwise.
+    private var effectiveScreenCenter: CGPoint {
+        reference.followsCanvas
+            ? canvasState.documentToScreen(reference.center)
+            : reference.center
+    }
+
+    /// Base scale (without canvas zoom). Applies in-flight resize delta.
+    private var effectiveBaseScale: CGFloat {
         guard let r = resizeStart else { return reference.scale }
-        let startWidth = reference.image.size.width * r.scale
-        let scaleFactor = 1.0 + r.outwardDelta / max(startWidth, 1)
+        let scaleFactor = 1.0 + r.outwardDelta / max(r.screenWidth, 1)
         return max(0.1, r.scale * scaleFactor)
+    }
+
+    /// Displayed scale on screen — base scale × canvas zoom when following.
+    private var effectiveScreenScale: CGFloat {
+        let base = effectiveBaseScale
+        return reference.followsCanvas ? base * canvasState.zoomScale : base
+    }
+
+    /// Rotation applied to the rendered view. Follows canvas rotation
+    /// when in follow mode; zero otherwise.
+    ///
+    /// Negated because SwiftUI's `.rotationEffect(+angle)` rotates CW
+    /// visually, but `canvasState.canvasRotation` already had its sign
+    /// inverted at gesture-handler time (MetalCanvasView:3144) so that
+    /// the canvas's main shader (R(θ) in Y-up = CCW for positive) lines
+    /// up with user-CW gestures. The net effect of those two inversions
+    /// is that we need to negate here to make the SwiftUI rotation
+    /// agree with the canvas content's visual rotation.
+    private var effectiveRotation: Angle {
+        reference.followsCanvas ? -canvasState.canvasRotation : .zero
     }
 
     private var displayedSize: CGSize {
         CGSize(
-            width: reference.image.size.width * effectiveScale,
-            height: reference.image.size.height * effectiveScale,
+            width: reference.image.size.width * effectiveScreenScale,
+            height: reference.image.size.height * effectiveScreenScale,
         )
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            chromeBar
-            imageBody
-        }
-        .frame(width: displayedSize.width, height: displayedSize.height + headerHeight)
-        .background(frameBackground)
-        .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
-        .position(
-            x: reference.center.x + dragOffset.width,
-            y: reference.center.y + dragOffset.height,
-        )
-    }
-
-    // MARK: - Chrome bar
-
-    private var chromeBar: some View {
-        ZStack {
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(chromeDragGesture)
-                .simultaneousGesture(bringToFrontTapGesture)
-
-            HStack(spacing: 12) {
-                lockButton
-                opacitySlider
-                isolationButton
-                flipButton
-                deleteButton
+        imageBody
+            .frame(width: displayedSize.width, height: displayedSize.height)
+            .overlay(frameBorder)
+            .overlay(alignment: .topTrailing) {
+                if !reference.isLocked { deleteButton.padding(8) }
             }
-            .padding(.horizontal, 10)
-        }
-        .frame(height: headerHeight)
-        .background(chromeBackground)
-        .clipShape(
-            UnevenRoundedRectangle(
-                topLeadingRadius: 8,
-                topTrailingRadius: 8,
+            .overlay(alignment: .bottomLeading) {
+                lowerLeftStack.padding(8)
+            }
+            .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
+            .rotationEffect(effectiveRotation)
+            .position(
+                x: effectiveScreenCenter.x + dragOffset.width,
+                y: effectiveScreenCenter.y + dragOffset.height,
             )
-        )
     }
 
-    private var chromeBackground: some View {
-        LinearGradient(
-            colors: [Color.black.opacity(0.72), Color.black.opacity(0.55)],
-            startPoint: .top,
-            endPoint: .bottom,
-        )
+    // MARK: - Image body
+
+    /// In back-canvas mode the visible image comes from a Metal pass
+    /// rendered behind the layer composite — the SwiftUI image goes
+    /// opacity 0 to stay out of the way, while the controls overlay
+    /// keeps its chrome visible so the user can still interact.
+    private var imageBody: some View {
+        Image(uiImage: displayImage)
+            .resizable()
+            .scaledToFit()
+            .scaleEffect(
+                x: reference.isFlipped ? -1 : 1,
+                y: reference.isFlippedY ? -1 : 1,
+            )
+            .opacity(reference.isBehindCanvas ? 0 : reference.opacity)
+            .contentShape(Rectangle())
+            .allowsHitTesting(!reference.isLocked)
+            .gesture(reference.isLocked ? nil : bodyDragGesture)
+    }
+
+    // MARK: - Frame border
+
+    private var frameBorder: some View {
+        RoundedRectangle(cornerRadius: 6)
+            .stroke(
+                reference.isLocked
+                    ? Color.white.opacity(0.25)
+                    : Color.accentColor.opacity(0.85),
+                lineWidth: 1.5,
+            )
+    }
+
+    // MARK: - Top-right delete button
+
+    private var deleteButton: some View {
+        Button(action: onDelete) {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: chromeIconSize, height: chromeIconSize)
+                .background(Circle().fill(Color.black.opacity(0.7)))
+                .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Lower-left stack: lock + properties + resize
+
+    private var lowerLeftStack: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Spacer(minLength: 0)
+            lockButton
+            if !reference.isLocked {
+                propertiesButton
+                resizeHandle
+            }
+        }
     }
 
     private var lockButton: some View {
@@ -131,112 +186,45 @@ struct ReferenceImageView: View {
             onUpdate(r)
         } label: {
             Image(systemName: reference.isLocked ? "lock.fill" : "lock.open")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(reference.isLocked ? .yellow : .white.opacity(0.9))
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var opacitySlider: some View {
-        Slider(
-            value: Binding(
-                get: { reference.opacity },
-                set: { newValue in
-                    var r = reference
-                    r.opacity = newValue
-                    onUpdate(r)
-                },
-            ),
-            in: 0.0...1.0,
-        )
-        .controlSize(.mini)
-        .tint(.white)
-    }
-
-    private var isolationButton: some View {
-        Button(action: onRequestIsolation) {
-            ZStack(alignment: .topTrailing) {
-                if reference.isIsolating {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .tint(.white)
-                } else {
-                    Image(systemName: reference.isIsolated
-                          ? "person.crop.rectangle.badge.checkmark"
-                          : "person.crop.rectangle.stack")
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(.white)
-                }
-
-                if reference.lastIsolationFailed && !reference.isIsolating {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 6, height: 6)
-                        .offset(x: 4, y: -4)
-                }
-            }
-            .frame(width: 22, height: 22)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(reference.isIsolating)
-    }
-
-    private var flipButton: some View {
-        Button {
-            var r = reference
-            r.isFlipped.toggle()
-            onUpdate(r)
-        } label: {
-            Image(systemName: "arrow.left.and.right")
-                .font(.caption.weight(.semibold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
+                .frame(width: chromeIconSize, height: chromeIconSize)
+                .background(Circle().fill(reference.isLocked ? Color.yellow.opacity(0.85) : Color.accentColor))
+                .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
     }
 
-    private var deleteButton: some View {
-        Button(action: onDelete) {
-            Image(systemName: "xmark")
-                .font(.caption.weight(.semibold))
+    private var propertiesButton: some View {
+        Button { showProperties = true } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
-                .frame(width: 22, height: 22)
-                .contentShape(Rectangle())
+                .frame(width: chromeIconSize, height: chromeIconSize)
+                .background(Circle().fill(Color.accentColor))
+                .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .popover(isPresented: $showProperties, arrowEdge: .leading) {
+            ReferencePropertiesPopover(
+                reference: reference,
+                canvasState: canvasState,
+                onUpdate: onUpdate,
+                onRequestIsolation: onRequestIsolation,
+            )
+            .presentationCompactAdaptation(.popover)
+        }
     }
-
-    // MARK: - Image body
-
-    private var imageBody: some View {
-        Image(uiImage: displayImage)
-            .resizable()
-            .scaledToFit()
-            .frame(width: displayedSize.width, height: displayedSize.height)
-            .scaleEffect(x: reference.isFlipped ? -1 : 1, y: 1)
-            .opacity(reference.opacity)
-            .contentShape(Rectangle())
-            .allowsHitTesting(!reference.isLocked)
-            .gesture(reference.isLocked ? nil : bodyDragGesture)
-            .simultaneousGesture(reference.isLocked ? nil : bringToFrontTapGesture)
-            .overlay(alignment: .bottomLeading) {
-                if !reference.isLocked {
-                    resizeHandle.padding(6)
-                }
-            }
-    }
-
-    // MARK: - Resize handle (single, bottom-left)
 
     private var resizeHandle: some View {
         Image(systemName: "arrow.down.left.and.arrow.up.right")
             .font(.system(size: 12, weight: .bold))
             .foregroundColor(.white)
-            .frame(width: resizeHandleSize, height: resizeHandleSize)
+            .frame(width: cornerHandleSize, height: cornerHandleSize)
             .background(Circle().fill(Color.accentColor))
             .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
             .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
@@ -244,30 +232,11 @@ struct ReferenceImageView: View {
             .gesture(resizeGesture)
     }
 
-    // MARK: - Frame background
-
-    private var frameBackground: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .stroke(
-                reference.isLocked
-                    ? Color.white.opacity(0.25)
-                    : Color.accentColor.opacity(0.85),
-                lineWidth: 1.5,
-            )
-    }
-
     // MARK: - Gestures
 
-    /// Quick-tap-to-front. Fires on touch-release with no significant
-    /// movement; runs alongside the drag gestures via simultaneousGesture.
-    private var bringToFrontTapGesture: some Gesture {
-        TapGesture().onEnded { onBringToFront() }
-    }
-
-    /// Body drag — deferred commit. dragOffset is in-flight; the manager
-    /// only learns about the new center when onEnded fires. This is the
-    /// fix for "insanely jittery" — no per-frame publishes during drag,
-    /// no full DrawingCanvasView body re-evaluation per touch event.
+    /// Body drag — deferred commit. dragOffset is in-flight screen-space
+    /// delta. On end, the new screen position is converted back to doc
+    /// space if the reference follows the canvas, otherwise stored as-is.
     private var bodyDragGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .updating($dragOffset) { value, state, _ in
@@ -275,65 +244,229 @@ struct ReferenceImageView: View {
             }
             .onEnded { value in
                 var r = reference
-                r.center = CGPoint(
-                    x: reference.center.x + value.translation.width,
-                    y: reference.center.y + value.translation.height,
+                let newScreenCenter = CGPoint(
+                    x: effectiveScreenCenter.x + value.translation.width,
+                    y: effectiveScreenCenter.y + value.translation.height,
                 )
+                if reference.followsCanvas {
+                    r.center = canvasState.screenToDocument(newScreenCenter)
+                } else {
+                    r.center = newScreenCenter
+                }
                 onUpdate(r)
                 onBringToFront()
             }
     }
 
-    /// Chrome bar empty-space drag. Same deferred-commit pattern as
-    /// bodyDragGesture. The controls inside the chrome bar intercept
-    /// their own touches before this gesture sees them.
-    private var chromeDragGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
-            .updating($dragOffset) { value, state, _ in
-                state = value.translation
-            }
-            .onEnded { value in
-                var r = reference
-                r.center = CGPoint(
-                    x: reference.center.x + value.translation.width,
-                    y: reference.center.y + value.translation.height,
-                )
-                onUpdate(r)
-                onBringToFront()
-            }
-    }
-
-    /// Single diagonal resize. Drag down-and-left = grow; up-and-right
-    /// = shrink. Both axes contribute symmetrically (sum, not max).
-    ///
-    /// In-flight resizeStart drives effectiveScale during the drag; the
-    /// manager only learns about the new scale on onEnded. Same deferred-
-    /// commit pattern as the drag — no per-frame publish storm.
+    /// Single diagonal resize. Drag down-and-left = grow; up-and-right =
+    /// shrink. screenWidth captured at gesture-begin includes the canvas
+    /// zoom factor when following, so the 1:1 finger-tracking feel works
+    /// regardless of mode.
     private var resizeGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 let outward = -value.translation.width + value.translation.height
                 if resizeStart == nil {
+                    let screenWidth = reference.image.size.width * reference.scale
+                        * (reference.followsCanvas ? canvasState.zoomScale : 1.0)
                     resizeStart = ResizeStart(
                         scale: reference.scale,
                         outwardDelta: outward,
+                        screenWidth: screenWidth,
                     )
                 } else {
                     resizeStart = ResizeStart(
-                        scale: resizeStart!.scale,  // immutable start scale
+                        scale: resizeStart!.scale,
                         outwardDelta: outward,
+                        screenWidth: resizeStart!.screenWidth,
                     )
                 }
             }
             .onEnded { _ in
                 guard let start = resizeStart else { return }
-                let startWidth = reference.image.size.width * start.scale
-                let scaleFactor = 1.0 + start.outwardDelta / max(startWidth, 1)
+                let scaleFactor = 1.0 + start.outwardDelta / max(start.screenWidth, 1)
                 let newScale = max(0.1, start.scale * scaleFactor)
                 var r = reference
                 r.scale = newScale
                 onUpdate(r)
                 resizeStart = nil
             }
+    }
+}
+
+// MARK: - Properties popover
+
+private struct ReferencePropertiesPopover: View {
+    let reference: ReferenceImage
+    @ObservedObject var canvasState: CanvasStateManager
+    let onUpdate: (ReferenceImage) -> Void
+    let onRequestIsolation: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            opacityRow
+            sendToBackToggle
+            followsCanvasToggle
+            isolationToggle
+            flipRow
+        }
+        .padding(16)
+        .frame(width: 280)
+    }
+
+    private var opacityRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Opacity").font(.subheadline)
+                Spacer()
+                Text("\(Int(reference.opacity * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: Binding(
+                get: { reference.opacity },
+                set: { newValue in
+                    var r = reference
+                    r.opacity = newValue
+                    onUpdate(r)
+                },
+            ), in: 0.0...1.0)
+        }
+    }
+
+    private var sendToBackToggle: some View {
+        Button {
+            var r = reference
+            r.isBehindCanvas.toggle()
+            onUpdate(r)
+        } label: {
+            HStack {
+                Image(systemName: reference.isBehindCanvas
+                      ? "rectangle.stack.badge.plus"
+                      : "rectangle.stack.badge.minus")
+                    .frame(width: 22)
+                Text(reference.isBehindCanvas
+                     ? "Send to front"
+                     : "Send to back of canvas")
+                    .font(.subheadline)
+                Spacer()
+            }
+            .foregroundColor(.primary)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// "Move & Scale with canvas" toggle. Switching between modes
+    /// preserves the visible state at the moment of the flip:
+    ///   ON  (fixed → follow): screen center → doc center, scale /= zoom.
+    ///       Canvas rotation now applies — if the canvas is rotated, the
+    ///       reference will visually rotate to match (this is the
+    ///       inevitable cost of "following" a rotated canvas).
+    ///   OFF (follow → fixed): doc center → screen center, scale *= zoom.
+    ///       Canvas rotation no longer applies — the reference becomes
+    ///       upright at its current screen position with current visible
+    ///       size. This is the user-requested behavior.
+    private var followsCanvasToggle: some View {
+        Button {
+            var r = reference
+            let zoom = canvasState.zoomScale
+            if r.followsCanvas {
+                // Bake current displayed state, then un-follow.
+                r.center = canvasState.documentToScreen(r.center)
+                r.scale = r.scale * zoom
+                r.followsCanvas = false
+            } else {
+                r.center = canvasState.screenToDocument(r.center)
+                r.scale = r.scale / max(zoom, 0.001)
+                r.followsCanvas = true
+            }
+            onUpdate(r)
+        } label: {
+            HStack {
+                Image(systemName: reference.followsCanvas
+                      ? "lock.rotation"
+                      : "arrow.up.and.down.and.arrow.left.and.right")
+                    .frame(width: 22)
+                Text("Move & Scale with canvas")
+                    .font(.subheadline)
+                Spacer()
+                Image(systemName: reference.followsCanvas
+                      ? "checkmark.circle.fill"
+                      : "circle")
+                    .foregroundColor(reference.followsCanvas ? .accentColor : .secondary)
+            }
+            .foregroundColor(.primary)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var isolationToggle: some View {
+        Button(action: onRequestIsolation) {
+            HStack {
+                if reference.isIsolating {
+                    ProgressView().controlSize(.mini).frame(width: 22)
+                } else {
+                    Image(systemName: reference.isIsolated
+                          ? "person.crop.rectangle.badge.checkmark"
+                          : "person.crop.rectangle.stack")
+                        .frame(width: 22)
+                }
+                Text(reference.isIsolated
+                     ? "Show original"
+                     : (reference.isIsolating ? "Isolating subject…" : "Isolate subject"))
+                    .font(.subheadline)
+                Spacer()
+                if reference.lastIsolationFailed && !reference.isIsolating {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 6, height: 6)
+                }
+            }
+            .foregroundColor(.primary)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(reference.isIsolating)
+    }
+
+    private var flipRow: some View {
+        HStack(spacing: 10) {
+            Button {
+                var r = reference
+                r.isFlipped.toggle()
+                onUpdate(r)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.left.and.right")
+                    Text("Flip H").font(.subheadline)
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                var r = reference
+                r.isFlippedY.toggle()
+                onUpdate(r)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.and.down")
+                    Text("Flip V").font(.subheadline)
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
     }
 }

@@ -56,7 +56,32 @@ struct ReferenceImage: Identifiable, Equatable {
     /// bar above the image stays fully visible regardless, so a faded
     /// reference is always findable.
     var opacity: CGFloat = 1.0
+    /// Horizontal mirror (left-right).
     var isFlipped: Bool = false
+    /// Vertical mirror (top-bottom). Added Pass 3.
+    var isFlippedY: Bool = false
+    /// When true, the reference renders BEHIND the canvas's drawing
+    /// layers via a dedicated Metal pass — strokes appear on top.
+    /// Architectural invariant: this rendering is ONLY in the to-screen
+    /// path. compositeLayersToTexture (the save/AI/export composite)
+    /// still reads only from `layers`. References in back mode are
+    /// just as excluded from the AI as references in front mode.
+    var isBehindCanvas: Bool = false
+
+    /// When true, `center` is interpreted as DOCUMENT-space coords and
+    /// the reference pans/zooms/rotates with the canvas — like a real
+    /// layer would. When false (default), `center` is screen-space
+    /// coords and the reference stays put as the canvas moves under it.
+    ///
+    /// Toggling ON: convert center screen→doc, divide scale by zoom
+    /// (so visible size stays the same; canvas rotation will start
+    /// applying immediately, which may visually rotate the ref).
+    /// Toggling OFF: convert center doc→screen, multiply scale by
+    /// zoom (so visible size stays the same); canvas rotation no
+    /// longer applies, so the ref becomes upright — this is the
+    /// "bake current visible state, un-rotate" behavior the user
+    /// specified.
+    var followsCanvas: Bool = false
     /// Higher = on top. Manager bumps to max+1 on touch.
     var zOrder: Int = 0
 }
