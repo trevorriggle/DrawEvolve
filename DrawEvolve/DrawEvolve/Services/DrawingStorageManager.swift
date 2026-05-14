@@ -43,6 +43,14 @@ import Network
 import Supabase
 import UIKit
 
+/// Output of `CloudDrawingStorageManager.encodeForSave`. Pre-encoded JPEG bytes
+/// for full image + (optional) thumbnail, produced off-main so the slow
+/// UIImage decode + re-encode doesn't stall the @MainActor during save.
+fileprivate struct EncodedSaveArtifacts: Sendable {
+    let fullJPEG: Data
+    let thumbnailJPEG: Data?
+}
+
 @MainActor
 final class CloudDrawingStorageManager: ObservableObject {
     static let shared = CloudDrawingStorageManager()
@@ -324,7 +332,23 @@ final class CloudDrawingStorageManager: ObservableObject {
             critiqueHistory: critiqueHistory
         )
 
-        try persistLocally(drawing: drawing, imageData: imageData)
+        // Off-main encode (Fix 1.5): JPEG re-encode + thumbnail resize moved
+        // to a detached Task so the @MainActor doesn't stall ~200-500ms on a
+        // 4096² canvas. The fast file-write hop back here is via
+        // persistArtifactsLocally.
+        let fullQ = fullImageJPEGQuality
+        let thumbMax = thumbnailMaxDimension
+        let thumbQ = thumbnailJPEGQuality
+        let sourceData = imageData
+        let artifacts = await Task.detached(priority: .userInitiated) {
+            CloudDrawingStorageManager.encodeForSave(
+                sourceData: sourceData,
+                fullQuality: fullQ,
+                thumbMaxDimension: thumbMax,
+                thumbQuality: thumbQ,
+            )
+        }.value
+        try persistArtifactsLocally(drawing: drawing, artifacts: artifacts)
         drawings.insert(drawing, at: 0)
         print("💾 Saved drawing locally: \(drawing.id) '\(title)' (\(critiqueHistory.count) critiques)")
 
@@ -433,7 +457,25 @@ final class CloudDrawingStorageManager: ObservableObject {
         if let critiqueHistory { drawing.critiqueHistory = critiqueHistory }
         drawing.updatedAt = Date()
 
-        try persistLocally(drawing: drawing, imageData: imageData)
+        // Off-main encode (Fix 1.5) when imageData is present; metadata-only
+        // updates fall through to the synchronous path (no encode work
+        // happens anyway when imageData is nil).
+        if let sourceData = imageData {
+            let fullQ = fullImageJPEGQuality
+            let thumbMax = thumbnailMaxDimension
+            let thumbQ = thumbnailJPEGQuality
+            let artifacts = await Task.detached(priority: .userInitiated) {
+                CloudDrawingStorageManager.encodeForSave(
+                    sourceData: sourceData,
+                    fullQuality: fullQ,
+                    thumbMaxDimension: thumbMax,
+                    thumbQuality: thumbQ,
+                )
+            }.value
+            try persistArtifactsLocally(drawing: drawing, artifacts: artifacts)
+        } else {
+            try persistLocally(drawing: drawing, imageData: nil)
+        }
         drawings[index] = drawing
         print("💾 Updated drawing locally: \(id) '\(drawing.title)'")
 
@@ -921,6 +963,13 @@ final class CloudDrawingStorageManager: ObservableObject {
             // Normalize to JPEG (q=0.9). The canvas exports PNG; converting here
             // keeps the cloud-side format consistent and shrinks the on-disk
             // footprint. Lossy — see the file header for the PNG-storage follow-up.
+            //
+            // Hot-path callers (saveDrawing, updateDrawing-with-image) prefer
+            // `persistArtifactsLocally` below — it takes pre-encoded bytes from
+            // an off-main `encodeForSave` task so the @MainActor doesn't stall
+            // for ~200-500ms on a 4096² canvas. This synchronous path remains
+            // for the metadata-only callers (rename) where imageData is nil and
+            // the encode work is skipped anyway.
             let jpegFull = jpegData(from: imageData, quality: fullImageJPEGQuality) ?? imageData
             let imageURL = imagesDir.appendingPathComponent("\(drawing.id.uuidString).jpg")
             try jpegFull.write(to: imageURL)
@@ -932,6 +981,59 @@ final class CloudDrawingStorageManager: ObservableObject {
             }
         }
         writeMetadataToCache(drawing)
+    }
+
+    /// Fast main-thread file write of pre-encoded bytes produced by the
+    /// off-main `encodeForSave` task. Splits the slow part (JPEG encode +
+    /// thumbnail resize) from the fast part (file I/O + metadata write).
+    /// See Fix 1.5 of the perf-quick-wins PR.
+    private func persistArtifactsLocally(drawing: Drawing, artifacts: EncodedSaveArtifacts) throws {
+        let imageURL = imagesDir.appendingPathComponent("\(drawing.id.uuidString).jpg")
+        try artifacts.fullJPEG.write(to: imageURL)
+
+        if let thumbData = artifacts.thumbnailJPEG {
+            let thumbURL = thumbnailsDir.appendingPathComponent("\(drawing.id.uuidString).jpg")
+            try thumbData.write(to: thumbURL)
+            thumbnailCache[drawing.id] = thumbData
+        }
+        writeMetadataToCache(drawing)
+    }
+
+    /// Off-main encoder. `nonisolated` + pure (no instance state read) so it
+    /// can be invoked safely from `Task.detached`. Returns pre-encoded full +
+    /// thumbnail JPEG bytes for `persistArtifactsLocally`. UIImage decode and
+    /// UIGraphicsImageRenderer are documented thread-safe for the operations
+    /// performed here (decode, draw-to-context, encode).
+    nonisolated fileprivate static func encodeForSave(
+        sourceData: Data,
+        fullQuality: CGFloat,
+        thumbMaxDimension: CGFloat,
+        thumbQuality: CGFloat,
+    ) -> EncodedSaveArtifacts {
+        let fullJPEG: Data = {
+            guard let img = UIImage(data: sourceData) else { return sourceData }
+            return img.jpegData(compressionQuality: fullQuality) ?? sourceData
+        }()
+
+        let thumbnailJPEG: Data? = {
+            guard let img = UIImage(data: sourceData),
+                  img.size.width > 0, img.size.height > 0 else { return nil }
+            let scale = min(thumbMaxDimension / img.size.width,
+                            thumbMaxDimension / img.size.height,
+                            1.0)
+            let newSize = CGSize(width: img.size.width * scale,
+                                 height: img.size.height * scale)
+            let format = UIGraphicsImageRendererFormat.default()
+            format.opaque = true
+            format.scale = 1
+            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+            let scaled = renderer.image { _ in
+                img.draw(in: CGRect(origin: .zero, size: newSize))
+            }
+            return scaled.jpegData(compressionQuality: thumbQuality)
+        }()
+
+        return EncodedSaveArtifacts(fullJPEG: fullJPEG, thumbnailJPEG: thumbnailJPEG)
     }
 
     private func writeMetadataToCache(_ drawing: Drawing) {

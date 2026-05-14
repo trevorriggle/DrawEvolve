@@ -37,7 +37,7 @@ struct AdvancedColorPicker: View {
     /// picking, just without the AI-generation affordance.
     var compositeImage: (() -> UIImage?)? = nil
 
-    @StateObject private var paletteManager = PaletteManager.shared
+    @ObservedObject private var paletteManager = PaletteManager.shared
 
     @State private var hue: Double = 0
     @State private var saturation: Double = 1

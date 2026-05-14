@@ -268,25 +268,24 @@ struct EveConversationView: View {
 // ThinkingDots — small animated three-dot indicator
 // =============================================================================
 //
-// Pure SwiftUI, no images. Three dots pulse in sequence using a
-// repeating timeline. Lives in this file because it's only used here;
-// promote to Components/ if a second caller appears.
+// Pure SwiftUI, no images. Three dots pulse in sequence on a TimelineView
+// schedule. SwiftUI auto-pauses TimelineView when the view is offscreen,
+// so dismissing the Eve sheet stops the animation cost without manual
+// timer-cancel bookkeeping. Phase is derived from absolute time, so
+// dropped frames or re-renders never desync the pulse.
 
 private struct ThinkingDots: View {
-    @State private var phase: Int = 0
-    private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
-
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .frame(width: 6, height: 6)
-                    .foregroundColor(.secondary)
-                    .opacity(phase == i ? 1.0 : 0.35)
+        TimelineView(.periodic(from: .now, by: 0.4)) { context in
+            let phase = Int(context.date.timeIntervalSinceReferenceDate / 0.4) % 3
+            HStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { i in
+                    Circle()
+                        .frame(width: 6, height: 6)
+                        .foregroundColor(.secondary)
+                        .opacity(phase == i ? 1.0 : 0.35)
+                }
             }
-        }
-        .onReceive(timer) { _ in
-            phase = (phase + 1) % 3
         }
     }
 }

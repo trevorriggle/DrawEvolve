@@ -103,14 +103,26 @@ struct MetalCanvasView: UIViewRepresentable {
 
         metalView.device = device
         metalView.delegate = context.coordinator
-        metalView.enableSetNeedsDisplay = false  // Use continuous drawing mode
-        metalView.isPaused = false  // Continuous updates at preferredFramesPerSecond
+        // Fix 1.1: render-on-demand. The MTKView only draws when something
+        // explicitly calls setNeedsDisplay() — touch handlers do so after each
+        // dispatch (touchesBegan/Moved/Ended/Cancelled), and updateUIView
+        // already calls it on SwiftUI state changes (line below). Idle canvas
+        // = no per-frame work. Background pause is handled by the Coordinator's
+        // didEnterBackground / willEnterForeground observers (Fix 1.2).
+        metalView.enableSetNeedsDisplay = true
+        metalView.isPaused = false
         metalView.framebufferOnly = false  // Allow texture readback
         // Off-canvas workbench is light gray so the canvas boundary is visible
         // when zoomed/panned out. At default zoom the canvas fills the viewport.
         metalView.clearColor = MTLClearColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1)
         metalView.backgroundColor = UIColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1.0)
-        metalView.preferredFramesPerSecond = 60  // Smooth drawing at 60fps
+        // Fix 1.1: ProMotion. MTKView exposes `preferredFramesPerSecond`;
+        // iOS clamps to the display's capability (120 on ProMotion iPad Pro,
+        // 60 on non-ProMotion). Throttles down automatically if the GPU
+        // can't keep up on a heavy stroke — graceful degradation, no crash.
+        // (MTKView doesn't expose CADisplayLink.preferredFrameRateRange
+        // directly, so we use the Int property and rely on iOS clamping.)
+        metalView.preferredFramesPerSecond = 120
 
         // Enable multi-touch and pencil input
         metalView.isMultipleTouchEnabled = true
@@ -120,6 +132,10 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // Connect touch events to coordinator
         metalView.touchDelegate = context.coordinator
+
+        // Weak ref so the Coordinator's background/foreground handlers can
+        // flip isPaused without depending on a per-touch view reference.
+        context.coordinator.metalView = metalView
 
         // Add gesture recognizers for zoom, pan, and rotation
         let pinchGesture = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
@@ -306,6 +322,12 @@ struct MetalCanvasView: UIViewRepresentable {
         private static let snapToLineAngleIncrement: CGFloat = 15.0     // degrees
         private static let snapToLineAngleTolerance: CGFloat = 3.0      // degrees
 
+        /// Weak ref to the MTKView, captured in `makeUIView`. Used by the
+        /// background/foreground notification handlers to flip `isPaused`
+        /// without depending on a per-touch view reference. Weak so the
+        /// Coordinator doesn't pin the view's lifetime.
+        weak var metalView: MTKView?
+
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
@@ -332,7 +354,43 @@ struct MetalCanvasView: UIViewRepresentable {
             self.typeOnPathMode = typeOnPathMode
             self.symmetry = symmetry
 
+            super.init()
+
+            // Background pause (Fix 1.2). Suspend the display link when the
+            // app is backgrounded so the canvas stops generating frames the
+            // user can't see; restore on foreground and schedule one redraw
+            // so the visible state refreshes. Selector-based observers are
+            // auto-removed on Coordinator deinit (since iOS 9).
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAppDidEnterBackground),
+                name: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAppWillEnterForeground),
+                name: UIApplication.willEnterForegroundNotification,
+                object: nil,
+            )
+
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
+        }
+
+        @objc private func handleAppDidEnterBackground() {
+            DispatchQueue.main.async { [weak self] in
+                self?.metalView?.isPaused = true
+            }
+        }
+
+        @objc private func handleAppWillEnterForeground() {
+            DispatchQueue.main.async { [weak self] in
+                guard let view = self?.metalView else { return }
+                // Order matters: un-pause the display link first so the
+                // setNeedsDisplay call below has somewhere to land.
+                view.isPaused = false
+                view.setNeedsDisplay()
+            }
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -1211,6 +1269,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     cs.stampCursorDiameter = diameter
                 }
             }
+            view.setNeedsDisplay()
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -1685,7 +1744,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
-            // No need to call setNeedsDisplay - continuous drawing is enabled
+            // Fix 1.1: render-on-demand mode. Each Pencil event schedules
+            // the next frame; idle = no frames until something changes.
+            view.setNeedsDisplay()
         }
 
         // Flush any new eraser sub-stroke points (those past
@@ -2242,6 +2303,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
             print("Stroke cleared from preview, should now be visible in layer texture")
+            view.setNeedsDisplay()
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -2331,6 +2393,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     canvasState.stampCursorDiameter = 0
                 }
             }
+            view.setNeedsDisplay()
         }
 
         // MARK: - Symmetry mirroring

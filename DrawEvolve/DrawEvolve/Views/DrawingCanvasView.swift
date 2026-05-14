@@ -157,7 +157,7 @@ struct DrawingCanvasView: View {
     /// `showBetaInfo` — auto-trigger killed in ContentView; surfaced
     /// via the (?) button under the (!) info button.
     @State private var showOnboardingInfo = false
-    @StateObject private var storageManager = CloudDrawingStorageManager.shared
+    @ObservedObject private var storageManager = CloudDrawingStorageManager.shared
 
     // Clear confirmation
     @State private var showClearConfirmation = false
