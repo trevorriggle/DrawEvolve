@@ -162,8 +162,18 @@ struct DrawingCanvasView: View {
     // Clear confirmation
     @State private var showClearConfirmation = false
 
-    // Image import (Photos picker)
-    @State private var photoPickerItem: PhotosPickerItem?
+    // Image import — bifurcated into two flows behind one button.
+    // "Import as Layer" preserves today's flow (image enters the layer
+    // stack; AI-critique + export include it). "Add as Reference"
+    // creates a session-only floating overlay (NEVER enters the layer
+    // stack, automatically excluded from AI/export by construction).
+    // The two paths share nothing above UIImage(data:) decoding.
+    @StateObject private var referenceManager = ReferenceImageManager()
+    @State private var showPhotoChoice = false
+    @State private var showLayerPicker = false
+    @State private var showReferencePicker = false
+    @State private var layerPickerItem: PhotosPickerItem?
+    @State private var referencePickerItem: PhotosPickerItem?
 
     // Image export (Photos save)
     @State private var isSavingToPhotos = false
@@ -432,16 +442,54 @@ struct DrawingCanvasView: View {
                 canvasState.commitSelection()
             }
         }
-        .onChange(of: photoPickerItem) { _, newItem in
+        .confirmationDialog(
+            "Add a photo",
+            isPresented: $showPhotoChoice,
+            titleVisibility: .visible,
+        ) {
+            Button("Import as Layer") { showLayerPicker = true }
+            Button("Add as Reference") { showReferencePicker = true }
+            Button("Cancel", role: .cancel) {}
+        }
+        .photosPicker(
+            isPresented: $showLayerPicker,
+            selection: $layerPickerItem,
+            matching: .images,
+        )
+        .photosPicker(
+            isPresented: $showReferencePicker,
+            selection: $referencePickerItem,
+            matching: .images,
+        )
+        .onChange(of: layerPickerItem) { _, newItem in
+            // "Import as Layer" path — unchanged behavior. Image enters
+            // the layer stack and is included in AI critique and export.
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self),
+                   let uiImage = UIImage(data: data) {
+                    await MainActor.run { canvasState.importImage(uiImage) }
+                }
+                await MainActor.run { layerPickerItem = nil }
+            }
+        }
+        .onChange(of: referencePickerItem) { _, newItem in
+            // "Add as Reference" path — image becomes a session-only
+            // floating overlay. ReferenceImageManager lives outside the
+            // layer stack, so this image NEVER enters AI critique or
+            // export (see CanvasRenderer.compositeLayersToTexture).
             guard let newItem else { return }
             Task {
                 if let data = try? await newItem.loadTransferable(type: Data.self),
                    let uiImage = UIImage(data: data) {
                     await MainActor.run {
-                        canvasState.importImage(uiImage)
+                        let viewport = canvasState.screenSize.width > 0
+                            ? canvasState.screenSize
+                            : UIScreen.main.bounds.size
+                        referenceManager.add(uiImage, viewportSize: viewport)
                     }
                 }
-                await MainActor.run { photoPickerItem = nil }
+                await MainActor.run { referencePickerItem = nil }
             }
         }
         .onAppear {
@@ -509,6 +557,11 @@ struct DrawingCanvasView: View {
                 )
                 .ignoresSafeArea()
                 .background(Color(uiColor: .systemGray6))
+                // Reference images render above the canvas, below tool
+                // chrome. NEVER enters the layer stack — see
+                // CanvasRenderer.compositeLayersToTexture for the
+                // architectural commitment.
+                .overlay { referenceOverlay }
 
                 // Selection overlays — parity with padBody. Without these
                 // iPhone users got no rubber-band preview while dragging
@@ -774,6 +827,11 @@ struct DrawingCanvasView: View {
             )
             .ignoresSafeArea() // Full screen, edge to edge
             .background(Color(uiColor: .systemGray6))
+            // Reference images render above the canvas, below tool
+            // chrome. NEVER enters the layer stack — see
+            // CanvasRenderer.compositeLayersToTexture for the
+            // architectural commitment.
+            .overlay { referenceOverlay }
 
             // Selection overlays use the MTKView's full-screen coordinate
             // space (the MTKView ignores safe area at line 70). Without
@@ -1311,8 +1369,13 @@ struct DrawingCanvasView: View {
                     // is unchanged from when they lived inside the grid.
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
-                            // Image import (Photos picker)
-                            PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                            // Image import — bifurcated picker. Button
+                            // opens a confirmationDialog with "Import as
+                            // Layer" / "Add as Reference"; each option
+                            // triggers its own PhotosPicker. See the
+                            // modifier chain on body for the dialog +
+                            // pickers + handlers.
+                            Button(action: { showPhotoChoice = true }) {
                                 Image(systemName: "photo.badge.plus")
                                     .font(.system(size: 22))
                                     .frame(width: 44, height: 44)
@@ -1539,6 +1602,24 @@ struct DrawingCanvasView: View {
     // bar without ending the float). The GeometryReader provides
     // screen-space bounds for drag-clamping and the default first-launch
     // position.
+
+    /// Floating reference images layered above the Metal canvas. Each
+    /// reference has its own chrome bar (drag/opacity/flip/delete) and
+    /// corner-handle resize affordances; the image body is non-hit-
+    /// testable so brush strokes pass through to the canvas. Sorted by
+    /// zOrder so the most-recently-touched is on top.
+    private var referenceOverlay: some View {
+        ZStack {
+            ForEach(referenceManager.references.sorted { $0.zOrder < $1.zOrder }) { ref in
+                ReferenceImageView(
+                    reference: ref,
+                    onUpdate: { referenceManager.update($0) },
+                    onDelete: { referenceManager.remove(id: ref.id) },
+                    onBringToFront: { referenceManager.bringToFront(id: ref.id) },
+                )
+            }
+        }
+    }
 
     @ViewBuilder
     private var typeBarOverlay: some View {
@@ -2759,15 +2840,17 @@ struct DrawingCanvasView: View {
             // third Group split here so PhotosPicker..layerPanel can keep
             // their original tile sequence.
             Group {
-                PhotosPicker(selection: $photoPickerItem, matching: .images) {
+                Button(action: {
+                    // Same bifurcation as the iPad site — opens the
+                    // confirmationDialog mounted on body. Collapse the
+                    // tool panel before the dialog appears so the canvas
+                    // is visible while the user chooses.
+                    collapsePhoneToolPanel()
+                    showPhotoChoice = true
+                }) {
                     Image(systemName: "photo.badge.plus")
                         .font(.system(size: 22))
                         .frame(width: 44, height: 44)
-                }
-                .onChange(of: photoPickerItem) { _, _ in
-                    // Collapse on pick so the canvas is visible while
-                    // the import sheet is being interacted with.
-                    collapsePhoneToolPanel()
                 }
                 ToolButton(
                     icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",

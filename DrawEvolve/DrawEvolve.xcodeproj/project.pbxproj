@@ -111,6 +111,8 @@
 		DE000118 /* PaletteService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100118 /* PaletteService.swift */; };
 		DE000119 /* PaletteManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100119 /* PaletteManager.swift */; };
 		DE000120 /* PaletteGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100120 /* PaletteGenerator.swift */; };
+		DE000121 /* ReferenceImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100121 /* ReferenceImage.swift */; };
+		DE000122 /* ReferenceImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100122 /* ReferenceImageView.swift */; };
 		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
@@ -222,6 +224,8 @@
 		DE100118 /* PaletteService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteService.swift; sourceTree = "<group>"; };
 		DE100119 /* PaletteManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteManager.swift; sourceTree = "<group>"; };
 		DE100120 /* PaletteGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteGenerator.swift; sourceTree = "<group>"; };
+		DE100121 /* ReferenceImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceImage.swift; sourceTree = "<group>"; };
+		DE100122 /* ReferenceImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceImageView.swift; sourceTree = "<group>"; };
 		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -333,6 +337,7 @@
 				DE100104 /* EveConversation.swift */,
 				DE100113 /* Recommendation.swift */,
 				DE100117 /* Palette.swift */,
+				DE100121 /* ReferenceImage.swift */,
 				DE000319 /* Pose */,
 			);
 			path = Models;
@@ -410,6 +415,7 @@
 				DE100093 /* BrushSizeRail.swift */,
 				DE100094 /* FloatingTextCaretIndicator.swift */,
 				DE100095 /* BrushSizeRailHorizontal.swift */,
+				DE100122 /* ReferenceImageView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -670,6 +676,8 @@
 				DE000118 /* PaletteService.swift in Sources */,
 				DE000119 /* PaletteManager.swift in Sources */,
 				DE000120 /* PaletteGenerator.swift in Sources */,
+				DE000121 /* ReferenceImage.swift in Sources */,
+				DE000122 /* ReferenceImageView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

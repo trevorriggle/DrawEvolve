@@ -670,6 +670,18 @@ class CanvasRenderer: NSObject {
     /// return it. Used by export and the eyedropper. Output pixels have
     /// alpha = 1.0 and straight (not premultiplied) RGB equal to what the
     /// user sees on screen, since the white background is fully opaque.
+    ///
+    /// ARCHITECTURAL INVARIANT — DO NOT BREAK BY ADDING NEW SOURCES:
+    /// This function reads only from the `layers` parameter. Reference
+    /// images (`ReferenceImageManager.references`) are deliberately
+    /// rendered as a SwiftUI overlay above MetalCanvasView and live
+    /// outside the layer stack — they appear on screen, but they never
+    /// enter this composite. That separation is what guarantees
+    /// references aren't sent to the AI for critique, baked into saved
+    /// drawings, or sampled by the eyedropper. If a future feature needs
+    /// "what the user sees" (e.g., a share-screen flow), build a SEPARATE
+    /// function — never modify this one to read from anywhere other than
+    /// `layers`.
     func compositeLayersToTexture(layers: [DrawingLayer]) -> MTLTexture? {
         guard let finalTexture = createLayerTexture() else {
             return nil
