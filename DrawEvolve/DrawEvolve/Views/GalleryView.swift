@@ -60,6 +60,32 @@ private let presetVoiceOptions: [PresetVoiceOption] = [
           description: "A Florentine workshop master, somewhere around 1503."),
 ]
 
+// MARK: - PreferenceKeys for delete-suck animation
+//
+// The "fly to trash" animation needs two pieces of geometry that aren't
+// available through normal SwiftUI state: the bottomBar trash icon's
+// global center (so we know where cards should fly to) and each card's
+// global frame (so we know each card's starting point). PreferenceKeys
+// + GeometryReaders in .background capture both without forcing a
+// hierarchy refactor.
+
+private struct TrashIconCenterKey: PreferenceKey {
+    static var defaultValue: CGPoint? = nil
+    static func reduce(value: inout CGPoint?, nextValue: () -> CGPoint?) {
+        // Take the most-recent non-nil reporter. The trash icon is now
+        // a production feature so this should always resolve to a real
+        // point after the first layout pass.
+        value = nextValue() ?? value
+    }
+}
+
+private struct CardFramesKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
 // MARK: - GalleryView (shell)
 
 struct GalleryView: View {
@@ -181,6 +207,33 @@ private struct GalleryContent: View {
     @State private var drawingToDelete: Drawing?
     @State private var showClearAllAlert = false
 
+    // MARK: - Delete-suck animation state
+    //
+    // Cards currently animating out toward the trash. Each card stays
+    // in `storageManager.drawings` for the duration of its animation;
+    // the actual deleteDrawing call is scheduled at +0.4s. Set so
+    // multiple concurrent deletes work cleanly.
+    @State private var animatingDeletes: Set<UUID> = []
+
+    /// Bottom-bar trash icon's center in window (global) coords.
+    /// Populated by TrashIconCenterKey via GeometryReader.
+    @State private var trashIconCenter: CGPoint? = nil
+
+    /// Live frames of every visible DrawingCard, keyed by drawing id.
+    /// Populated by CardFramesKey via per-card GeometryReader. Read at
+    /// delete time to compute the offset from card-center to trash.
+    @State private var cardFrames: [UUID: CGRect] = [:]
+
+    /// Trash icon scale multiplier; bounces 1.0 → 1.15 → 1.0 when a
+    /// card lands. Driven by triggerTrashPulse().
+    @State private var trashPulseScale: CGFloat = 1.0
+
+    private let deleteSuckDuration: Double = 0.4
+    private let trashPulseTotalDuration: Double = 0.3
+    /// Fires the trash-pulse at ~70% into the card's animation so the
+    /// pulse peak roughly aligns with the card "landing."
+    private let trashPulseDelay: Double = 0.28
+
     // Persisted across launches via UserDefaults. OpenAIManager reads
     // the same key directly when assembling each request, so the
     // worker sees the user's current selection without view-layer
@@ -239,17 +292,30 @@ private struct GalleryContent: View {
                     }
                 }
 
-                // DEBUG ONLY: Clear all drawings button
-                #if DEBUG
+                // Clear all drawings — production feature. The bottomBar
+                // trash icon also serves as the target for the
+                // delete-suck animation (per-card delete flies here).
                 ToolbarItem(placement: .bottomBar) {
                     Button(action: {
                         showClearAllAlert = true
                     }) {
                         Label("Clear All", systemImage: "trash.fill")
                             .foregroundColor(.red)
+                            .scaleEffect(trashPulseScale)
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: TrashIconCenterKey.self,
+                                        value: CGPoint(
+                                            x: geo.frame(in: .global).midX,
+                                            y: geo.frame(in: .global).midY,
+                                        ),
+                                    )
+                                }
+                                .allowsHitTesting(false)
+                            )
                     }
                 }
-                #endif
             }
             .task {
                 await storageManager.fetchDrawings()
@@ -260,9 +326,7 @@ private struct GalleryContent: View {
             .alert("Delete Drawing", isPresented: $showDeleteAlert, presenting: drawingToDelete) { drawing in
                 Button("Cancel", role: .cancel) {}
                 Button("Delete", role: .destructive) {
-                    Task {
-                        try? await storageManager.deleteDrawing(id: drawing.id)
-                    }
+                    beginSuckAnimation(for: drawing)
                 }
             } message: { drawing in
                 Text("Are you sure you want to delete '\(drawing.title)'?")
@@ -275,7 +339,7 @@ private struct GalleryContent: View {
                     }
                 }
             } message: {
-                Text("This will permanently delete ALL drawings. This cannot be undone.")
+                Text("Delete all \(storageManager.drawings.count) drawings? This cannot be undone.")
             }
         }
     }
@@ -534,9 +598,80 @@ private struct GalleryContent: View {
                         }
                     }
                     .buttonStyle(PlainButtonStyle())
+                    // Capture this card's frame in global coords so
+                    // suckOffset(for:) can compute the translate-to-trash
+                    // delta when the user confirms deletion.
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: CardFramesKey.self,
+                                value: [drawing.id: geo.frame(in: .global)],
+                            )
+                        }
+                        .allowsHitTesting(false)
+                    )
+                    // Delete-suck transforms. Identity when not animating;
+                    // scale/offset/fade to the trash when this card's id
+                    // is in animatingDeletes.
+                    .scaleEffect(animatingDeletes.contains(drawing.id) ? 0.08 : 1.0)
+                    .offset(suckOffset(for: drawing.id))
+                    .opacity(animatingDeletes.contains(drawing.id) ? 0.0 : 1.0)
+                    // Defensive: a shrinking card shouldn't be tappable
+                    // (would otherwise open the detail view mid-animation).
+                    .allowsHitTesting(!animatingDeletes.contains(drawing.id))
+                    .animation(.easeIn(duration: deleteSuckDuration), value: animatingDeletes)
                 }
             }
             .padding()
+        }
+        .onPreferenceChange(TrashIconCenterKey.self) { trashIconCenter = $0 }
+        .onPreferenceChange(CardFramesKey.self) { cardFrames = $0 }
+    }
+
+    // MARK: - Delete-suck animation helpers
+
+    /// Translation from a card's current center to the trash icon's
+    /// center. Returns .zero when the card isn't animating OR before
+    /// the first layout pass (trashIconCenter still nil) — in that
+    /// edge window the card falls back to scale-down-in-place, still
+    /// reads as a delete.
+    private func suckOffset(for id: UUID) -> CGSize {
+        guard animatingDeletes.contains(id),
+              let cardFrame = cardFrames[id],
+              let trash = trashIconCenter else { return .zero }
+        let cardCenter = CGPoint(x: cardFrame.midX, y: cardFrame.midY)
+        return CGSize(width: trash.x - cardCenter.x, height: trash.y - cardCenter.y)
+    }
+
+    /// Kick off the suck animation for a drawing. Adds its id to
+    /// animatingDeletes (which drives the per-card modifiers), schedules
+    /// the trash-icon pulse near the end of the animation, then fires
+    /// the actual deleteDrawing at +deleteSuckDuration. The card stays
+    /// in storageManager.drawings until that point.
+    private func beginSuckAnimation(for drawing: Drawing) {
+        let id = drawing.id
+        animatingDeletes.insert(id)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + trashPulseDelay) {
+            triggerTrashPulse()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + deleteSuckDuration) {
+            animatingDeletes.remove(id)
+            Task { try? await storageManager.deleteDrawing(id: id) }
+        }
+    }
+
+    /// Two-stage scale on the trash icon: up to 1.15, then back to 1.0.
+    /// Total duration is trashPulseTotalDuration; split evenly.
+    private func triggerTrashPulse() {
+        withAnimation(.easeOut(duration: trashPulseTotalDuration * 0.5)) {
+            trashPulseScale = 1.15
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + trashPulseTotalDuration * 0.5) {
+            withAnimation(.easeIn(duration: trashPulseTotalDuration * 0.5)) {
+                trashPulseScale = 1.0
+            }
         }
     }
 }
