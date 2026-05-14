@@ -38,6 +38,15 @@ struct EyeTestPanel: View {
     /// User tapped "Clear intent." Parent persists `nil` and the
     /// panel re-renders without the intent section.
     let onClearIntent: () -> Void
+    /// User tapped "Ask Eve about this" (M6). Parent dismisses the
+    /// panel and opens Eve in `.drawing` scope as a NEW conversation
+    /// (does not continue an existing one — per condition 6 of the
+    /// build plan). The locked starter-chip copy ("Why does the eye
+    /// go there?") is shown next to the button so the user knows
+    /// the suggested entry point; pre-filling that into Eve's input
+    /// field is a v6.1 polish item (would require threading
+    /// through EveSheetHost + EveConversationManager + EveInputBar).
+    let onAskEve: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -88,6 +97,30 @@ struct EyeTestPanel: View {
             Divider()
 
             intentSection
+
+            Divider()
+
+            askEveSection
+        }
+    }
+
+    /// "Ask Eve about this" handoff (M6). New conversation in
+    /// `.drawing` scope; existing conversation NOT continued. The
+    /// starter-chip copy below the button is a visible suggestion;
+    /// pre-fill into Eve's input is deferred to v6.1.
+    private var askEveSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Talk to Eve about this")
+                .font(.headline)
+            Text("Suggested: \"Why does the eye go there?\"")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button(action: onAskEve) {
+                Label("Ask Eve about this", systemImage: "bubble.left.and.bubble.right.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
         }
     }
 
