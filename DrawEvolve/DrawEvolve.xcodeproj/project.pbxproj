@@ -90,6 +90,8 @@
 		DE000093 /* BrushSizeRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100093 /* BrushSizeRail.swift */; };
 		DE000094 /* FloatingTextCaretIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100094 /* FloatingTextCaretIndicator.swift */; };
 		DE000095 /* BrushSizeRailHorizontal.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100095 /* BrushSizeRailHorizontal.swift */; };
+		DE000137 /* BrushPreviewDisc.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100137 /* BrushPreviewDisc.swift */; };
+		DE000138 /* BrushPreviewShader.metal in Sources */ = {isa = PBXBuildFile; fileRef = DE100138 /* BrushPreviewShader.metal */; };
 		DE000096 /* CritiqueSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100096 /* CritiqueSummary.swift */; };
 		DE000101 /* EvolutionSkillRadarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100101 /* EvolutionSkillRadarView.swift */; };
 		DE000102 /* EvolutionStudioWallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100102 /* EvolutionStudioWallView.swift */; };
@@ -209,6 +211,8 @@
 		DE100093 /* BrushSizeRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSizeRail.swift; sourceTree = "<group>"; };
 		DE100094 /* FloatingTextCaretIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingTextCaretIndicator.swift; sourceTree = "<group>"; };
 		DE100095 /* BrushSizeRailHorizontal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushSizeRailHorizontal.swift; sourceTree = "<group>"; };
+		DE100137 /* BrushPreviewDisc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrushPreviewDisc.swift; sourceTree = "<group>"; };
+		DE100138 /* BrushPreviewShader.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = BrushPreviewShader.metal; sourceTree = "<group>"; };
 		DE100096 /* CritiqueSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueSummary.swift; sourceTree = "<group>"; };
 		DE100101 /* EvolutionSkillRadarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionSkillRadarView.swift; sourceTree = "<group>"; };
 		DE100102 /* EvolutionStudioWallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionStudioWallView.swift; sourceTree = "<group>"; };
@@ -429,6 +433,8 @@
 				DE100093 /* BrushSizeRail.swift */,
 				DE100094 /* FloatingTextCaretIndicator.swift */,
 				DE100095 /* BrushSizeRailHorizontal.swift */,
+				DE100137 /* BrushPreviewDisc.swift */,
+				DE100138 /* BrushPreviewShader.metal */,
 				DE100122 /* ReferenceImageView.swift */,
 				DE100134 /* EyeTestIconButton.swift */,
 				DE100135 /* EyeTestPanel.swift */,
@@ -674,6 +680,8 @@
 				DE000093 /* BrushSizeRail.swift in Sources */,
 				DE000094 /* FloatingTextCaretIndicator.swift in Sources */,
 				DE000095 /* BrushSizeRailHorizontal.swift in Sources */,
+				DE000137 /* BrushPreviewDisc.swift in Sources */,
+				DE000138 /* BrushPreviewShader.metal in Sources */,
 				DE000101 /* EvolutionSkillRadarView.swift in Sources */,
 				DE000102 /* EvolutionStudioWallView.swift in Sources */,
 				DE000103 /* LaunchHomeView.swift in Sources */,

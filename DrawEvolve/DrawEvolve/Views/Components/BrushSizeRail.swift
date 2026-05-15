@@ -19,6 +19,11 @@
 //  most while drawing; surfacing them both on the rail saves the
 //  Brush Properties round-trip.
 //
+//  Live preview: both tracks render the same `BrushPreviewDisc`
+//  driven by the current size + hardness — scrubbing either slider
+//  shows the disc that matches what the brush will actually paint.
+//  See BrushPreviewDisc.swift for the contract.
+//
 
 import SwiftUI
 
@@ -61,6 +66,33 @@ struct BrushSizeRail: View {
     /// Two-track width — fits the size + hardness tracks side by side
     /// with a small gap.
     private static let containerWidthDual: CGFloat = 76
+    /// Max preview disc diameter so a 200px brush at high zoom doesn't
+    /// blow out the rail's chrome. Exposed so the inner tracks can
+    /// position the disc from the same constant the parent uses.
+    static let previewDiameterCap: CGFloat = 80
+    /// HStack(spacing: 8) between size and hardness tracks + each track's
+    /// 30pt frame width. When the hardness track renders its disc to
+    /// the LEFT of the whole rail, it needs to clear this much extra
+    /// to land at the same screen-x as the size track's disc.
+    private static let trackToTrackOffset: CGFloat = 30 + 8
+
+    /// Hardness used to drive the preview disc when no hardness binding
+    /// is provided (legacy single-track callers). 1.0 = hard edge,
+    /// matching the solid-circle preview behaviour the rail had before
+    /// the unified disc landed.
+    private static let previewHardnessFallback: CGFloat = 1.0
+
+    /// Single source of truth for what the preview disc renders. Both
+    /// tracks read from this so the disc looks identical whether the
+    /// user is scrubbing size or hardness — only the anchor position
+    /// differs (next to whichever knob the user is dragging).
+    private var previewModel: BrushPreviewModel {
+        let docDiameter = screenDiameter?(size) ?? size
+        return BrushPreviewModel(
+            diameter: min(docDiameter, Self.previewDiameterCap),
+            hardness: hardness?.wrappedValue ?? Self.previewHardnessFallback
+        )
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -72,8 +104,8 @@ struct BrushSizeRail: View {
                 accessibilityValue: "\(Int(size)) pixels",
                 readoutText: "\(Int(size)) px",
                 accessibilityStep: 2,
-                screenDiameter: screenDiameter,
-                showSizePreview: true
+                previewModel: previewModel,
+                trackLeadingClearance: 0
             )
             if let hardness {
                 VerticalRailTrack(
@@ -84,8 +116,8 @@ struct BrushSizeRail: View {
                     accessibilityValue: "\(Int(hardness.wrappedValue * 100)) percent",
                     readoutText: "\(Int(hardness.wrappedValue * 100))%",
                     accessibilityStep: 0.05,
-                    screenDiameter: nil,
-                    showSizePreview: false
+                    previewModel: previewModel,
+                    trackLeadingClearance: Self.trackToTrackOffset
                 )
             }
         }
@@ -103,9 +135,8 @@ struct BrushSizeRail: View {
 }
 
 /// One vertical track inside the rail. Owns its own knob, fill, drag
-/// gesture, and (optional) live preview readout. The outer
-/// `BrushSizeRail` lays out one or two of these inside the shared
-/// rounded-rectangle chrome.
+/// gesture, and live preview readout. The outer `BrushSizeRail` lays
+/// out one or two of these inside the shared rounded-rectangle chrome.
 private struct VerticalRailTrack: View {
     @Binding var value: CGFloat
     var range: ClosedRange<CGFloat>
@@ -114,18 +145,20 @@ private struct VerticalRailTrack: View {
     var accessibilityValue: String
     var readoutText: String
     var accessibilityStep: CGFloat
-    /// When set, the size preview circle floats to the LEFT of the
-    /// knob using this converter from value→on-screen pt. Hardness
-    /// passes nil and just shows the numeric readout.
-    var screenDiameter: ((CGFloat) -> CGFloat)?
-    var showSizePreview: Bool
+    /// Current size + hardness from the parent — what the disc renders
+    /// when this track is being scrubbed.
+    var previewModel: BrushPreviewModel
+    /// How far left of this track's local origin to anchor the preview
+    /// disc. Size track passes 0; hardness track passes the offset
+    /// across the size track + gap so the disc lands on the LEFT side
+    /// of the whole rail regardless of which slider is active.
+    var trackLeadingClearance: CGFloat
 
     @State private var isDragging = false
 
     private static let railWidth: CGFloat = 6
     private static let knobDiameter: CGFloat = 22
     private static let trackInset: CGFloat = Self.knobDiameter / 2 + 4
-    private static let previewDiameterCap: CGFloat = 80
 
     var body: some View {
         GeometryReader { proxy in
@@ -156,51 +189,29 @@ private struct VerticalRailTrack: View {
                 .position(x: proxy.size.width / 2, y: knobY)
 
             if isDragging {
-                if showSizePreview {
-                    let trueDiameter = screenDiameter?(value) ?? value
-                    let previewDiameter = min(trueDiameter, Self.previewDiameterCap)
-                    Circle()
-                        .fill(Color.primary.opacity(0.85))
-                        .frame(width: previewDiameter, height: previewDiameter)
-                        .overlay(
-                            Circle().stroke(
-                                Color(uiColor: .systemBackground).opacity(0.9),
-                                lineWidth: 1.5
-                            )
-                        )
-                        .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
-                        .position(x: -(Self.previewDiameterCap / 2 + 12), y: knobY)
-                        .transition(.opacity)
+                BrushPreviewDisc(model: previewModel)
+                    .position(
+                        x: -(BrushSizeRail.previewDiameterCap / 2 + 12) - trackLeadingClearance,
+                        y: knobY
+                    )
+                    .transition(.opacity)
 
-                    // .fixedSize so the bubble doesn't wrap when the
-                    // parent's proposed width is narrow.
-                    Text(readoutText)
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.black.opacity(0.78))
-                        .clipShape(Capsule())
-                        .fixedSize(horizontal: true, vertical: false)
-                        .position(x: -(Self.previewDiameterCap + 48), y: knobY)
-                        .transition(.opacity)
-                } else {
-                    // Hardness: just the numeric pill, floated alongside
-                    // the knob. The size-track owns the preview-circle
-                    // affordance so we don't double up.
-                    Text(readoutText)
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.black.opacity(0.78))
-                        .clipShape(Capsule())
-                        .fixedSize(horizontal: true, vertical: false)
-                        .position(x: proxy.size.width + 28, y: knobY)
-                        .transition(.opacity)
-                }
+                // .fixedSize so the bubble doesn't wrap when the
+                // parent's proposed width is narrow.
+                Text(readoutText)
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.78))
+                    .clipShape(Capsule())
+                    .fixedSize(horizontal: true, vertical: false)
+                    .position(
+                        x: -(BrushSizeRail.previewDiameterCap + 48) - trackLeadingClearance,
+                        y: knobY
+                    )
+                    .transition(.opacity)
             }
         }
         .frame(width: 30)
