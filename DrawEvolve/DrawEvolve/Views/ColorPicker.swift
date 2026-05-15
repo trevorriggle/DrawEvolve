@@ -81,6 +81,73 @@ struct AdvancedColorPicker: View {
     /// checkmark fade on the trailing slot's badge.
     @State private var addCurrentJustSaved: Bool = false
 
+    // MARK: - Coalescing markers
+    //
+    // Each `lastSynced*` mirrors the value that `syncStateFromSelectedColor`
+    // most recently wrote into the matching @State channel. Slider /
+    // text-field .onChange handlers compare their current channel set
+    // against these markers and short-circuit when they match — that's how
+    // we break the HSB→RGB→hex→sync→HSB feedback loop that used to fire
+    // 3–5 cascading writebacks per slider drag tick. Without these guards
+    // every tick triggered N round-trips of state writes and view
+    // invalidations, which is what made the picker feel laggy.
+    @State private var lastSyncedHue: Double = -1
+    @State private var lastSyncedSaturation: Double = -1
+    @State private var lastSyncedBrightness: Double = -1
+    @State private var lastSyncedAlpha: Double = -1
+    @State private var lastSyncedRed: Double = -1
+    @State private var lastSyncedGreen: Double = -1
+    @State private var lastSyncedBlue: Double = -1
+    @State private var lastSyncedHexText: String = ""
+
+    // MARK: - Cached slider gradient endpoints
+    //
+    // Each visible HSB / RGB slider's gradient backing was previously
+    // rebuilt from scratch on every body re-render — meaning a saturation
+    // drag thrashed the (hue,brightness)-anchored saturation gradient
+    // 60×/sec even though its inputs hadn't moved. These caches recompute
+    // only via `recomputeGradientCache()`, which fires from
+    // `syncStateFromSelectedColor` so each gradient turns over exactly
+    // when its anchor channels change.
+    @State private var satGradientStart: Color = Color(hue: 0, saturation: 0, brightness: 1)
+    @State private var satGradientEnd: Color = Color(hue: 0, saturation: 1, brightness: 1)
+    @State private var brightGradientStart: Color = .black
+    @State private var brightGradientEnd: Color = .white
+    @State private var redGradientStart: Color = .black
+    @State private var redGradientEnd: Color = .red
+    @State private var greenGradientStart: Color = .black
+    @State private var greenGradientEnd: Color = .green
+    @State private var blueGradientStart: Color = .black
+    @State private var blueGradientEnd: Color = .blue
+    @State private var opacityGradientColor: Color = .black
+
+    /// The hue slider's rainbow is constant — share a single instance
+    /// rather than rebuilding the LinearGradient on every render.
+    private static let hueGradient = LinearGradient(
+        colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
+        startPoint: .leading,
+        endPoint: .trailing
+    )
+
+    /// True when every HSB-relevant @State channel matches what sync
+    /// last wrote — meaning the most recent change was sync-driven and
+    /// a writeback would just bounce the same color through the loop.
+    private var hsbStateMatchesSync: Bool {
+        hue == lastSyncedHue
+            && saturation == lastSyncedSaturation
+            && brightness == lastSyncedBrightness
+            && alpha == lastSyncedAlpha
+    }
+
+    /// RGB-side twin of `hsbStateMatchesSync`. Includes alpha because
+    /// opacity-driven writebacks need to short-circuit in RGB mode too.
+    private var rgbStateMatchesSync: Bool {
+        red == lastSyncedRed
+            && green == lastSyncedGreen
+            && blue == lastSyncedBlue
+            && alpha == lastSyncedAlpha
+    }
+
     enum SliderMode: String, CaseIterable, Identifiable {
         case hsb = "HSB"
         case rgb = "RGB"
@@ -174,6 +241,10 @@ struct AdvancedColorPicker: View {
                 )
                 .onSubmit { commitHex() }
                 .onChange(of: hexText) { _, newValue in
+                    // Skip when the change came from sync (we just wrote
+                    // this exact hex string ourselves). Catches the
+                    // post-sync echo without affecting genuine typing.
+                    if newValue == lastSyncedHexText { return }
                     if let color = parseHex(newValue) {
                         hexFieldInvalid = false
                         applyColor(color)
@@ -207,7 +278,10 @@ struct AdvancedColorPicker: View {
                         .stroke(Color(uiColor: .separator), lineWidth: 1)
                 )
                 .frame(width: 56)
-                .onChange(of: value.wrappedValue) { _, _ in writeBackFromRGB() }
+                .onChange(of: value.wrappedValue) { _, _ in
+                    if rgbStateMatchesSync { return }
+                    writeBackFromRGB()
+                }
         }
     }
 
@@ -243,37 +317,36 @@ struct AdvancedColorPicker: View {
     private var hsbSliders: some View {
         VStack(spacing: 10) {
             ColorSlider(value: $hue, range: 0...1, label: "Hue") {
-                LinearGradient(
-                    colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
+                Self.hueGradient
             }
-            .onChange(of: hue) { _, _ in writeBackFromHSB() }
+            .onChange(of: hue) { _, _ in
+                if hsbStateMatchesSync { return }
+                writeBackFromHSB()
+            }
 
             ColorSlider(value: $saturation, range: 0...1, label: "Saturation") {
                 LinearGradient(
-                    colors: [
-                        Color(hue: hue, saturation: 0, brightness: brightness),
-                        Color(hue: hue, saturation: 1, brightness: brightness),
-                    ],
+                    colors: [satGradientStart, satGradientEnd],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
             }
-            .onChange(of: saturation) { _, _ in writeBackFromHSB() }
+            .onChange(of: saturation) { _, _ in
+                if hsbStateMatchesSync { return }
+                writeBackFromHSB()
+            }
 
             ColorSlider(value: $brightness, range: 0...1, label: "Brightness") {
                 LinearGradient(
-                    colors: [
-                        Color(hue: hue, saturation: saturation, brightness: 0),
-                        Color(hue: hue, saturation: saturation, brightness: 1),
-                    ],
+                    colors: [brightGradientStart, brightGradientEnd],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
             }
-            .onChange(of: brightness) { _, _ in writeBackFromHSB() }
+            .onChange(of: brightness) { _, _ in
+                if hsbStateMatchesSync { return }
+                writeBackFromHSB()
+            }
         }
     }
 
@@ -284,42 +357,42 @@ struct AdvancedColorPicker: View {
                 set: { red = ($0 * 255.0).rounded() }
             ), range: 0...1, label: "Red") {
                 LinearGradient(
-                    colors: [
-                        Color(red: 0, green: green / 255.0, blue: blue / 255.0),
-                        Color(red: 1, green: green / 255.0, blue: blue / 255.0),
-                    ],
+                    colors: [redGradientStart, redGradientEnd],
                     startPoint: .leading, endPoint: .trailing
                 )
             }
-            .onChange(of: red) { _, _ in writeBackFromRGB() }
+            .onChange(of: red) { _, _ in
+                if rgbStateMatchesSync { return }
+                writeBackFromRGB()
+            }
 
             ColorSlider(value: Binding(
                 get: { green / 255.0 },
                 set: { green = ($0 * 255.0).rounded() }
             ), range: 0...1, label: "Green") {
                 LinearGradient(
-                    colors: [
-                        Color(red: red / 255.0, green: 0, blue: blue / 255.0),
-                        Color(red: red / 255.0, green: 1, blue: blue / 255.0),
-                    ],
+                    colors: [greenGradientStart, greenGradientEnd],
                     startPoint: .leading, endPoint: .trailing
                 )
             }
-            .onChange(of: green) { _, _ in writeBackFromRGB() }
+            .onChange(of: green) { _, _ in
+                if rgbStateMatchesSync { return }
+                writeBackFromRGB()
+            }
 
             ColorSlider(value: Binding(
                 get: { blue / 255.0 },
                 set: { blue = ($0 * 255.0).rounded() }
             ), range: 0...1, label: "Blue") {
                 LinearGradient(
-                    colors: [
-                        Color(red: red / 255.0, green: green / 255.0, blue: 0),
-                        Color(red: red / 255.0, green: green / 255.0, blue: 1),
-                    ],
+                    colors: [blueGradientStart, blueGradientEnd],
                     startPoint: .leading, endPoint: .trailing
                 )
             }
-            .onChange(of: blue) { _, _ in writeBackFromRGB() }
+            .onChange(of: blue) { _, _ in
+                if rgbStateMatchesSync { return }
+                writeBackFromRGB()
+            }
         }
     }
 
@@ -327,16 +400,23 @@ struct AdvancedColorPicker: View {
         ColorSlider(value: $alpha, range: 0...1, label: "Opacity") {
             LinearGradient(
                 colors: [
-                    Color(uiColor: selectedColor).opacity(0),
-                    Color(uiColor: selectedColor).opacity(1),
+                    opacityGradientColor.opacity(0),
+                    opacityGradientColor.opacity(1),
                 ],
                 startPoint: .leading, endPoint: .trailing
             )
         }
         .onChange(of: alpha) { _, _ in
+            // Mode-specific sync guard: a sync-driven alpha change in HSB
+            // mode also writes the RGB channels, so checking the matching
+            // mode's set is sufficient and avoids cross-mode false skips.
             switch sliderMode {
-            case .hsb: writeBackFromHSB()
-            case .rgb: writeBackFromRGB()
+            case .hsb:
+                if hsbStateMatchesSync { return }
+                writeBackFromHSB()
+            case .rgb:
+                if rgbStateMatchesSync { return }
+                writeBackFromRGB()
             }
         }
     }
@@ -654,35 +734,77 @@ struct AdvancedColorPicker: View {
     private func syncStateFromSelectedColor(skipFor _: UIColor? = nil) {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         selectedColor.getRed(&r, green: &g, blue: &b, alpha: &a)
-        red = (r * 255).rounded()
-        green = (g * 255).rounded()
-        blue = (b * 255).rounded()
-        alpha = a
+        let newRed = (r * 255).rounded()
+        let newGreen = (g * 255).rounded()
+        let newBlue = (b * 255).rounded()
+        let newAlpha = Double(a)
 
         var h: CGFloat = 0, s: CGFloat = 0, br: CGFloat = 0, aa: CGFloat = 0
         selectedColor.getHue(&h, saturation: &s, brightness: &br, alpha: &aa)
-        hue = h
-        saturation = s
-        brightness = br
+        let newHue = Double(h)
+        let newSat = Double(s)
+        let newBright = Double(br)
+
+        // Stamp the markers in lockstep with the @State writes. SwiftUI
+        // coalesces both into a single body re-eval and the per-channel
+        // .onChange handlers fire AFTER the body completes, so by the time
+        // a handler reads its marker the matching value is already in.
+        lastSyncedRed = newRed
+        lastSyncedGreen = newGreen
+        lastSyncedBlue = newBlue
+        lastSyncedAlpha = newAlpha
+        lastSyncedHue = newHue
+        lastSyncedSaturation = newSat
+        lastSyncedBrightness = newBright
+
+        red = newRed
+        green = newGreen
+        blue = newBlue
+        alpha = newAlpha
+        hue = newHue
+        saturation = newSat
+        brightness = newBright
 
         let rr = Int(red)
         let gg = Int(green)
         let bb = Int(blue)
         let newHex = String(format: "#%02x%02x%02x", rr, gg, bb)
         if hexText != newHex {
+            lastSyncedHexText = newHex
             hexText = newHex
             hexFieldInvalid = false
+        } else {
+            lastSyncedHexText = newHex
         }
+
+        recomputeGradientCache()
+    }
+
+    /// Recomputes the cached endpoint Colors used by HSB/RGB/opacity
+    /// slider gradients. Called from `syncStateFromSelectedColor` so the
+    /// caches turn over exactly when their anchor channels change, not on
+    /// every body re-render.
+    private func recomputeGradientCache() {
+        satGradientStart = Color(hue: hue, saturation: 0, brightness: brightness)
+        satGradientEnd = Color(hue: hue, saturation: 1, brightness: brightness)
+        brightGradientStart = Color(hue: hue, saturation: saturation, brightness: 0)
+        brightGradientEnd = Color(hue: hue, saturation: saturation, brightness: 1)
+        let rN = red / 255.0
+        let gN = green / 255.0
+        let bN = blue / 255.0
+        redGradientStart = Color(red: 0, green: gN, blue: bN)
+        redGradientEnd = Color(red: 1, green: gN, blue: bN)
+        greenGradientStart = Color(red: rN, green: 0, blue: bN)
+        greenGradientEnd = Color(red: rN, green: 1, blue: bN)
+        blueGradientStart = Color(red: rN, green: gN, blue: 0)
+        blueGradientEnd = Color(red: rN, green: gN, blue: 1)
+        opacityGradientColor = Color(uiColor: selectedColor)
     }
 
     private func writeBackFromHSB() {
         let newColor = UIColor(hue: hue, saturation: saturation, brightness: brightness, alpha: alpha)
-        if !PaletteManager.colorsAreEqualForRecent(newColor, selectedColor) {
-            applyColor(newColor)
-        } else if newColor != selectedColor {
-            selectedColor = newColor
-            syncStateFromSelectedColor()
-        }
+        guard newColor != selectedColor else { return }
+        selectedColor = newColor
     }
 
     private func writeBackFromRGB() {
@@ -690,12 +812,8 @@ struct AdvancedColorPicker: View {
         let g = max(0, min(1, green / 255))
         let b = max(0, min(1, blue / 255))
         let newColor = UIColor(red: r, green: g, blue: b, alpha: alpha)
-        if !PaletteManager.colorsAreEqualForRecent(newColor, selectedColor) {
-            applyColor(newColor)
-        } else if newColor != selectedColor {
-            selectedColor = newColor
-            syncStateFromSelectedColor()
-        }
+        guard newColor != selectedColor else { return }
+        selectedColor = newColor
     }
 
     private func commitHex() {
