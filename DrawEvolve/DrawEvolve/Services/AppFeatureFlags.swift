@@ -51,18 +51,22 @@ final class AppFeatureFlags: ObservableObject {
     /// stored encoding ever changes (currently a plain [String: Bool]).
     private let defaultsKey = "AppFeatureFlags.cachedFlags.v1"
 
-    /// Periodic refresh task lifetime. Owned by the singleton — there's
-    /// no deinit path in practice.
-    private var refreshTask: Task<Void, Never>?
+    /// Throttle: skip refresh if the last successful one was within
+    /// this window. Prevents redundant network on rapid foreground/
+    /// background toggling (Slide Over, Stage Manager, lock screen
+    /// peeks). 5 minutes is generous — flag flips don't need to
+    /// propagate faster than that.
+    private let minimumRefreshInterval: TimeInterval = 300
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            let cached = try? JSONDecoder().decode([String: Bool].self, from: data) {
             self.flags = cached
         }
-        // Kick off an initial fetch in the background. Auto-refresh
-        // is started explicitly via `startAutoRefresh()` from the
-        // app entry point so launch sequencing stays explicit.
+        // Kick off an initial fetch in the background. Subsequent
+        // refreshes are driven by scenePhase transitions (see
+        // DrawEvolveApp.swift) so the radio doesn't wake on a timer
+        // when the app is backgrounded.
         Task { [weak self] in await self?.refresh() }
     }
 
@@ -113,17 +117,20 @@ final class AppFeatureFlags: ObservableObject {
         }
     }
 
-    /// Start periodic background refresh. Call once from app entry.
-    /// Subsequent calls cancel the previous task; idempotent.
-    func startAutoRefresh(interval: TimeInterval = 3600) {
-        refreshTask?.cancel()
-        refreshTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                let seconds = max(interval, 60)
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                await self?.refresh()
-            }
+    /// Refresh on foreground transition. Replaces the old hourly
+    /// `startAutoRefresh` poll which wandered on forever and woke
+    /// the radio whether the user cared or not. Throttled by
+    /// `minimumRefreshInterval` so rapid foreground toggling
+    /// (Slide Over, Stage Manager, lock-screen peeks) doesn't fan
+    /// out into a stream of network calls.
+    func refreshOnForegroundIfStale() async {
+        if let last = lastRefreshAt,
+           Date().timeIntervalSince(last) < minimumRefreshInterval {
+            #if DEBUG
+            print("[AppFeatureFlags] foreground refresh skipped — last refresh \(String(format: "%.0f", Date().timeIntervalSince(last)))s ago")
+            #endif
+            return
         }
+        await refresh()
     }
 }

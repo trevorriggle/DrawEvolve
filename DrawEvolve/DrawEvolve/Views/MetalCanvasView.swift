@@ -720,19 +720,26 @@ struct MetalCanvasView: UIViewRepresentable {
             // Check all layers for missing textures
             for i in 0..<layers.count {
                 if layers[i].texture == nil {
+                    #if DEBUG
                     print("⚠️ Layer \(i) '\(layers[i].name)' has NIL texture - creating new one. Layer ID: \(layers[i].id)")
+                    #endif
                     layers[i].texture = renderer.createLayerTexture()
                     if let tex = layers[i].texture {
+                        #if DEBUG
                         print("   ✅ Created texture: \(ObjectIdentifier(tex))")
+                        #endif
                         created = true
                     } else {
+                        #if DEBUG
                         print("   ❌ FAILED to create texture!")
+                        #endif
                     }
                 }
             }
 
             // Only verify if we created textures
             if created {
+                #if DEBUG
                 print("📋 Current layer state:")
                 for (i, layer) in layers.enumerated() {
                     if let tex = layer.texture {
@@ -741,6 +748,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: ❌ NO TEXTURE")
                     }
                 }
+                #endif
             }
         }
 

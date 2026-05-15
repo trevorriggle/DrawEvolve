@@ -10,18 +10,16 @@ import SwiftUI
 @main
 struct DrawEvolveApp: App {
     @StateObject private var authManager = AuthManager.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         // Initialize crash reporting + boot the auth state listener early.
         _ = CrashReporter.shared
         _ = AuthManager.shared
-        // Start the remote feature-flag refresher. The singleton kicks
-        // off an initial fetch in its init; this turns on the hourly
-        // background refresh so flag flips picked up by the
-        // TestFlight cohort don't wait for an app restart.
-        Task { @MainActor in
-            AppFeatureFlags.shared.startAutoRefresh()
-        }
+        // The feature-flag singleton kicks off an initial fetch in its
+        // init. Subsequent refreshes are driven by scenePhase below —
+        // we used to run a 1h timer-loop, but it wakes the radio even
+        // when the app is backgrounded for days, which adds up.
     }
 
     var body: some Scene {
@@ -31,6 +29,16 @@ struct DrawEvolveApp: App {
                 .onOpenURL { url in
                     Task { await authManager.handleDeepLink(url) }
                 }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // Refresh remote feature flags whenever the app becomes
+            // active. Throttled internally (5 min) so rapid toggling
+            // doesn't fan out into a stream of network calls.
+            if newPhase == .active {
+                Task { @MainActor in
+                    await AppFeatureFlags.shared.refreshOnForegroundIfStale()
+                }
+            }
         }
     }
 }
