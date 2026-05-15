@@ -670,6 +670,7 @@ class CanvasStateManager: ObservableObject {
             guard let texture = layer.texture else { continue }
             renderer.flipLayerTextureInPlace(
                 texture,
+                tileGrid: layer.tileGrid,
                 flipHorizontal: flipH,
                 flipVertical: flipV
             )
@@ -2205,6 +2206,7 @@ class CanvasStateManager: ObservableObject {
             guard let texture = layer.texture else { continue }
             renderer.flipLayerTextureInPlace(
                 texture,
+                tileGrid: layer.tileGrid,
                 flipHorizontal: flipH,
                 flipVertical: flipV
             )
