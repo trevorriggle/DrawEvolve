@@ -122,6 +122,7 @@
 		DE000135 /* EyeTestPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100135 /* EyeTestPanel.swift */; };
 		DE000136 /* EyeTestOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100136 /* EyeTestOverlay.swift */; };
 		DE000139 /* TileKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100139 /* TileKey.swift */; };
+		DE000140 /* LayerTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100140 /* LayerTile.swift */; };
 		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
@@ -244,6 +245,7 @@
 		DE100135 /* EyeTestPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EyeTestPanel.swift; sourceTree = "<group>"; };
 		DE100136 /* EyeTestOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EyeTestOverlay.swift; sourceTree = "<group>"; };
 		DE100139 /* TileKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileKey.swift; sourceTree = "<group>"; };
+		DE100140 /* LayerTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerTile.swift; sourceTree = "<group>"; };
 		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
@@ -358,6 +360,7 @@
 				DE100121 /* ReferenceImage.swift */,
 				DE100132 /* CompositionAnalysis.swift */,
 				DE100139 /* TileKey.swift */,
+				DE100140 /* LayerTile.swift */,
 				DE000319 /* Pose */,
 			);
 			path = Models;
@@ -714,6 +717,7 @@
 				DE000135 /* EyeTestPanel.swift in Sources */,
 				DE000136 /* EyeTestOverlay.swift in Sources */,
 				DE000139 /* TileKey.swift in Sources */,
+				DE000140 /* LayerTile.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
