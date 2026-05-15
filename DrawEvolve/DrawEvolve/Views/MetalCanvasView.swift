@@ -49,6 +49,141 @@ protocol TouchHandling: AnyObject {
     func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?)
 }
 
+/// Snapshot of every canvas-state field that `draw(in:)` reads.
+/// Compared in `MetalCanvasView.updateUIView` to decide whether the
+/// SwiftUI body re-eval actually warrants a GPU redraw. Two snapshots
+/// being equal means "nothing draw(in:) would render differently"
+/// — safe to skip `setNeedsDisplay()`. See updateUIView's header
+/// comment for the battery rationale.
+///
+/// Adding a render-affecting field to draw(in:)?
+///   1. Add it to this struct as a value-Equatable field.
+///   2. Capture it in the `init(canvasState:...)` initializer.
+///   3. Build a debug case where only that field changes and verify
+///      the canvas redraws.
+///
+/// Texture references compare by ObjectIdentifier — pixel-level
+/// changes within a texture don't change identity, so they must go
+/// through layerMutationCounter (or a dedicated revision) to be
+/// caught here.
+struct CanvasRenderSnapshot: Equatable {
+    // Viewport
+    let zoomScale: CGFloat
+    let panOffset: CGPoint
+    let canvasRotationRadians: Double
+    let flipHorizontal: Bool
+    let flipVertical: Bool
+    let documentSize: CGSize
+
+    // Layer composite. `layerMutationCounter` catches add/remove/
+    // reorder/visibility-toggle/stroke commit/clear/fill/text
+    // commit/selection delete/undo/redo. Per-layer opacity and
+    // visibility tuples are belt-and-suspenders for the gap noted
+    // in CompositionAnalysisService.swift's doc block: opacity
+    // slider drags don't bump the counter.
+    let layerMutationCounter: Int
+    let layerCount: Int
+    let layerOpacities: [Float]
+    let layerVisibilities: [Bool]
+    let layerTextureIDs: [ObjectIdentifier?]
+
+    // Move / selection state
+    let isTranslatingActiveLayer: Bool
+    let selectedLayerIndex: Int
+    let floatingSelectionTextureID: ObjectIdentifier?
+    let selectionOriginalRect: CGRect?
+    let selectionOffset: CGPoint
+    let selectionScale: CGSize
+    let selectionRotationRadians: Double
+
+    // Floating text live preview
+    let floatingTextTextureID: ObjectIdentifier?
+    let floatingTextRect: CGRect
+    let floatingTextRotationRadians: Double
+
+    // Note: the in-progress stroke lives on the Coordinator, not on
+    // canvasState, so we can't snapshot it from here. That's OK —
+    // every touchesBegan/Moved/Ended call site already invokes
+    // setNeedsDisplay() explicitly (see the 11 grep'd sites in
+    // BATTERY_AUDIT_2026-05-15.md), which bypasses this gate.
+
+    // Back-canvas references (renderBackCanvasReferences reads count
+    // + ids; pixel updates inside a reference image are out of scope
+    // — they don't happen in the current code).
+    let backCanvasReferenceCount: Int
+    let backCanvasReferenceIDs: [UUID]
+
+    // textOnPath mode (Coordinator reads in touch handlers; doesn't
+    // strictly affect draw(in:), but updateUIView pushes it into the
+    // Coordinator from this same call, so a mode change should
+    // trigger the redraw anyway for visual mode chrome reasons).
+    let typeOnPathMode: TypeOnPathPathMode
+
+    @MainActor
+    init(
+        canvasState: CanvasStateManager?,
+        backCanvasReferences: [ReferenceImage],
+        typeOnPathMode: TypeOnPathPathMode
+    ) {
+        if let state = canvasState {
+            self.zoomScale = state.zoomScale
+            self.panOffset = state.panOffset
+            self.canvasRotationRadians = state.canvasRotation.radians
+            self.flipHorizontal = state.flipHorizontal
+            self.flipVertical = state.flipVertical
+            self.documentSize = state.documentSize
+            self.layerMutationCounter = state.layerMutationCounter
+            self.layerCount = state.layers.count
+            self.layerOpacities = state.layers.map { $0.opacity }
+            self.layerVisibilities = state.layers.map { $0.isVisible }
+            self.layerTextureIDs = state.layers.map {
+                $0.texture.map(ObjectIdentifier.init)
+            }
+            self.isTranslatingActiveLayer = state.isTranslatingActiveLayer
+            self.selectedLayerIndex = state.selectedLayerIndex
+            self.floatingSelectionTextureID = state.floatingSelectionTexture.map(ObjectIdentifier.init)
+            self.selectionOriginalRect = state.selectionOriginalRect
+            self.selectionOffset = state.selectionOffset
+            self.selectionScale = state.selectionScale
+            self.selectionRotationRadians = state.selectionRotation.radians
+            if let ft = state.floatingText {
+                self.floatingTextTextureID = ft.cachedTexture.map(ObjectIdentifier.init)
+                self.floatingTextRect = ft.displayedRect
+                self.floatingTextRotationRadians = ft.rotation.radians
+            } else {
+                self.floatingTextTextureID = nil
+                self.floatingTextRect = .zero
+                self.floatingTextRotationRadians = 0
+            }
+        } else {
+            self.zoomScale = 1
+            self.panOffset = .zero
+            self.canvasRotationRadians = 0
+            self.flipHorizontal = false
+            self.flipVertical = false
+            self.documentSize = .zero
+            self.layerMutationCounter = -1
+            self.layerCount = 0
+            self.layerOpacities = []
+            self.layerVisibilities = []
+            self.layerTextureIDs = []
+            self.isTranslatingActiveLayer = false
+            self.selectedLayerIndex = -1
+            self.floatingSelectionTextureID = nil
+            self.selectionOriginalRect = nil
+            self.selectionOffset = .zero
+            self.selectionScale = CGSize(width: 1, height: 1)
+            self.selectionRotationRadians = 0
+            self.floatingTextTextureID = nil
+            self.floatingTextRect = .zero
+            self.floatingTextRotationRadians = 0
+        }
+        self.backCanvasReferenceCount = backCanvasReferences.count
+        self.backCanvasReferenceIDs = backCanvasReferences.map { $0.id }
+        self.typeOnPathMode = typeOnPathMode
+    }
+}
+
 struct MetalCanvasView: UIViewRepresentable {
     @Binding var layers: [DrawingLayer]
     @Binding var currentTool: DrawingTool
@@ -194,8 +329,33 @@ struct MetalCanvasView: UIViewRepresentable {
         // enters compositeLayersToTexture / the AI/save path.
         context.coordinator.backCanvasReferences = backCanvasReferences
 
-        // Just trigger a redraw when something changes
-        uiView.setNeedsDisplay()
+        // Battery: gate setNeedsDisplay on whether anything draw(in:)
+        // actually reads has changed. Without this gate, every
+        // @Published mutation on CanvasStateManager (34 of them —
+        // color picker, brush slider, tool switch, etc.) cascades into
+        // a full GPU redraw + 8-layer composite, even when the result
+        // is identical pixels. See BATTERY_AUDIT_2026-05-15.md
+        // finding #1 for the diagnosis.
+        //
+        // Touch handlers already call setNeedsDisplay() explicitly
+        // (touchesBegan/Moved/Ended at the 11 sites grep'd in the
+        // audit), so active drawing isn't affected — the gate only
+        // deduplicates SwiftUI-state-only redraw signals.
+        //
+        // If a snapshot field is missed and a needed redraw is dropped,
+        // the canvas appears frozen until another setNeedsDisplay()
+        // fires (any touch, pan, zoom, or external state bump). That's
+        // a real failure mode — if you spot it, add the missing field
+        // to CanvasRenderSnapshot below rather than ripping the gate out.
+        let snapshot = CanvasRenderSnapshot(
+            canvasState: canvasState,
+            backCanvasReferences: backCanvasReferences,
+            typeOnPathMode: typeOnPathMode
+        )
+        if context.coordinator.lastRenderSnapshot != snapshot {
+            context.coordinator.lastRenderSnapshot = snapshot
+            uiView.setNeedsDisplay()
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -242,6 +402,14 @@ struct MetalCanvasView: UIViewRepresentable {
         /// touch handlers to branch between freehand polyline capture
         /// and tap-center / drag-radius capture.
         var typeOnPathMode: TypeOnPathPathMode = .freehand
+
+        /// Snapshot of canvas state from the last `updateUIView` call.
+        /// Compared against a fresh snapshot to decide whether to call
+        /// `setNeedsDisplay()`. nil means "no snapshot yet — render the
+        /// first frame unconditionally." See updateUIView for the
+        /// rationale (battery: stop cascading GPU redraws on @Published
+        /// changes that don't actually affect pixels).
+        var lastRenderSnapshot: CanvasRenderSnapshot?
         private let symmetry: SymmetryConfig
 
         // textOnPath circle-mode state. `circleDrawingCenter` is the
