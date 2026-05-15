@@ -22,6 +22,14 @@
 //      Type Bar's ✓ checkmark is the commit affordance and the existing
 //      cancel pill handles cancel; a Done/Cancel toolbar above the
 //      keyboard duplicated both. Return key remains as newline.
+//    • Keyboard-avoidance preview: when the soft keyboard rises and
+//      the float's screen anchor lands behind the keyboard, we surface
+//      a visible preview card above the keyboard with the current
+//      content + a "lands behind keyboard" adornment. The actual
+//      rasterised glyphs stay at the anchor — only this temporary
+//      preview translates. Auto-dismisses on keyboard-hide. Preferred
+//      over translating the canvas itself because pinch-zoom state
+//      lives in canvasState and a transient pan would corrupt it.
 //
 
 import SwiftUI
@@ -30,21 +38,111 @@ import UIKit
 struct TextEntryOverlay: View {
     @ObservedObject var canvasState: CanvasStateManager
 
+    /// End-frame of the soft keyboard in screen-points, captured from
+    /// the latest keyboardWillShow / keyboardWillHide notification. nil
+    /// when the keyboard is down (or hardware keyboard, which reports
+    /// height 0).
+    @State private var keyboardFrame: CGRect? = nil
+
+    /// Animation duration iOS published with the most recent show/hide
+    /// so the preview's appear/disappear matches the keyboard slide.
+    @State private var keyboardAnimDuration: Double = 0.25
+
     var body: some View {
-        if canvasState.floatingText != nil {
-            TextEntryHost(canvasState: canvasState)
-                .frame(width: 1, height: 1)
-                .position(positionForFloat)
-                .allowsHitTesting(false)
+        if let ft = canvasState.floatingText {
+            ZStack {
+                TextEntryHost(canvasState: canvasState)
+                    .frame(width: 1, height: 1)
+                    .position(canvasState.documentToScreen(ft.anchor))
+                    .allowsHitTesting(false)
+
+                if let elevated = elevatedPosition(for: ft) {
+                    elevatedPreview(for: ft, at: elevated)
+                        .transition(.opacity)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillShowNotification
+            )) { handleKeyboardShow($0) }
+            .onReceive(NotificationCenter.default.publisher(
+                for: UIResponder.keyboardWillHideNotification
+            )) { handleKeyboardHide($0) }
         }
     }
 
-    /// Anchors the invisible UITextView to the float's anchor in screen
-    /// space. The position only matters for the (invisible) caret and is
-    /// otherwise unused — the keyboard rises regardless of frame.
-    private var positionForFloat: CGPoint {
-        guard let ft = canvasState.floatingText else { return .zero }
-        return canvasState.documentToScreen(ft.anchor)
+    // MARK: - Keyboard avoidance
+
+    /// Screen-point center for the elevated preview card when the float's
+    /// anchor is behind the soft keyboard. nil ⇒ either no keyboard or
+    /// the anchor is already visible, and the preview shouldn't mount.
+    private func elevatedPosition(for ft: FloatingText) -> CGPoint? {
+        guard let kb = keyboardFrame, kb.height > 0 else { return nil }
+        let anchorScreen = canvasState.documentToScreen(ft.anchor)
+        // 8pt slack so a hairline overlap with the keyboard top still
+        // counts as obscured — the rasterised glyph extends below the
+        // anchor (font descenders + first-line height).
+        guard anchorScreen.y >= kb.minY - 8 else { return nil }
+        return CGPoint(x: kb.midX, y: kb.minY - 56)
+    }
+
+    @ViewBuilder
+    private func elevatedPreview(for ft: FloatingText, at point: CGPoint) -> some View {
+        let displayText = ft.content.isEmpty ? "Type your text…" : ft.content
+        VStack(spacing: 4) {
+            Text(displayText)
+                .font(.body)
+                .foregroundColor(ft.content.isEmpty ? .secondary : .primary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(uiColor: .secondarySystemBackground))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.down")
+                    .font(.caption2.weight(.semibold))
+                Text("Text lands behind keyboard")
+                    .font(.caption2)
+            }
+            .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: 320)
+        .position(point)
+        .allowsHitTesting(false)
+    }
+
+    private func handleKeyboardShow(_ note: Notification) {
+        guard let info = note.userInfo,
+              let frameValue = info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue,
+              let duration = info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double else {
+            return
+        }
+        let frame = frameValue.cgRectValue
+        // Hardware keyboard reports height 0 / off-screen position — no
+        // preview needed because no software keyboard is hiding anything.
+        guard frame.height > 0 else {
+            withAnimation(.easeInOut(duration: duration)) { keyboardFrame = nil }
+            return
+        }
+        keyboardAnimDuration = duration
+        withAnimation(.easeInOut(duration: duration)) {
+            keyboardFrame = frame
+        }
+    }
+
+    private func handleKeyboardHide(_ note: Notification) {
+        let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double)
+            ?? keyboardAnimDuration
+        withAnimation(.easeInOut(duration: duration)) {
+            keyboardFrame = nil
+        }
     }
 }
 
