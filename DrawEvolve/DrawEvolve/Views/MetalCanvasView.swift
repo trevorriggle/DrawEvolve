@@ -389,6 +389,16 @@ struct MetalCanvasView: UIViewRepresentable {
         // (rectangle, circle). Line is rotation-invariant so it can use the
         // doc-space start directly.
         private var shapeStartScreen: CGPoint?
+        // Two-finger perfect-shape constraint.
+        // `shapePrimaryTouchID` is the touch that opened the shape stroke;
+        // any additional touches that land while the shape is in progress
+        // are tracked in `shapeConstraintTouchIDs`. While that set is
+        // non-empty, the shape generators snap to square / circle / 45°
+        // line. Lifting the last secondary touch (without lifting the
+        // primary) releases the constraint and the shape returns to
+        // freeform on the next preview frame.
+        private var shapePrimaryTouchID: ObjectIdentifier?
+        private var shapeConstraintTouchIDs: Set<ObjectIdentifier> = []
         private var lassoPath: [CGPoint] = [] // For lasso selection
         private var canvasState: CanvasStateManager?
         private var onTextRequest: ((CGPoint) -> Void)?
@@ -985,6 +995,23 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Perfect-shape two-finger constraint. A new touch landing on
+            // the canvas while a shape stroke is mid-drag is the modifier
+            // that snaps the in-progress rectangle/circle/line to a square
+            // /circle/45° line. We don't start a competing stroke for the
+            // modifier finger — it's parked in `shapeConstraintTouchIDs`
+            // until lift. Force a redraw so the preview reflects the
+            // constraint immediately even if the primary touch hasn't moved.
+            if [.line, .rectangle, .circle].contains(currentTool),
+               shapeStartPoint != nil,
+               shapePrimaryTouchID != nil {
+                for t in touches where ObjectIdentifier(t) != shapePrimaryTouchID {
+                    shapeConstraintTouchIDs.insert(ObjectIdentifier(t))
+                }
+                view.setNeedsDisplay()
+                return
+            }
+
             // Ensure layer textures exist
             ensureLayerTextures()
 
@@ -1389,6 +1416,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 // For shape tools, just store the start point
                 shapeStartPoint = location
                 shapeStartScreen = screenLocation
+                // Track the primary touch ID so a second finger landing
+                // mid-drag can be routed into the perfect-shape
+                // constraint path instead of starting a competing stroke.
+                shapePrimaryTouchID = ObjectIdentifier(touch)
+                shapeConstraintTouchIDs.removeAll()
                 print("Shape tool: stored start point \(location) (screen: \(screenLocation))")
             }
 
@@ -1506,7 +1538,22 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesMoved(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
-            guard let touch = touches.first else {
+            // Filter out perfect-shape constraint touches. Their movement is
+            // irrelevant — only their existence matters (the constraint flag
+            // is set in touchesBegan; their lift clears it in touchesEnded).
+            // Without this filter, `touches.first` could be the constraint
+            // touch and the shape geometry would track the wrong finger.
+            let touch: UITouch? = {
+                if !shapeConstraintTouchIDs.isEmpty {
+                    if let primary = shapePrimaryTouchID,
+                       let primaryTouch = touches.first(where: { ObjectIdentifier($0) == primary }) {
+                        return primaryTouch
+                    }
+                    return touches.first(where: { !shapeConstraintTouchIDs.contains(ObjectIdentifier($0)) })
+                }
+                return touches.first
+            }()
+            guard let touch = touch else {
                 print("touchesMoved: No touch in set")
                 return
             }
@@ -1779,6 +1826,7 @@ struct MetalCanvasView: UIViewRepresentable {
             if isShapeTool, let startPoint = shapeStartPoint {
                 // Shape tools only care about start/end; use the latest coalesced sample.
                 let endPressure = computePressure(for: touch)
+                let constrainPerfect = !shapeConstraintTouchIDs.isEmpty
                 // Rectangle and circle should be SCREEN-axis-aligned regardless
                 // of canvas rotation/zoom/pan. We generate their path in
                 // screen space and map each point back through screenToDocument
@@ -1799,7 +1847,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         to: endScreen,
                         tool: currentTool,
                         pressure: endPressure,
-                        timestamp: touch.timestamp
+                        timestamp: touch.timestamp,
+                        constrainPerfect: constrainPerfect
                     )
                     originals = screenPoints.map { sp in
                         BrushStroke.StrokePoint(
@@ -1814,7 +1863,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         to: latestLocation,
                         tool: currentTool,
                         pressure: endPressure,
-                        timestamp: touch.timestamp
+                        timestamp: touch.timestamp,
+                        constrainPerfect: constrainPerfect
                     )
                 }
                 // Symmetry: shape stroke.points are wholesale-replaced on
@@ -2050,6 +2100,27 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Perfect-shape constraint lifecycle. If only a secondary
+            // (constraint) touch lifted, drop it from the set and force a
+            // redraw so the preview reverts to freeform if no constraint
+            // touches remain. The primary touch is still down, so the shape
+            // stroke must NOT be finalized here.
+            if !shapeConstraintTouchIDs.isEmpty {
+                var droppedAny = false
+                for t in touches {
+                    if shapeConstraintTouchIDs.remove(ObjectIdentifier(t)) != nil {
+                        droppedAny = true
+                    }
+                }
+                let primaryEnded = shapePrimaryTouchID.map { primary in
+                    touches.contains(where: { ObjectIdentifier($0) == primary })
+                } ?? false
+                if droppedAny && !primaryEnded {
+                    view.setNeedsDisplay()
+                    return
+                }
+            }
+
             // Blur adjustment: clear the touchdown anchor — no commit on lift.
             // Sigma is held at whatever value the last drag tick set it to;
             // commit happens only via the HUD's ✓ button.
@@ -2223,8 +2294,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
 
-                shapeStartPoint = nil
-                shapeStartScreen = nil
+                resetShapeToolState()
                 return
             }
 
@@ -2237,8 +2307,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Lasso: path too short (\(lassoPath.count) points), ignoring selection")
                     // Clear lasso path and preview
                     lassoPath = []
-                    shapeStartPoint = nil
-                shapeStartScreen = nil
+                    resetShapeToolState()
                     if let canvasState = canvasState {
                         Task { @MainActor in
                             canvasState.previewLassoPath = nil
@@ -2260,8 +2329,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Lasso: selection too small (\(width)x\(height)), ignoring")
                     // Clear lasso path and preview
                     lassoPath = []
-                    shapeStartPoint = nil
-                shapeStartScreen = nil
+                    resetShapeToolState()
                     if let canvasState = canvasState {
                         Task { @MainActor in
                             canvasState.previewLassoPath = nil
@@ -2291,8 +2359,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 // Clear lasso path
                 lassoPath = []
-                shapeStartPoint = nil
-                shapeStartScreen = nil
+                resetShapeToolState()
                 return
             }
 
@@ -2318,8 +2385,7 @@ struct MetalCanvasView: UIViewRepresentable {
                       let renderer = renderer else {
                     currentStroke = nil
                     lastPoint = nil
-                    shapeStartPoint = nil
-                    shapeStartScreen = nil
+                    resetShapeToolState()
                     eraserBeforeSnapshot = nil
                     eraserCommittedPointCount = 0
                     renderer?.endPreviewMask()
@@ -2353,8 +2419,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
                 currentStroke = nil
                 lastPoint = nil
-                shapeStartPoint = nil
-                shapeStartScreen = nil
+                resetShapeToolState()
                 eraserBeforeSnapshot = nil
                 eraserCommittedPointCount = 0
                 renderer.endPreviewMask()
@@ -2425,8 +2490,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 currentStroke = nil
                 lastPoint = nil
-                shapeStartPoint = nil
-                shapeStartScreen = nil
+                resetShapeToolState()
                 renderer.endPreviewMask()
                 resetSnapToLineState()
                 if let cs = canvasState {
@@ -2520,8 +2584,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Clear current stroke so preview stops rendering
             currentStroke = nil
             lastPoint = nil
-            shapeStartPoint = nil
-            shapeStartScreen = nil
+            resetShapeToolState()
             marqueeStartScreen = nil
             // Free the cached preview selection mask. The committed stroke
             // dispatched above rasterises its own mask internally; the
@@ -2579,8 +2642,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             currentStroke = nil
             lastPoint = nil
-            shapeStartPoint = nil
-            shapeStartScreen = nil
+            resetShapeToolState()
             marqueeStartScreen = nil
             lassoPath = []
             isDraggingSelection = false
@@ -2972,23 +3034,73 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // MARK: - Shape Generation
 
-        /// Generate points for shape tools (line, rectangle, circle)
+        /// Clear all shape-tool transient state. Called from every
+        /// shape-stroke termination site (commit, cancel, selection-drag
+        /// branches that double as bail-outs). Centralised so adding new
+        /// per-stroke state — the perfect-shape constraint touches landed
+        /// alongside — only needs to be nilled out in one place.
+        private func resetShapeToolState() {
+            shapeStartPoint = nil
+            shapeStartScreen = nil
+            shapePrimaryTouchID = nil
+            shapeConstraintTouchIDs.removeAll()
+        }
+
+        /// Generate points for shape tools (line, rectangle, circle).
+        /// When `constrainPerfect` is true, the end point is snapped to
+        /// produce a square (rectangle), circle (ellipse), or 45°-snapped
+        /// line — driven by the two-finger constraint gesture.
         private func generateShapePoints(
             from start: CGPoint,
             to end: CGPoint,
             tool: DrawingTool,
             pressure: CGFloat,
-            timestamp: TimeInterval
+            timestamp: TimeInterval,
+            constrainPerfect: Bool = false
         ) -> [BrushStroke.StrokePoint] {
+            let constrainedEnd = constrainPerfect
+                ? perfectShapeEnd(from: start, to: end, tool: tool)
+                : end
             switch tool {
             case .line:
-                return generateLinePoints(from: start, to: end, pressure: pressure, timestamp: timestamp)
+                return generateLinePoints(from: start, to: constrainedEnd, pressure: pressure, timestamp: timestamp)
             case .rectangle:
-                return generateRectanglePoints(from: start, to: end, pressure: pressure, timestamp: timestamp)
+                return generateRectanglePoints(from: start, to: constrainedEnd, pressure: pressure, timestamp: timestamp)
             case .circle:
-                return generateCirclePoints(from: start, to: end, pressure: pressure, timestamp: timestamp)
+                return generateCirclePoints(from: start, to: constrainedEnd, pressure: pressure, timestamp: timestamp)
             default:
                 return []
+            }
+        }
+
+        /// Snap an end-point so the resulting shape is a perfect square /
+        /// circle / 45°-snapped line. Preserves the directional sign of the
+        /// drag so the shape grows in the quadrant the user pulled toward.
+        private func perfectShapeEnd(from start: CGPoint, to end: CGPoint, tool: DrawingTool) -> CGPoint {
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            switch tool {
+            case .rectangle, .circle:
+                // Square / circle: use the larger axis as the side length
+                // so the shape grows past the finger, not under it (matches
+                // Photos / Procreate convention).
+                let side = max(abs(dx), abs(dy))
+                let sx: CGFloat = dx >= 0 ? 1 : -1
+                let sy: CGFloat = dy >= 0 ? 1 : -1
+                return CGPoint(x: start.x + sx * side, y: start.y + sy * side)
+            case .line:
+                // 45° snap: round the drag's angle to the nearest 45° and
+                // keep the drag length. atan2 handles the (0,0) edge case
+                // by returning 0, which collapses to a degenerate point —
+                // generateLinePoints already guards against that.
+                let length = hypot(dx, dy)
+                guard length > 0 else { return end }
+                let step = CGFloat.pi / 4
+                let snapped = (atan2(dy, dx) / step).rounded() * step
+                return CGPoint(x: start.x + cos(snapped) * length,
+                               y: start.y + sin(snapped) * length)
+            default:
+                return end
             }
         }
 
