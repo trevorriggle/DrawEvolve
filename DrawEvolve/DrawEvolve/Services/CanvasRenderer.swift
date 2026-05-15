@@ -487,8 +487,13 @@ class CanvasRenderer: NSObject {
     // overhead.
     #if DEBUG
     static var verifyTilesEnabled: Bool = true
+    // Production Phase 2 defaults: strict bit-exact verification. The
+    // dual-write paths (all seven Task-4 callsites) are now blit-from-
+    // monolithic and produce byte-identical tiles, so tolerance=0 is the
+    // correct invariant. Any mismatch is a real bug; assertion failure on
+    // first occurrence is the tight feedback loop we want.
     static var verifyTilesAssertOnMismatch: Bool = true
-    static var verifyTilesPerChannelTolerance: UInt8 = 1
+    static var verifyTilesPerChannelTolerance: UInt8 = 0
     private static var hasLoggedVerifierActive: Bool = false
 
     // Lazy-allocated .shared staging texture for the verifier's blit-
@@ -753,14 +758,6 @@ class CanvasRenderer: NSObject {
     /// `selectionPath`: when non-nil, the stroke is rasterized to a mask and
     /// every stamp's fragment alpha is multiplied by the mask sample. Pass
     /// nil to paint without clipping (default 1×1 `noMaskTexture` is bound).
-    /// Error surface for the tile-grid dual-write. Metal command-encoder
-    /// creation returns nil rather than throwing; this enum bridges that
-    /// into `TileGrid.updateTile(at:_:)`'s throwing contract so a failed
-    /// encoder leaves the tile's metadata pinned at its last successful
-    /// write.
-    private enum TileRenderError: Error {
-        case encoderCreationFailed
-    }
 
     /// Bounding box of a brush stroke in document-pixel space, expanded by
     /// `stroke.settings.size / 2` to cover the full footprint of every
@@ -930,87 +927,67 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.endEncoding()
 
-        // === Phase 2 Task 4.1: tile-grid dual-write (shadow pass) =========
+        // === Phase 2 Task 4.1: tile-grid dual-write (blit from monolithic) =
         //
-        // Mirror the stroke into the layer's TileGrid. The monolithic write
-        // above remains the source of truth (Phase 2/3); this block writes
-        // to whatever tiles the stroke's bbox intersects, so Phase 5's
-        // verification harness can confirm the two representations agree.
+        // After the monolithic encoder finishes rasterising every stamp,
+        // blit the affected tiles from monolithic into the layer's
+        // TileGrid on the SAME command buffer. Metal serialises encoders
+        // within a buffer in submission order, so the blits run after the
+        // render pass and read the post-render monolithic pixels.
         //
-        // Gated on `tileGrid != nil`: Task 4 commits land while Task 5 has
-        // not yet wired up grid allocation, so every layer's grid is nil
-        // and this block is dormant. When Task 5 starts allocating grids
-        // lazily, the dual-write activates automatically.
+        // Bit-exact by construction: every tile pixel is a direct copy of
+        // the corresponding monolithic pixel. Replaces the original
+        // per-tile re-rasterisation approach (Phase 2 first cut), which
+        // produced ±1 LSB GPU rasterizer noise per stamp that compounded
+        // through alpha-over into ±8-15 visible drift over overlapping
+        // stamps. The blit approach matches what flip / translate /
+        // floodFill / renderImage / clearRect / clearPath / composite-
+        // FloatingTextureIntoLayer all use — one consistent dual-write
+        // pattern.
         //
-        // Runs on the SAME command buffer as the monolithic pass; Metal
-        // executes the encoders sequentially. The completion handler still
-        // fires once both passes finish on the GPU.
+        // Two-pass structure (same as other blit-only callsites):
+        //   Pass 1: ensureTileWithClearIfNeeded encodes a no-draw
+        //           loadAction=.clear render pass for any freshly-allocated
+        //           tile, on the same command buffer. Must run before the
+        //           blit encoder opens — Metal allows only one active
+        //           encoder per buffer at a time.
+        //   Pass 2: a single blit encoder copies tile-sized regions of
+        //           monolithic into each tile.
+        //
+        // The completion handler still fires once both passes finish.
         if let grid = tileGrid {
             let bbox = strokeBoundingBox(stroke)
             let tileKeys = grid.tilesIntersecting(bbox)
-            let tileSizeF = Float(grid.tileSize)
-            var tileViewport = SIMD2<Float>(tileSizeF, tileSizeF)
+            let tileSize = grid.tileSize
+            let texW = texture.width
+            let texH = texture.height
 
-            for key in tileKeys {
-                let tileObj = grid.ensureTile(at: key)
-                let tileOriginVec = SIMD2<Float>(Float(key.x * grid.tileSize),
-                                                 Float(key.y * grid.tileSize))
-
-                // updateTile(...) only bumps wasCleared/dirtyVersion if
-                // the closure returns normally. Encoder-creation failure
-                // throws and leaves metadata pinned at the prior version
-                // — verification harness contract.
-                try? grid.updateTile(at: key) { tile in
-                    let desc = MTLRenderPassDescriptor()
-                    desc.colorAttachments[0].texture = tile.texture
-                    desc.colorAttachments[0].loadAction = tile.wasCleared ? .load : .clear
-                    desc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-                    desc.colorAttachments[0].storeAction = .store
-
-                    guard let tileEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: desc) else {
-                        throw TileRenderError.encoderCreationFailed
-                    }
-                    tileEncoder.setRenderPipelineState(pipelineState)
-                    tileEncoder.setFragmentTexture(selectionMask, index: 2)
-
-                    var tileUniforms = uniforms
-                    tileUniforms.tileOrigin = tileOriginVec
-
-                    for (i, point) in stroke.points.enumerated() {
-                        let safePressure: CGFloat = {
-                            guard point.pressure.isFinite else { return 1.0 }
-                            return max(0, min(1, point.pressure))
-                        }()
-                        tileUniforms.pressure = Float(safePressure)
-
-                        // Tile-local stamp position. The shader's
-                        // `tileOrigin` uniform re-anchors layer-space
-                        // lookups (selection mask, grain seeds, blurred
-                        // texture sample) so the rendered pixels are
-                        // identical to the monolithic pass.
-                        var localPos = SIMD2<Float>(
-                            Float(point.location.x) - tileOriginVec.x,
-                            Float(point.location.y) - tileOriginVec.y
-                        )
-                        tileEncoder.setVertexBytes(&localPos,
-                                                   length: MemoryLayout<SIMD2<Float>>.stride,
-                                                   index: 0)
-                        tileEncoder.setVertexBytes(&tileUniforms,
-                                                   length: MemoryLayout<BrushUniforms>.stride,
-                                                   index: 1)
-                        tileEncoder.setVertexBytes(&tileViewport,
-                                                   length: MemoryLayout<SIMD2<Float>>.stride,
-                                                   index: 2)
-                        tileEncoder.setFragmentBytes(&tileUniforms,
-                                                    length: MemoryLayout<BrushUniforms>.stride,
-                                                    index: 0)
-                        tileEncoder.drawPrimitives(type: .point,
-                                                   vertexStart: 0,
-                                                   vertexCount: 1)
-                    }
-                    tileEncoder.endEncoding()
+            if !tileKeys.isEmpty {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
                 }
-                _ = tileObj // suppress "constant unused" — the ensure call is the side-effect
+                if let blit = commandBuffer.makeBlitCommandEncoder() {
+                    for key in tileKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+
+                        grid.updateTile(at: key) { tile in
+                            blit.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit.endEncoding()
+                }
             }
         }
         // === End dual-write block ========================================
@@ -1619,21 +1596,23 @@ class CanvasRenderer: NSObject {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
 
-        // === Phase 2 Task 4.3: tile-grid dual-write (shadow pass) =========
+        // === Phase 2 Task 4.3: tile-grid dual-write (blit from monolithic) =
         //
-        // Replay the same composite into the tiles intersecting docRect.
-        // The trick: set canvasSize=viewport=tileSize and shift the rect
-        // by the tile's pixel origin. The shader then computes NDC for
-        // tile-local doc coords; the rasterizer clips to the tile's
-        // framebuffer; in-tile fragments sample the floating texture at
-        // the same layer-pixel UV they would in the monolithic pass.
+        // After the monolithic composite ends, blit the affected tiles
+        // from `layer` (monolithic) into the TileGrid on the SAME command
+        // buffer. Bit-exact by construction. Replaces the original
+        // per-tile re-render approach (with the viewport+canvasSize
+        // substitution trick), which inherited renderStroke's
+        // ±1 LSB rasterizer drift via the alpha-over blend (the
+        // post-renderStroke tile state diverged slightly from monolithic,
+        // and the composite preserved that divergence — visible in soak
+        // as catastrophic ±16+ mismatches).
         //
-        // Selection rotation works unchanged: it's applied around the
-        // rect's center in doc space, and the center shifts by the same
-        // tile origin, so the relative rotation is identical.
+        // Selection rotation is irrelevant here — the post-rotation
+        // pixels are already in monolithic; we copy them verbatim.
         if let grid = tileGrid {
             // pixelRect: docRect converted to layer-pixel space, same
-            // scale the monolithic pass used at line 1337.
+            // scale the monolithic pass used above.
             let pixelRect = CGRect(
                 x: docRect.origin.x * scale,
                 y: docRect.origin.y * scale,
@@ -1641,54 +1620,35 @@ class CanvasRenderer: NSObject {
                 height: docRect.height * scale
             )
             let tileKeys = grid.tilesIntersecting(pixelRect)
-            let tileSizeF = Float(grid.tileSize)
+            let tileSize = grid.tileSize
+            let texW = layer.width
+            let texH = layer.height
 
-            for key in tileKeys {
-                let tileOriginPx = SIMD2<Float>(Float(key.x * grid.tileSize),
-                                                Float(key.y * grid.tileSize))
-                _ = grid.ensureTile(at: key)
+            if !tileKeys.isEmpty {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+                }
+                if let blit = commandBuffer.makeBlitCommandEncoder() {
+                    for key in tileKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
 
-                try? grid.updateTile(at: key) { tile in
-                    let desc = MTLRenderPassDescriptor()
-                    desc.colorAttachments[0].texture = tile.texture
-                    desc.colorAttachments[0].loadAction = tile.wasCleared ? .load : .clear
-                    desc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-                    desc.colorAttachments[0].storeAction = .store
-
-                    guard let tileEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: desc) else {
-                        throw TileRenderError.encoderCreationFailed
+                        grid.updateTile(at: key) { tile in
+                            blit.copy(
+                                from: layer,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
                     }
-                    tileEncoder.setRenderPipelineState(pipelineState)
-                    tileEncoder.setFragmentTexture(floating, index: 0)
-
-                    var tileOpacity: Float = 1.0
-                    tileEncoder.setFragmentBytes(&tileOpacity, length: MemoryLayout<Float>.stride, index: 0)
-
-                    var tileTransform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
-                    tileEncoder.setVertexBytes(&tileTransform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-
-                    var tileViewport = SIMD2<Float>(tileSizeF, tileSizeF)
-                    tileEncoder.setVertexBytes(&tileViewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
-
-                    var tileCanvas = SIMD2<Float>(tileSizeF, tileSizeF)
-                    tileEncoder.setVertexBytes(&tileCanvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
-
-                    var tileRect = SIMD4<Float>(
-                        Float(pixelRect.origin.x) - tileOriginPx.x,
-                        Float(pixelRect.origin.y) - tileOriginPx.y,
-                        Float(pixelRect.width),
-                        Float(pixelRect.height)
-                    )
-                    tileEncoder.setVertexBytes(&tileRect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
-
-                    var tileRot = rotation
-                    tileEncoder.setVertexBytes(&tileRot, length: MemoryLayout<Float>.stride, index: 4)
-
-                    var tileFlip = SIMD2<Float>(0, 0)
-                    tileEncoder.setVertexBytes(&tileFlip, length: MemoryLayout<SIMD2<Float>>.stride, index: 5)
-
-                    tileEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-                    tileEncoder.endEncoding()
+                    blit.endEncoding()
                 }
             }
         }
@@ -1859,7 +1819,7 @@ class CanvasRenderer: NSObject {
                         // inside the closure; blit.copy can't throw and the
                         // encoder is guarded above. Present only to satisfy
                         // updateTile's rethrows signature.
-                        try? grid.updateTile(at: newKey) { tile in
+                        grid.updateTile(at: newKey) { tile in
                             blit2.copy(
                                 from: texture,
                                 sourceSlice: 0, sourceLevel: 0,
@@ -2046,7 +2006,7 @@ class CanvasRenderer: NSObject {
                         // inside the closure; blit.copy can't throw and the
                         // encoder is guarded above. Present only to satisfy
                         // updateTile's rethrows signature.
-                        try? grid.updateTile(at: newKey) { tile in
+                        grid.updateTile(at: newKey) { tile in
                             blit.copy(
                                 from: texture,
                                 sourceSlice: 0, sourceLevel: 0,
@@ -2641,7 +2601,7 @@ class CanvasRenderer: NSObject {
                                 // intercepts an error in this path — it's
                                 // present only because updateTile's
                                 // signature is rethrows. Not a swallowed bug.
-                                try? grid.updateTile(at: key) { tile in
+                                grid.updateTile(at: key) { tile in
                                     blitEncoder.copy(
                                         from: srcBuffer,
                                         sourceOffset: srcOffset,
@@ -3193,7 +3153,7 @@ class CanvasRenderer: NSObject {
                     memset(zeroBuffer.contents(), 0, zeroBufferBytes)
 
                     for (key, region) in partialTiles {
-                        try? grid.updateTile(at: key) { tile in
+                        grid.updateTile(at: key) { tile in
                             let bytesPerRow = region.size.width * 4
                             blitEncoder.copy(
                                 from: zeroBuffer,
@@ -3379,7 +3339,7 @@ class CanvasRenderer: NSObject {
                         let dstX = Int(inter.origin.x) - (key.x * tileSize)
                         let dstY = Int(inter.origin.y) - (key.y * tileSize)
 
-                        try? grid.updateTile(at: key) { tile in
+                        grid.updateTile(at: key) { tile in
                             blitEncoder.copy(
                                 from: srcBuffer,
                                 sourceOffset: sourceOffset,
@@ -3799,7 +3759,7 @@ class CanvasRenderer: NSObject {
                         let localX = Int(inter.origin.x) - (key.x * tileSize)
                         let localY = Int(inter.origin.y) - (key.y * tileSize)
 
-                        try? grid.updateTile(at: key) { tile in
+                        grid.updateTile(at: key) { tile in
                             blitEncoder.copy(
                                 from: srcBuffer,
                                 sourceOffset: sourceOffset,
