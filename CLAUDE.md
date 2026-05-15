@@ -144,7 +144,7 @@ Re-enable: flip BOTH flags to true (or remove `APP_ATTEST_REQUIRED` from wrangle
 | `authandratelimitingandsecurity.md` | The auth + rate-limiting master plan, in 6 phases. Source of truth for what's landed vs. pending. iPad verification runbook. |
 | `KNOWN_ISSUES.md` | Punch list of small bugs not blocking v1 (save-as UX, no-op updateDrawing, skillLevel default divergence, missing rename) |
 | `PERF_ISSUES.md` | Perf audit dated 2026-04-30. Highest priorities: full-texture `getBytes` reads in `CanvasRenderer`, paint bucket / aggregate texture I/O |
-| `CUSTOM_PROMPTS_PLAN.md` | Post-TestFlight design for per-drawing custom prompts. Not started. |
+| `CUSTOM_PROMPTS_PLAN.md` | Later-phase design for per-drawing custom prompts. Not started. |
 | `PIPELINE_FEATURES.md` | Feature roadmap. MVP+ done; Phase-1 analytics next; social phase not started. |
 | `cloudflare-worker/DEPLOYMENT.md` | Worker deploy runbook (secrets, KV, manual steps) |
 | `DrawEvolve, April 27th` | Older broad dev plan; mostly superseded but has device-targeting notes |
@@ -160,7 +160,7 @@ When the user asks about anything in those buckets, **read the doc** rather than
 3. **Sign in with Apple entitlements.** `DrawEvolve.entitlements` and the Xcode "Signing & Capabilities" UI must stay in sync. Removing in one place but not the other = runtime crash on auth attempt.
 4. **`skillLevel` default divergence.** iOS defaults to `"Beginner"`, Worker fallback uses `"Intermediate"`. Harmless today (UI always sets a value) but a trap for future API consumers. See `KNOWN_ISSUES.md`.
 5. **Don't migrate legacy `Documents/Drawings/*.json` yet.** That's Phase 4 work. Phase 3 ignores those files on purpose; deleting them now would lose pre-auth drawings.
-6. **`CanvasRenderer.getBytes` reads the full 4096² texture in 7 places** even when the work region is small (~64MB per call). Logged in `PERF_ISSUES.md`. If you touch the renderer, fix this in passing only with sign-off — brush/canvas/Metal pipeline is TestFlight-blocker territory.
+6. **`CanvasRenderer.getBytes` reads the full 4096² texture in 7 places** even when the work region is small (~64MB per call). Logged in `PERF_ISSUES.md`. If you touch the renderer, fix this in passing only with sign-off — brush/canvas/Metal pipeline is release-blocker territory.
 7. **gpt-5.1 wants `reasoning_effort` flat, not nested.** Chat/completions takes `reasoning_effort: 'none' | 'low' | 'medium' | 'high'` as a top-level body field; the nested `reasoning: { effort: ... }` shape is the /v1/responses endpoint's API and OpenAI 400s if you send it to /v1/chat/completions. `'minimal'` is also rejected (gpt-5.1-specific). Current production: `OPENAI_REASONING_EFFORT = 'none'`, wired at `routes/feedback.js:720`.
 
 ---
@@ -168,7 +168,7 @@ When the user asks about anything in those buckets, **read the doc** rather than
 ## Things to ask before doing
 
 - Touching `AuthManager`, `SupabaseManager`, or `AppConfig` — Phase 1 is stable and verified.
-- Touching the Metal pipeline / `CanvasRenderer` / `Shaders.metal` / brush code — TestFlight blocker risk.
+- Touching the Metal pipeline / `CanvasRenderer` / `Shaders.metal` / brush code — release-blocker risk.
 - Touching `Services/AnonymousUserManager.swift` — legacy but still imported by `CrashReporter`. Don't delete without checking.
 - Pushing to remote, force-pushing, or opening PRs — always confirm first.
 - Committing anything that looks like a secret. The repo's `.gitignore` is comprehensive but not infallible.
