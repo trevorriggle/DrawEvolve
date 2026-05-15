@@ -2534,7 +2534,7 @@ class CanvasRenderer: NSObject {
         return (x0, y0, w, h)
     }
 
-    func clearRect(_ rect: CGRect, in texture: MTLTexture, screenSize: CGSize) {
+    func clearRect(_ rect: CGRect, in texture: MTLTexture, tileGrid: TileGrid? = nil, screenSize: CGSize) {
         print("CanvasRenderer: Clearing rect \(rect)")
 
         // Convert doc-space rect to integer pixel rect. Use floor/ceil so every
@@ -2565,6 +2565,82 @@ class CanvasRenderer: NSObject {
                 bytesPerRow: regionBytesPerRow
             )
         }
+
+        // === Phase 2 Task 4.4: tile-grid dual-write =======================
+        //
+        // Mirror the clear into the tile grid:
+        //   - Tiles NOT yet allocated → skip (transparent stays transparent).
+        //   - Tiles fully covered by the rect → dropTile (allocation goes
+        //     back to zero — the audit's TILE-NATIVE-WIN).
+        //   - Tiles partially covered → blit zeros to the tile-local
+        //     sub-region via MTLBlitCommandEncoder (CPU texture.replace
+        //     doesn't work on .private storage; blit copies from a shared
+        //     zero buffer).
+        //
+        // One command buffer, one blit encoder, one shared zero buffer
+        // sized to the max possible region (tileSize × tileSize × 4 bytes).
+        if let grid = tileGrid {
+            let pixelRect = CGRect(x: x, y: y, width: w, height: h)
+            let tileKeys = grid.tilesIntersecting(pixelRect)
+            let tileSize = grid.tileSize
+
+            var partialTiles: [(key: TileKey, region: MTLRegion)] = []
+            for key in tileKeys {
+                guard grid.tile(at: key) != nil else { continue }
+                let tileRect = CGRect(x: key.x * tileSize,
+                                      y: key.y * tileSize,
+                                      width: tileSize,
+                                      height: tileSize)
+                let intersection = tileRect.intersection(pixelRect)
+                if Int(intersection.width) >= tileSize && Int(intersection.height) >= tileSize {
+                    grid.dropTile(at: key)
+                } else {
+                    let localX = Int(intersection.origin.x) - (key.x * tileSize)
+                    let localY = Int(intersection.origin.y) - (key.y * tileSize)
+                    let localW = Int(intersection.width)
+                    let localH = Int(intersection.height)
+                    guard localW > 0, localH > 0 else { continue }
+                    partialTiles.append((
+                        key: key,
+                        region: MTLRegion(
+                            origin: MTLOrigin(x: localX, y: localY, z: 0),
+                            size: MTLSize(width: localW, height: localH, depth: 1)
+                        )
+                    ))
+                }
+            }
+
+            if !partialTiles.isEmpty {
+                let zeroBufferBytes = tileSize * tileSize * 4
+                if let zeroBuffer = device.makeBuffer(length: zeroBufferBytes,
+                                                      options: .storageModeShared),
+                   let cmdBuf = commandQueue.makeCommandBuffer(),
+                   let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                    memset(zeroBuffer.contents(), 0, zeroBufferBytes)
+
+                    for (key, region) in partialTiles {
+                        try? grid.updateTile(at: key) { tile in
+                            let bytesPerRow = region.size.width * 4
+                            blitEncoder.copy(
+                                from: zeroBuffer,
+                                sourceOffset: 0,
+                                sourceBytesPerRow: bytesPerRow,
+                                sourceBytesPerImage: bytesPerRow * region.size.height,
+                                sourceSize: region.size,
+                                to: tile.texture,
+                                destinationSlice: 0,
+                                destinationLevel: 0,
+                                destinationOrigin: region.origin
+                            )
+                        }
+                    }
+                    blitEncoder.endEncoding()
+                    cmdBuf.commit()
+                    cmdBuf.waitUntilCompleted()
+                }
+            }
+        }
+        // === End dual-write block ========================================
 
         print("Rect cleared successfully")
     }
