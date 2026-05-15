@@ -389,6 +389,15 @@ struct MetalCanvasView: UIViewRepresentable {
         // (rectangle, circle). Line is rotation-invariant so it can use the
         // doc-space start directly.
         private var shapeStartScreen: CGPoint?
+        // Pressure captured at touchdown for shape tools. Shape strokes
+        // regenerate their whole point list on every touchesMoved; reading
+        // `computePressure(for: touch)` per frame made the live preview
+        // track the Pencil's instantaneous force during the drag, then
+        // the commit froze on whatever the last (typically low, mid-lift)
+        // sample happened to be — strokes visibly snapped thinner on
+        // release. Locking the pressure at touchdown makes preview and
+        // commit identical for the whole stroke.
+        private var shapeStartPressure: CGFloat?
         // Two-finger perfect-shape constraint.
         // `shapePrimaryTouchID` is the touch that opened the shape stroke;
         // any additional touches that land while the shape is in progress
@@ -1416,6 +1425,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 // For shape tools, just store the start point
                 shapeStartPoint = location
                 shapeStartScreen = screenLocation
+                // Lock the touchdown pressure for the duration of the
+                // drag; preview and commit both read it.
+                shapeStartPressure = pressure
                 // Track the primary touch ID so a second finger landing
                 // mid-drag can be routed into the perfect-shape
                 // constraint path instead of starting a competing stroke.
@@ -1824,8 +1836,9 @@ struct MetalCanvasView: UIViewRepresentable {
             let isShapeTool = [.line, .rectangle, .circle].contains(currentTool)
 
             if isShapeTool, let startPoint = shapeStartPoint {
-                // Shape tools only care about start/end; use the latest coalesced sample.
-                let endPressure = computePressure(for: touch)
+                // Pressure is locked at touchdown (see shapeStartPressure
+                // doc) so preview width stays stable and matches commit.
+                let endPressure = shapeStartPressure ?? computePressure(for: touch)
                 let constrainPerfect = !shapeConstraintTouchIDs.isEmpty
                 // Rectangle and circle should be SCREEN-axis-aligned regardless
                 // of canvas rotation/zoom/pan. We generate their path in
@@ -3042,6 +3055,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private func resetShapeToolState() {
             shapeStartPoint = nil
             shapeStartScreen = nil
+            shapeStartPressure = nil
             shapePrimaryTouchID = nil
             shapeConstraintTouchIDs.removeAll()
         }
