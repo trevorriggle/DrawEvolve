@@ -121,6 +121,60 @@ final class TileGrid {
         return tile
     }
 
+    /// Allocate a tile if absent and schedule a transparent-clear render
+    /// pass on `commandBuffer` when the tile's `wasCleared` flag is false.
+    /// After this returns, the tile is allocated and its `wasCleared`
+    /// flag is true.
+    ///
+    /// **When to call this instead of `ensureTile(at:)`.** The blit-only
+    /// dual-write callsites (renderImage / floodFill / flip-edge /
+    /// translate-edge) can write to a freshly-allocated `.private` tile
+    /// where the blit covers only part of the tile's pixels — Metal
+    /// doesn't define what the unblitted region contains. The empty
+    /// `loadAction = .clear` render pass scheduled here zeroes the whole
+    /// tile before the caller's blit lands; afterwards the blit overwrites
+    /// its covered region and the rest stays transparent.
+    ///
+    /// Render-pass callsites (renderStroke / compositeFloatingTextureInto
+    /// Layer) don't need this helper — they already set
+    /// `loadAction = .clear` on their own encoder when wasCleared is
+    /// false.
+    ///
+    /// `commandBuffer` is the buffer the caller is about to commit. The
+    /// clear render pass is encoded onto it (one no-draw render encoder),
+    /// so the clear executes before any subsequent blit on the same
+    /// buffer. Metal serialises encoders within a command buffer in
+    /// submission order.
+    ///
+    /// `dirtyVersion` is NOT bumped by this method — the caller's
+    /// subsequent `updateTile(at:_:)` handles that. We want one bump per
+    /// logical write, not two for "clear + write."
+    ///
+    /// If render encoder construction fails, this method silently skips
+    /// the clear and `wasCleared` stays false. The next call will retry.
+    /// This matches Metal's nil-return failure mode and keeps the
+    /// signature non-throwing for ergonomics at the call sites.
+    func ensureTileWithClearIfNeeded(at key: TileKey,
+                                     onCommandBuffer commandBuffer: MTLCommandBuffer) -> LayerTile {
+        let needsClear = (tiles[key]?.wasCleared ?? false) == false
+        let allocated = ensureTile(at: key)
+        if needsClear {
+            let desc = MTLRenderPassDescriptor()
+            desc.colorAttachments[0].texture = allocated.texture
+            desc.colorAttachments[0].loadAction = .clear
+            desc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            desc.colorAttachments[0].storeAction = .store
+            if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: desc) {
+                enc.endEncoding()
+                var bumped = allocated
+                bumped.wasCleared = true
+                tiles[key] = bumped
+                return bumped
+            }
+        }
+        return allocated
+    }
+
     /// Runs `body` with the current tile at `key`, then bumps the tile's
     /// metadata (`wasCleared = true`, `dirtyVersion &+= 1`) only if `body`
     /// returns normally.

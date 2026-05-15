@@ -954,6 +954,12 @@ struct MetalCanvasView: UIViewRepresentable {
                         print("   ✅ Created texture: \(ObjectIdentifier(tex))")
                         #endif
                         created = true
+                        // Pair the texture with an empty tile grid (Phase 2
+                        // Task 5). Dual-write paths in CanvasRenderer
+                        // populate the grid on first write to each tile.
+                        if layers[i].tileGrid == nil {
+                            layers[i].tileGrid = renderer.makeEmptyTileGrid()
+                        }
                     } else {
                         #if DEBUG
                         print("   ❌ FAILED to create texture!")

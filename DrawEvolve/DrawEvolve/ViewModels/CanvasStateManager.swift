@@ -1238,6 +1238,12 @@ class CanvasStateManager: ObservableObject {
             }
 
             layer.texture = texture
+            // Pair the texture with an empty tile grid (Phase 2 Task 5).
+            // Same lifetime as `layer.texture`; nil if texture allocation
+            // ultimately failed.
+            if texture != nil {
+                layer.tileGrid = renderer.makeEmptyTileGrid()
+            }
             layers.append(layer)
         }
 
@@ -1408,6 +1414,11 @@ class CanvasStateManager: ObservableObject {
         // calls below need a real MTLTexture.
         if layers[selectedLayerIndex].texture == nil {
             layers[selectedLayerIndex].texture = renderer.createLayerTexture()
+            // Pair with an empty tile grid (Phase 2 Task 5).
+            if layers[selectedLayerIndex].texture != nil &&
+               layers[selectedLayerIndex].tileGrid == nil {
+                layers[selectedLayerIndex].tileGrid = renderer.makeEmptyTileGrid()
+            }
         }
         guard let texture = layers[selectedLayerIndex].texture else {
             print("ERROR: Cannot import image - failed to create texture")

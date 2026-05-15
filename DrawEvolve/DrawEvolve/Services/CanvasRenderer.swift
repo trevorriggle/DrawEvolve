@@ -449,6 +449,199 @@ class CanvasRenderer: NSObject {
         }
     }
 
+    /// Create an empty TileGrid sized to the renderer's current
+    /// canvasSize at the Phase 2 tile size of 256. The grid is empty
+    /// (no allocated tiles) — Phase 2 dual-write paths populate it on
+    /// first write to each tile.
+    ///
+    /// Callers are responsible for assigning the returned grid alongside
+    /// `layer.texture` so the layer's texture and grid stay paired. The
+    /// renderer doesn't know about DrawingLayer.
+    func makeEmptyTileGrid() -> TileGrid {
+        TileGrid(canvasSize: canvasSize, tileSize: 256, device: device)
+    }
+
+    // MARK: - Debug tile-grid verification (Phase 2 Task 5)
+    //
+    // The verifier compares every allocated tile's pixels against the
+    // corresponding region of the layer's monolithic texture. A mismatch
+    // means a dual-write callsite drifted from the monolithic source of
+    // truth — surface it loudly during soak.
+    //
+    // Two static flags govern runtime behavior:
+    //   - verifyTilesEnabled: run the verifier at all
+    //   - verifyTilesAssertOnMismatch: crash on first mismatch vs.
+    //     log-only (batch-collection mode)
+    //
+    // Both default to true. Toggle via LLDB:
+    //   (lldb) expr -- CanvasRenderer.verifyTilesEnabled = false
+    //   (lldb) expr -- CanvasRenderer.verifyTilesAssertOnMismatch = false
+    //
+    // All verifier state is #if DEBUG-only — Release builds carry no
+    // overhead.
+    #if DEBUG
+    static var verifyTilesEnabled: Bool = true
+    static var verifyTilesAssertOnMismatch: Bool = true
+    private static var hasLoggedVerifierActive: Bool = false
+
+    // Lazy-allocated .shared staging texture for the verifier's blit-
+    // and-read path. The .private tile textures can't be getBytes'd
+    // directly; we blit each tile into this staging texture before
+    // CPU readback. Sized tileSize × tileSize (assumed 256). Held on
+    // the renderer for the renderer's lifetime in DEBUG only.
+    private var verifyStagingTexture: MTLTexture?
+    private var verifyStagingBuffer: Data = Data()
+    private var verifyMonolithicBuffer: Data = Data()
+
+    /// Compare every allocated tile against the corresponding region of
+    /// `monolithic`. Runs synchronously on the caller's thread; all
+    /// renderStroke async callers dispatch to main before invoking.
+    ///
+    /// Behavior:
+    ///   - Skips entirely when verifyTilesEnabled is false or tileGrid
+    ///     is nil.
+    ///   - On the first invocation per app launch, prints a single
+    ///     liveness line so soak operators can confirm the harness is
+    ///     active (distinguishes "no mismatches" from "harness off").
+    ///   - For each allocated tile: blit tile.texture → staging, getBytes
+    ///     staging, getBytes monolithic at the tile's in-canvas pixel
+    ///     rect, memcmp. Partial-edge tiles compare only the in-canvas
+    ///     region.
+    ///   - On mismatch: print callsite + tile key + first-mismatch byte
+    ///     coords. If verifyTilesAssertOnMismatch is true, also
+    ///     assertionFailure.
+    func verifyTileGridMatchesMonolithic(monolithic: MTLTexture,
+                                         tileGrid: TileGrid?,
+                                         callsite: String) {
+        guard CanvasRenderer.verifyTilesEnabled, let grid = tileGrid else { return }
+
+        if !CanvasRenderer.hasLoggedVerifierActive {
+            CanvasRenderer.hasLoggedVerifierActive = true
+            print("[tile-verify] active — verifyTilesEnabled=true, " +
+                  "verifyTilesAssertOnMismatch=\(CanvasRenderer.verifyTilesAssertOnMismatch)")
+        }
+
+        let tileSize = grid.tileSize
+        let allocatedKeys = grid.allocatedKeys()
+        if allocatedKeys.isEmpty { return }
+
+        // Lazy-init the staging texture and the two CPU buffers.
+        if verifyStagingTexture == nil ||
+           verifyStagingTexture?.width != tileSize ||
+           verifyStagingTexture?.height != tileSize {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: tileSize, height: tileSize,
+                mipmapped: false
+            )
+            desc.storageMode = .shared
+            desc.usage = [.shaderRead]
+            verifyStagingTexture = device.makeTexture(descriptor: desc)
+            verifyStagingBuffer = Data(count: tileSize * tileSize * 4)
+            verifyMonolithicBuffer = Data(count: tileSize * tileSize * 4)
+        }
+        guard let staging = verifyStagingTexture else {
+            print("[tile-verify] FAILED to allocate staging texture at callsite=\(callsite)")
+            return
+        }
+
+        let monoW = monolithic.width
+        let monoH = monolithic.height
+        let bytesPerRow = tileSize * 4
+
+        for key in allocatedKeys {
+            guard let tile = grid.tile(at: key) else { continue }
+            let originX = key.x * tileSize
+            let originY = key.y * tileSize
+            let cmpW = min(tileSize, monoW - originX)
+            let cmpH = min(tileSize, monoH - originY)
+            if cmpW <= 0 || cmpH <= 0 { continue }
+
+            // Blit tile (.private) → staging (.shared) so CPU can read.
+            guard let cmdBuf = commandQueue.makeCommandBuffer(),
+                  let blit = cmdBuf.makeBlitCommandEncoder() else {
+                continue
+            }
+            blit.copy(
+                from: tile.texture,
+                sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: cmpW, height: cmpH, depth: 1),
+                to: staging,
+                destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.endEncoding()
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
+
+            verifyStagingBuffer.withUnsafeMutableBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                staging.getBytes(
+                    base,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: 0, y: 0, z: 0),
+                        size: MTLSize(width: cmpW, height: cmpH, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+
+            verifyMonolithicBuffer.withUnsafeMutableBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                monolithic.getBytes(
+                    base,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: originX, y: originY, z: 0),
+                        size: MTLSize(width: cmpW, height: cmpH, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+
+            // Per-row memcmp to find first mismatch, since the buffers are
+            // tile-sized but only the first cmpW*4 bytes of each row are
+            // valid for partial-edge tiles.
+            let mismatch: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? =
+                verifyStagingBuffer.withUnsafeBytes { sPtr in
+                    verifyMonolithicBuffer.withUnsafeBytes { mPtr in
+                        guard let sBase = sPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                              let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                        else { return nil }
+                        for row in 0..<cmpH {
+                            let rowStart = row * bytesPerRow
+                            for col in 0..<cmpW {
+                                let pxOff = rowStart + col * 4
+                                for ch in 0..<4 {
+                                    let s = sBase[pxOff + ch]
+                                    let m = mBase[pxOff + ch]
+                                    if s != m {
+                                        return (row, col, ch, s, m)
+                                    }
+                                }
+                            }
+                        }
+                        return nil
+                    }
+                }
+
+            if let mm = mismatch {
+                let layerPx = (x: originX + mm.col, y: originY + mm.row)
+                let channelName = ["B", "G", "R", "A"][mm.channel]
+                print("[tile-verify] MISMATCH callsite=\(callsite) " +
+                      "tile=(\(key.x),\(key.y)) layerPx=(\(layerPx.x),\(layerPx.y)) " +
+                      "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
+                      "monoByte=0x\(String(mm.monoByte, radix: 16))")
+                if CanvasRenderer.verifyTilesAssertOnMismatch {
+                    assertionFailure("[tile-verify] mismatch at \(callsite) tile (\(key.x),\(key.y))")
+                }
+            }
+        }
+    }
+    #endif
+
     /// Create a new texture for a layer
     func createLayerTexture() -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -774,6 +967,9 @@ class CanvasRenderer: NSObject {
                 DispatchQueue.main.async {
                     #if DEBUG
                     print("CanvasRenderer: Stroke completed on GPU (async)")
+                    self?.verifyTileGridMatchesMonolithic(monolithic: texture,
+                                                          tileGrid: tileGrid,
+                                                          callsite: "renderStroke")
                     #endif
                     completion()
                 }
@@ -789,6 +985,9 @@ class CanvasRenderer: NSObject {
             strokeCommandSlots.signal()
             #if DEBUG
             print("CanvasRenderer: Stroke completed on GPU")
+            verifyTileGridMatchesMonolithic(monolithic: texture,
+                                            tileGrid: tileGrid,
+                                            callsite: "renderStroke")
             #endif
         }
     }
@@ -1434,6 +1633,12 @@ class CanvasRenderer: NSObject {
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: layer,
+                                        tileGrid: tileGrid,
+                                        callsite: "compositeFloatingTextureIntoLayer")
+        #endif
     }
 
     /// Translate a layer texture's pixels by an integer doc-space offset, in
@@ -1571,38 +1776,51 @@ class CanvasRenderer: NSObject {
                 grid.dropTile(at: old)
             }
 
-            if let mirrorBuf = commandQueue.makeCommandBuffer(),
-               let blit2 = mirrorBuf.makeBlitCommandEncoder() {
+            if let mirrorBuf = commandQueue.makeCommandBuffer() {
+                // Pass 1: allocate-and-clear-if-needed for freshly-ensured
+                // tiles. Each call may encode an empty-clear render pass on
+                // mirrorBuf; can't overlap with an active blit encoder.
                 for newKey in postSet {
-                    _ = grid.ensureTile(at: newKey)
-                    let srcX = newKey.x * tileSize
-                    let srcY = newKey.y * tileSize
-                    let blitW = min(tileSize, texW - srcX)
-                    let blitH = min(tileSize, texH - srcY)
-                    if blitW <= 0 || blitH <= 0 { continue }
-
-                    // try? only catches encoder-construction failure inside
-                    // the closure; blit.copy can't throw and the encoder is
-                    // guarded above. Present only to satisfy updateTile's
-                    // rethrows signature.
-                    try? grid.updateTile(at: newKey) { tile in
-                        blit2.copy(
-                            from: texture,
-                            sourceSlice: 0, sourceLevel: 0,
-                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                            to: tile.texture,
-                            destinationSlice: 0, destinationLevel: 0,
-                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                        )
-                    }
+                    _ = grid.ensureTileWithClearIfNeeded(at: newKey, onCommandBuffer: mirrorBuf)
                 }
-                blit2.endEncoding()
+                // Pass 2: blit data into tiles.
+                if let blit2 = mirrorBuf.makeBlitCommandEncoder() {
+                    for newKey in postSet {
+                        let srcX = newKey.x * tileSize
+                        let srcY = newKey.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+
+                        // try? only catches encoder-construction failure
+                        // inside the closure; blit.copy can't throw and the
+                        // encoder is guarded above. Present only to satisfy
+                        // updateTile's rethrows signature.
+                        try? grid.updateTile(at: newKey) { tile in
+                            blit2.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit2.endEncoding()
+                }
                 mirrorBuf.commit()
                 mirrorBuf.waitUntilCompleted()
             }
         }
         // === End dual-write block ========================================
+
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: texture,
+                                        tileGrid: tileGrid,
+                                        callsite: "translateLayerTextureInPlace")
+        #endif
     }
 
     /// Mirror a layer texture's pixel data about its center on the
@@ -1745,38 +1963,51 @@ class CanvasRenderer: NSObject {
                 grid.dropTile(at: old)
             }
 
-            if let mirrorBuf = commandQueue.makeCommandBuffer(),
-               let blit = mirrorBuf.makeBlitCommandEncoder() {
+            if let mirrorBuf = commandQueue.makeCommandBuffer() {
+                // Pass 1: allocate-and-clear-if-needed for freshly-ensured
+                // tiles. Each call may encode an empty-clear render pass on
+                // mirrorBuf; can't overlap with an active blit encoder.
                 for newKey in postFlipKeys {
-                    _ = grid.ensureTile(at: newKey)
-                    let srcX = newKey.x * tileSize
-                    let srcY = newKey.y * tileSize
-                    let blitW = min(tileSize, texW - srcX)
-                    let blitH = min(tileSize, texH - srcY)
-                    if blitW <= 0 || blitH <= 0 { continue }
-
-                    // try? only catches encoder-construction failure inside
-                    // the closure; blit.copy can't throw and the encoder is
-                    // guarded above. Present only to satisfy updateTile's
-                    // rethrows signature.
-                    try? grid.updateTile(at: newKey) { tile in
-                        blit.copy(
-                            from: texture,
-                            sourceSlice: 0, sourceLevel: 0,
-                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                            to: tile.texture,
-                            destinationSlice: 0, destinationLevel: 0,
-                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                        )
-                    }
+                    _ = grid.ensureTileWithClearIfNeeded(at: newKey, onCommandBuffer: mirrorBuf)
                 }
-                blit.endEncoding()
+                // Pass 2: blit data into tiles.
+                if let blit = mirrorBuf.makeBlitCommandEncoder() {
+                    for newKey in postFlipKeys {
+                        let srcX = newKey.x * tileSize
+                        let srcY = newKey.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+
+                        // try? only catches encoder-construction failure
+                        // inside the closure; blit.copy can't throw and the
+                        // encoder is guarded above. Present only to satisfy
+                        // updateTile's rethrows signature.
+                        try? grid.updateTile(at: newKey) { tile in
+                            blit.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit.endEncoding()
+                }
                 mirrorBuf.commit()
                 mirrorBuf.waitUntilCompleted()
             }
         }
         // === End dual-write block ========================================
+
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: texture,
+                                        tileGrid: tileGrid,
+                                        callsite: "flipLayerTextureInPlace")
+        #endif
     }
 
     /// Upload a UIImage into a fresh Metal texture. Used to build the floating
@@ -2313,10 +2544,18 @@ class CanvasRenderer: NSObject {
                                                           options: .storageModeShared)
                         }
                         if let srcBuffer = bufferOpt,
-                           let cmdBuf = self.commandQueue.makeCommandBuffer(),
-                           let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                           let cmdBuf = self.commandQueue.makeCommandBuffer() {
+                            // Pass 1: allocate-and-clear-if-needed for
+                            // freshly-ensured tiles. Each may encode a
+                            // no-draw clear pass on cmdBuf; can't overlap
+                            // with an active blit encoder, so this loop
+                            // runs first.
                             for key in tileKeys {
-                                _ = grid.ensureTile(at: key)
+                                _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
+                            }
+                            // Pass 2: blit data into tiles.
+                            if let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                            for key in tileKeys {
                                 let tileRect = CGRect(x: key.x * tileSize,
                                                       y: key.y * tileSize,
                                                       width: tileSize,
@@ -2354,6 +2593,7 @@ class CanvasRenderer: NSObject {
                                 }
                             }
                             blitEncoder.endEncoding()
+                            }
                             cmdBuf.commit()
                             cmdBuf.waitUntilCompleted()
                         }
@@ -2363,6 +2603,9 @@ class CanvasRenderer: NSObject {
 
                 #if DEBUG
                 print("Flood fill complete")
+                self?.verifyTileGridMatchesMonolithic(monolithic: texture,
+                                                      tileGrid: tileGrid,
+                                                      callsite: "floodFill")
                 #endif
                 completion()
             }
@@ -2911,6 +3154,12 @@ class CanvasRenderer: NSObject {
         // === End dual-write block ========================================
 
         print("Rect cleared successfully")
+
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: texture,
+                                        tileGrid: tileGrid,
+                                        callsite: "clearRect")
+        #endif
     }
 
     /// Clear pixels along a path (for lasso selection)
@@ -3090,6 +3339,12 @@ class CanvasRenderer: NSObject {
         // === End dual-write block ========================================
 
         print("Path cleared successfully (\(clearedCount) pixels)")
+
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: texture,
+                                        tileGrid: tileGrid,
+                                        callsite: "clearPath")
+        #endif
     }
 
     // MARK: - Export Image
@@ -3453,10 +3708,17 @@ class CanvasRenderer: NSObject {
                                              options: .storageModeShared)
                 }
                 if let srcBuffer = bufferOpt,
-                   let cmdBuf = commandQueue.makeCommandBuffer(),
-                   let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                   let cmdBuf = commandQueue.makeCommandBuffer() {
+                    // Pass 1: allocate-and-clear-if-needed for freshly-
+                    // ensured tiles. Each may encode a no-draw clear
+                    // pass on cmdBuf; can't overlap with an active blit
+                    // encoder, so this loop runs first.
                     for key in tileKeys {
-                        _ = grid.ensureTile(at: key)
+                        _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
+                    }
+                    // Pass 2: blit data into tiles.
+                    if let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                    for key in tileKeys {
                         let tileRect = CGRect(x: key.x * tileSize,
                                               y: key.y * tileSize,
                                               width: tileSize,
@@ -3489,12 +3751,19 @@ class CanvasRenderer: NSObject {
                         }
                     }
                     blitEncoder.endEncoding()
+                    }
                     cmdBuf.commit()
                     cmdBuf.waitUntilCompleted()
                 }
             }
         }
         // === End dual-write block ========================================
+
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: texture,
+                                        tileGrid: tileGrid,
+                                        callsite: "renderImage")
+        #endif
     }
 
     // MARK: - Blur (PR 1)
