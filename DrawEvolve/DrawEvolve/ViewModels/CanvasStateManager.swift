@@ -1112,7 +1112,7 @@ class CanvasStateManager: ObservableObject {
         // pixel-to-texture-pixel ratio (1.0 in practice). The blit ends
         // up pixel-aligned.
         let fullRect = CGRect(origin: .zero, size: documentSize)
-        renderer.renderImage(image, at: fullRect, to: texture, screenSize: documentSize)
+        renderer.renderImage(image, at: fullRect, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
 
         let afterSnapshot = renderer.captureSnapshot(of: texture)
         if let before = beforeSnapshot, let after = afterSnapshot {
@@ -1460,7 +1460,7 @@ class CanvasStateManager: ObservableObject {
 
         if floatingSelectionTexture == nil {
             print("⚠️ Failed to upload imported image to a Metal texture; falling back to direct composite")
-            renderer.renderImage(resized, at: rect, to: texture, screenSize: documentSize)
+            renderer.renderImage(resized, at: rect, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
             clearSelection()
         }
 
@@ -1693,7 +1693,7 @@ class CanvasStateManager: ObservableObject {
         )
 
         // Step 3: Render the pixels at the new position (use documentSize for 1:1 coordinate mapping)
-        renderer.renderImage(pixels, at: currentRect, to: texture, screenSize: documentSize)
+        renderer.renderImage(pixels, at: currentRect, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
     }
 
     /// Commit the moved selection to finalize the change.

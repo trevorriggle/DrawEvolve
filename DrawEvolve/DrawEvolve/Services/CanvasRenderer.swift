@@ -2224,7 +2224,10 @@ class CanvasRenderer: NSObject {
             textureSize: texSize
         ) else { return }
         let destRect = CGRect(origin: location, size: result.docSize)
-        renderImage(result.image, at: destRect, to: texture, screenSize: screenSize)
+        // Dead-code path (renderText has no external callers as of Phase 2).
+        // Pass tileGrid: nil — if revived, callers should plumb the grid
+        // through renderText's signature.
+        renderImage(result.image, at: destRect, to: texture, tileGrid: nil, screenSize: screenSize)
     }
 
     // MARK: - Core Text rasterisation
@@ -3028,7 +3031,7 @@ class CanvasRenderer: NSObject {
     /// sourceAlpha/oneMinusSourceAlpha blend factors). The previous version
     /// applied a straight-alpha Porter-Duff formula to premultiplied inputs,
     /// double-multiplying by srcA and shifting edge colors.
-    func renderImage(_ image: UIImage, at rect: CGRect, to texture: MTLTexture, screenSize: CGSize) {
+    func renderImage(_ image: UIImage, at rect: CGRect, to texture: MTLTexture, tileGrid: TileGrid? = nil, screenSize: CGSize) {
         guard let cgImage = image.cgImage else {
             print("ERROR: Failed to get CGImage")
             return
@@ -3157,6 +3160,76 @@ class CanvasRenderer: NSObject {
                 bytesPerRow: regionBytesPerRow
             )
         }
+
+        // === Phase 2 Task 4.6: tile-grid dual-write =======================
+        //
+        // Mirror the post-blend region into the tile grid. The CPU
+        // `regionData` buffer holds the FINAL pixel state for the dest
+        // region after the porter-duff blend; reuse it via a shared
+        // MTLBuffer and per-tile blit, same pattern as clearPath.
+        //
+        // Unlike clearPath/clearRect, renderImage *adds* non-transparent
+        // content where the image had alpha > 0. So every intersecting
+        // tile may need allocation, not just already-allocated ones — we
+        // ensureTile unconditionally for tiles that don't exist. (Tiles
+        // where the image is entirely alpha-zero will end up allocated
+        // and zero — a minor memory waste; Phase 6 can detect via
+        // nonTransparentBits and dropTile retroactively.)
+        if let grid = tileGrid, regionW > 0, regionH > 0 {
+            let regionPixelRect = CGRect(x: dstX, y: dstY, width: regionW, height: regionH)
+            let tileKeys = grid.tilesIntersecting(regionPixelRect)
+            let tileSize = grid.tileSize
+
+            if !tileKeys.isEmpty {
+                let bufferOpt: MTLBuffer? = regionData.withUnsafeBytes { ptr in
+                    guard let base = ptr.baseAddress else { return nil }
+                    return device.makeBuffer(bytes: base,
+                                             length: regionData.count,
+                                             options: .storageModeShared)
+                }
+                if let srcBuffer = bufferOpt,
+                   let cmdBuf = commandQueue.makeCommandBuffer(),
+                   let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                    for key in tileKeys {
+                        _ = grid.ensureTile(at: key)
+                        let tileRect = CGRect(x: key.x * tileSize,
+                                              y: key.y * tileSize,
+                                              width: tileSize,
+                                              height: tileSize)
+                        let inter = tileRect.intersection(regionPixelRect)
+                        if inter.isNull || inter.isEmpty { continue }
+                        let interW = Int(inter.width)
+                        let interH = Int(inter.height)
+                        if interW <= 0 || interH <= 0 { continue }
+
+                        let srcCol = Int(inter.origin.x) - dstX
+                        let srcRow = Int(inter.origin.y) - dstY
+                        let sourceOffset = srcRow * regionBytesPerRow + srcCol * 4
+
+                        let localX = Int(inter.origin.x) - (key.x * tileSize)
+                        let localY = Int(inter.origin.y) - (key.y * tileSize)
+
+                        try? grid.updateTile(at: key) { tile in
+                            blitEncoder.copy(
+                                from: srcBuffer,
+                                sourceOffset: sourceOffset,
+                                sourceBytesPerRow: regionBytesPerRow,
+                                sourceBytesPerImage: regionBytesPerRow * interH,
+                                sourceSize: MTLSize(width: interW, height: interH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0,
+                                destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: localX, y: localY, z: 0)
+                            )
+                        }
+                    }
+                    blitEncoder.endEncoding()
+                    cmdBuf.commit()
+                    cmdBuf.waitUntilCompleted()
+                }
+            }
+        }
+        // === End dual-write block ========================================
     }
 
     // MARK: - Blur (PR 1)
