@@ -1443,6 +1443,7 @@ class CanvasRenderer: NSObject {
     /// then this single GPU pass actually moves the bits when the user lets go.
     func translateLayerTextureInPlace(
         _ texture: MTLTexture,
+        tileGrid: TileGrid? = nil,
         byDocOffset offset: CGPoint,
         screenSize: CGSize
     ) {
@@ -1452,6 +1453,11 @@ class CanvasRenderer: NSObject {
         let dy = Int((offset.y * scaleY).rounded())
 
         if dx == 0 && dy == 0 { return }
+
+        // Capture pre-translate allocated keys BEFORE the monolithic pass.
+        // The monolithic op doesn't touch the tile grid, so this is just
+        // for intent clarity — the set wouldn't change either way.
+        let preTranslateKeys: [TileKey] = tileGrid?.allocatedKeys() ?? []
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: texture.pixelFormat,
@@ -1516,6 +1522,87 @@ class CanvasRenderer: NSObject {
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+
+        // === Phase 2 Task 4.9: tile-grid dual-write (shift + blit) =======
+        //
+        // Result-then-mirror: post-translate pixels live in `texture`.
+        // Mirror by:
+        //   1. Compute post-translate destination key set: for each pre-
+        //      translate allocated key K with pixel rect R_K, the content
+        //      lands at R_K + (dx, dy). Union the tilesIntersecting of
+        //      each shifted rect (clamped to canvas).
+        //   2. Drop all pre-translate allocations (their content has moved
+        //      or been clipped off-canvas).
+        //   3. For each post-translate key: ensureTile + blit the new
+        //      key's pixel rect from post-translate monolithic.
+        //
+        // For sub-tile offsets (the typical drag case), a single source
+        // tile contributes content to up to 4 destination tiles. The
+        // post-translate set captures that 1→4 fan-out automatically via
+        // tilesIntersecting.
+        //
+        // Blit width/height = min(tileSize, texture.width/height - origin),
+        // so on canvas dims that are exact multiples of tileSize the blit
+        // is full-tile and partial-edge undefined-pixel concerns don't
+        // arise. Non-multiple canvas dims hit the same partial-edge case
+        // as flip; Task 5's allocation-clear fix covers it.
+        if let grid = tileGrid, !preTranslateKeys.isEmpty {
+            let tileSize = grid.tileSize
+            let texW = texture.width
+            let texH = texture.height
+
+            var postSet = Set<TileKey>()
+            for old in preTranslateKeys {
+                let shifted = CGRect(
+                    x: old.x * tileSize + dx,
+                    y: old.y * tileSize + dy,
+                    width: tileSize,
+                    height: tileSize
+                )
+                for k in grid.tilesIntersecting(shifted) {
+                    postSet.insert(k)
+                }
+            }
+
+            // Drop pre-translate allocations FIRST so dropTile/ensureTile
+            // pairs that hit the same key (small offsets where a source
+            // tile partially overlaps itself) don't leak stale content.
+            for old in preTranslateKeys {
+                grid.dropTile(at: old)
+            }
+
+            if let mirrorBuf = commandQueue.makeCommandBuffer(),
+               let blit2 = mirrorBuf.makeBlitCommandEncoder() {
+                for newKey in postSet {
+                    _ = grid.ensureTile(at: newKey)
+                    let srcX = newKey.x * tileSize
+                    let srcY = newKey.y * tileSize
+                    let blitW = min(tileSize, texW - srcX)
+                    let blitH = min(tileSize, texH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+
+                    // try? only catches encoder-construction failure inside
+                    // the closure; blit.copy can't throw and the encoder is
+                    // guarded above. Present only to satisfy updateTile's
+                    // rethrows signature.
+                    try? grid.updateTile(at: newKey) { tile in
+                        blit2.copy(
+                            from: texture,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit2.endEncoding()
+                mirrorBuf.commit()
+                mirrorBuf.waitUntilCompleted()
+            }
+        }
+        // === End dual-write block ========================================
     }
 
     /// Mirror a layer texture's pixel data about its center on the

@@ -1857,7 +1857,7 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        renderer.translateLayerTextureInPlace(texture, byDocOffset: selectionOffset, screenSize: documentSize)
+        renderer.translateLayerTextureInPlace(texture, tileGrid: layers[selectedLayerIndex].tileGrid, byDocOffset: selectionOffset, screenSize: documentSize)
 
         let afterSnapshot = renderer.captureSnapshot(of: texture)
         if let after = afterSnapshot {
