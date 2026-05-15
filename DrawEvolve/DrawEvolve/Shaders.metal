@@ -25,7 +25,15 @@ struct BrushUniforms {
     float4 color;           // RGBA color
     float size;             // Brush size in pixels
     float opacity;          // 0.0 to 1.0
-    float hardness;         // 0.0 (soft) to 1.0 (hard)
+    float hardness;         // 0.0 (soft) to 1.0 (hard) — RAW SLIDER VALUE.
+                            // Each stamp shader applies a sqrt() perceptual
+                            // remap on this uniform before using it (see
+                            // `perceivedHardness` below). The slider's 0–1
+                            // travel now lands at a perceptual midpoint at
+                            // ~0.5 — previously the lower 75% of the slider
+                            // all read as "soft" because the falloff
+                            // band's area scales as (1 - hardness)² and
+                            // perception tracks area, not band width.
     float pressure;         // 0.0 to 1.0 from Apple Pencil
     float grainDensity;     // experiment/brush-variety-v1: charcoal grain
                             // intensity. Existing shaders ignore it; only
@@ -33,6 +41,18 @@ struct BrushUniforms {
                             // trailing field keeps the C-ABI prefix stable
                             // for the brush/eraser/blur/smudge shaders.
 };
+
+// Perceptual hardness remap. The brush stamp's opaque core occupies a
+// disc of normalised radius `hardness`, so the opaque AREA scales as
+// `hardness²`. Users perceive "hardness" by how much of the disc looks
+// solid, which means the raw uniform reads non-linearly: slider 0.5
+// shows only 25% opaque area and feels almost as soft as 0.25. Taking
+// sqrt straightens the curve so slider 0.5 → ~50% opaque area → reads
+// like the midpoint a user expects. Clamp guards against negative
+// inputs (would NaN in sqrt) and >1 inputs (defensive).
+static float perceivedHardness(float h) {
+    return sqrt(clamp(h, 0.0, 1.0));
+}
 
 struct LayerUniforms {
     float opacity;          // Layer opacity
@@ -324,13 +344,14 @@ fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
     float dist = distance(pointCoord, center) * 2.0; // 0.0 at center, 1.0 at edge
 
     // Apply hardness: soft edge vs hard edge
+    float hardness = perceivedHardness(uniforms.hardness);
     float alpha;
-    if (uniforms.hardness >= 0.99) {
+    if (hardness >= 0.99) {
         // Hard brush: sharp cutoff
         alpha = dist < 1.0 ? 1.0 : 0.0;
     } else {
         // Soft brush: smooth falloff
-        float softness = 1.0 - uniforms.hardness;
+        float softness = 1.0 - hardness;
         float edge = 1.0 - softness;
         alpha = smoothstep(1.0, edge, dist);
     }
@@ -350,11 +371,12 @@ fragment float4 eraserFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
+    float hardness = perceivedHardness(uniforms.hardness);
     float alpha;
-    if (uniforms.hardness >= 0.99) {
+    if (hardness >= 0.99) {
         alpha = dist < 1.0 ? 1.0 : 0.0;
     } else {
-        float softness = 1.0 - uniforms.hardness;
+        float softness = 1.0 - hardness;
         float edge = 1.0 - softness;
         alpha = smoothstep(1.0, edge, dist);
     }
@@ -398,7 +420,10 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     // hardness in the panel, force a floor of 0.85 so the look stays
     // identifiably "pencil." Without this floor, pencil at hardness 0.5
     // is indistinguishable from a default brush at hardness 0.5.
-    float hardness = max(uniforms.hardness, 0.85);
+    // The perceptual remap runs BEFORE the floor so the slider's UX
+    // matches the other tools; the floor still kicks in for any
+    // remapped value below 0.85.
+    float hardness = max(perceivedHardness(uniforms.hardness), 0.85);
     float softness = 1.0 - hardness;
     float edge = 1.0 - softness;
     float alpha = smoothstep(1.0, edge, dist);
@@ -516,7 +541,8 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    float softness = 1.0 - uniforms.hardness;
+    float hardness = perceivedHardness(uniforms.hardness);
+    float softness = 1.0 - hardness;
     float edge = 1.0 - softness;
     float alpha = smoothstep(1.0, edge, dist);
 
@@ -753,11 +779,12 @@ fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
+    float hardness = perceivedHardness(uniforms.hardness);
     float alpha;
-    if (uniforms.hardness >= 0.99) {
+    if (hardness >= 0.99) {
         alpha = dist < 1.0 ? 1.0 : 0.0;
     } else {
-        float softness = 1.0 - uniforms.hardness;
+        float softness = 1.0 - hardness;
         float edge = 1.0 - softness;
         alpha = smoothstep(1.0, edge, dist);
     }
@@ -896,11 +923,12 @@ fragment float4 smudgeDepositShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
+    float hardness = perceivedHardness(uniforms.hardness);
     float alpha;
-    if (uniforms.hardness >= 0.99) {
+    if (hardness >= 0.99) {
         alpha = dist < 1.0 ? 1.0 : 0.0;
     } else {
-        float softness = 1.0 - uniforms.hardness;
+        float softness = 1.0 - hardness;
         float edge = 1.0 - softness;
         alpha = smoothstep(1.0, edge, dist);
     }
