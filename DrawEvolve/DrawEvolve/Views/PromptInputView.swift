@@ -67,6 +67,16 @@ struct PromptInputView: View {
                 .padding(.bottom, 8)
 
                 VStack(alignment: .leading, spacing: 8) {
+                    Text("Name your drawing")
+                        .font(.headline)
+                    TextField("e.g., Mountain sunset, Portrait of Lily", text: $context.title)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.words)
+                        .textContentType(.none)
+                        .autocorrectionDisabled()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
                     Text("Skill Level")
                         .font(.headline)
                     Picker("Skill Level", selection: $context.skillLevel) {
@@ -231,6 +241,16 @@ struct PromptInputView: View {
                 // Form
                 ScrollView {
                     VStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Name your drawing")
+                                .font(.headline)
+                            TextField("e.g., Mountain sunset, Portrait of Lily", text: $context.title)
+                                .textFieldStyle(.roundedBorder)
+                                .textInputAutocapitalization(.words)
+                                .textContentType(.none)
+                                .autocorrectionDisabled()
+                        }
+
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Skill Level")
                                 .font(.headline)

@@ -1612,9 +1612,9 @@ struct DrawingCanvasView: View {
             // touches via the default hit-testing — without it the user
             // could keep drawing / switching tools / tapping Get Feedback
             // while Eve was open, which broke the "focused conversation"
-            // promise. Tap-outside dismisses, matching the iPhone .sheet
-            // behavior (which provides this for free) and standard iOS
-            // modal convention.
+            // promise. Dismissal is X-button-only by design; tap-outside
+            // was too easy to trigger accidentally and lost in-progress
+            // conversations.
             //
             // Width 560 reads well on landscape (~half-screen) and
             // portrait (~70% of the narrower axis). Height caps at 820
@@ -1625,12 +1625,6 @@ struct DrawingCanvasView: View {
                 Color.black
                     .opacity(0.35)
                     .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
-                            showEve = false
-                        }
-                    }
                     .transition(.opacity)
 
                 GeometryReader { geo in
@@ -1639,7 +1633,11 @@ struct DrawingCanvasView: View {
                         drawingId: eveScope == .drawing ? currentDrawingID : nil,
                         critiqueSequence: eveCritiqueSequence,
                         drawingTitle: eveDrawingTitle,
-                        onClose: { showEve = false }
+                        onClose: {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                                showEve = false
+                            }
+                        }
                     )
                     .frame(
                         width: min(560, geo.size.width - 40),
@@ -3185,6 +3183,15 @@ struct DrawingCanvasView: View {
     private func loadExistingDrawing() {
         guard let drawing = existingDrawing else {
             print("DrawingCanvasView: No existing drawing to load")
+            // Pre-populate the save-dialog title from the questionnaire's
+            // name field so the user doesn't enter it twice. Only seed
+            // when still empty so a mid-session retitle isn't clobbered.
+            if drawingTitle.isEmpty {
+                let trimmed = context.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    drawingTitle = trimmed
+                }
+            }
             return
         }
 
