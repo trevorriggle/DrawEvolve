@@ -9,10 +9,13 @@
 //
 //  Tracks `floatingText.anchor` through `documentToScreen`, so the
 //  caret follows canvas zoom / pan / rotation / flip the same way
-//  every other doc-space overlay does. Hides itself the moment the
-//  user types anything (the rasterised glyphs take over). Hit-testing
-//  is disabled — the underlying TextEntryOverlay's UITextView owns
-//  keyboard input.
+//  every other doc-space overlay does. The Rectangle itself is also
+//  rotated by `-canvasRotation` so the bar reads as doc-vertical
+//  (matching the rasterised glyphs the shader rotates by the same
+//  amount) rather than screen-vertical on a tilted canvas. Hides
+//  itself the moment the user types anything (the rasterised glyphs
+//  take over). Hit-testing is disabled — the underlying
+//  TextEntryOverlay's UITextView owns keyboard input.
 //
 
 import SwiftUI
@@ -31,6 +34,16 @@ struct FloatingTextCaretIndicator: View {
                     .fill(Color.accentColor)
                     .frame(width: 2, height: height)
                     .opacity(isOn ? 1.0 : 0.15)
+                    // Match canvas rotation so the bar reads doc-vertical.
+                    // Sign matches ReferenceImageView.effectiveRotation:
+                    // canvasState.canvasRotation already has its gesture
+                    // sign inverted at the handler, and SwiftUI's
+                    // .rotationEffect(+θ) rotates visually CW, so we
+                    // negate here to land on the same visual axis the
+                    // floating-text shader produces for the rasterised
+                    // glyph (selTheta + canvasRotation, with selTheta=0
+                    // for the caret-only phase).
+                    .rotationEffect(-canvasState.canvasRotation)
                     .position(anchor)
                     .allowsHitTesting(false)
             }
