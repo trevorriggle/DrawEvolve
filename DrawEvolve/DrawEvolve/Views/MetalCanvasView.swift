@@ -544,6 +544,27 @@ struct MetalCanvasView: UIViewRepresentable {
         /// is detected above the screen, and with nil on hover-end.
         var onHoverChange: ((CGPoint?) -> Void)?
 
+        /// Paint-bucket fill deferred from touchesBegan to touchesEnded so a
+        /// second finger (the leading edge of a pinch / two-finger pan) can
+        /// suppress the fill before it commits. Set on single-finger touchdown
+        /// over the paint-bucket tool; cleared on multi-touch begin, on
+        /// touchesCancelled (which UIKit fires when a transform gesture
+        /// claims the touches), or after the fill dispatches in touchesEnded.
+        private var pendingPaintBucketFill: PendingPaintBucketFill?
+        private struct PendingPaintBucketFill {
+            let docLocation: CGPoint
+            let layerIndex: Int
+            let layerId: UUID
+            let beforeSnapshot: Data?
+        }
+
+        /// True while a touch-driven stroke is in flight on this MTKView.
+        /// Used to suppress the Apple Pencil hover cursor from flickering
+        /// in mid-stroke (e.g. trackpad-pointer hover events arriving while
+        /// the user is also drawing with a finger). Reset on touchesEnded
+        /// and touchesCancelled.
+        private var isStrokeInProgress = false
+
         init(
             layers: Binding<[DrawingLayer]>,
             currentTool: Binding<DrawingTool>,
@@ -988,6 +1009,16 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure layer textures exist
             ensureLayerTextures()
 
+            // A touch is now active — kill the Apple Pencil hover cursor.
+            // Trackpad / mouse pointers on iPad can keep firing hover
+            // events while a finger is also touching the screen, and a
+            // ghost cursor lingering mid-stroke is the bug this guards
+            // against. Cleared on touchesEnded / touchesCancelled.
+            if !isStrokeInProgress {
+                onHoverChange?(nil)
+            }
+            isStrokeInProgress = true
+
             // Get touch location and transform from screen space to document space
             let screenLocation = touch.location(in: view)
             let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
@@ -1198,70 +1229,64 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Handle paint bucket tool - flood fill
+            // Handle paint bucket tool — flood fill is DEFERRED to
+            // touchesEnded so a second finger landing (the leading edge of
+            // a pinch / two-finger pan) can suppress the fill before it
+            // commits. Previously this dispatched the fill synchronously
+            // on touchdown, which meant attempts to pinch-zoom while the
+            // paint-bucket tool was active always painted the canvas
+            // first. The flow now:
+            //
+            //   touchesBegan (one finger):  capture before-snapshot, stash
+            //                               request, no GPU work yet.
+            //   touchesBegan (>1 finger):   drop the pending request and
+            //                               return — multi-touch means the
+            //                               user is starting a transform.
+            //   touchesCancelled:           UIKit fires this on the MTKView
+            //                               when a pinch/pan/rotation
+            //                               gesture claims the touches;
+            //                               that clears pendingPaintBucketFill
+            //                               in the cancellation handler.
+            //   touchesEnded (single tap):  execute the dispatched fill.
+            //
+            // For a real single-finger tap the deferral is imperceptible
+            // (touchdown→liftoff is a few tens of ms), and a pre-captured
+            // before-snapshot keeps the undo record identical to the
+            // previous synchronous path.
             if currentTool == .paintBucket {
-                print("Paint bucket: filling at \(location)")
+                // Multi-touch guard: if a second touch is already on the
+                // screen we're at the leading edge of a transform gesture,
+                // not a tap-to-fill. Drop any pending fill from a prior
+                // single-finger touchdown.
+                if (touches.count > 1) || ((event?.allTouches?.count ?? 1) > 1) {
+                    pendingPaintBucketFill = nil
+                    print("Paint bucket: multi-touch detected on begin, suppressing pending fill")
+                    return
+                }
                 guard selectedLayerIndex < layers.count,
                       let texture = layers[selectedLayerIndex].texture,
                       let renderer = renderer,
                       let canvasState = canvasState else {
-                    print("ERROR: Cannot fill - invalid layer or texture")
+                    print("ERROR: Cannot prepare paint-bucket fill - invalid layer or texture")
+                    pendingPaintBucketFill = nil
                     return
                 }
-
                 // Re-entrancy guard: ignore taps while a previous fill is
                 // still running on the background queue. The HUD over the
                 // canvas also blocks hits, but this is the authoritative
                 // check.
                 if canvasState.isFilling {
                     print("Paint bucket: ignoring tap, fill already in progress")
+                    pendingPaintBucketFill = nil
                     return
                 }
-
-                // Capture before snapshot (stays on main, like other tools).
-                let beforeSnapshot = renderer.captureSnapshot(of: texture)
-
-                let documentSize = MainActor.assumeIsolated { canvasState.documentSize }
-                let currentLayerIndex = selectedLayerIndex
-                let layerId = layers[selectedLayerIndex].id
-
-                let dispatched = renderer.floodFill(
-                    at: location,
-                    with: brushSettings.color,
-                    in: texture,
-                    screenSize: documentSize
-                ) { [weak self] in
-                    // Back on main, after texture.replace has landed.
-                    let afterSnapshot = renderer.captureSnapshot(of: texture)
-                    if let before = beforeSnapshot, let after = afterSnapshot {
-                        canvasState.historyManager.record(.stroke(
-                            layerId: layerId,
-                            beforeSnapshot: before,
-                            afterSnapshot: after
-                        ))
-                    }
-
-                    // Mark dirty for auto-save — flood fill mutates the
-                    // layer texture just like a stroke.
-                    canvasState.bumpLayerMutation()
-
-                    // Update thumbnail (existing pattern). [weak self] above
-                    // is what this nested block needs; the outer closure
-                    // itself doesn't reference self otherwise.
-                    DispatchQueue.global(qos: .utility).async {
-                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
-                            DispatchQueue.main.async {
-                                self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
-                            }
-                        }
-                    }
-
-                    canvasState.isFilling = false
-                }
-
-                if dispatched {
-                    canvasState.isFilling = true
-                }
+                pendingPaintBucketFill = PendingPaintBucketFill(
+                    docLocation: location,
+                    layerIndex: selectedLayerIndex,
+                    layerId: layers[selectedLayerIndex].id,
+                    beforeSnapshot: renderer.captureSnapshot(of: texture)
+                )
+                print("Paint bucket: pending fill captured at \(location) (awaiting touchesEnded)")
                 return
             }
 
@@ -2042,6 +2067,22 @@ struct MetalCanvasView: UIViewRepresentable {
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("=== TOUCH ENDED ===")
 
+            // Hover-cursor suppression flag rides every early return in
+            // this function. defer covers them all from one place.
+            defer {
+                // Re-enable hover only when this was the last touch in the
+                // event — otherwise (e.g. a two-finger pinch where the
+                // second finger lifts first) we'd flicker the cursor back
+                // on mid-gesture. UIEvent.allTouches.count counts every
+                // touch the event still tracks, including the ones in the
+                // touches set that are ending right now; subtract them.
+                let endingCount = touches.count
+                let totalTouches = event?.allTouches?.count ?? endingCount
+                if totalTouches - endingCount <= 0 {
+                    isStrokeInProgress = false
+                }
+            }
+
             // Active-layer bounds guard — see touchesBegan for rationale.
             // touchesEnded reads `layers[selectedLayerIndex]` for stroke
             // commit + thumbnail refresh. Bail before any of that runs.
@@ -2056,6 +2097,59 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .blurAdjustment {
                 blurAdjustmentTouchStartScreen = nil
                 blurAdjustmentLastUpdateAt = 0
+                return
+            }
+
+            // Paint bucket: execute the deferred fill captured at touchdown.
+            // pendingPaintBucketFill is cleared by touchesCancelled if a
+            // transform gesture grabbed the touches first; the nil-check
+            // here is what makes the gesture gate actually work. The
+            // dispatch body is identical to the previous synchronous
+            // path in touchesBegan — only the trigger moved.
+            if currentTool == .paintBucket, let pending = pendingPaintBucketFill {
+                pendingPaintBucketFill = nil
+                guard pending.layerIndex < layers.count,
+                      layers[pending.layerIndex].id == pending.layerId,
+                      let texture = layers[pending.layerIndex].texture,
+                      let renderer = renderer,
+                      let canvasState = canvasState else {
+                    print("Paint bucket: pending fill abandoned — layer changed before lift")
+                    return
+                }
+                if canvasState.isFilling {
+                    return
+                }
+                let documentSize = MainActor.assumeIsolated { canvasState.documentSize }
+                let currentLayerIndex = pending.layerIndex
+                let layerId = pending.layerId
+                let beforeSnapshot = pending.beforeSnapshot
+                let dispatched = renderer.floodFill(
+                    at: pending.docLocation,
+                    with: brushSettings.color,
+                    in: texture,
+                    screenSize: documentSize
+                ) { [weak self] in
+                    let afterSnapshot = renderer.captureSnapshot(of: texture)
+                    if let before = beforeSnapshot, let after = afterSnapshot {
+                        canvasState.historyManager.record(.stroke(
+                            layerId: layerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                    }
+                    canvasState.bumpLayerMutation()
+                    DispatchQueue.global(qos: .utility).async {
+                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                            DispatchQueue.main.async {
+                                self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
+                            }
+                        }
+                    }
+                    canvasState.isFilling = false
+                }
+                if dispatched {
+                    canvasState.isFilling = true
+                }
                 return
             }
 
@@ -2587,6 +2681,11 @@ struct MetalCanvasView: UIViewRepresentable {
             selectionDragStart = nil
             blurAdjustmentTouchStartScreen = nil
             blurAdjustmentLastUpdateAt = 0
+            // Drop any pending paint-bucket fill — touchesCancelled fires
+            // when a pinch/pan/rotation gesture claims the touches, which
+            // is exactly the case the gate is built to suppress.
+            pendingPaintBucketFill = nil
+            isStrokeInProgress = false
             // Free the cached preview selection mask if any. Idempotent —
             // safe even when no stroke was in flight.
             renderer?.endPreviewMask()
