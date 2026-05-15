@@ -38,6 +38,16 @@ struct BrushUniforms {
                             // `charcoalFragmentShader` reads it. Adding a
                             // trailing field keeps the C-ABI prefix stable
                             // for the brush/eraser/blur/smudge shaders.
+    float2 tileOrigin;      // Layer-pixel coords of the framebuffer's (0,0).
+                            // Tiling migration Phase 2: when the framebuffer
+                            // is the monolithic layer texture, this is (0,0)
+                            // and every shader's `in.position.xy + tileOrigin`
+                            // is mathematically identical to `in.position.xy`
+                            // alone. Phase 4+: when the framebuffer is a tile,
+                            // this becomes (tx * tileSize, ty * tileSize) so
+                            // selection mask sampling, procedural grain seeds,
+                            // and canvas-sized texture lookups keep producing
+                            // the same layer-space values they did pre-tiling.
 };
 
 // Perceptual hardness remap. Earlier this used `sqrt(h)` so slider 0.5
@@ -322,18 +332,26 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
 // `clamp_to_edge + linear` so soft (anti-aliased) selection edges
 // produce smooth clipping without per-shader edge handling.
 
-// Sample the selection mask at the fragment's layer pixel position. Returns
+// Sample the selection mask at the fragment's LAYER pixel position. Returns
 // 1.0 inside the selection (or everywhere when no-mask 1×1 is bound) and
 // 0.0 outside; soft-edge selections produce in-between values.
+//
+// `tileOrigin` is MANDATORY — no overload, no default. It's the layer-pixel
+// coords of the framebuffer's (0,0). Pre-tiling callers pass (0,0); tiled
+// callers pass the tile's pixel offset. A missed offset would silently
+// sample the wrong region of the mask; the mandatory positional argument
+// forces callers to think about it (Phase 2 / Task 1 refinement #1).
 static float sampleSelectionMask(texture2d<float> mask,
-                                 float4 fragPosition) {
+                                 float4 fragPosition,
+                                 float2 tileOrigin) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float2 maskSize = float2(mask.get_width(), mask.get_height());
     // For the 1×1 no-mask texture, maskSize is (1,1) and any UV samples
     // the single pixel (= 1.0). For the canvas-sized real mask, maskSize
-    // matches the layer texture's dims and `fragPosition.xy` is in those
-    // same pixel units.
-    return mask.sample(s, fragPosition.xy / maskSize).r;
+    // matches the layer texture's dims and `layerPos` is in those same
+    // pixel units.
+    float2 layerPos = fragPosition.xy + tileOrigin;
+    return mask.sample(s, layerPos / maskSize).r;
 }
 
 // Fragment shader for brush strokes with soft edges
@@ -360,7 +378,7 @@ fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
 
     // Apply opacity and pressure, then clip to selection.
     alpha *= uniforms.opacity * uniforms.pressure;
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
@@ -384,7 +402,7 @@ fragment float4 eraserFragmentShader(VertexOut in [[stage_in]],
     }
 
     alpha *= uniforms.opacity * uniforms.pressure;
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     // Return transparent black with alpha for erasing
     return float4(0.0, 0.0, 0.0, alpha);
@@ -415,6 +433,13 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
                                       float2 pointCoord [[point_coord]],
                                       constant BrushUniforms &uniforms [[buffer(0)]],
                                       texture2d<float> selectionMask [[texture(2)]]) {
+    // Layer-space fragment position. Pre-tiling: in.position.xy is already
+    // the layer-pixel coord and tileOrigin is (0,0). Tiled: in.position.xy
+    // is tile-local and tileOrigin re-anchors it. Used for both the
+    // procedural grain seed AND the selection mask sample — without this
+    // a brush stamp crossing a tile boundary would show a grain seam.
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
@@ -434,7 +459,7 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     // grain reads as horizontal streaks rather than isotropic speckle.
     // Strength bumped from 0.4 → 0.7 mix so it's actually visible at
     // default settings. Without this, pencil read as a soft solid disc.
-    float toothGrain = brushHash(float2(in.position.x, in.position.y * 0.33));
+    float toothGrain = brushHash(float2(layerPos.x, layerPos.y * 0.33));
     float grain = mix(0.3, 1.0, toothGrain);
     alpha *= mix(1.0, grain, 0.7);
 
@@ -444,7 +469,7 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     float pressureOpacity = uniforms.pressure * uniforms.pressure * uniforms.pressure;
     alpha *= uniforms.opacity * pressureOpacity;
 
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
@@ -468,7 +493,7 @@ fragment float4 inkPenFragmentShader(VertexOut in [[stage_in]],
     // the ink pen.
     alpha *= uniforms.opacity;
 
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
@@ -494,7 +519,7 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     // default so overlaps darken visibly without immediately saturating.
     alpha *= uniforms.opacity * uniforms.pressure;
 
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
@@ -507,6 +532,9 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
                                         float2 pointCoord [[point_coord]],
                                         constant BrushUniforms &uniforms [[buffer(0)]],
                                         texture2d<float> selectionMask [[texture(2)]]) {
+    // Layer-space fragment position; see pencilFragmentShader for rationale.
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
@@ -519,7 +547,7 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
 
     // Mist grain — bumped from 10% → 25% modulation so the texture
     // actually reads as airbrush mist, not a perfectly smooth halo.
-    float grain = mix(1.0, brushHash(in.position.xy * 2.0), 0.25);
+    float grain = mix(1.0, brushHash(layerPos * 2.0), 0.25);
     alpha *= grain;
 
     // Pressure modulates opacity, not size. Square keeps light pressure
@@ -527,7 +555,7 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     float pressureOpacity = uniforms.pressure * uniforms.pressure;
     alpha *= uniforms.opacity * pressureOpacity;
 
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
@@ -540,6 +568,13 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
                                         float2 pointCoord [[point_coord]],
                                         constant BrushUniforms &uniforms [[buffer(0)]],
                                         texture2d<float> selectionMask [[texture(2)]]) {
+    // Layer-space fragment position. Charcoal is the heaviest user of
+    // procedural grain in this codebase (4 brushHash calls, 3 octaves +
+    // edge breakup). All 4 grain seeds AND the selection-mask sample must
+    // be in layer-space — anything tile-local would produce a visible
+    // seam wherever a single stamp crosses a tile boundary.
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
@@ -551,9 +586,9 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     // Heavy three-octave grain — was two-octave. Each octave is the
     // hash() at a different spatial frequency; summing makes the
     // texture rocky and irregular rather than blocky or noisy.
-    float grain1 = brushHash(in.position.xy * 0.6);
-    float grain2 = brushHash(in.position.xy * 1.4 + float2(13.0, 7.0));
-    float grain3 = brushHash(in.position.xy * 3.1 + float2(31.0, 19.0));
+    float grain1 = brushHash(layerPos * 0.6);
+    float grain2 = brushHash(layerPos * 1.4 + float2(13.0, 7.0));
+    float grain3 = brushHash(layerPos * 3.1 + float2(31.0, 19.0));
     float grain = grain1 * 0.5 + grain2 * 0.3 + grain3 * 0.2;
 
     // Steepen the grain into a black/white speckle (was linear). This
@@ -571,7 +606,7 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     // like a charcoal stick dragging across paper. The center stays
     // mostly solid (or as speckled as grainDensity dictates).
     float edgeBand = smoothstep(0.4, 1.0, dist);
-    float edgeBreakup = mix(1.0, brushHash(in.position.xy * 2.3 + float2(7.0, 5.0)), edgeBand * 0.6);
+    float edgeBreakup = mix(1.0, brushHash(layerPos * 2.3 + float2(7.0, 5.0)), edgeBand * 0.6);
     alpha *= edgeBreakup;
 
     // Pressure: moderate. Even light strokes leave visible deposit
@@ -579,7 +614,7 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     float pressureOpacity = mix(0.6, 1.0, uniforms.pressure);
     alpha *= uniforms.opacity * pressureOpacity;
 
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
@@ -791,18 +826,20 @@ fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
     alpha *= uniforms.opacity * uniforms.pressure * blurStrength;
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     if (alpha <= 0.0) {
         discard_fragment();
     }
 
-    // Sample blurredTexture at this fragment's layer-pixel position. The
-    // VertexOut `position` attribute is in framebuffer (= layer-pixel) coords
-    // at rasterisation; normalise by layer size to get the [0,1] UV.
+    // Sample blurredTexture at this fragment's LAYER-pixel position.
+    // `blurredTexture` is canvas-sized (the pre-blurred snapshot from
+    // the H/V Gaussian passes), so the lookup must be in layer-space
+    // even when the framebuffer is a tile.
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float2 layerSize = float2(blurredTexture.get_width(), blurredTexture.get_height());
-    float2 uv = in.position.xy / layerSize;
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+    float2 uv = layerPos / layerSize;
     float4 blurred = blurredTexture.sample(s, uv);
 
     // Gate the deposit's alpha by the blurred sample's own alpha. Without
@@ -938,19 +975,23 @@ fragment float4 smudgeDepositShader(VertexOut in [[stage_in]],
     // Selection clip on deposit: outside the selection, alpha → 0 and the
     // discard below short-circuits the patch sample. Pairs with the
     // pickup-side mask in smudgePatchUpdateShader.
-    alpha *= sampleSelectionMask(selectionMask, in.position);
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     if (alpha <= 0.0) {
         discard_fragment();
     }
 
-    // Layer pixel position → patch UV. The patch is anchored at the current
+    // Layer pixel position → patch UV. `smudge.stampCenter` is in
+    // layer-pixel coords from the Swift caller, so `layerPx` must also
+    // be in layer-pixel coords — `in.position.xy + uniforms.tileOrigin`
+    // is the layer-pixel position regardless of whether the framebuffer
+    // is monolithic or a tile. The patch is anchored at the current
     // stamp center with world half-size `patchHalfSize`, so the UV at
     // `layerPx` is (layerPx - center + halfSize) / (2 * halfSize). Sampler
     // clamps so fragments outside the patch's world footprint (shouldn't
     // happen — point sprite is sized to fit) read the edge.
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float2 layerPx = in.position.xy;
+    float2 layerPx = in.position.xy + uniforms.tileOrigin;
     float2 patchUV = (layerPx - smudge.stampCenter + smudge.patchHalfSize) / (2.0 * smudge.patchHalfSize);
     float4 picked = patchTexture.sample(s, patchUV);
 

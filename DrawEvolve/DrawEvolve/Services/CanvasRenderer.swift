@@ -586,6 +586,7 @@ class CanvasRenderer: NSObject {
             size: Float(stroke.settings.size),
             opacity: Float(stroke.settings.opacity),
             hardness: Float(stroke.settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0),
             grainDensity: stroke.settings.grainDensity
         )
 
@@ -675,7 +676,16 @@ class CanvasRenderer: NSObject {
         }
     }
 
-    // Metal structure matching shader
+    // Metal structure matching shader.
+    //
+    // `tileOrigin` is mandatory at the init call site even though every
+    // current call site passes (0, 0): the missing-parameter shape forces
+    // Phase 4 tile-bind sites to opt in explicitly, mirroring the
+    // discipline of the shader-side `sampleSelectionMask` helper. A
+    // forgotten tile-origin would silently corrupt layer-space lookups
+    // (selection mask sampling, procedural grain seeds, canvas-sized
+    // texture samples); making it positional and mandatory turns that
+    // silent miss into a compile error.
     private struct BrushUniforms {
         var color: SIMD4<Float>
         var size: Float
@@ -683,8 +693,14 @@ class CanvasRenderer: NSObject {
         var hardness: Float
         var pressure: Float
         var grainDensity: Float
+        var tileOrigin: SIMD2<Float>
 
-        init(color: UIColor, size: Float, opacity: Float, hardness: Float, grainDensity: Float = 0.5) {
+        init(color: UIColor,
+             size: Float,
+             opacity: Float,
+             hardness: Float,
+             tileOrigin: SIMD2<Float>,
+             grainDensity: Float = 0.5) {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
             color.getRed(&r, green: &g, blue: &b, alpha: &a)
             self.color = SIMD4<Float>(Float(r), Float(g), Float(b), Float(a))
@@ -693,6 +709,7 @@ class CanvasRenderer: NSObject {
             self.hardness = hardness
             self.pressure = 1.0
             self.grainDensity = grainDensity
+            self.tileOrigin = tileOrigin
         }
     }
 
@@ -1644,6 +1661,7 @@ class CanvasRenderer: NSObject {
             size: Float(safePreviewSize),
             opacity: Float(previewOpacity),
             hardness: Float(stroke.settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0),
             grainDensity: stroke.settings.grainDensity
         )
 
@@ -3250,7 +3268,8 @@ class CanvasRenderer: NSObject {
             color: s.settings.color,
             size: Float(s.settings.size),
             opacity: Float(s.settings.opacity),
-            hardness: Float(s.settings.hardness)
+            hardness: Float(s.settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0)
         )
         var blurStrength = s.blurStrength
         var viewportCopy = s.viewport
@@ -3407,7 +3426,8 @@ class CanvasRenderer: NSObject {
             color: stroke.settings.color,
             size: Float(stroke.settings.size),
             opacity: Float(stroke.settings.opacity),
-            hardness: Float(stroke.settings.hardness)
+            hardness: Float(stroke.settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0)
         )
         var blurStrength = blurStrengthValue
 
@@ -3671,7 +3691,8 @@ class CanvasRenderer: NSObject {
             color: settings.color,
             size: Float(settings.size),
             opacity: Float(settings.opacity),
-            hardness: Float(settings.hardness)
+            hardness: Float(settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0)
         )
 
         for stamp in stamps {
