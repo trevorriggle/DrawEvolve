@@ -3531,12 +3531,43 @@ struct MetalCanvasView: UIViewRepresentable {
         /// devices. Trackpad/mouse hover on iPad with a Magic Keyboard
         /// or pointer device also fires this; the cursor still reads
         /// as useful in those cases.
+        ///
+        /// Two coordinate / state corrections vs. the original wiring:
+        ///   1. Suppress while a stroke is in flight. UIHoverGestureRecognizer
+        ///      keeps firing for a trackpad pointer even while the user is
+        ///      drawing with a finger, which left a ghost cursor floating
+        ///      mid-stroke. `isStrokeInProgress` is set/cleared from the
+        ///      touch handlers; while set, every hover event is force-nil'd.
+        ///   2. Round-trip through screenToDocument / documentToScreen so
+        ///      the cursor lands at the same visual screen point the
+        ///      brush shader will commit a stroke to. Strokes get sampled
+        ///      in screen space, projected into doc space, and rendered
+        ///      back through the canvas transform — the doc round-trip
+        ///      normalises any difference between the raw MTKView point
+        ///      and the canvas-aligned screen pipeline.
         @objc func handleHover(_ gesture: UIHoverGestureRecognizer) {
             let view = gesture.view
-            let point = gesture.location(in: view)
+            let rawPoint = gesture.location(in: view)
             switch gesture.state {
             case .began, .changed:
-                onHoverChange?(point)
+                if isStrokeInProgress {
+                    // Hover events arriving mid-stroke would re-light a
+                    // stale cursor over the canvas. Drop them on the
+                    // floor; touchesEnded re-enables hover by clearing
+                    // the flag.
+                    onHoverChange?(nil)
+                    return
+                }
+                let aligned: CGPoint
+                if let canvasState = canvasState {
+                    aligned = MainActor.assumeIsolated {
+                        let doc = canvasState.screenToDocument(rawPoint)
+                        return canvasState.documentToScreen(doc)
+                    }
+                } else {
+                    aligned = rawPoint
+                }
+                onHoverChange?(aligned)
             case .ended, .cancelled, .failed:
                 onHoverChange?(nil)
             default:
