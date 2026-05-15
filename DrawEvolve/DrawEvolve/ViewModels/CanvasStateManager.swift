@@ -579,6 +579,13 @@ class CanvasStateManager: ObservableObject {
                     layer.isVisible = old
                 }
             }
+
+        case .flipContent(let layerIds, let flipH, let flipV):
+            // Flip is involutive — re-applying the same axes to the same
+            // layers reverses the effect. Iterate by stored IDs (not
+            // current visibility) so a layer hidden after the op is
+            // still un-flipped.
+            applyFlipToLayers(layerIds: layerIds, flipH: flipH, flipV: flipV)
         }
     }
 
@@ -638,6 +645,48 @@ class CanvasStateManager: ObservableObject {
                     layer.blendMode = new
                 case .visibility(_, let new):
                     layer.isVisible = new
+                }
+            }
+
+        case .flipContent(let layerIds, let flipH, let flipV):
+            applyFlipToLayers(layerIds: layerIds, flipH: flipH, flipV: flipV)
+        }
+    }
+
+    /// Re-apply a flip op to the specified layer IDs without recording
+    /// a new history entry. Used by undo and redo (flip is involutive,
+    /// so both directions just replay the same operation). Refreshes
+    /// thumbnails and bumps the mutation counter.
+    private func applyFlipToLayers(layerIds: [UUID], flipH: Bool, flipV: Bool) {
+        guard let renderer = renderer else { return }
+        guard flipH || flipV else { return }
+
+        let affected = layerIds.compactMap { id in
+            layers.first(where: { $0.id == id })
+        }
+        guard !affected.isEmpty else { return }
+
+        for layer in affected {
+            guard let texture = layer.texture else { continue }
+            renderer.flipLayerTextureInPlace(
+                texture,
+                flipHorizontal: flipH,
+                flipVertical: flipV
+            )
+
+            let layerId = layer.id
+            nonisolated(unsafe) let unsafeRenderer = renderer
+            nonisolated(unsafe) let unsafeTexture = texture
+            Task.detached {
+                if let thumbnail = unsafeRenderer.generateThumbnail(
+                    from: unsafeTexture,
+                    size: CGSize(width: 44, height: 44)
+                ) {
+                    await MainActor.run {
+                        if let l = self.layers.first(where: { $0.id == layerId }) {
+                            l.updateThumbnail(thumbnail)
+                        }
+                    }
                 }
             }
         }
@@ -2121,16 +2170,77 @@ class CanvasStateManager: ObservableObject {
         flipVertical = false
     }
 
-    /// Toggle horizontal flip (display-only mirror around viewport
-    /// center). Layer textures are unchanged.
+    /// Bake a horizontal flip into each visible layer's pixel data.
+    /// Layer textures are mirrored about their horizontal center on the
+    /// GPU; afterwards no display-time flip transform is needed. The op
+    /// is recorded with the affected layer IDs so undo flips the same
+    /// set even if visibility changes later. The `flipHorizontal` bool
+    /// is left at its existing value (always `false` post-bake) — it's
+    /// preserved for legacy callers that still gate on it, but it no
+    /// longer drives any visible flip.
     func toggleFlipHorizontal() {
-        flipHorizontal.toggle()
+        applyFlipContent(flipH: true, flipV: false)
     }
 
-    /// Toggle vertical flip (display-only mirror around viewport
-    /// center). Layer textures are unchanged.
+    /// Bake a vertical flip into each visible layer's pixel data. See
+    /// `toggleFlipHorizontal` for the rationale.
     func toggleFlipVertical() {
-        flipVertical.toggle()
+        applyFlipContent(flipH: false, flipV: true)
+    }
+
+    /// Apply a flip-content op to every currently-visible layer, record
+    /// it on the history stack, and refresh thumbnails. Used by both
+    /// the toggle entry points and the undo/redo handlers (flip is its
+    /// own inverse — applying the same axis twice cancels).
+    private func applyFlipContent(flipH: Bool, flipV: Bool, recordHistory: Bool = true) {
+        guard let renderer = renderer else { return }
+        guard flipH || flipV else { return }
+
+        let affected = layers.filter { $0.isVisible && $0.texture != nil }
+        guard !affected.isEmpty else { return }
+
+        for layer in affected {
+            guard let texture = layer.texture else { continue }
+            renderer.flipLayerTextureInPlace(
+                texture,
+                flipHorizontal: flipH,
+                flipVertical: flipV
+            )
+        }
+
+        if recordHistory {
+            let layerIds = affected.map { $0.id }
+            historyManager.record(.flipContent(
+                layerIds: layerIds,
+                flipH: flipH,
+                flipV: flipV
+            ))
+        }
+
+        // Refresh thumbnails for every flipped layer off the main thread,
+        // mirroring the stroke-commit path. The mutation counter bump
+        // below covers Metal redraws; thumbnails live on @Published
+        // `DrawingLayer.thumbnail` and need their own regen.
+        for layer in affected {
+            guard let texture = layer.texture else { continue }
+            let layerId = layer.id
+            nonisolated(unsafe) let unsafeRenderer = renderer
+            nonisolated(unsafe) let unsafeTexture = texture
+            Task.detached {
+                if let thumbnail = unsafeRenderer.generateThumbnail(
+                    from: unsafeTexture,
+                    size: CGSize(width: 44, height: 44)
+                ) {
+                    await MainActor.run {
+                        if let l = self.layers.first(where: { $0.id == layerId }) {
+                            l.updateThumbnail(thumbnail)
+                        }
+                    }
+                }
+            }
+        }
+
+        bumpLayerMutation()
     }
 
     /// Transform a rectangle from document space to screen space
