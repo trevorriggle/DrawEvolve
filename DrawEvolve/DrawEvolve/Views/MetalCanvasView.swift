@@ -2237,6 +2237,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     at: pending.docLocation,
                     with: brushSettings.color,
                     in: texture,
+                    tileGrid: layers[pending.layerIndex].tileGrid,
                     screenSize: documentSize
                 ) { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(of: texture)

@@ -1954,6 +1954,7 @@ class CanvasRenderer: NSObject {
         at point: CGPoint,
         with color: UIColor,
         in texture: MTLTexture,
+        tileGrid: TileGrid? = nil,
         screenSize: CGSize,
         completion: @escaping () -> Void
     ) -> Bool {
@@ -2045,6 +2046,16 @@ class CanvasRenderer: NSObject {
             var fillCount = 0
             let maxFill = width * height // Safety limit
 
+            // Phase 2 Task 4.7: dirty-bbox tracking for the tile mirror.
+            // Updated per filled pixel below; 4 integer comparisons per pixel
+            // are negligible against the rest of the loop. After the fill
+            // completes, the dual-write only touches tiles intersecting this
+            // bbox rather than the full canvas.
+            var dirtyMinX = startX
+            var dirtyMaxX = startX
+            var dirtyMinY = startY
+            var dirtyMaxY = startY
+
             data.withUnsafeMutableBytes { rawBuffer in
                 guard let basePtr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
 
@@ -2072,6 +2083,11 @@ class CanvasRenderer: NSObject {
                     basePtr[idx + 3] = fillA
                     fillCount += 1
 
+                    if px < dirtyMinX { dirtyMinX = px }
+                    if px > dirtyMaxX { dirtyMaxX = px }
+                    if py < dirtyMinY { dirtyMinY = py }
+                    if py > dirtyMaxY { dirtyMaxY = py }
+
                     stack.append((px + 1, py))
                     stack.append((px - 1, py))
                     stack.append((px, py + 1))
@@ -2083,7 +2099,7 @@ class CanvasRenderer: NSObject {
             print("Filled \(fillCount) pixels")
             #endif
 
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 data.withUnsafeBytes { ptr in
                     guard let baseAddress = ptr.baseAddress else { return }
                     texture.replace(
@@ -2096,6 +2112,89 @@ class CanvasRenderer: NSObject {
                         bytesPerRow: bytesPerRow
                     )
                 }
+
+                // === Phase 2 Task 4.7: tile-grid dual-write ===============
+                //
+                // Mirror the post-fill `data` buffer into the tiles
+                // intersecting the dirty bbox. The buffer is full-canvas-
+                // shaped; per-tile blits index into it via sourceOffset +
+                // full-canvas stride (bytesPerRow).
+                //
+                // The fillCount > 0 guard is conservative — if the fill
+                // bailed before painting anything, the buffer is unchanged
+                // and there's nothing to mirror.
+                //
+                // waitUntilCompleted is intentional, not a perf bug: Task
+                // 5's verification harness assumes the dual-write has
+                // landed before it can compare tile pixels against
+                // monolithic. Phase 6 can revisit if a pathological fill
+                // becomes a real UX problem.
+                if let grid = tileGrid, fillCount > 0, let self = self {
+                    let dirtyRect = CGRect(
+                        x: dirtyMinX,
+                        y: dirtyMinY,
+                        width: dirtyMaxX - dirtyMinX + 1,
+                        height: dirtyMaxY - dirtyMinY + 1
+                    )
+                    let tileKeys = grid.tilesIntersecting(dirtyRect)
+                    let tileSize = grid.tileSize
+
+                    if !tileKeys.isEmpty {
+                        let bufferOpt: MTLBuffer? = data.withUnsafeBytes { ptr in
+                            guard let base = ptr.baseAddress else { return nil }
+                            return self.device.makeBuffer(bytes: base,
+                                                          length: dataSize,
+                                                          options: .storageModeShared)
+                        }
+                        if let srcBuffer = bufferOpt,
+                           let cmdBuf = self.commandQueue.makeCommandBuffer(),
+                           let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                            for key in tileKeys {
+                                _ = grid.ensureTile(at: key)
+                                let tileRect = CGRect(x: key.x * tileSize,
+                                                      y: key.y * tileSize,
+                                                      width: tileSize,
+                                                      height: tileSize)
+                                let inter = tileRect.intersection(dirtyRect)
+                                if inter.isNull || inter.isEmpty { continue }
+                                let interW = Int(inter.width)
+                                let interH = Int(inter.height)
+                                if interW <= 0 || interH <= 0 { continue }
+
+                                let srcOffset = Int(inter.origin.y) * bytesPerRow + Int(inter.origin.x) * 4
+                                let localX = Int(inter.origin.x) - (key.x * tileSize)
+                                let localY = Int(inter.origin.y) - (key.y * tileSize)
+
+                                // `try?` silently catches encoder-creation
+                                // failure inside updateTile's closure. Here
+                                // the encoder is built OUTSIDE the closure
+                                // and guarded above; blit.copy itself doesn't
+                                // throw. So the try? never actually
+                                // intercepts an error in this path — it's
+                                // present only because updateTile's
+                                // signature is rethrows. Not a swallowed bug.
+                                try? grid.updateTile(at: key) { tile in
+                                    blitEncoder.copy(
+                                        from: srcBuffer,
+                                        sourceOffset: srcOffset,
+                                        sourceBytesPerRow: bytesPerRow,
+                                        sourceBytesPerImage: bytesPerRow * interH,
+                                        sourceSize: MTLSize(width: interW, height: interH, depth: 1),
+                                        to: tile.texture,
+                                        destinationSlice: 0,
+                                        destinationLevel: 0,
+                                        destinationOrigin: MTLOrigin(x: localX, y: localY, z: 0)
+                                    )
+                                }
+                            }
+                            blitEncoder.endEncoding()
+                            cmdBuf.commit()
+                            cmdBuf.waitUntilCompleted()
+                        }
+                    }
+                }
+                // === End dual-write block ================================
+
                 #if DEBUG
                 print("Flood fill complete")
                 #endif
