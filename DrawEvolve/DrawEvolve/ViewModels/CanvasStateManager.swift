@@ -1555,7 +1555,7 @@ class CanvasStateManager: ObservableObject {
         if let rect = activeSelection {
             renderer.clearRect(rect, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
         } else if let path = selectionPath {
-            renderer.clearPath(path, in: texture, screenSize: documentSize)
+            renderer.clearPath(path, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
         }
 
         // Capture after snapshot

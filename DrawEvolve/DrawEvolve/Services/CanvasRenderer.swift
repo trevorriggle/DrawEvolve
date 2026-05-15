@@ -2646,7 +2646,7 @@ class CanvasRenderer: NSObject {
     }
 
     /// Clear pixels along a path (for lasso selection)
-    func clearPath(_ path: [CGPoint], in texture: MTLTexture, screenSize: CGSize) {
+    func clearPath(_ path: [CGPoint], in texture: MTLTexture, tileGrid: TileGrid? = nil, screenSize: CGSize) {
         print("CanvasRenderer: Clearing path with \(path.count) points")
 
         guard path.count >= 3 else {
@@ -2741,6 +2741,85 @@ class CanvasRenderer: NSObject {
                 bytesPerRow: regionBytesPerRow
             )
         }
+
+        // === Phase 2 Task 4.5: tile-grid dual-write =======================
+        //
+        // Mirror the post-clear bbox region into the tile grid. The CPU
+        // `pixelData` buffer already holds the FINAL pixel state for the
+        // bbox (zeros inside the polygon, original values outside) from
+        // the monolithic getBytes → modify → replace cycle above. We reuse
+        // that buffer here — one extra GPU memcpy via MTLBuffer + blit,
+        // no extra getBytes.
+        //
+        // Per-tile rule: skip if not allocated; otherwise blit the
+        // tile-bbox intersection. Fully-inside-polygon tiles end up as
+        // allocated-but-zeroed (slight memory waste vs dropTile, but
+        // dropping requires a topology test that's only safe for convex
+        // polygons — Phase 6 optimisation).
+        if let grid = tileGrid, regionW > 0, regionH > 0 {
+            let bboxPixelRect = CGRect(x: minX, y: minY, width: regionW, height: regionH)
+            let tileKeys = grid.tilesIntersecting(bboxPixelRect)
+            let tileSize = grid.tileSize
+
+            // Skip the GPU work if no allocated tiles overlap the bbox.
+            let allocatedTouched = tileKeys.contains { grid.tile(at: $0) != nil }
+
+            if allocatedTouched {
+                // Wrap the existing pixelData in a one-shot shared MTLBuffer
+                // (one memcpy at construction). The buffer is bbox-shaped
+                // (regionW × regionH × 4 bytes); per-tile blit uses
+                // sourceOffset + sourceBytesPerRow to read its sub-rect.
+                let bufferOpt: MTLBuffer? = pixelData.withUnsafeBytes { ptr in
+                    guard let base = ptr.baseAddress else { return nil }
+                    return device.makeBuffer(bytes: base,
+                                             length: pixelData.count,
+                                             options: .storageModeShared)
+                }
+                if let srcBuffer = bufferOpt,
+                   let cmdBuf = commandQueue.makeCommandBuffer(),
+                   let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                    for key in tileKeys {
+                        guard grid.tile(at: key) != nil else { continue }
+                        let tileRect = CGRect(x: key.x * tileSize,
+                                              y: key.y * tileSize,
+                                              width: tileSize,
+                                              height: tileSize)
+                        let inter = tileRect.intersection(bboxPixelRect)
+                        if inter.isNull || inter.isEmpty { continue }
+                        let interW = Int(inter.width)
+                        let interH = Int(inter.height)
+                        if interW <= 0 || interH <= 0 { continue }
+
+                        // Source coords inside pixelData (which is bbox-shaped).
+                        let srcCol = Int(inter.origin.x) - minX
+                        let srcRow = Int(inter.origin.y) - minY
+                        let sourceOffset = srcRow * regionBytesPerRow + srcCol * 4
+
+                        // Destination coords inside the tile (tile-local).
+                        let dstX = Int(inter.origin.x) - (key.x * tileSize)
+                        let dstY = Int(inter.origin.y) - (key.y * tileSize)
+
+                        try? grid.updateTile(at: key) { tile in
+                            blitEncoder.copy(
+                                from: srcBuffer,
+                                sourceOffset: sourceOffset,
+                                sourceBytesPerRow: regionBytesPerRow,
+                                sourceBytesPerImage: regionBytesPerRow * interH,
+                                sourceSize: MTLSize(width: interW, height: interH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0,
+                                destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                            )
+                        }
+                    }
+                    blitEncoder.endEncoding()
+                    cmdBuf.commit()
+                    cmdBuf.waitUntilCompleted()
+                }
+            }
+        }
+        // === End dual-write block ========================================
 
         print("Path cleared successfully (\(clearedCount) pixels)")
     }
