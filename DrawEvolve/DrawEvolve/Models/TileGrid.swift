@@ -113,7 +113,10 @@ final class TileGrid {
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             fatalError("TileGrid: failed to allocate \(tileSize)x\(tileSize) tile texture for key (\(key.x), \(key.y))")
         }
-        let tile = LayerTile(texture: texture, dirtyVersion: 0, nonTransparentBits: 0)
+        let tile = LayerTile(texture: texture,
+                             dirtyVersion: 0,
+                             nonTransparentBits: 0,
+                             wasCleared: false)
         tiles[key] = tile
         return tile
     }

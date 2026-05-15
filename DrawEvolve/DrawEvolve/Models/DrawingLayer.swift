@@ -24,6 +24,23 @@ class DrawingLayer: Identifiable, ObservableObject {
     // Metal texture for this layer
     var texture: MTLTexture?
 
+    /// Sparse tile-grid mirror of `texture`, populated by the renderer's
+    /// dual-write paths (tiling migration Phase 2). Nil until the first
+    /// write to this layer initializes it.
+    ///
+    /// **Dimension invariant:** once initialized, `tileGrid`'s dimensions
+    /// (`canvasSize`, `tileSize`, `gridWidth`, `gridHeight`) do not change.
+    /// If the canvas size changes mid-session, the grid keeps its original
+    /// dimensions; the renderer is responsible for either refusing the
+    /// canvas-size change or explicitly rebuilding the grid by reprojecting
+    /// allocated tiles into a new grid. Phase 2 does neither — it relies on
+    /// the existing capped 2048/4096 canvas-size logic to make this a
+    /// non-issue.
+    ///
+    /// Phase 2 + Phase 3: `texture` is still the source of truth; `tileGrid`
+    /// is shadow state. Phase 4 inverts this and removes `texture`.
+    var tileGrid: TileGrid?
+
     // Cached thumbnail for layer panel preview (44x44)
     @Published var thumbnail: UIImage?
 

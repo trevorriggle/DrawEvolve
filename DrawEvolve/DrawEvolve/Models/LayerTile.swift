@@ -17,6 +17,12 @@ import Metal
 ///   split into four equal quadrants and one bit records whether that
 ///   quadrant has any non-transparent pixels. Composite/export passes use
 ///   this to early-out tiles that are allocated but entirely zeroed.
+/// - `wasCleared` tracks first-use clear: tiles allocated with
+///   `storageMode = .private` have undefined initial contents per the
+///   Metal contract, so the renderer must issue a clear render pass on
+///   the first write to a tile. The renderer flips this flag from `false`
+///   to `true` the first time it binds the tile as a render target with
+///   `loadAction = .clear`; subsequent writes use `loadAction = .load`.
 ///
 /// Bit layout of `nonTransparentBits` (bits 4-7 reserved, must remain 0):
 ///
@@ -29,12 +35,12 @@ import Metal
 /// ```
 ///
 /// `texture` is `.bgra8Unorm` with `storageMode = .private`. Metal does not
-/// guarantee any initial contents for `.private` textures; callers must
-/// issue a clear render pass before the first read. Phase 1 has no callers,
-/// so this is benign; Phase 2's renderer integration owns the first-use
-/// clear.
+/// guarantee any initial contents for `.private` textures; the renderer
+/// uses `wasCleared` to decide whether the next bind needs
+/// `loadAction = .clear` (first time) or `.load` (subsequent writes).
 struct LayerTile {
     let texture: MTLTexture
     var dirtyVersion: UInt32
     var nonTransparentBits: UInt8
+    var wasCleared: Bool
 }
