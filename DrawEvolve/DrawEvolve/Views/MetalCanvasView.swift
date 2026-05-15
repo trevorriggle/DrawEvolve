@@ -2364,6 +2364,24 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
 
+                // Simplify the path with Ramer–Douglas–Peucker before
+                // closing. Apple Pencil at 240Hz appends every coalesced
+                // touch sample during touchesMoved, so a leisurely loop
+                // can land 2–5k near-duplicate points in lassoPath. Every
+                // downstream consumer (point-in-polygon hit tests, the
+                // CanvasRenderer mask rasteriser, the SwiftUI marching-
+                // ants Path) walks the polygon linearly per use, so the
+                // un-simplified shape blows the finalize budget and the
+                // animated-stroke per-frame budget alike. RDP with a
+                // ~1 doc-unit tolerance preserves the visible silhouette
+                // (the eye can't see sub-pixel polygon detail) while
+                // typically cutting the point count by 10–50×. Selection
+                // semantics are untouched: the polygon is still a closed
+                // ring in doc space.
+                let preSimplifyCount = lassoPath.count
+                lassoPath = simplifyPathRDP(lassoPath, epsilon: 1.0)
+                print("Lasso: simplified \(preSimplifyCount) → \(lassoPath.count) points")
+
                 // Close the path by connecting back to start
                 lassoPath.append(lassoPath[0])
 
@@ -3285,9 +3303,29 @@ struct MetalCanvasView: UIViewRepresentable {
             return false
         }
 
-        /// Point-in-polygon test using ray casting algorithm
+        /// Point-in-polygon test using ray casting algorithm. Bbox-
+        /// gated so out-of-bounds points skip the ray-cast entirely —
+        /// the bbox loop is the same O(n) walk as the polygon test
+        /// but with branch-light comparisons, so the early-out pays
+        /// for itself the moment a single coordinate falls outside.
         private func pointInPolygon(point: CGPoint, polygon: [CGPoint]) -> Bool {
             guard polygon.count >= 3 else { return false }
+
+            // Bounding-box pre-check. We don't cache the bbox here
+            // because pointInPolygon is called once per touchesBegan,
+            // not in a hot loop — the linear pass is cheap and avoids
+            // a second source of truth. If a future call site iterates,
+            // hoist this into a stored bbox alongside selectionPath.
+            var minX = polygon[0].x, maxX = polygon[0].x
+            var minY = polygon[0].y, maxY = polygon[0].y
+            for i in 1..<polygon.count {
+                let p = polygon[i]
+                if p.x < minX { minX = p.x } else if p.x > maxX { maxX = p.x }
+                if p.y < minY { minY = p.y } else if p.y > maxY { maxY = p.y }
+            }
+            if point.x < minX || point.x > maxX || point.y < minY || point.y > maxY {
+                return false
+            }
 
             var inside = false
             var j = polygon.count - 1
@@ -3307,6 +3345,59 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             return inside
+        }
+
+        /// Ramer–Douglas–Peucker path simplification. Drops near-collinear
+        /// points whose perpendicular distance to the chord between two
+        /// kept neighbors is below `epsilon`. Iterative-with-explicit-stack
+        /// so a degenerate spiral can't blow the recursion limit on a
+        /// 5k-point Pencil-coalesced sample. Preserves first and last
+        /// points (essential — caller relies on path[0] for the close).
+        private func simplifyPathRDP(_ pts: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
+            guard pts.count > 2 else { return pts }
+            let epsSq = epsilon * epsilon
+            var keep = [Bool](repeating: false, count: pts.count)
+            keep[0] = true
+            keep[pts.count - 1] = true
+
+            // Explicit stack of (start, end) index pairs to process.
+            var stack: [(Int, Int)] = [(0, pts.count - 1)]
+            while let (start, end) = stack.popLast() {
+                if end <= start + 1 { continue }
+                let a = pts[start], b = pts[end]
+                let dx = b.x - a.x, dy = b.y - a.y
+                let lenSq = dx * dx + dy * dy
+                var maxDistSq: CGFloat = 0
+                var maxIndex = start
+                for i in (start + 1)..<end {
+                    let p = pts[i]
+                    let distSq: CGFloat
+                    if lenSq == 0 {
+                        let ex = p.x - a.x, ey = p.y - a.y
+                        distSq = ex * ex + ey * ey
+                    } else {
+                        // |cross(b-a, p-a)|² / |b-a|² = perp-dist²
+                        let cross = dx * (a.y - p.y) - dy * (a.x - p.x)
+                        distSq = cross * cross / lenSq
+                    }
+                    if distSq > maxDistSq {
+                        maxDistSq = distSq
+                        maxIndex = i
+                    }
+                }
+                if maxDistSq > epsSq {
+                    keep[maxIndex] = true
+                    stack.append((start, maxIndex))
+                    stack.append((maxIndex, end))
+                }
+            }
+
+            var out: [CGPoint] = []
+            out.reserveCapacity(pts.count)
+            for i in 0..<pts.count where keep[i] {
+                out.append(pts[i])
+            }
+            return out
         }
 
         // MARK: - Eyedropper Helper

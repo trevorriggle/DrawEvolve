@@ -46,56 +46,59 @@ struct MarchingAntsRectangle: View {
     }
 }
 
-/// Animated marching ants border for lasso/path selections
+/// Animated marching ants border for lasso/path selections.
+///
+/// Path geometry is built ONCE in init from the input vertex list and
+/// stored on the view; only the dash-phase animation re-runs per frame.
+/// Without this, every dashPhase tick re-invoked body, which rebuilt
+/// the Path from scratch — for a 3k-point lasso at 120Hz that's ~360k
+/// addLine calls/sec just to animate two strokes that aren't changing
+/// geometry. The cached Path makes the per-frame cost equivalent to
+/// the rectangle marching-ants regardless of polygon vertex count.
 struct MarchingAntsPath: View {
     let path: [CGPoint]
+    private let cachedPath: Path
     @State private var dashPhase: CGFloat = 0
 
-    var body: some View {
-        Path { p in
-            guard !path.isEmpty else { return }
-            p.move(to: path[0])
+    init(path: [CGPoint]) {
+        self.path = path
+        var p = Path()
+        if let first = path.first {
+            p.move(to: first)
             for point in path.dropFirst() {
                 p.addLine(to: point)
             }
-            // Close the path
-            if let first = path.first {
-                p.addLine(to: first)
-            }
+            p.addLine(to: first)
         }
-        .stroke(style: StrokeStyle(
-            lineWidth: 2,
-            lineCap: .round,
-            lineJoin: .round,
-            dash: [8, 4],
-            dashPhase: dashPhase
-        ))
-        .foregroundColor(.white)
-        .overlay(
-            Path { p in
-                guard !path.isEmpty else { return }
-                p.move(to: path[0])
-                for point in path.dropFirst() {
-                    p.addLine(to: point)
-                }
-                if let first = path.first {
-                    p.addLine(to: first)
-                }
-            }
+        self.cachedPath = p
+    }
+
+    var body: some View {
+        cachedPath
             .stroke(style: StrokeStyle(
                 lineWidth: 2,
                 lineCap: .round,
                 lineJoin: .round,
                 dash: [8, 4],
-                dashPhase: dashPhase - 6
+                dashPhase: dashPhase
             ))
-            .foregroundColor(.black)
-        )
-        .onAppear {
-            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
-                dashPhase = -12
+            .foregroundColor(.white)
+            .overlay(
+                cachedPath
+                    .stroke(style: StrokeStyle(
+                        lineWidth: 2,
+                        lineCap: .round,
+                        lineJoin: .round,
+                        dash: [8, 4],
+                        dashPhase: dashPhase - 6
+                    ))
+                    .foregroundColor(.black)
+            )
+            .onAppear {
+                withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                    dashPhase = -12
+                }
             }
-        }
     }
 }
 
