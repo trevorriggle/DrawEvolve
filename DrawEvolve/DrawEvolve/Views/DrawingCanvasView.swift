@@ -799,6 +799,7 @@ struct DrawingCanvasView: View {
                     if phoneBrushSizeRailVisible {
                         BrushSizeRailHorizontal(
                             size: $canvasState.brushSettings.size,
+                            hardness: $canvasState.brushSettings.hardness,
                             screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
                         )
                             .padding(.horizontal, 16)
@@ -2076,6 +2077,7 @@ struct DrawingCanvasView: View {
                     if !isToolbarCollapsed {
                         BrushSizeRail(
                             size: $canvasState.brushSettings.size,
+                            hardness: $canvasState.brushSettings.hardness,
                             screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
                         )
                             .transition(.move(edge: .trailing).combined(with: .opacity))

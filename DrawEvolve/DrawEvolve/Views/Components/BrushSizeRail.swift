@@ -13,11 +13,23 @@
 //  rail while one of those is active just stores the size for next
 //  time a stamp tool runs.
 //
+//  The rail also exposes a hardness slider when a `hardness` binding
+//  is supplied — same chrome, secondary track to the right of the
+//  size track. Size and hardness are the two controls that come up
+//  most while drawing; surfacing them both on the rail saves the
+//  Brush Properties round-trip.
+//
 
 import SwiftUI
 
 struct BrushSizeRail: View {
     @Binding var size: CGFloat
+    /// Optional binding for the secondary hardness track. When nil the
+    /// rail keeps its legacy single-track layout. Callers that own a
+    /// BrushSettings (the canvas) pass `$canvasState.brushSettings.hardness`
+    /// to surface the new control.
+    /// TODO: add opacity slider once wet-ink pipeline lands (see BrushSettingsView.swift ~96–101)
+    var hardness: Binding<CGFloat>? = nil
     /// Matches the range surfaced in `BrushSettingsView` (1...200) so the
     /// rail and the full panel agree on bounds.
     var range: ClosedRange<CGFloat> = 1...200
@@ -27,19 +39,6 @@ struct BrushSizeRail: View {
     /// matches what a single stamp will look like on the canvas.
     var screenDiameter: ((CGFloat) -> CGFloat)? = nil
 
-    /// True while the user is actively dragging — fades in the readout
-    /// bubble that shows the live numeric size.
-    @State private var isDragging = false
-
-    private static let railWidth: CGFloat = 6
-    private static let knobDiameter: CGFloat = 22
-    private static let containerWidth: CGFloat = 36
-    private static let containerHeight: CGFloat = 200
-    /// Padding from the top/bottom edges of the container to the knob's
-    /// extreme positions. Prevents the knob from clipping the rounded
-    /// container corners.
-    private static let trackInset: CGFloat = Self.knobDiameter / 2 + 4
-
     /// Response-curve exponent for knob-position → brush-size mapping.
     /// Mirrors BrushSizeRailHorizontal so the iPad and iPhone rails
     /// feel identical. Exponent 2 compresses small sizes into more
@@ -48,52 +47,117 @@ struct BrushSizeRail: View {
     /// (top half covers 50–200px). Linear (=1) made the top half
     /// feel jumpy with no fine control over small brushes.
     private static let sizeCurve: CGFloat = 2.0
-    /// Cap for the live size-preview circle. At max brush size
-    /// (200px) the preview would otherwise be 200pt diameter and
-    /// occupy a quarter of the canvas. Clamp so the preview reads
-    /// "this is big" without taking over the screen.
+    /// Hardness curve. Hardness is a 0–1 percentage; perceptually
+    /// linear travel reads as the expected behaviour for a soft↔hard
+    /// edge control (Photoshop matches this). The Pencil tool's
+    /// fragment shader floors the value internally so dragging the
+    /// rail below 0.85 still renders "pencil"-looking strokes.
+    private static let hardnessCurve: CGFloat = 1.0
+
+    private static let containerHeight: CGFloat = 200
+    /// Single-track width (size only) — preserves legacy chrome for
+    /// any caller that doesn't pass a hardness binding.
+    private static let containerWidthSingle: CGFloat = 36
+    /// Two-track width — fits the size + hardness tracks side by side
+    /// with a small gap.
+    private static let containerWidthDual: CGFloat = 76
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VerticalRailTrack(
+                value: $size,
+                range: range,
+                curve: Self.sizeCurve,
+                accessibilityLabel: "Brush size",
+                accessibilityValue: "\(Int(size)) pixels",
+                readoutText: "\(Int(size)) px",
+                accessibilityStep: 2,
+                screenDiameter: screenDiameter,
+                showSizePreview: true
+            )
+            if let hardness {
+                VerticalRailTrack(
+                    value: hardness,
+                    range: 0...1,
+                    curve: Self.hardnessCurve,
+                    accessibilityLabel: "Brush hardness",
+                    accessibilityValue: "\(Int(hardness.wrappedValue * 100)) percent",
+                    readoutText: "\(Int(hardness.wrappedValue * 100))%",
+                    accessibilityStep: 0.05,
+                    screenDiameter: nil,
+                    showSizePreview: false
+                )
+            }
+        }
+        .padding(.horizontal, 4)
+        .frame(
+            width: hardness == nil ? Self.containerWidthSingle : Self.containerWidthDual,
+            height: Self.containerHeight
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(uiColor: .systemBackground).opacity(0.95))
+                .shadow(radius: 4)
+        )
+    }
+}
+
+/// One vertical track inside the rail. Owns its own knob, fill, drag
+/// gesture, and (optional) live preview readout. The outer
+/// `BrushSizeRail` lays out one or two of these inside the shared
+/// rounded-rectangle chrome.
+private struct VerticalRailTrack: View {
+    @Binding var value: CGFloat
+    var range: ClosedRange<CGFloat>
+    var curve: CGFloat
+    var accessibilityLabel: String
+    var accessibilityValue: String
+    var readoutText: String
+    var accessibilityStep: CGFloat
+    /// When set, the size preview circle floats to the LEFT of the
+    /// knob using this converter from value→on-screen pt. Hardness
+    /// passes nil and just shows the numeric readout.
+    var screenDiameter: ((CGFloat) -> CGFloat)?
+    var showSizePreview: Bool
+
+    @State private var isDragging = false
+
+    private static let railWidth: CGFloat = 6
+    private static let knobDiameter: CGFloat = 22
+    private static let trackInset: CGFloat = Self.knobDiameter / 2 + 4
     private static let previewDiameterCap: CGFloat = 80
 
     var body: some View {
-        ZStack(alignment: .top) {
-            container
+        GeometryReader { proxy in
+            let trackHeight = proxy.size.height - 2 * Self.trackInset
+            let knobY = knobYOffset(in: trackHeight) + Self.trackInset
 
-            GeometryReader { proxy in
-                let trackHeight = proxy.size.height - 2 * Self.trackInset
-                let knobY = knobYOffset(in: trackHeight) + Self.trackInset
+            Capsule()
+                .fill(Color.primary.opacity(0.15))
+                .frame(width: Self.railWidth, height: trackHeight)
+                .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
 
-                // Background rail
-                Capsule()
-                    .fill(Color.primary.opacity(0.15))
-                    .frame(width: Self.railWidth, height: trackHeight)
-                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            Capsule()
+                .fill(Color.accentColor)
+                .frame(
+                    width: Self.railWidth,
+                    height: trackHeight - (knobY - Self.trackInset)
+                )
+                .position(
+                    x: proxy.size.width / 2,
+                    y: (proxy.size.height + knobY) / 2
+                )
 
-                // Filled portion (bottom up — bigger size = more fill)
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(
-                        width: Self.railWidth,
-                        height: trackHeight - (knobY - Self.trackInset)
-                    )
-                    .position(
-                        x: proxy.size.width / 2,
-                        y: (proxy.size.height + knobY) / 2
-                    )
+            Circle()
+                .fill(Color.accentColor)
+                .overlay(Circle().stroke(Color.white, lineWidth: 2))
+                .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
+                .frame(width: Self.knobDiameter, height: Self.knobDiameter)
+                .position(x: proxy.size.width / 2, y: knobY)
 
-                // Knob
-                Circle()
-                    .fill(Color.accentColor)
-                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                    .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
-                    .frame(width: Self.knobDiameter, height: Self.knobDiameter)
-                    .position(x: proxy.size.width / 2, y: knobY)
-
-                // Live size preview — filled circle scaled to actual
-                // brush diameter (capped). Floats to the LEFT of the
-                // knob in the canvas-overlap area so the user can
-                // size-check against their drawing before stroking.
-                if isDragging {
-                    let trueDiameter = screenDiameter?(size) ?? size
+            if isDragging {
+                if showSizePreview {
+                    let trueDiameter = screenDiameter?(value) ?? value
                     let previewDiameter = min(trueDiameter, Self.previewDiameterCap)
                     Circle()
                         .fill(Color.primary.opacity(0.85))
@@ -108,13 +172,9 @@ struct BrushSizeRail: View {
                         .position(x: -(Self.previewDiameterCap / 2 + 12), y: knobY)
                         .transition(.opacity)
 
-                    // Numeric readout bubble — further left of the
-                    // preview circle. .fixedSize(horizontal: true) is
-                    // REQUIRED: without it the parent GeometryReader's
-                    // 36pt width propagates as the proposed width and
-                    // the "200 px" text wraps onto three lines. Fixed
-                    // sizing tells the Text to use its natural width.
-                    Text("\(Int(size)) px")
+                    // .fixedSize so the bubble doesn't wrap when the
+                    // parent's proposed width is narrow.
+                    Text(readoutText)
                         .font(.caption.weight(.semibold))
                         .monospacedDigit()
                         .foregroundColor(.white)
@@ -125,84 +185,84 @@ struct BrushSizeRail: View {
                         .fixedSize(horizontal: true, vertical: false)
                         .position(x: -(Self.previewDiameterCap + 48), y: knobY)
                         .transition(.opacity)
+                } else {
+                    // Hardness: just the numeric pill, floated alongside
+                    // the knob. The size-track owns the preview-circle
+                    // affordance so we don't double up.
+                    Text(readoutText)
+                        .font(.caption.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.78))
+                        .clipShape(Capsule())
+                        .fixedSize(horizontal: true, vertical: false)
+                        .position(x: proxy.size.width + 28, y: knobY)
+                        .transition(.opacity)
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(dragGesture)
         }
-        .frame(width: Self.containerWidth, height: Self.containerHeight)
+        .frame(width: 30)
+        .contentShape(Rectangle())
+        .gesture(dragGesture)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Brush size")
-        .accessibilityValue("\(Int(size)) pixels")
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(accessibilityValue)
         .accessibilityAdjustableAction { dir in
             switch dir {
-            case .increment: size = min(range.upperBound, size + 2)
-            case .decrement: size = max(range.lowerBound, size - 2)
+            case .increment: value = min(range.upperBound, value + accessibilityStep)
+            case .decrement: value = max(range.lowerBound, value - accessibilityStep)
             @unknown default: break
             }
         }
     }
 
-    // MARK: - Container chrome
-
-    private var container: some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(Color(uiColor: .systemBackground).opacity(0.95))
-            .shadow(radius: 4)
-    }
-
-    // MARK: - Geometry
-
-    /// Knob's vertical center within the track region (0 = top of track,
-    /// trackHeight = bottom of track). Bigger size renders higher on the
-    /// rail, matching Procreate's convention.
-    ///
-    /// Inverse of the curve applied in `updateSize`: the size-axis
-    /// fraction is `((size - lo) / (hi - lo))^(1/curve)`, then we
-    /// flip to Y because Y-down means "bigger = smaller knobY."
-    /// Without this inverse the knob would drift relative to the
-    /// size value the slider just wrote (e.g. setting size=50 from
-    /// Brush Properties would leave the knob in the wrong place).
     private func knobYOffset(in trackHeight: CGFloat) -> CGFloat {
-        let raw = (size - range.lowerBound) / (range.upperBound - range.lowerBound)
+        let raw = (value - range.lowerBound) / (range.upperBound - range.lowerBound)
         let clamped = max(0, min(1, raw))
-        let t = pow(clamped, 1 / Self.sizeCurve)
+        let t = pow(clamped, 1 / curve)
         return trackHeight * (1 - t)
     }
 
-    // MARK: - Gesture
-
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
-            .onChanged { value in
+            .onChanged { gesture in
                 if !isDragging {
                     withAnimation(.easeOut(duration: 0.12)) { isDragging = true }
                 }
-                updateSize(from: value.location.y)
+                updateValue(from: gesture.location.y)
             }
             .onEnded { _ in
                 withAnimation(.easeOut(duration: 0.18)) { isDragging = false }
             }
     }
 
-    private func updateSize(from y: CGFloat) {
-        let trackHeight = Self.containerHeight - 2 * Self.trackInset
+    private func updateValue(from y: CGFloat) {
+        // The GeometryReader's height equals the rail's content height;
+        // the outer container adds vertical padding but the gesture
+        // coordinates are in the GeometryReader's local space.
+        let trackHeight = BrushSizeRail.containerHeightForTrack - 2 * Self.trackInset
         let trackY = y - Self.trackInset
         let clamped = max(0, min(trackHeight, trackY))
-        // Flip so t=0 at bottom of track, t=1 at top — Procreate convention.
         let t = 1 - (clamped / trackHeight)
-        // Quadratic response: bottom half of track covers small
-        // sizes (fine control), top half covers big sizes (coarse
-        // control). See `sizeCurve` doc.
-        let curved = pow(t, Self.sizeCurve)
+        let curved = pow(t, curve)
         let raw = range.lowerBound + curved * (range.upperBound - range.lowerBound)
-        size = max(range.lowerBound, min(range.upperBound, raw))
+        value = max(range.lowerBound, min(range.upperBound, raw))
     }
 }
 
+extension BrushSizeRail {
+    /// Exposed to `VerticalRailTrack` so it can compute the same track
+    /// height the outer container reserved. Keeping this here avoids a
+    /// magic-number drift between layout and gesture math.
+    fileprivate static var containerHeightForTrack: CGFloat { containerHeight }
+}
+
 #Preview {
-    VStack {
+    HStack {
         BrushSizeRail(size: .constant(40))
+        BrushSizeRail(size: .constant(40), hardness: .constant(0.6))
     }
     .padding()
     .background(Color.gray.opacity(0.2))
