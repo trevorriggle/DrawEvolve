@@ -48,6 +48,11 @@ struct EveSheetHost: View {
             EveConversationView(manager: manager)
         }
         .background(Color(uiColor: .systemBackground))
+        // Block iPhone's interactive swipe-down dismiss when the user
+        // has unsent text — losing a half-typed message to an accidental
+        // swipe broke too much trust. The X button still dismisses.
+        // Harmless no-op on iPad (overlay presentation, not a sheet).
+        .interactiveDismissDisabled(manager.hasUnsentText)
     }
 
     private var header: some View {

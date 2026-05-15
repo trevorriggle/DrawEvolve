@@ -34,6 +34,14 @@ final class EveConversationManager: ObservableObject {
     /// draft within the same manager lifetime.
     @Published var draft: String = ""
 
+    /// True when the input bar has non-whitespace text the user hasn't
+    /// sent yet. Gates iPhone's interactive (swipe-down) sheet dismissal
+    /// so an in-progress message isn't lost to an accidental swipe — the
+    /// X button still dismisses, since that's a deliberate tap.
+    var hasUnsentText: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     enum LoadState: Equatable {
         case idle
         case loading
