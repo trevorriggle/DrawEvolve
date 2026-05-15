@@ -29,6 +29,13 @@ struct DrawEvolveApp: App {
                 .onOpenURL { url in
                     Task { await authManager.handleDeepLink(url) }
                 }
+                // Lock the app to light mode by default. The canvas
+                // attaches its own .preferredColorScheme based on the
+                // user's saved preference, which takes precedence on
+                // that screen — this default just covers everywhere
+                // else (launch, auth gate, gallery, prompt) so iPads
+                // running system-wide dark mode don't come up dark.
+                .preferredColorScheme(.light)
         }
         .onChange(of: scenePhase) { _, newPhase in
             // Refresh remote feature flags whenever the app becomes
