@@ -746,6 +746,16 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipeline)
 
+        // Clip to document bounds. finalTexture == canvasSize == documentSize
+        // today, so this is a defensive no-op; if doc/canvas ever decouple,
+        // it ensures the export still drops content past document bounds
+        // instead of leaking texture-edge pixels into the saved image.
+        renderEncoder.setScissorRect(MTLScissorRect(
+            x: 0, y: 0,
+            width: finalTexture.width,
+            height: finalTexture.height
+        ))
+
         for layer in layers where layer.isVisible {
             guard let layerTexture = layer.texture else {
                 continue
@@ -920,6 +930,103 @@ class CanvasRenderer: NSObject {
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
+    /// Set a scissor on the on-screen encoder that matches the canvas
+    /// square's footprint on the drawable. Subsequent draws (background,
+    /// references, layer composite, floating textures, stroke preview)
+    /// are clipped to this rect so content rendered past the canvas —
+    /// e.g. a floating selection dragged off-edge, or a floating-text
+    /// box positioned partly outside — doesn't bleed onto the gray
+    /// workbench area surrounding the canvas.
+    ///
+    /// Math mirrors `quadVertexShaderWithTransform` corner-by-corner so
+    /// the scissor AABB exactly matches where the canvas pixels land on
+    /// the drawable. Rotation produces a rotated quad, not an axis-
+    /// aligned rect; we take the AABB of the four rotated corners,
+    /// which slightly over-clips into the rotated-canvas-bounds corners
+    /// (worst case √2× at 45°) but still bounds the bleed.
+    ///
+    /// `viewportPoints` is `view.bounds.size`; `drawableSize` is
+    /// `view.drawableSize` (pixels). Scissor is set in drawable pixels.
+    func setCanvasFootprintScissor(
+        on encoder: MTLRenderCommandEncoder,
+        drawableSize: CGSize,
+        viewportPoints: CGSize,
+        zoomScale: CGFloat,
+        panOffset: CGPoint,
+        canvasRotation: CGFloat,
+        flipHorizontal: Bool,
+        flipVertical: Bool
+    ) {
+        let vx = viewportPoints.width
+        let vy = viewportPoints.height
+        guard vx > 0, vy > 0, drawableSize.width > 0, drawableSize.height > 0 else {
+            return
+        }
+
+        // Shader fit-to-longest in points: canvas square fills the longer
+        // viewport dimension at zoom=1.
+        let fitSize = max(vx, vy)
+        let halfFit = fitSize * 0.5
+        let cx = vx * 0.5
+        let cy = vy * 0.5
+
+        // Unit-canvas corners in Y-up viewport-pts space (before zoom/
+        // rotate/pan/flip), centered at viewport center.
+        var corners: [(x: CGFloat, y: CGFloat)] = [
+            (-halfFit, -halfFit), ( halfFit, -halfFit),
+            (-halfFit,  halfFit), ( halfFit,  halfFit),
+        ]
+        // Apply zoom around (0,0), then rotate around (0,0), then re-anchor
+        // at viewport center, then pan, then flip — same order as the
+        // shader's screenPos math.
+        let cosT = cos(canvasRotation)
+        let sinT = sin(canvasRotation)
+        for i in corners.indices {
+            var x = corners[i].x * zoomScale
+            var y = corners[i].y * zoomScale
+            let rx = x * cosT - y * sinT
+            let ry = x * sinT + y * cosT
+            x = rx + cx
+            y = ry + cy
+            // Pan: x += pan.x, y -= pan.y (shader flips pan.y because
+            // screenPos here is Y-up but pan is in UIKit Y-down pts).
+            x += panOffset.x
+            y -= panOffset.y
+            if flipHorizontal { x = vx - x }
+            if flipVertical   { y = vy - y }
+            corners[i] = (x, y)
+        }
+
+        // Convert Y-up viewport-pts corners → Y-down drawable-pixel
+        // coords. pointToPixel scales x/y identically since drawableSize
+        // == bounds * contentScaleFactor on both axes.
+        let scaleX = drawableSize.width / vx
+        let scaleY = drawableSize.height / vy
+        var minX = CGFloat.greatestFiniteMagnitude
+        var maxX = -CGFloat.greatestFiniteMagnitude
+        var minY = CGFloat.greatestFiniteMagnitude
+        var maxY = -CGFloat.greatestFiniteMagnitude
+        for c in corners {
+            let px = c.x * scaleX
+            let py = (vy - c.y) * scaleY
+            minX = min(minX, px); maxX = max(maxX, px)
+            minY = min(minY, py); maxY = max(maxY, py)
+        }
+
+        // Clamp to drawable bounds. Floor mins, ceil maxes so the
+        // scissor never crops a partially-covered pixel on the canvas
+        // edge.
+        let dx = drawableSize.width
+        let dy = drawableSize.height
+        let x0 = Int(max(0, floor(minX)))
+        let y0 = Int(max(0, floor(minY)))
+        let x1 = Int(min(dx, ceil(maxX)))
+        let y1 = Int(min(dy, ceil(maxY)))
+        let w = max(0, x1 - x0)
+        let h = max(0, y1 - y0)
+        encoder.setScissorRect(MTLScissorRect(x: x0, y: y0, width: w, height: h))
     }
 
     // MARK: - Reference Image (back-canvas mode)

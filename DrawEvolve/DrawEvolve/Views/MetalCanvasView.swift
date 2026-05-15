@@ -696,6 +696,23 @@ struct MetalCanvasView: UIViewRepresentable {
             let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
             let flipState = SIMD2<Float>(flipH ? 1 : 0, flipV ? 1 : 0)
 
+            // Clip every subsequent draw on this encoder to the canvas's
+            // footprint on the drawable. Stops floating-text boxes,
+            // dragged selections, and active-layer drag previews from
+            // bleeding onto the gray workbench area outside the canvas
+            // square. Background, references, layers, floating textures,
+            // and the stroke preview all share this encoder.
+            renderer?.setCanvasFootprintScissor(
+                on: renderEncoder,
+                drawableSize: view.drawableSize,
+                viewportPoints: view.bounds.size,
+                zoomScale: zoomScale,
+                panOffset: panOffset,
+                canvasRotation: rotation,
+                flipHorizontal: flipH,
+                flipVertical: flipV
+            )
+
             // Draw opaque white canvas background so the gray workbench
             // doesn't show through transparent layer regions
             renderer?.renderCanvasBackground(
