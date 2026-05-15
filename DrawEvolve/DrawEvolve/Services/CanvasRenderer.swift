@@ -1292,6 +1292,7 @@ class CanvasRenderer: NSObject {
     func compositeFloatingTextureIntoLayer(
         _ floating: MTLTexture,
         into layer: MTLTexture,
+        tileGrid: TileGrid? = nil,
         atDocRect docRect: CGRect,
         rotation: Float = 0.0
     ) {
@@ -1355,6 +1356,81 @@ class CanvasRenderer: NSObject {
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
+
+        // === Phase 2 Task 4.3: tile-grid dual-write (shadow pass) =========
+        //
+        // Replay the same composite into the tiles intersecting docRect.
+        // The trick: set canvasSize=viewport=tileSize and shift the rect
+        // by the tile's pixel origin. The shader then computes NDC for
+        // tile-local doc coords; the rasterizer clips to the tile's
+        // framebuffer; in-tile fragments sample the floating texture at
+        // the same layer-pixel UV they would in the monolithic pass.
+        //
+        // Selection rotation works unchanged: it's applied around the
+        // rect's center in doc space, and the center shifts by the same
+        // tile origin, so the relative rotation is identical.
+        if let grid = tileGrid {
+            // pixelRect: docRect converted to layer-pixel space, same
+            // scale the monolithic pass used at line 1337.
+            let pixelRect = CGRect(
+                x: docRect.origin.x * scale,
+                y: docRect.origin.y * scale,
+                width: docRect.width * scale,
+                height: docRect.height * scale
+            )
+            let tileKeys = grid.tilesIntersecting(pixelRect)
+            let tileSizeF = Float(grid.tileSize)
+
+            for key in tileKeys {
+                let tileOriginPx = SIMD2<Float>(Float(key.x * grid.tileSize),
+                                                Float(key.y * grid.tileSize))
+                _ = grid.ensureTile(at: key)
+
+                try? grid.updateTile(at: key) { tile in
+                    let desc = MTLRenderPassDescriptor()
+                    desc.colorAttachments[0].texture = tile.texture
+                    desc.colorAttachments[0].loadAction = tile.wasCleared ? .load : .clear
+                    desc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                    desc.colorAttachments[0].storeAction = .store
+
+                    guard let tileEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: desc) else {
+                        throw TileRenderError.encoderCreationFailed
+                    }
+                    tileEncoder.setRenderPipelineState(pipelineState)
+                    tileEncoder.setFragmentTexture(floating, index: 0)
+
+                    var tileOpacity: Float = 1.0
+                    tileEncoder.setFragmentBytes(&tileOpacity, length: MemoryLayout<Float>.stride, index: 0)
+
+                    var tileTransform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
+                    tileEncoder.setVertexBytes(&tileTransform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+
+                    var tileViewport = SIMD2<Float>(tileSizeF, tileSizeF)
+                    tileEncoder.setVertexBytes(&tileViewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+
+                    var tileCanvas = SIMD2<Float>(tileSizeF, tileSizeF)
+                    tileEncoder.setVertexBytes(&tileCanvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+
+                    var tileRect = SIMD4<Float>(
+                        Float(pixelRect.origin.x) - tileOriginPx.x,
+                        Float(pixelRect.origin.y) - tileOriginPx.y,
+                        Float(pixelRect.width),
+                        Float(pixelRect.height)
+                    )
+                    tileEncoder.setVertexBytes(&tileRect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
+
+                    var tileRot = rotation
+                    tileEncoder.setVertexBytes(&tileRot, length: MemoryLayout<Float>.stride, index: 4)
+
+                    var tileFlip = SIMD2<Float>(0, 0)
+                    tileEncoder.setVertexBytes(&tileFlip, length: MemoryLayout<SIMD2<Float>>.stride, index: 5)
+
+                    tileEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                    tileEncoder.endEncoding()
+                }
+            }
+        }
+        // === End dual-write block ========================================
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()

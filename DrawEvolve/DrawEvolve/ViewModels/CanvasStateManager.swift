@@ -779,6 +779,7 @@ class CanvasStateManager: ObservableObject {
         renderer.compositeFloatingTextureIntoLayer(
             cachedTexture,
             into: texture,
+            tileGrid: layers[selectedLayerIndex].tileGrid,
             atDocRect: docRect,
             rotation: Float(ft.rotation.radians)
         )
@@ -1724,6 +1725,7 @@ class CanvasStateManager: ObservableObject {
             renderer.compositeFloatingTextureIntoLayer(
                 floating,
                 into: texture,
+                tileGrid: layers[selectedLayerIndex].tileGrid,
                 atDocRect: finalRect,
                 rotation: Float(selectionRotation.radians)
             )
