@@ -67,7 +67,7 @@ final class CloudDrawingStorageManager: ObservableObject {
     private let fileManager = FileManager.default
     private let storageBucketID = "drawings"
     private let signedURLTTLSeconds = 3600     // 1 hour per Phase 3 spec
-    private let thumbnailMaxDimension: CGFloat = 256
+    private let thumbnailMaxDimension: CGFloat = 512
     private let fullImageJPEGQuality: CGFloat = 0.9
     private let thumbnailJPEGQuality: CGFloat = 0.8
 
