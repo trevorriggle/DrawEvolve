@@ -51,6 +51,7 @@ struct EveInputBar: View {
                 TextField("Ask Eve…", text: $manager.draft, axis: .vertical)
                     .lineLimit(1...5)
                     .focused($isFocused)
+                    .keyboardType(.default)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(Color(uiColor: .secondarySystemBackground))
@@ -82,6 +83,16 @@ struct EveInputBar: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(Color(uiColor: .systemBackground))
+        }
+        // Clear stale focus when the manager lands a fresh conversation.
+        // Why: the M6 "Ask Eve about this" handoff from Eye Test can leave
+        // SwiftUI's last-focused-field state pointing at the panel's prior
+        // field, which makes the system inherit a compact / number-pad
+        // keyboard configuration on first tap. Resetting on conversation
+        // arrival ensures the user's first tap into this field starts
+        // with no inherited focus context.
+        .onChange(of: manager.conversation?.id) { _, _ in
+            isFocused = false
         }
     }
 
