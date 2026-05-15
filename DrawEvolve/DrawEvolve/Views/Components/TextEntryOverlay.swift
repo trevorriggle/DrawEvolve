@@ -157,6 +157,20 @@ private struct TextEntryHost: UIViewRepresentable {
         tv.text = canvasState.floatingText?.content ?? ""
         tv.delegate = context.coordinator
         tv.isScrollEnabled = false
+        // Single-pipeline keyboard config — both `.text` and `.textOnPath`
+        // route their keystrokes through this one UITextView (see
+        // beginText / beginTextOnPath / beginTextOnPathCircle in
+        // CanvasStateManager — they all create the FloatingText that
+        // this overlay then captures input for). These four traits are
+        // set explicitly to .default to lock the contract: regular type
+        // and type-on-path get the IDENTICAL platform keyboard,
+        // QuickType bar included. A previous build set keyboardType to a
+        // numeric/compact variant on the type-on-path path; explicit
+        // assignment here defends against that drift returning.
+        tv.keyboardType = .default
+        tv.returnKeyType = .default
+        tv.autocapitalizationType = .sentences
+        tv.autocorrectionType = .default
         // Autocorrect / spell-check / smart-dashes / smart-quotes /
         // smart-insert-delete left at the platform defaults so the user
         // sees the standard iOS keyboard (QuickType bar included). The
