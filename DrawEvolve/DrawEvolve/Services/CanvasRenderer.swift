@@ -1308,6 +1308,101 @@ class CanvasRenderer: NSObject {
         commandBuffer.waitUntilCompleted()
     }
 
+    /// Mirror a layer texture's pixel data about its center on the
+    /// requested axes, in place. Used by the flip-canvas tool to bake
+    /// the flip into pixels — after this returns, the layer's mirrored
+    /// content is part of the layer's stored bitmap and no display-time
+    /// transform is needed to keep it flipped. Subsequent rotation,
+    /// pan, or zoom do not undo the flip.
+    ///
+    /// Implementation: copy the source layer into a temp texture, then
+    /// render a fullscreen quad back into the original layer that
+    /// samples from the temp and uses the existing transform-pipeline's
+    /// flip math to mirror positions. All work runs on the GPU — no
+    /// CPU readback. Pipeline: `textureDisplayWithTransformPipelineState`
+    /// (vertex shader `quadVertexShaderWithTransform` already implements
+    /// the canvas-flip mirror about viewport center, which lines up
+    /// with texture-center for a 1:1 viewport).
+    func flipLayerTextureInPlace(_ texture: MTLTexture,
+                                  flipHorizontal: Bool,
+                                  flipVertical: Bool) {
+        if !flipHorizontal && !flipVertical { return }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: texture.pixelFormat,
+            width: texture.width,
+            height: texture.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+
+        guard let temp = device.makeTexture(descriptor: descriptor),
+              let pipelineState = textureDisplayWithTransformPipelineState,
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            print("ERROR: flip-in-place failed to allocate temp/pipeline/command buffer")
+            return
+        }
+
+        // 1. Blit source pixels into the temp texture so the subsequent
+        //    render pass has something to sample (it cannot read and
+        //    write the same texture in one pass).
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(
+                from: texture, sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                to: temp, destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.endEncoding()
+        }
+
+        // 2. Clear-and-render back into the layer. The clear + standard
+        //    source-over blend resolves to exactly the (flipped) source
+        //    pixels.
+        let renderDescriptor = MTLRenderPassDescriptor()
+        renderDescriptor.colorAttachments[0].texture = texture
+        renderDescriptor.colorAttachments[0].loadAction = .clear
+        renderDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        renderDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderDescriptor) else {
+            commandBuffer.commit()
+            return
+        }
+
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentTexture(temp, index: 0)
+
+        var opacity: Float = 1.0
+        encoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
+
+        // Identity transform — no zoom, pan, rotation. The vertex shader
+        // applies flip in screen-space relative to the viewport, which
+        // here equals the layer pixel size; mirror-about-viewport-center
+        // becomes mirror-about-layer-center.
+        var transform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
+        encoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+
+        var viewport = SIMD2<Float>(Float(texture.width), Float(texture.height))
+        encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+
+        // canvasSize uniform is unused by the shader but the buffer
+        // slot must be bound. Pass the viewport for a benign value.
+        var canvas = viewport
+        encoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+
+        var flip = SIMD2<Float>(flipHorizontal ? 1 : 0, flipVertical ? 1 : 0)
+        encoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 3)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
     /// Upload a UIImage into a fresh Metal texture. Used to build the floating
     /// selection texture once (when extraction completes) so subsequent drag
     /// frames can render it on the GPU without touching the CPU pixels.

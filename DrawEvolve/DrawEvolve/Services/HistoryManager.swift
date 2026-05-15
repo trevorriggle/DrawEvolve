@@ -59,6 +59,13 @@ enum HistoryAction {
     case layerRemoved(DrawingLayer, index: Int)
     case layerMoved(from: Int, to: Int)
     case layerPropertyChanged(layerId: UUID, property: LayerProperty)
+    // Flip is an involution — undoing it is just applying the same flip
+    // again on the same set of layers, so we don't need before/after
+    // pixel snapshots (which would force a full-texture getBytes per
+    // layer). `layerIds` pins which layers were flipped at op time so
+    // visibility changes between record and undo don't re-flip the
+    // wrong set.
+    case flipContent(layerIds: [UUID], flipH: Bool, flipV: Bool)
 
     enum LayerProperty {
         case opacity(old: Float, new: Float)
