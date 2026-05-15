@@ -206,6 +206,11 @@ struct DrawingCanvasView: View {
     @State private var isSavingToPhotos = false
     @State private var showPhotoSaveConfirmation = false
     @State private var photoSaveError: String?
+    /// Routed separately from `photoSaveError` so the permission-denied
+    /// case can present a Cancel / Open Settings two-button alert instead
+    /// of the generic OK-only "couldn't save" alert. An OK-only dead-end
+    /// when the system has nothing actionable to offer was the bug.
+    @State private var showPhotoPermissionDeniedAlert = false
 
     // Critique history
     @State private var critiqueHistory: [CritiqueEntry] = []
@@ -494,6 +499,19 @@ struct DrawingCanvasView: View {
             Button("OK", role: .cancel) {}
         } message: { err in
             Text(err)
+        }
+        .alert(
+            "Photos Access Needed",
+            isPresented: $showPhotoPermissionDeniedAlert
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("Open Settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+        } message: {
+            Text("DrawEvolve needs permission to save to Photos. Enable it in Settings > Privacy & Security > Photos > DrawEvolve.")
         }
         .onChange(of: canvasState.currentTool) { _, _ in
             // When tool changes, commit any active selection
@@ -3500,6 +3518,12 @@ struct DrawingCanvasView: View {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 showPhotoSaveConfirmation = false
             }
+        } catch PhotoLibrarySaverError.permissionDenied {
+            // The system permission prompt has already been answered "no"
+            // (or "limited" without add-only access). An OK-only alert
+            // here would be a dead-end since iOS won't re-prompt — route
+            // the user to Settings instead.
+            showPhotoPermissionDeniedAlert = true
         } catch {
             photoSaveError = error.localizedDescription
         }
