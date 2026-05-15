@@ -2129,6 +2129,7 @@ struct MetalCanvasView: UIViewRepresentable {
             renderer.renderStroke(
                 subStroke,
                 to: texture,
+                tileGrid: layers[selectedLayerIndex].tileGrid,
                 screenSize: documentSize,
                 selectionPath: selPath,
                 completion: onDone
@@ -2683,7 +2684,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     if stroke.tool == .blur {
                         renderer.renderBlurStroke(stroke, to: texture, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     } else {
-                        renderer.renderStroke(stroke, to: texture, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
+                        renderer.renderStroke(stroke, to: texture, tileGrid: layer.tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     }
                 }
                 dispatchStroke { [weak self] in

@@ -121,6 +121,41 @@ final class TileGrid {
         return tile
     }
 
+    /// Runs `body` with the current tile at `key`, then bumps the tile's
+    /// metadata (`wasCleared = true`, `dirtyVersion &+= 1`) only if `body`
+    /// returns normally.
+    ///
+    /// **Failure semantics.** If `body` throws (e.g., the caller could not
+    /// create a Metal render encoder for the tile), the tile's metadata
+    /// stays at its prior state. Pixel-side state may be inconsistent —
+    /// the caller's partial render may have touched the tile's texture —
+    /// but `dirtyVersion` accurately reflects "this tile was last
+    /// successfully written at the prior version." Task 5's verification
+    /// harness depends on this contract: a bumped `dirtyVersion` on a
+    /// failed render would surface as a spurious mismatch.
+    ///
+    /// **No-op if `key` is absent.** Callers that want allocate-on-write
+    /// semantics should call `ensureTile(at:)` first; this method
+    /// deliberately does not allocate.
+    ///
+    /// **Mutates only `wasCleared` and `dirtyVersion`.** Other fields
+    /// (`nonTransparentBits`, the `texture` reference) are not touched.
+    /// Phase 6+ optimisations that need to update `nonTransparentBits`
+    /// will require a separate API.
+    ///
+    /// The closure receives the tile by value, so it can read fields like
+    /// `wasCleared` (to choose `loadAction`) and the `texture` reference
+    /// (to bind as the render target), but it cannot mutate the stored
+    /// tile directly — all metadata writes are owned by this method.
+    func updateTile(at key: TileKey, _ body: (LayerTile) throws -> Void) rethrows {
+        guard let tile = tiles[key] else { return }
+        try body(tile)
+        var bumped = tile
+        bumped.wasCleared = true
+        bumped.dirtyVersion &+= 1
+        tiles[key] = bumped
+    }
+
     /// Drops the tile at `key` if allocated. No-op if absent.
     ///
     /// Used by full-clear operations and by the eraser path when a stamp

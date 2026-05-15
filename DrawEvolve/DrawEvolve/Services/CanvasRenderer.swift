@@ -497,8 +497,40 @@ class CanvasRenderer: NSObject {
     /// `selectionPath`: when non-nil, the stroke is rasterized to a mask and
     /// every stamp's fragment alpha is multiplied by the mask sample. Pass
     /// nil to paint without clipping (default 1×1 `noMaskTexture` is bound).
+    /// Error surface for the tile-grid dual-write. Metal command-encoder
+    /// creation returns nil rather than throwing; this enum bridges that
+    /// into `TileGrid.updateTile(at:_:)`'s throwing contract so a failed
+    /// encoder leaves the tile's metadata pinned at its last successful
+    /// write.
+    private enum TileRenderError: Error {
+        case encoderCreationFailed
+    }
+
+    /// Bounding box of a brush stroke in document-pixel space, expanded by
+    /// `stroke.settings.size / 2` to cover the full footprint of every
+    /// stamp. Returns `.null` for an empty stroke, which `TileGrid.tilesIntersecting`
+    /// turns into an empty key list.
+    private func strokeBoundingBox(_ stroke: BrushStroke) -> CGRect {
+        guard let first = stroke.points.first else { return .null }
+        let radius = CGFloat(stroke.settings.size) / 2.0
+        var minX = first.location.x - radius
+        var minY = first.location.y - radius
+        var maxX = first.location.x + radius
+        var maxY = first.location.y + radius
+        for p in stroke.points.dropFirst() {
+            let px = p.location.x
+            let py = p.location.y
+            if px - radius < minX { minX = px - radius }
+            if py - radius < minY { minY = py - radius }
+            if px + radius > maxX { maxX = px + radius }
+            if py + radius > maxY { maxY = py + radius }
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
     func renderStroke(_ stroke: BrushStroke,
                       to texture: MTLTexture,
+                      tileGrid: TileGrid? = nil,
                       screenSize: CGSize,
                       selectionPath: [CGPoint]?,
                       completion: (() -> Void)? = nil) {
@@ -641,6 +673,91 @@ class CanvasRenderer: NSObject {
         }
 
         renderEncoder.endEncoding()
+
+        // === Phase 2 Task 4.1: tile-grid dual-write (shadow pass) =========
+        //
+        // Mirror the stroke into the layer's TileGrid. The monolithic write
+        // above remains the source of truth (Phase 2/3); this block writes
+        // to whatever tiles the stroke's bbox intersects, so Phase 5's
+        // verification harness can confirm the two representations agree.
+        //
+        // Gated on `tileGrid != nil`: Task 4 commits land while Task 5 has
+        // not yet wired up grid allocation, so every layer's grid is nil
+        // and this block is dormant. When Task 5 starts allocating grids
+        // lazily, the dual-write activates automatically.
+        //
+        // Runs on the SAME command buffer as the monolithic pass; Metal
+        // executes the encoders sequentially. The completion handler still
+        // fires once both passes finish on the GPU.
+        if let grid = tileGrid {
+            let bbox = strokeBoundingBox(stroke)
+            let tileKeys = grid.tilesIntersecting(bbox)
+            let tileSizeF = Float(grid.tileSize)
+            var tileViewport = SIMD2<Float>(tileSizeF, tileSizeF)
+
+            for key in tileKeys {
+                let tileObj = grid.ensureTile(at: key)
+                let tileOriginVec = SIMD2<Float>(Float(key.x * grid.tileSize),
+                                                 Float(key.y * grid.tileSize))
+
+                // updateTile(...) only bumps wasCleared/dirtyVersion if
+                // the closure returns normally. Encoder-creation failure
+                // throws and leaves metadata pinned at the prior version
+                // — verification harness contract.
+                try? grid.updateTile(at: key) { tile in
+                    let desc = MTLRenderPassDescriptor()
+                    desc.colorAttachments[0].texture = tile.texture
+                    desc.colorAttachments[0].loadAction = tile.wasCleared ? .load : .clear
+                    desc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                    desc.colorAttachments[0].storeAction = .store
+
+                    guard let tileEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: desc) else {
+                        throw TileRenderError.encoderCreationFailed
+                    }
+                    tileEncoder.setRenderPipelineState(pipelineState)
+                    tileEncoder.setFragmentTexture(selectionMask, index: 2)
+
+                    var tileUniforms = uniforms
+                    tileUniforms.tileOrigin = tileOriginVec
+
+                    for (i, point) in stroke.points.enumerated() {
+                        let safePressure: CGFloat = {
+                            guard point.pressure.isFinite else { return 1.0 }
+                            return max(0, min(1, point.pressure))
+                        }()
+                        tileUniforms.pressure = Float(safePressure)
+
+                        // Tile-local stamp position. The shader's
+                        // `tileOrigin` uniform re-anchors layer-space
+                        // lookups (selection mask, grain seeds, blurred
+                        // texture sample) so the rendered pixels are
+                        // identical to the monolithic pass.
+                        var localPos = SIMD2<Float>(
+                            Float(point.location.x) - tileOriginVec.x,
+                            Float(point.location.y) - tileOriginVec.y
+                        )
+                        tileEncoder.setVertexBytes(&localPos,
+                                                   length: MemoryLayout<SIMD2<Float>>.stride,
+                                                   index: 0)
+                        tileEncoder.setVertexBytes(&tileUniforms,
+                                                   length: MemoryLayout<BrushUniforms>.stride,
+                                                   index: 1)
+                        tileEncoder.setVertexBytes(&tileViewport,
+                                                   length: MemoryLayout<SIMD2<Float>>.stride,
+                                                   index: 2)
+                        tileEncoder.setFragmentBytes(&tileUniforms,
+                                                    length: MemoryLayout<BrushUniforms>.stride,
+                                                    index: 0)
+                        tileEncoder.drawPrimitives(type: .point,
+                                                   vertexStart: 0,
+                                                   vertexCount: 1)
+                    }
+                    tileEncoder.endEncoding()
+                }
+                _ = tileObj // suppress "constant unused" — the ensure call is the side-effect
+            }
+        }
+        // === End dual-write block ========================================
 
         if let completion = completion {
             // Async path: caller does its post-stroke work (snapshot, history,
