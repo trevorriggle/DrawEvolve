@@ -26,14 +26,12 @@ struct BrushUniforms {
     float size;             // Brush size in pixels
     float opacity;          // 0.0 to 1.0
     float hardness;         // 0.0 (soft) to 1.0 (hard) — RAW SLIDER VALUE.
-                            // Each stamp shader applies a sqrt() perceptual
-                            // remap on this uniform before using it (see
-                            // `perceivedHardness` below). The slider's 0–1
-                            // travel now lands at a perceptual midpoint at
-                            // ~0.5 — previously the lower 75% of the slider
-                            // all read as "soft" because the falloff
-                            // band's area scales as (1 - hardness)² and
-                            // perception tracks area, not band width.
+                            // Each stamp shader applies a perceptual remap
+                            // on this uniform before using it (see
+                            // `perceivedHardness` below). The lower half
+                            // of the slider needs to feel airbrush-soft,
+                            // so the remap compresses low slider values
+                            // toward zero rather than spreading them out.
     float pressure;         // 0.0 to 1.0 from Apple Pencil
     float grainDensity;     // experiment/brush-variety-v1: charcoal grain
                             // intensity. Existing shaders ignore it; only
@@ -42,16 +40,20 @@ struct BrushUniforms {
                             // for the brush/eraser/blur/smudge shaders.
 };
 
-// Perceptual hardness remap. The brush stamp's opaque core occupies a
-// disc of normalised radius `hardness`, so the opaque AREA scales as
-// `hardness²`. Users perceive "hardness" by how much of the disc looks
-// solid, which means the raw uniform reads non-linearly: slider 0.5
-// shows only 25% opaque area and feels almost as soft as 0.25. Taking
-// sqrt straightens the curve so slider 0.5 → ~50% opaque area → reads
-// like the midpoint a user expects. Clamp guards against negative
-// inputs (would NaN in sqrt) and >1 inputs (defensive).
+// Perceptual hardness remap. Earlier this used `sqrt(h)` so slider 0.5
+// landed at ~50% opaque area, but the side-effect was that the lower
+// half of the slider all rendered firmer than artists expected — sqrt
+// pushes weak values UP (0.25 → 0.5), starving the slider of true
+// airbrush territory at the soft end.
+//
+// `h²` compresses low slider values toward zero, giving the bottom
+// half real feathering (slider 0.25 → 0.0625, slider 0.5 → 0.25) while
+// keeping 1.0 → 1.0 for hard-edge work. Each quarter of the slider
+// now reads as a meaningfully different brush. Clamp keeps the curve
+// well-defined on out-of-range inputs.
 static float perceivedHardness(float h) {
-    return sqrt(clamp(h, 0.0, 1.0));
+    float clamped = clamp(h, 0.0, 1.0);
+    return clamped * clamped;
 }
 
 struct LayerUniforms {

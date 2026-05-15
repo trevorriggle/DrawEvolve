@@ -47,11 +47,11 @@ struct BrushSizeRail: View {
     /// (top half covers 50–200px). Linear (=1) made the top half
     /// feel jumpy with no fine control over small brushes.
     private static let sizeCurve: CGFloat = 2.0
-    /// Hardness curve. Hardness is a 0–1 percentage; perceptually
-    /// linear travel reads as the expected behaviour for a soft↔hard
-    /// edge control (Photoshop matches this). The Pencil tool's
-    /// fragment shader floors the value internally so dragging the
-    /// rail below 0.85 still renders "pencil"-looking strokes.
+    /// Hardness curve. Hardness is a 0–1 percentage; the shader applies
+    /// its own perceptual remap (h²) so the slider stays linear at
+    /// this layer. The Pencil tool's fragment shader floors the
+    /// shader-space value at 0.85 so dragging the rail below ~0.92
+    /// still renders "pencil"-looking strokes.
     private static let hardnessCurve: CGFloat = 1.0
 
     private static let containerHeight: CGFloat = 200
