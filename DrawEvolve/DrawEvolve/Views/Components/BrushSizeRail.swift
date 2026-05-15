@@ -95,42 +95,68 @@ struct BrushSizeRail: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            VerticalRailTrack(
-                value: $size,
-                range: range,
-                curve: Self.sizeCurve,
-                accessibilityLabel: "Brush size",
-                accessibilityValue: "\(Int(size)) pixels",
-                readoutText: "\(Int(size)) px",
-                accessibilityStep: 2,
-                previewModel: previewModel,
-                trackLeadingClearance: 0
-            )
-            if let hardness {
+        VStack(spacing: 4) {
+            labelRow
+            HStack(spacing: 8) {
                 VerticalRailTrack(
-                    value: hardness,
-                    range: 0...1,
-                    curve: Self.hardnessCurve,
-                    accessibilityLabel: "Brush hardness",
-                    accessibilityValue: "\(Int(hardness.wrappedValue * 100)) percent",
-                    readoutText: "\(Int(hardness.wrappedValue * 100))%",
-                    accessibilityStep: 0.05,
+                    value: $size,
+                    range: range,
+                    curve: Self.sizeCurve,
+                    accessibilityLabel: "Brush size",
+                    accessibilityValue: "\(Int(size)) pixels",
+                    readoutText: "\(Int(size)) px",
+                    accessibilityStep: 2,
                     previewModel: previewModel,
-                    trackLeadingClearance: Self.trackToTrackOffset
+                    trackLeadingClearance: 0
                 )
+                if let hardness {
+                    VerticalRailTrack(
+                        value: hardness,
+                        range: 0...1,
+                        curve: Self.hardnessCurve,
+                        accessibilityLabel: "Brush hardness",
+                        accessibilityValue: "\(Int(hardness.wrappedValue * 100)) percent",
+                        readoutText: "\(Int(hardness.wrappedValue * 100))%",
+                        accessibilityStep: 0.05,
+                        previewModel: previewModel,
+                        trackLeadingClearance: Self.trackToTrackOffset
+                    )
+                }
+            }
+            .padding(.horizontal, 4)
+            .frame(
+                width: hardness == nil ? Self.containerWidthSingle : Self.containerWidthDual,
+                height: Self.containerHeight
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(uiColor: .systemBackground).opacity(0.95))
+                    .shadow(radius: 4)
+            )
+        }
+    }
+
+    /// Header labels sit above the chrome so they live outside every
+    /// track's drag gesture. Each label is centered over its track
+    /// (track frame is 30pt; we use the same frame on the label so
+    /// "hardness" overflows its 30pt slot symmetrically rather than
+    /// pulling everything left).
+    @ViewBuilder
+    private var labelRow: some View {
+        HStack(spacing: 8) {
+            Text("size")
+                .frame(width: 30, alignment: .center)
+            if hardness != nil {
+                Text("hardness")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: 30, alignment: .center)
             }
         }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
         .padding(.horizontal, 4)
-        .frame(
-            width: hardness == nil ? Self.containerWidthSingle : Self.containerWidthDual,
-            height: Self.containerHeight
-        )
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .systemBackground).opacity(0.95))
-                .shadow(radius: 4)
-        )
+        .allowsHitTesting(false)
     }
 }
 

@@ -82,38 +82,62 @@ struct BrushSizeRailHorizontal: View {
     }
 
     var body: some View {
-        VStack(spacing: 4) {
-            HorizontalRailTrack(
-                value: $size,
-                range: range,
-                curve: Self.sizeCurve,
-                accessibilityLabel: "Brush size",
-                accessibilityValue: "\(Int(size)) pixels",
-                readoutText: "\(Int(size)) px",
-                accessibilityStep: 2,
-                previewModel: previewModel,
-                trackTopClearance: 0
-            )
-            if let hardness {
+        HStack(spacing: 10) {
+            labelColumn
+            VStack(spacing: 4) {
                 HorizontalRailTrack(
-                    value: hardness,
-                    range: 0...1,
-                    curve: Self.hardnessCurve,
-                    accessibilityLabel: "Brush hardness",
-                    accessibilityValue: "\(Int(hardness.wrappedValue * 100)) percent",
-                    readoutText: "\(Int(hardness.wrappedValue * 100))%",
-                    accessibilityStep: 0.05,
+                    value: $size,
+                    range: range,
+                    curve: Self.sizeCurve,
+                    accessibilityLabel: "Brush size",
+                    accessibilityValue: "\(Int(size)) pixels",
+                    readoutText: "\(Int(size)) px",
+                    accessibilityStep: 2,
                     previewModel: previewModel,
-                    trackTopClearance: Self.trackToTrackOffset
+                    trackTopClearance: 0
                 )
+                if let hardness {
+                    HorizontalRailTrack(
+                        value: hardness,
+                        range: 0...1,
+                        curve: Self.hardnessCurve,
+                        accessibilityLabel: "Brush hardness",
+                        accessibilityValue: "\(Int(hardness.wrappedValue * 100)) percent",
+                        readoutText: "\(Int(hardness.wrappedValue * 100))%",
+                        accessibilityStep: 0.05,
+                        previewModel: previewModel,
+                        trackTopClearance: Self.trackToTrackOffset
+                    )
+                }
             }
         }
+        .padding(.leading, 10)
         .frame(height: hardness == nil ? Self.singleTrackHeight : Self.dualTrackHeight)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(uiColor: .systemBackground).opacity(0.95))
                 .shadow(radius: 4)
         )
+    }
+
+    /// Leading-edge labels live inside the chrome but outside each
+    /// track's drag gesture. Each label sits at the same vertical
+    /// centre as the track it names (30pt-tall row with matching 4pt
+    /// inter-row gap, mirroring the tracks' VStack(spacing: 4)).
+    @ViewBuilder
+    private var labelColumn: some View {
+        VStack(spacing: 4) {
+            Text("size")
+                .frame(height: 30, alignment: .center)
+            if hardness != nil {
+                Text("hardness")
+                    .frame(height: 30, alignment: .center)
+            }
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(.secondary)
+        .frame(width: 56, alignment: .leading)
+        .allowsHitTesting(false)
     }
 }
 
