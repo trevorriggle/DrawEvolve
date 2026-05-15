@@ -109,6 +109,13 @@ struct DrawingCanvasView: View {
     @State private var typeBarSuspended = false
     @State private var previousNonTypeTool: DrawingTool = .brush
 
+    /// Captured at the moment the color picker sheet opens; restored to
+    /// `canvasState.currentTool` on dismiss (Done, swipe-down, or any
+    /// other path that flips `showColorPicker` back to false). Mirrors
+    /// the `previousNonTypeTool` idiom — the picker is a non-tool sheet
+    /// that shouldn't strand the user on a different tool after dismissal.
+    @State private var previousNonColorPickerTool: DrawingTool = .brush
+
     // Path mode for the .textOnPath tool. Persisted across launches so
     // the user's last choice is the default next session. Toggled by
     // the top-center pill that's visible only while .textOnPath is the
@@ -304,6 +311,14 @@ struct DrawingCanvasView: View {
                             }
                         }
                     }
+            }
+        }
+        // Restore the pre-picker tool from a single observer regardless of
+        // dismissal path — Done button, swipe-down, or any future tap-outside
+        // wiring all funnel through `showColorPicker` flipping to false.
+        .onChange(of: showColorPicker) { isShown in
+            if !isShown {
+                canvasState.currentTool = previousNonColorPickerTool
             }
         }
         .sheet(isPresented: $showLayerPanel) {
@@ -1293,6 +1308,12 @@ struct DrawingCanvasView: View {
                                 guard canvasState.currentTool != .blur,
                                       canvasState.currentTool != .blurAdjustment,
                                       canvasState.currentTool != .smudge else { return }
+                                // Stash the active tool BEFORE flipping the
+                                // sheet on so the .onChange(of: showColorPicker)
+                                // dismissal handler can restore it.
+                                if !showColorPicker {
+                                    previousNonColorPickerTool = canvasState.currentTool
+                                }
                                 showColorPicker.toggle()
                             }) {
                                 Circle()
@@ -3075,6 +3096,12 @@ struct DrawingCanvasView: View {
                     guard canvasState.currentTool != .blur,
                           canvasState.currentTool != .blurAdjustment,
                           canvasState.currentTool != .smudge else { return }
+                    // Stash the active tool BEFORE flipping the sheet on
+                    // so the .onChange(of: showColorPicker) dismissal
+                    // handler can restore it. Mirrors iPad toggle site.
+                    if !showColorPicker {
+                        previousNonColorPickerTool = canvasState.currentTool
+                    }
                     showColorPicker.toggle()
                     collapsePhoneToolPanel()
                 }) {
