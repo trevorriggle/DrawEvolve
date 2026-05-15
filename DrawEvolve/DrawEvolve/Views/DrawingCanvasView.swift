@@ -683,14 +683,23 @@ struct DrawingCanvasView: View {
                     .ignoresSafeArea()
                 }
 
-                if let selection = canvasState.activeSelection {
+                // Marching ants vanish while the user is moving or
+                // scaling/rotating the selection — see
+                // canvasState.isTransformingSelection. The selection is
+                // still alive; only the animated outline is suppressed
+                // for the duration of the transform so the chasing ants
+                // don't read as visual noise (and so we don't restroke
+                // a large polygon every frame).
+                if let selection = canvasState.activeSelection,
+                   !canvasState.isTransformingSelection {
                     let screenSelection = canvasState.documentRectToScreen(selection)
                     MarchingAntsRectangle(rect: screenSelection)
                         .allowsHitTesting(false)
                         .ignoresSafeArea()
                 }
 
-                if let path = canvasState.selectionPath {
+                if let path = canvasState.selectionPath,
+                   !canvasState.isTransformingSelection {
                     let screenPath = canvasState.documentPathToScreen(path)
                     MarchingAntsPath(path: screenPath)
                         .allowsHitTesting(false)
@@ -959,8 +968,12 @@ struct DrawingCanvasView: View {
                 .ignoresSafeArea()
             }
 
-            // Marching ants selection overlay (after selection is made)
-            if let selection = canvasState.activeSelection {
+            // Marching ants selection overlay (after selection is made).
+            // Hidden during transform — see canvasState.isTransformingSelection;
+            // selection is still active, just the animated outline is
+            // suppressed while the user moves or scales it.
+            if let selection = canvasState.activeSelection,
+               !canvasState.isTransformingSelection {
                 // Transform selection from document space to screen space
                 let screenSelection = canvasState.documentRectToScreen(selection)
                 MarchingAntsRectangle(rect: screenSelection)
@@ -1038,8 +1051,11 @@ struct DrawingCanvasView: View {
             .padding(.bottom, 12)
             .allowsHitTesting(false)
 
-            if let path = canvasState.selectionPath {
-                // Transform path from document space to screen space
+            if let path = canvasState.selectionPath,
+               !canvasState.isTransformingSelection {
+                // Transform path from document space to screen space.
+                // Hidden during transform — see iPad activeSelection
+                // branch above for the rationale.
                 let screenPath = canvasState.documentPathToScreen(path)
                 MarchingAntsPath(path: screenPath)
                     .allowsHitTesting(false)

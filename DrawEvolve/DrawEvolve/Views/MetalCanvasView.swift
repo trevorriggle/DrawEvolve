@@ -1354,6 +1354,14 @@ struct MetalCanvasView: UIViewRepresentable {
                     // Start dragging the selection
                     isDraggingSelection = true
                     selectionDragStart = location
+                    // Body-grab is also a "transform" for UI purposes —
+                    // hide marching ants while the user moves the
+                    // selection content. Cleared in touchesEnded /
+                    // touchesCancelled. See SelectionOverlays' handle
+                    // gestures for the matching set on scale/rotation.
+                    MainActor.assumeIsolated {
+                        canvasState.isTransformingSelection = true
+                    }
                     print("Started dragging selection at \(location)")
                     return
                 }
@@ -2268,6 +2276,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // selection) go through the GPU composite path.
                 if let canvasState = canvasState {
                     Task { @MainActor in
+                        canvasState.isTransformingSelection = false
                         if canvasState.isTranslatingActiveLayer {
                             canvasState.commitActiveLayerTranslation()
                         } else {
@@ -2741,6 +2750,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     canvasState.previewLassoPath = nil
                     canvasState.stampCursorCenter = nil
                     canvasState.stampCursorDiameter = 0
+                    // Cancellation always exits any in-flight transform —
+                    // ants should reappear on the (still-active) selection.
+                    canvasState.isTransformingSelection = false
                 }
             }
             view.setNeedsDisplay()

@@ -265,12 +265,19 @@ struct TransformHandlesOverlay: View {
             .onChanged { value in
                 if session == nil {
                     session = makeSession(for: handle, fingerScreen: value.startLocation)
+                    // Hide the marching ants while the user is moving
+                    // geometry — ants chasing the selection through scale
+                    // / rotation in real time reads as visual noise and
+                    // also re-strokes the (potentially large) animated
+                    // polygon every frame. Reset on .onEnded below.
+                    canvasState.isTransformingSelection = true
                 }
                 guard let s = session else { return }
                 applyScaleDrag(session: s, handle: handle, fingerScreen: value.location)
             }
             .onEnded { _ in
                 session = nil
+                canvasState.isTransformingSelection = false
                 // Resample from the original full-res source on a background
                 // thread; the bilinear-scaled texture stays in place until
                 // the swap completes.
@@ -283,12 +290,14 @@ struct TransformHandlesOverlay: View {
             .onChanged { value in
                 if session == nil {
                     session = makeSession(for: .rotation, fingerScreen: value.startLocation)
+                    canvasState.isTransformingSelection = true
                 }
                 guard let s = session else { return }
                 applyRotationDrag(session: s, fingerScreen: value.location)
             }
             .onEnded { _ in
                 session = nil
+                canvasState.isTransformingSelection = false
                 // No resample — rotation doesn't change pixel density.
             }
     }
