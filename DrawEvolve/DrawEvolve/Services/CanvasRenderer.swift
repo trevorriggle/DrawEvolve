@@ -468,20 +468,27 @@ class CanvasRenderer: NSObject {
     // means a dual-write callsite drifted from the monolithic source of
     // truth — surface it loudly during soak.
     //
-    // Two static flags govern runtime behavior:
-    //   - verifyTilesEnabled: run the verifier at all
+    // Three static flags govern runtime behavior:
+    //   - verifyTilesEnabled: run the verifier at all.
     //   - verifyTilesAssertOnMismatch: crash on first mismatch vs.
-    //     log-only (batch-collection mode)
+    //     log-only batch-collection mode.
+    //   - verifyTilesPerChannelTolerance: per-byte tolerance (UInt8).
+    //     A byte-pair (tile, monolithic) counts as a match when
+    //     |tile - mono| <= tolerance. Default 1 accommodates the GPU
+    //     rasterizer's ±1 LSB precision noise at point-sprite disc
+    //     edges. Set to 0 for bit-exact verification.
     //
-    // Both default to true. Toggle via LLDB:
+    // All three default to (true, true, 1). Toggle via LLDB:
     //   (lldb) expr -- CanvasRenderer.verifyTilesEnabled = false
     //   (lldb) expr -- CanvasRenderer.verifyTilesAssertOnMismatch = false
+    //   (lldb) expr -- CanvasRenderer.verifyTilesPerChannelTolerance = 0
     //
     // All verifier state is #if DEBUG-only — Release builds carry no
     // overhead.
     #if DEBUG
     static var verifyTilesEnabled: Bool = true
     static var verifyTilesAssertOnMismatch: Bool = true
+    static var verifyTilesPerChannelTolerance: UInt8 = 1
     private static var hasLoggedVerifierActive: Bool = false
 
     // Lazy-allocated .shared staging texture for the verifier's blit-
@@ -518,7 +525,8 @@ class CanvasRenderer: NSObject {
         if !CanvasRenderer.hasLoggedVerifierActive {
             CanvasRenderer.hasLoggedVerifierActive = true
             print("[tile-verify] active — verifyTilesEnabled=true, " +
-                  "verifyTilesAssertOnMismatch=\(CanvasRenderer.verifyTilesAssertOnMismatch)")
+                  "verifyTilesAssertOnMismatch=\(CanvasRenderer.verifyTilesAssertOnMismatch), " +
+                  "tolerance=\(CanvasRenderer.verifyTilesPerChannelTolerance)")
         }
 
         let tileSize = grid.tileSize
@@ -601,41 +609,96 @@ class CanvasRenderer: NSObject {
                 )
             }
 
-            // Per-row memcmp to find first mismatch, since the buffers are
-            // tile-sized but only the first cmpW*4 bytes of each row are
-            // valid for partial-edge tiles.
-            let mismatch: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? =
-                verifyStagingBuffer.withUnsafeBytes { sPtr in
-                    verifyMonolithicBuffer.withUnsafeBytes { mPtr in
-                        guard let sBase = sPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                              let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
-                        else { return nil }
-                        for row in 0..<cmpH {
-                            let rowStart = row * bytesPerRow
-                            for col in 0..<cmpW {
-                                let pxOff = rowStart + col * 4
-                                for ch in 0..<4 {
-                                    let s = sBase[pxOff + ch]
-                                    let m = mBase[pxOff + ch]
-                                    if s != m {
-                                        return (row, col, ch, s, m)
+            // Per-byte comparison with tolerance + magnitude histogram.
+            //
+            // In assert-on mode: short-circuit at the first byte where
+            // |tile - mono| > tolerance, preserves the tight strict-debug
+            // feedback loop.
+            //
+            // In log-only mode: scan the entire tile, count every nonzero
+            // diff into a 6-bucket magnitude histogram (±1, ±2, ±3, ±4-7,
+            // ±8-15, ±16+), print one summary line per tile if any bucket
+            // is nonzero. Skips the print entirely on clean tiles so soak
+            // output stays quiet.
+            let assertOnMode = CanvasRenderer.verifyTilesAssertOnMismatch
+            let tolerance = CanvasRenderer.verifyTilesPerChannelTolerance
+            var histogram: [Int] = [0, 0, 0, 0, 0, 0]
+            var firstBeyond: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? = nil
+            var beyondCount: Int = 0
+            var withinTolerance: Int = 0
+            let totalBytes = cmpW * cmpH * 4
+
+            verifyStagingBuffer.withUnsafeBytes { sPtr in
+                verifyMonolithicBuffer.withUnsafeBytes { mPtr in
+                    guard let sBase = sPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                          let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                    else { return }
+                    scanLoop: for row in 0..<cmpH {
+                        let rowStart = row * bytesPerRow
+                        for col in 0..<cmpW {
+                            let pxOff = rowStart + col * 4
+                            for ch in 0..<4 {
+                                let s = sBase[pxOff + ch]
+                                let m = mBase[pxOff + ch]
+                                let absDiff: UInt8 = s > m ? s - m : m - s
+                                if absDiff == 0 {
+                                    withinTolerance += 1
+                                    continue
+                                }
+                                // Bucket increment fires for any nonzero diff,
+                                // regardless of tolerance. The summary line
+                                // shows the distribution; tolerance affects
+                                // only the assert decision and the within-
+                                // tolerance counter.
+                                switch absDiff {
+                                case 1: histogram[0] += 1
+                                case 2: histogram[1] += 1
+                                case 3: histogram[2] += 1
+                                case 4...7: histogram[3] += 1
+                                case 8...15: histogram[4] += 1
+                                default: histogram[5] += 1
+                                }
+                                if absDiff <= tolerance {
+                                    withinTolerance += 1
+                                } else {
+                                    beyondCount += 1
+                                    if firstBeyond == nil {
+                                        firstBeyond = (row, col, ch, s, m)
+                                    }
+                                    if assertOnMode {
+                                        break scanLoop
                                     }
                                 }
                             }
                         }
-                        return nil
                     }
                 }
+            }
 
-            if let mm = mismatch {
-                let layerPx = (x: originX + mm.col, y: originY + mm.row)
-                let channelName = ["B", "G", "R", "A"][mm.channel]
-                print("[tile-verify] MISMATCH callsite=\(callsite) " +
-                      "tile=(\(key.x),\(key.y)) layerPx=(\(layerPx.x),\(layerPx.y)) " +
-                      "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
-                      "monoByte=0x\(String(mm.monoByte, radix: 16))")
-                if CanvasRenderer.verifyTilesAssertOnMismatch {
+            if assertOnMode {
+                if let mm = firstBeyond {
+                    let layerPx = (x: originX + mm.col, y: originY + mm.row)
+                    let channelName = ["B", "G", "R", "A"][mm.channel]
+                    print("[tile-verify] MISMATCH callsite=\(callsite) " +
+                          "tile=(\(key.x),\(key.y)) layerPx=(\(layerPx.x),\(layerPx.y)) " +
+                          "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
+                          "monoByte=0x\(String(mm.monoByte, radix: 16)) " +
+                          "tolerance=\(tolerance)")
                     assertionFailure("[tile-verify] mismatch at \(callsite) tile (\(key.x),\(key.y))")
+                }
+            } else {
+                // Log-only mode: histogram summary if any nonzero bucket.
+                let hasAnyDiff = histogram.contains { $0 > 0 }
+                if hasAnyDiff {
+                    let labels = ["±1", "±2", "±3", "±4-7", "±8-15", "±16+"]
+                    var bucketParts: [String] = []
+                    for i in 0..<histogram.count where histogram[i] > 0 {
+                        bucketParts.append("\(labels[i]):\(histogram[i])")
+                    }
+                    print("[tile-verify] callsite=\(callsite) tile=(\(key.x),\(key.y)) " +
+                          "total=\(totalBytes) within_tolerance=\(withinTolerance) " +
+                          "mismatches_beyond_tolerance=\(beyondCount) " +
+                          "(\(bucketParts.joined(separator: " ")))")
                 }
             }
         }
