@@ -976,7 +976,10 @@ struct DrawingCanvasView: View {
 
             // Canvas transform indicators (top-right) — zoom % moved into the
             // floating toolbar (Apr 16) so it's no longer hidden behind the
-            // gallery button. Rotation indicator stays here.
+            // gallery button. Rotation indicator pushed leftward by the same
+            // gallery-icon clearance (50pt button + 12pt trailing inset + 10pt
+            // gap = 72pt trailing) so it doesn't sit visually-under that
+            // always-visible icon column when canvas is rotated.
             VStack(alignment: .trailing, spacing: 4) {
                 if canvasState.canvasRotation.degrees != 0 {
                     HStack(spacing: 4) {
@@ -993,8 +996,8 @@ struct DrawingCanvasView: View {
                     .transition(.opacity)
                 }
             }
-            .padding(.top, 8)
-            .padding(.trailing, 8)
+            .padding(.top, 12)
+            .padding(.trailing, 72)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .allowsHitTesting(false)
 
