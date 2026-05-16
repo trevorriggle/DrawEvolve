@@ -1250,72 +1250,22 @@ class CanvasRenderer: NSObject {
     /// function — never modify this one to read from anywhere other than
     /// `layers`.
     func compositeLayersToTexture(layers: [DrawingLayer]) -> MTLTexture? {
-        guard let finalTexture = createLayerTexture() else {
-            return nil
-        }
-
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            return nil
-        }
-
-        let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = finalTexture
-        renderPassDescriptor.colorAttachments[0].loadAction = .clear
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-
-        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
-            return nil
-        }
-
-        guard let pipeline = textureDisplayPipelineState else {
-            print("ERROR: textureDisplayPipelineState not available")
-            return nil
-        }
-
-        renderEncoder.setRenderPipelineState(pipeline)
-
-        // Clip to document bounds. finalTexture == canvasSize == documentSize
-        // today, so this is a defensive no-op; if doc/canvas ever decouple,
-        // it ensures the export still drops content past document bounds
-        // instead of leaking texture-edge pixels into the saved image.
-        renderEncoder.setScissorRect(MTLScissorRect(
-            x: 0, y: 0,
-            width: finalTexture.width,
-            height: finalTexture.height
-        ))
-
-        for layer in layers where layer.isVisible {
-            guard let layerTexture = layer.texture else {
-                continue
-            }
-
-            renderEncoder.setFragmentTexture(layerTexture, index: 0)
-            var opacityValue = layer.opacity
-            renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
-            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-        }
-
-        renderEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        #if DEBUG
-        // Phase 3 parallel verifier: run the tile-based composite for the
-        // same layer set and compare byte-by-byte against the legacy
-        // monolithic composite above. Returned output to callers is still
-        // the legacy one — verifier is observation-only during Task 3.1.
-        // After 3.2's body swap, the legacy path is gone and this verifier
-        // call goes with it.
-        if CanvasRenderer.verifyCompositeEnabled,
-           let tileBased = compositeLayersToTextureViaTiles(layers: layers) {
-            verifyCompositeMatchesMonolithic(monoTex: finalTexture,
-                                             tileTex: tileBased,
-                                             callsite: "compositeLayersToTexture")
-        }
-        #endif
-
-        return finalTexture
+        // Phase 3 Task 3.2: legacy monolithic-source composite body retired.
+        // All 4 callers (save / export / AI critique, palette generate,
+        // eyedropper, composition analysis) now read from the tile grid via
+        // compositeLayersToTextureViaTiles. Phase 2's bit-exact tile<->mono
+        // invariant + Phase 3's structural rasterization guarantees (integer
+        // pixel coords, NEAREST sampler, power-of-2 output dims) mean the
+        // returned output is byte-identical to what the legacy path would
+        // have produced — verified pre-swap with the now-removed parallel
+        // verifier (see commit 5779903 if you need to bring it back for
+        // diagnostic work).
+        //
+        // The verifier function `verifyCompositeMatchesMonolithic` itself
+        // survives in this file; reactivation just means re-wiring it to a
+        // pair of texture outputs to compare. Phase 4 may want it for the
+        // display-path cutover.
+        return compositeLayersToTextureViaTiles(layers: layers)
     }
 
     /// Layout-matched twin of the Metal `TileCompositeUniforms` struct
