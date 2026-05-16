@@ -52,8 +52,8 @@ class CanvasStateManager: ObservableObject {
     // Selection pixel data (extracted when selection is made)
     var selectionPixels: UIImage? = nil
     var selectionOriginalRect: CGRect? = nil // Original position before moving
-    var selectionLayerSnapshot: Data? = nil // Snapshot after clearing selection (for real-time rendering)
-    var selectionBeforeSnapshot: Data? = nil // Snapshot before extraction (for history/undo)
+    var selectionLayerSnapshot: CanvasRenderer.LayerSnapshot? = nil // Snapshot after clearing selection (for real-time rendering)
+    var selectionBeforeSnapshot: CanvasRenderer.LayerSnapshot? = nil // Snapshot before extraction (for history/undo)
 
     // GPU-side mirror of selectionPixels. Built once when extraction completes
     // (or when the move tool grabs the whole layer); the renderer composites
@@ -532,8 +532,8 @@ class CanvasStateManager: ObservableObject {
             if let layer = layers.first(where: { $0.id == layerId }),
                let texture = layer.texture,
                let renderer = renderer {
-                renderer.restoreSnapshot(beforeSnapshot, to: texture)
-                print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.count) bytes)")
+                renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layer.tileGrid)
+                print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.pixels.count) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
@@ -599,8 +599,8 @@ class CanvasStateManager: ObservableObject {
             if let layer = layers.first(where: { $0.id == layerId }),
                let texture = layer.texture,
                let renderer = renderer {
-                renderer.restoreSnapshot(afterSnapshot, to: texture)
-                print("Redo stroke - restored texture from snapshot (\(afterSnapshot.count) bytes)")
+                renderer.restoreSnapshot(afterSnapshot, to: texture, tileGrid: layer.tileGrid)
+                print("Redo stroke - restored texture from snapshot (\(afterSnapshot.pixels.count) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
@@ -773,7 +773,7 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         let displayed = ft.displayedRect
         let docRect = displayed
@@ -785,7 +785,7 @@ class CanvasStateManager: ObservableObject {
             rotation: Float(ft.rotation.radians)
         )
 
-        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         if let before = beforeSnapshot, let after = afterSnapshot {
             let layerId = layers[selectedLayerIndex].id
             historyManager.record(.stroke(
@@ -1104,7 +1104,7 @@ class CanvasStateManager: ObservableObject {
             opacity: max(0, min(1, opacity))
         ) else { return false }
 
-        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // The rasterized image is at canvas-doc native pixel resolution
         // and the texture is the same; passing rect = full doc and
@@ -1115,7 +1115,7 @@ class CanvasStateManager: ObservableObject {
         let fullRect = CGRect(origin: .zero, size: documentSize)
         renderer.renderImage(image, at: fullRect, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
 
-        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         if let before = beforeSnapshot, let after = afterSnapshot {
             historyManager.record(.stroke(
                 layerId: layer.id,
@@ -1461,7 +1461,7 @@ class CanvasStateManager: ObservableObject {
         // drag-release routes through commitSelection, which blits the
         // floating texture into the layer in a single GPU pass.
         clearSelection()
-        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         selectionBeforeSnapshot = beforeSnapshot
         selectionLayerSnapshot = beforeSnapshot   // empty layer — nothing to "restore" beyond it
         selectionPixels = resized
@@ -1561,7 +1561,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Capture before snapshot
-        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // Delete pixels in selection (use documentSize for 1:1 coordinate mapping)
         if let rect = activeSelection {
@@ -1571,7 +1571,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Capture after snapshot
-        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // Record in history
         if let before = beforeSnapshot, let after = afterSnapshot {
@@ -1614,7 +1614,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Capture "before" snapshot for history (BEFORE any modifications)
-        selectionBeforeSnapshot = renderer.captureSnapshot(of: texture)
+        selectionBeforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         if let rect = activeSelection {
             // Extract pixels from rectangular selection
@@ -1628,7 +1628,7 @@ class CanvasStateManager: ObservableObject {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
                 renderer.clearRect(rect, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
-                selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
+                selectionLayerSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
                 // Upload the extracted pixels to a Metal texture once. The
                 // draw loop composites this on top of the layer (which now
                 // has a hole) at originalRect + offset every frame — no CPU
@@ -1668,7 +1668,7 @@ class CanvasStateManager: ObservableObject {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
                 renderer.clearPath(path, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
-                selectionLayerSnapshot = renderer.captureSnapshot(of: texture)
+                selectionLayerSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
                 // GPU-side mirror for the live drag preview. See note in the
                 // rect-selection branch above.
                 floatingSelectionTexture = renderer.makeTexture(from: pixels)
@@ -1694,7 +1694,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Step 1: Restore the base layer (with hole where selection was) from snapshot
-        renderer.restoreSnapshot(snapshot, to: texture)
+        renderer.restoreSnapshot(snapshot, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // Step 2: Calculate the current position with offset and scale applied
         let currentRect = CGRect(
@@ -1750,7 +1750,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Capture the current state as "after" for history
-        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // Record in history (before = original with pixels, after = current with pixels moved)
         if let after = afterSnapshot {
@@ -1790,7 +1790,7 @@ class CanvasStateManager: ObservableObject {
            selectedLayerIndex < layers.count,
            let texture = layers[selectedLayerIndex].texture,
            let beforeSnapshot = selectionBeforeSnapshot {
-            renderer.restoreSnapshot(beforeSnapshot, to: texture)
+            renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         }
         clearSelection()
     }
@@ -1852,7 +1852,7 @@ class CanvasStateManager: ObservableObject {
 
         // Snapshot for undo/redo. No texture writes — the layer renders at
         // offset via the shader during drag.
-        selectionBeforeSnapshot = renderer.captureSnapshot(of: texture)
+        selectionBeforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         selectionOffset = .zero
         isTranslatingActiveLayer = true
     }
@@ -1870,7 +1870,7 @@ class CanvasStateManager: ObservableObject {
 
         renderer.translateLayerTextureInPlace(texture, tileGrid: layers[selectedLayerIndex].tileGrid, byDocOffset: selectionOffset, screenSize: documentSize)
 
-        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         if let after = afterSnapshot {
             let layerId = layers[selectedLayerIndex].id
             historyManager.record(.stroke(
@@ -2324,9 +2324,9 @@ class CanvasStateManager: ObservableObject {
               let texture = layer.texture else { return }
         let layerId = layer.id
 
-        let beforeSnapshot = renderer.captureSnapshot(of: texture)
+        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         renderer.commitBlurAdjustment(into: texture)
-        let afterSnapshot = renderer.captureSnapshot(of: texture)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         if let before = beforeSnapshot, let after = afterSnapshot {
             historyManager.record(.stroke(

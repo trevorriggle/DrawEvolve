@@ -2610,8 +2610,26 @@ class CanvasRenderer: NSObject {
         return true
     }
 
-    /// Capture a snapshot of a texture's pixel data for undo/redo
-    func captureSnapshot(of texture: MTLTexture) -> Data? {
+    /// Phase 2.5: layer snapshot pairs canvas-pixel data with the tile-grid
+    /// keyspace at capture time. Restoring rebuilds both the monolithic and
+    /// the tile keyspace so undo/redo across DROP+ADD ops (translate today;
+    /// future ops that drop keys later) round-trip cleanly.
+    ///
+    /// Without the keyspace capture, restoreSnapshot would leave tile grid
+    /// at whatever-it-was-when-undo-fired while monolithic rolled back —
+    /// the composite path (Phase 3) would render blank in any region whose
+    /// tiles were dropped between snapshot and restore (the translate-undo
+    /// case). This is the structural prerequisite for Phase 3's correctness.
+    struct LayerSnapshot {
+        let pixels: Data
+        let allocatedKeys: [TileKey]
+    }
+
+    /// Capture a snapshot of a texture's pixel data + tile-grid keyspace
+    /// for undo/redo. Pass `tileGrid` to capture keyspace fidelity; without
+    /// it (legacy callers) the snapshot has an empty keyspace and restore
+    /// drops the tile grid entirely on rollback (caller-aware degradation).
+    func captureSnapshot(of texture: MTLTexture, tileGrid: TileGrid? = nil) -> LayerSnapshot? {
         // Verify texture is readable (iOS only supports .shared for CPU access)
         #if os(iOS)
         guard texture.storageMode == .shared else {
@@ -2655,16 +2673,28 @@ class CanvasRenderer: NSObject {
             return true
         }
 
-        return success ? pixelData : nil
+        guard success else { return nil }
+        return LayerSnapshot(pixels: pixelData,
+                             allocatedKeys: tileGrid?.allocatedKeys() ?? [])
     }
 
-    /// Restore a texture from a snapshot
-    func restoreSnapshot(_ snapshot: Data, to texture: MTLTexture) {
+    /// Restore a texture from a snapshot, including tile-grid keyspace.
+    ///
+    /// Pass `tileGrid` when the snapshot was captured with one. Restore
+    /// rebuilds the grid to match `snapshot.allocatedKeys` exactly:
+    ///   1. Drop tiles in the current grid that are NOT in the snapshot's
+    ///      keyspace (cleans up tiles allocated by intervening ops).
+    ///   2. ensureTileWithClearIfNeeded + blit-from-monolithic for each
+    ///      key in the snapshot's keyspace (allocates missing tiles,
+    ///      refreshes content from the just-restored monolithic).
+    /// Result: `grid.allocatedKeys()` == `snapshot.allocatedKeys` set-equal,
+    /// each tile bit-exact with `texture`. Phase 3 composite-path correct.
+    func restoreSnapshot(_ snapshot: LayerSnapshot, to texture: MTLTexture, tileGrid: TileGrid? = nil) {
         let width = texture.width
         let height = texture.height
         let bytesPerRow = width * 4
 
-        snapshot.withUnsafeBytes { ptr in
+        snapshot.pixels.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
             texture.replace(
                 region: MTLRegion(
@@ -2676,6 +2706,43 @@ class CanvasRenderer: NSObject {
                 bytesPerRow: bytesPerRow
             )
         }
+
+        // Phase 2.5: keyspace rebuild. See LayerSnapshot doc for rationale.
+        guard let grid = tileGrid else { return }
+        let savedSet = Set(snapshot.allocatedKeys)
+        for key in grid.allocatedKeys() where !savedSet.contains(key) {
+            grid.dropTile(at: key)
+        }
+
+        if snapshot.allocatedKeys.isEmpty { return }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+        for key in snapshot.allocatedKeys {
+            _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
+        }
+        if let blit = cmdBuf.makeBlitCommandEncoder() {
+            let tileSize = grid.tileSize
+            for key in snapshot.allocatedKeys {
+                let srcX = key.x * tileSize
+                let srcY = key.y * tileSize
+                let blitW = min(tileSize, width - srcX)
+                let blitH = min(tileSize, height - srcY)
+                if blitW <= 0 || blitH <= 0 { continue }
+                grid.updateTile(at: key) { tile in
+                    blit.copy(
+                        from: texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                        sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                        to: tile.texture,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    )
+                }
+            }
+            blit.endEncoding()
+        }
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
     }
 
     /// Render text to a texture at the specified location.
