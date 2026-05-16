@@ -2325,7 +2325,7 @@ class CanvasStateManager: ObservableObject {
         let layerId = layer.id
 
         let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
-        renderer.commitBlurAdjustment(into: texture)
+        renderer.commitBlurAdjustment(into: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
         let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         if let before = beforeSnapshot, let after = afterSnapshot {
