@@ -1175,6 +1175,113 @@ class CanvasRenderer: NSObject {
         return finalTexture
     }
 
+    /// Layout-matched twin of the Metal `TileCompositeUniforms` struct
+    /// (Shaders.metal, Phase 3 tile composite). int4 + int2 = 24 bytes; the
+    /// struct lays out identically on both sides because SIMD4<Int32> is
+    /// 16-byte aligned and SIMD2<Int32> is 8-byte aligned.
+    private struct TileCompositeUniformsCPU {
+        var tileRect: SIMD4<Int32>
+        var outputSize: SIMD2<Int32>
+    }
+
+    /// Phase 3 tile-based composite. Same contract as
+    /// `compositeLayersToTexture` — white-backed canvas-sized output,
+    /// straight RGB, alpha=1.0 — but the source for each visible layer is
+    /// its `tileGrid` (sparse), not its `texture` (monolithic). Bit-exact
+    /// with the monolithic-based composite given Phase 2's tile<->mono
+    /// invariant: per-tile quads land on integer pixel boundaries, NEAREST
+    /// sampler, same blend state.
+    ///
+    /// **Fallback for layers without a tile grid.** A visible layer that has
+    /// `texture != nil` but `tileGrid == nil` is an invariant violation
+    /// (Phase 2 pairs them at allocation), but if it happens the monolithic
+    /// composite would draw its pixels — to preserve correctness this
+    /// function draws the full layer texture as a single canvas-sized quad
+    /// in that case. Logged in DEBUG so the violation surfaces.
+    ///
+    /// Phase 3 Task 3.1b; verifier wiring lands in 3.1c.
+    func compositeLayersToTextureViaTiles(layers: [DrawingLayer]) -> MTLTexture? {
+        guard let finalTexture = createLayerTexture() else { return nil }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = finalTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor),
+              let tilePipeline = compositeTilePipelineState else {
+            return nil
+        }
+
+        renderEncoder.setScissorRect(MTLScissorRect(
+            x: 0, y: 0,
+            width: finalTexture.width,
+            height: finalTexture.height
+        ))
+
+        let outputSize = SIMD2<Int32>(Int32(finalTexture.width), Int32(finalTexture.height))
+
+        renderEncoder.setRenderPipelineState(tilePipeline)
+
+        for layer in layers where layer.isVisible {
+            guard let layerTexture = layer.texture else { continue }
+            var opacityValue = layer.opacity
+
+            // Fallback: layer has a monolithic but no tile grid (invariant
+            // violation). Draw the full layer texture as a single quad so
+            // the composite stays correct.
+            guard let grid = layer.tileGrid else {
+                #if DEBUG
+                print("⚠️ compositeLayersToTextureViaTiles: layer '\(layer.name)' has texture but no tileGrid — falling back to full-canvas quad")
+                #endif
+                var fallback = TileCompositeUniformsCPU(
+                    tileRect: SIMD4<Int32>(0, 0, Int32(layerTexture.width), Int32(layerTexture.height)),
+                    outputSize: outputSize
+                )
+                renderEncoder.setVertexBytes(&fallback, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+                renderEncoder.setFragmentTexture(layerTexture, index: 0)
+                renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+                renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                continue
+            }
+
+            let tileSize = grid.tileSize
+            let texW = layerTexture.width
+            let texH = layerTexture.height
+
+            // Iterate this layer's allocated tiles. Order within a layer
+            // doesn't matter because tiles within a single layer don't
+            // overlap (sparse grid by definition). Order BETWEEN layers
+            // matches `layers` array order — that's what produces the
+            // back-to-front alpha-over.
+            for key in grid.allocatedKeys() {
+                guard let tile = grid.tile(at: key) else { continue }
+                let srcX = key.x * tileSize
+                let srcY = key.y * tileSize
+                let blitW = min(tileSize, texW - srcX)
+                let blitH = min(tileSize, texH - srcY)
+                if blitW <= 0 || blitH <= 0 { continue }
+
+                var uniforms = TileCompositeUniformsCPU(
+                    tileRect: SIMD4<Int32>(Int32(srcX), Int32(srcY), Int32(blitW), Int32(blitH)),
+                    outputSize: outputSize
+                )
+                renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+                renderEncoder.setFragmentTexture(tile.texture, index: 0)
+                renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+                renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            }
+        }
+
+        renderEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        return finalTexture
+    }
+
     // Internal (was private until Phase 3 of the color system overhaul,
     // 2026-05-13). DrawingCanvasView calls it to compose a UIImage for
     // PaletteGenerator's "Generate from canvas" path. The implementation
