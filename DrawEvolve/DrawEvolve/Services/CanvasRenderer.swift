@@ -3016,7 +3016,7 @@ class CanvasRenderer: NSObject {
     // MARK: - Load Image
 
     /// Load a UIImage into a texture (for editing existing drawings)
-    func loadImage(_ image: UIImage, into texture: MTLTexture) {
+    func loadImage(_ image: UIImage, into texture: MTLTexture, tileGrid: TileGrid? = nil) {
         print("CanvasRenderer: Loading image into texture")
         print("  Texture ID: \(ObjectIdentifier(texture))")
         print("  Texture size: \(texture.width)x\(texture.height)")
@@ -3070,6 +3070,65 @@ class CanvasRenderer: NSObject {
             withBytes: data,
             bytesPerRow: bytesPerRow
         )
+
+        // === Phase 2 hole #2 fix: tile-grid dual-write (wipe + rebuild) ====
+        //
+        // loadImage always writes the FULL canvas (CGContext.draw at
+        // (0, 0, width, height) — image is scaled to fill the texture).
+        // Tile grid must match: drop all currently-allocated keys, then
+        // allocate every tile in grid bounds and blit-from-monolithic.
+        //
+        // Distinct from Phase 2.5's restoreSnapshot semantic — loadImage
+        // has no prior keyspace to restore (we're loading raw pixels from
+        // a JPEG), so the keyspace recovery is necessarily "full canvas."
+        // Memory cost is full-grid allocation per layer on drawing-open
+        // (~16 MB at 2048², ~64 MB at 4096²). Acceptable for v1; Phase 6
+        // can revisit with alpha-scan sparse allocation if drawings with
+        // substantial transparent regions become common.
+        if let grid = tileGrid {
+            for key in grid.allocatedKeys() {
+                grid.dropTile(at: key)
+            }
+
+            var allKeys: [TileKey] = []
+            allKeys.reserveCapacity(grid.gridWidth * grid.gridHeight)
+            for ty in 0..<grid.gridHeight {
+                for tx in 0..<grid.gridWidth {
+                    allKeys.append(TileKey(x: tx, y: ty))
+                }
+            }
+
+            if let cmdBuf = commandQueue.makeCommandBuffer() {
+                for key in allKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
+                }
+                if let blit = cmdBuf.makeBlitCommandEncoder() {
+                    let tileSize = grid.tileSize
+                    for key in allKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, width - srcX)
+                        let blitH = min(tileSize, height - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+                        grid.updateTile(at: key) { tile in
+                            blit.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit.endEncoding()
+                }
+                cmdBuf.commit()
+                cmdBuf.waitUntilCompleted()
+            }
+        }
+        // === End dual-write block ========================================
 
         print("✅ Image loaded successfully into texture")
         print("  First 4 pixels (BGRA): ", terminator: "")

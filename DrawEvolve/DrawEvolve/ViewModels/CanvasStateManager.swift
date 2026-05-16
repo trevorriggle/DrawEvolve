@@ -1052,7 +1052,7 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        renderer.loadImage(image, into: texture)
+        renderer.loadImage(image, into: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // IMPORTANT: Mark that we've loaded an existing image so buttons enable
         hasLoadedExistingImage = true
