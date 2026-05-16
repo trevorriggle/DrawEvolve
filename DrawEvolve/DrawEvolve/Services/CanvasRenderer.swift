@@ -2533,22 +2533,26 @@ class CanvasRenderer: NSObject {
                     )
                 }
 
-                // === Phase 2 Task 4.7: tile-grid dual-write ===============
+                // === Phase 2 Task 4.7: tile-grid dual-write (blit from monolithic) =
                 //
-                // Mirror the post-fill `data` buffer into the tiles
-                // intersecting the dirty bbox. The buffer is full-canvas-
-                // shaped; per-tile blits index into it via sourceOffset +
-                // full-canvas stride (bytesPerRow).
+                // Canonical pattern. Previous shape used a buffer-to-texture
+                // sub-tile blit from a full-canvas MTLBuffer of the post-fill
+                // CPU data; that had two structural problems:
+                //   (a) freshly-allocated tiles got cleared to zero by
+                //       ensureTileWithClearIfNeeded, then only the
+                //       dirtyRect-intersection got blitted. Pixels inside the
+                //       tile but outside the dirtyRect stayed at zero while
+                //       monolithic at those pixels retained pre-fill content
+                //       (the canvas already-painted area the fill didn't
+                //       reach). That's a guaranteed mismatch for any new
+                //       allocation whose tile-bbox extends past the dirty bbox.
+                //   (b) sourceBytesPerRow alignment requirements aren't
+                //       universally honored across iOS GPUs for arbitrary
+                //       widths.
                 //
-                // The fillCount > 0 guard is conservative — if the fill
-                // bailed before painting anything, the buffer is unchanged
-                // and there's nothing to mirror.
-                //
-                // waitUntilCompleted is intentional, not a perf bug: Task
-                // 5's verification harness assumes the dual-write has
-                // landed before it can compare tile pixels against
-                // monolithic. Phase 6 can revisit if a pathological fill
-                // becomes a real UX problem.
+                // Full-tile blit-from-monolithic eliminates both: every
+                // affected tile becomes a bit-exact copy of monolithic, which
+                // texture.replace just landed with the final post-fill state.
                 if let grid = tileGrid, fillCount > 0, let self = self {
                     let dirtyRect = CGRect(
                         x: dirtyMinX,
@@ -2558,68 +2562,37 @@ class CanvasRenderer: NSObject {
                     )
                     let tileKeys = grid.tilesIntersecting(dirtyRect)
                     let tileSize = grid.tileSize
+                    let texW = texture.width
+                    let texH = texture.height
 
-                    if !tileKeys.isEmpty {
-                        let bufferOpt: MTLBuffer? = data.withUnsafeBytes { ptr in
-                            guard let base = ptr.baseAddress else { return nil }
-                            return self.device.makeBuffer(bytes: base,
-                                                          length: dataSize,
-                                                          options: .storageModeShared)
+                    if !tileKeys.isEmpty, let cmdBuf = self.commandQueue.makeCommandBuffer() {
+                        for key in tileKeys {
+                            _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
                         }
-                        if let srcBuffer = bufferOpt,
-                           let cmdBuf = self.commandQueue.makeCommandBuffer() {
-                            // Pass 1: allocate-and-clear-if-needed for
-                            // freshly-ensured tiles. Each may encode a
-                            // no-draw clear pass on cmdBuf; can't overlap
-                            // with an active blit encoder, so this loop
-                            // runs first.
+                        if let blit = cmdBuf.makeBlitCommandEncoder() {
                             for key in tileKeys {
-                                _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
-                            }
-                            // Pass 2: blit data into tiles.
-                            if let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
-                            for key in tileKeys {
-                                let tileRect = CGRect(x: key.x * tileSize,
-                                                      y: key.y * tileSize,
-                                                      width: tileSize,
-                                                      height: tileSize)
-                                let inter = tileRect.intersection(dirtyRect)
-                                if inter.isNull || inter.isEmpty { continue }
-                                let interW = Int(inter.width)
-                                let interH = Int(inter.height)
-                                if interW <= 0 || interH <= 0 { continue }
+                                let srcX = key.x * tileSize
+                                let srcY = key.y * tileSize
+                                let blitW = min(tileSize, texW - srcX)
+                                let blitH = min(tileSize, texH - srcY)
+                                if blitW <= 0 || blitH <= 0 { continue }
 
-                                let srcOffset = Int(inter.origin.y) * bytesPerRow + Int(inter.origin.x) * 4
-                                let localX = Int(inter.origin.x) - (key.x * tileSize)
-                                let localY = Int(inter.origin.y) - (key.y * tileSize)
-
-                                // `try?` silently catches encoder-creation
-                                // failure inside updateTile's closure. Here
-                                // the encoder is built OUTSIDE the closure
-                                // and guarded above; blit.copy itself doesn't
-                                // throw. So the try? never actually
-                                // intercepts an error in this path — it's
-                                // present only because updateTile's
-                                // signature is rethrows. Not a swallowed bug.
                                 grid.updateTile(at: key) { tile in
-                                    blitEncoder.copy(
-                                        from: srcBuffer,
-                                        sourceOffset: srcOffset,
-                                        sourceBytesPerRow: bytesPerRow,
-                                        sourceBytesPerImage: bytesPerRow * interH,
-                                        sourceSize: MTLSize(width: interW, height: interH, depth: 1),
+                                    blit.copy(
+                                        from: texture,
+                                        sourceSlice: 0, sourceLevel: 0,
+                                        sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                        sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
                                         to: tile.texture,
-                                        destinationSlice: 0,
-                                        destinationLevel: 0,
-                                        destinationOrigin: MTLOrigin(x: localX, y: localY, z: 0)
+                                        destinationSlice: 0, destinationLevel: 0,
+                                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                                     )
                                 }
                             }
-                            blitEncoder.endEncoding()
-                            }
-                            cmdBuf.commit()
-                            cmdBuf.waitUntilCompleted()
+                            blit.endEncoding()
                         }
+                        cmdBuf.commit()
+                        cmdBuf.waitUntilCompleted()
                     }
                 }
                 // === End dual-write block ================================
@@ -3100,78 +3073,64 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // === Phase 2 Task 4.4: tile-grid dual-write =======================
+        // === Phase 2 Task 4.4: tile-grid dual-write (blit from monolithic) =
         //
-        // Mirror the clear into the tile grid:
-        //   - Tiles NOT yet allocated → skip (transparent stays transparent).
-        //   - Tiles fully covered by the rect → dropTile (allocation goes
-        //     back to zero — the audit's TILE-NATIVE-WIN).
-        //   - Tiles partially covered → blit zeros to the tile-local
-        //     sub-region via MTLBlitCommandEncoder (CPU texture.replace
-        //     doesn't work on .private storage; blit copies from a shared
-        //     zero buffer).
+        // Canonical pattern (matches renderStroke / compositeFloating / flip /
+        // translate). Pass 1: ensureTileWithClearIfNeeded for every
+        // intersecting tile — allocates and clears any new tile so its
+        // unblitted region is well-defined. Pass 2: full-tile blit from
+        // monolithic, bit-exact by construction.
         //
-        // One command buffer, one blit encoder, one shared zero buffer
-        // sized to the max possible region (tileSize × tileSize × 4 bytes).
+        // Replaces the previous "skip-unallocated / dropTile-full /
+        // buffer-to-texture-partial" pattern. That pattern was structurally
+        // unsound: (a) the partial-tile buffer-to-texture blit's
+        // sourceBytesPerRow has device-specific alignment requirements not
+        // honored for arbitrary rect widths; (b) the skip-unallocated branch
+        // assumed prior callsites had already allocated the tile, but any
+        // prior callsite that ALSO skipped (e.g., another clearRect) could
+        // leave the tile permanently unallocated while monolithic accumulated
+        // writes, producing silent drift visible only when a later op forced
+        // allocation; (c) sub-tile blits don't repair drift in the
+        // non-cleared portion of a tile if some earlier callsite left it
+        // misaligned with monolithic.
+        //
+        // The canonical pattern resolves all three by always blitting the
+        // whole tile from post-write monolithic.
         if let grid = tileGrid {
             let pixelRect = CGRect(x: x, y: y, width: w, height: h)
             let tileKeys = grid.tilesIntersecting(pixelRect)
             let tileSize = grid.tileSize
+            let texW = texture.width
+            let texH = texture.height
 
-            var partialTiles: [(key: TileKey, region: MTLRegion)] = []
-            for key in tileKeys {
-                guard grid.tile(at: key) != nil else { continue }
-                let tileRect = CGRect(x: key.x * tileSize,
-                                      y: key.y * tileSize,
-                                      width: tileSize,
-                                      height: tileSize)
-                let intersection = tileRect.intersection(pixelRect)
-                if Int(intersection.width) >= tileSize && Int(intersection.height) >= tileSize {
-                    grid.dropTile(at: key)
-                } else {
-                    let localX = Int(intersection.origin.x) - (key.x * tileSize)
-                    let localY = Int(intersection.origin.y) - (key.y * tileSize)
-                    let localW = Int(intersection.width)
-                    let localH = Int(intersection.height)
-                    guard localW > 0, localH > 0 else { continue }
-                    partialTiles.append((
-                        key: key,
-                        region: MTLRegion(
-                            origin: MTLOrigin(x: localX, y: localY, z: 0),
-                            size: MTLSize(width: localW, height: localH, depth: 1)
-                        )
-                    ))
+            if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
                 }
-            }
+                if let blit = cmdBuf.makeBlitCommandEncoder() {
+                    for key in tileKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
 
-            if !partialTiles.isEmpty {
-                let zeroBufferBytes = tileSize * tileSize * 4
-                if let zeroBuffer = device.makeBuffer(length: zeroBufferBytes,
-                                                      options: .storageModeShared),
-                   let cmdBuf = commandQueue.makeCommandBuffer(),
-                   let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
-                    memset(zeroBuffer.contents(), 0, zeroBufferBytes)
-
-                    for (key, region) in partialTiles {
                         grid.updateTile(at: key) { tile in
-                            let bytesPerRow = region.size.width * 4
-                            blitEncoder.copy(
-                                from: zeroBuffer,
-                                sourceOffset: 0,
-                                sourceBytesPerRow: bytesPerRow,
-                                sourceBytesPerImage: bytesPerRow * region.size.height,
-                                sourceSize: region.size,
+                            blit.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
                                 to: tile.texture,
-                                destinationSlice: 0,
-                                destinationLevel: 0,
-                                destinationOrigin: region.origin
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                             )
                         }
                     }
-                    blitEncoder.endEncoding()
-                    cmdBuf.commit()
-                    cmdBuf.waitUntilCompleted()
+                    blit.endEncoding()
                 }
+                cmdBuf.commit()
+                cmdBuf.waitUntilCompleted()
             }
         }
         // === End dual-write block ========================================
@@ -3282,81 +3241,48 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // === Phase 2 Task 4.5: tile-grid dual-write =======================
+        // === Phase 2 Task 4.5: tile-grid dual-write (blit from monolithic) =
         //
-        // Mirror the post-clear bbox region into the tile grid. The CPU
-        // `pixelData` buffer already holds the FINAL pixel state for the
-        // bbox (zeros inside the polygon, original values outside) from
-        // the monolithic getBytes → modify → replace cycle above. We reuse
-        // that buffer here — one extra GPU memcpy via MTLBuffer + blit,
-        // no extra getBytes.
-        //
-        // Per-tile rule: skip if not allocated; otherwise blit the
-        // tile-bbox intersection. Fully-inside-polygon tiles end up as
-        // allocated-but-zeroed (slight memory waste vs dropTile, but
-        // dropping requires a topology test that's only safe for convex
-        // polygons — Phase 6 optimisation).
+        // Canonical pattern. Same rationale as clearRect — sub-tile
+        // buffer-to-texture blits had unhonored alignment requirements and
+        // didn't repair drift in the non-cleared portion of a tile that
+        // earlier callsites may have left misaligned. Full-tile blit from
+        // monolithic is bit-exact by construction.
         if let grid = tileGrid, regionW > 0, regionH > 0 {
             let bboxPixelRect = CGRect(x: minX, y: minY, width: regionW, height: regionH)
             let tileKeys = grid.tilesIntersecting(bboxPixelRect)
             let tileSize = grid.tileSize
+            let texW = texture.width
+            let texH = texture.height
 
-            // Skip the GPU work if no allocated tiles overlap the bbox.
-            let allocatedTouched = tileKeys.contains { grid.tile(at: $0) != nil }
-
-            if allocatedTouched {
-                // Wrap the existing pixelData in a one-shot shared MTLBuffer
-                // (one memcpy at construction). The buffer is bbox-shaped
-                // (regionW × regionH × 4 bytes); per-tile blit uses
-                // sourceOffset + sourceBytesPerRow to read its sub-rect.
-                let bufferOpt: MTLBuffer? = pixelData.withUnsafeBytes { ptr in
-                    guard let base = ptr.baseAddress else { return nil }
-                    return device.makeBuffer(bytes: base,
-                                             length: pixelData.count,
-                                             options: .storageModeShared)
+            if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
                 }
-                if let srcBuffer = bufferOpt,
-                   let cmdBuf = commandQueue.makeCommandBuffer(),
-                   let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                if let blit = cmdBuf.makeBlitCommandEncoder() {
                     for key in tileKeys {
-                        guard grid.tile(at: key) != nil else { continue }
-                        let tileRect = CGRect(x: key.x * tileSize,
-                                              y: key.y * tileSize,
-                                              width: tileSize,
-                                              height: tileSize)
-                        let inter = tileRect.intersection(bboxPixelRect)
-                        if inter.isNull || inter.isEmpty { continue }
-                        let interW = Int(inter.width)
-                        let interH = Int(inter.height)
-                        if interW <= 0 || interH <= 0 { continue }
-
-                        // Source coords inside pixelData (which is bbox-shaped).
-                        let srcCol = Int(inter.origin.x) - minX
-                        let srcRow = Int(inter.origin.y) - minY
-                        let sourceOffset = srcRow * regionBytesPerRow + srcCol * 4
-
-                        // Destination coords inside the tile (tile-local).
-                        let dstX = Int(inter.origin.x) - (key.x * tileSize)
-                        let dstY = Int(inter.origin.y) - (key.y * tileSize)
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
 
                         grid.updateTile(at: key) { tile in
-                            blitEncoder.copy(
-                                from: srcBuffer,
-                                sourceOffset: sourceOffset,
-                                sourceBytesPerRow: regionBytesPerRow,
-                                sourceBytesPerImage: regionBytesPerRow * interH,
-                                sourceSize: MTLSize(width: interW, height: interH, depth: 1),
+                            blit.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
                                 to: tile.texture,
-                                destinationSlice: 0,
-                                destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                             )
                         }
                     }
-                    blitEncoder.endEncoding()
-                    cmdBuf.commit()
-                    cmdBuf.waitUntilCompleted()
+                    blit.endEncoding()
                 }
+                cmdBuf.commit()
+                cmdBuf.waitUntilCompleted()
             }
         }
         // === End dual-write block ========================================
@@ -3704,80 +3630,49 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // === Phase 2 Task 4.6: tile-grid dual-write =======================
+        // === Phase 2 Task 4.6: tile-grid dual-write (blit from monolithic) =
         //
-        // Mirror the post-blend region into the tile grid. The CPU
-        // `regionData` buffer holds the FINAL pixel state for the dest
-        // region after the porter-duff blend; reuse it via a shared
-        // MTLBuffer and per-tile blit, same pattern as clearPath.
-        //
-        // Unlike clearPath/clearRect, renderImage *adds* non-transparent
-        // content where the image had alpha > 0. So every intersecting
-        // tile may need allocation, not just already-allocated ones — we
-        // ensureTile unconditionally for tiles that don't exist. (Tiles
-        // where the image is entirely alpha-zero will end up allocated
-        // and zero — a minor memory waste; Phase 6 can detect via
-        // nonTransparentBits and dropTile retroactively.)
+        // Canonical pattern. Same rationale as floodFill — freshly-allocated
+        // tiles where the image's region didn't fully cover the tile would
+        // previously be cleared to zero by ensureTileWithClearIfNeeded and
+        // then only the sub-tile blit landed inside the image's rect,
+        // leaving the rest of the tile at zero while monolithic kept its
+        // pre-existing content. Full-tile blit from monolithic is bit-exact.
         if let grid = tileGrid, regionW > 0, regionH > 0 {
             let regionPixelRect = CGRect(x: dstX, y: dstY, width: regionW, height: regionH)
             let tileKeys = grid.tilesIntersecting(regionPixelRect)
             let tileSize = grid.tileSize
+            let texW = texture.width
+            let texH = texture.height
 
-            if !tileKeys.isEmpty {
-                let bufferOpt: MTLBuffer? = regionData.withUnsafeBytes { ptr in
-                    guard let base = ptr.baseAddress else { return nil }
-                    return device.makeBuffer(bytes: base,
-                                             length: regionData.count,
-                                             options: .storageModeShared)
+            if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
                 }
-                if let srcBuffer = bufferOpt,
-                   let cmdBuf = commandQueue.makeCommandBuffer() {
-                    // Pass 1: allocate-and-clear-if-needed for freshly-
-                    // ensured tiles. Each may encode a no-draw clear
-                    // pass on cmdBuf; can't overlap with an active blit
-                    // encoder, so this loop runs first.
+                if let blit = cmdBuf.makeBlitCommandEncoder() {
                     for key in tileKeys {
-                        _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
-                    }
-                    // Pass 2: blit data into tiles.
-                    if let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
-                    for key in tileKeys {
-                        let tileRect = CGRect(x: key.x * tileSize,
-                                              y: key.y * tileSize,
-                                              width: tileSize,
-                                              height: tileSize)
-                        let inter = tileRect.intersection(regionPixelRect)
-                        if inter.isNull || inter.isEmpty { continue }
-                        let interW = Int(inter.width)
-                        let interH = Int(inter.height)
-                        if interW <= 0 || interH <= 0 { continue }
-
-                        let srcCol = Int(inter.origin.x) - dstX
-                        let srcRow = Int(inter.origin.y) - dstY
-                        let sourceOffset = srcRow * regionBytesPerRow + srcCol * 4
-
-                        let localX = Int(inter.origin.x) - (key.x * tileSize)
-                        let localY = Int(inter.origin.y) - (key.y * tileSize)
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
 
                         grid.updateTile(at: key) { tile in
-                            blitEncoder.copy(
-                                from: srcBuffer,
-                                sourceOffset: sourceOffset,
-                                sourceBytesPerRow: regionBytesPerRow,
-                                sourceBytesPerImage: regionBytesPerRow * interH,
-                                sourceSize: MTLSize(width: interW, height: interH, depth: 1),
+                            blit.copy(
+                                from: texture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
                                 to: tile.texture,
-                                destinationSlice: 0,
-                                destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: localX, y: localY, z: 0)
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                             )
                         }
                     }
-                    blitEncoder.endEncoding()
-                    }
-                    cmdBuf.commit()
-                    cmdBuf.waitUntilCompleted()
+                    blit.endEncoding()
                 }
+                cmdBuf.commit()
+                cmdBuf.waitUntilCompleted()
             }
         }
         // === End dual-write block ========================================
