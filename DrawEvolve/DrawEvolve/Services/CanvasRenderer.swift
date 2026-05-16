@@ -58,6 +58,13 @@ class CanvasRenderer: NSObject {
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
     private var floatingTexturePipelineState: MTLRenderPipelineState? // For floating selection drag preview
+    /// Pipeline for per-tile composite under the tiling migration (Phase 3).
+    /// Vertex shader places a quad at the tile's integer pixel rect within
+    /// the output canvas; fragment shader samples the tile with NEAREST
+    /// filter. Same alpha-over blend as `textureDisplayPipelineState` so the
+    /// per-tile composite is bit-exact with the legacy full-canvas-quad
+    /// composite given Phase 2's tile<->mono invariant.
+    private var compositeTilePipelineState: MTLRenderPipelineState?
     /// Pipeline for reference-image quads rendered in screen space BETWEEN
     /// the canvas's white paper and the layer composite. ONLY used by the
     /// to-screen path; the save/AI/export composite (compositeLayersToTexture)
@@ -218,7 +225,9 @@ class CanvasRenderer: NSObject {
               let gaussianBlurMaskedFragment = library.makeFunction(name: "gaussianBlurMaskedShader"),
               let stampBlurDepositFragment = library.makeFunction(name: "stampBlurDepositShader"),
               let smudgePatchUpdateFragment = library.makeFunction(name: "smudgePatchUpdateShader"),
-              let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader") else {
+              let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader"),
+              let compositeTileVertex = library.makeFunction(name: "compositeTileVertexShader"),
+              let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -303,6 +312,24 @@ class CanvasRenderer: NSObject {
         textureDisplayDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
         textureDisplayDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         textureDisplayDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
+        // Per-tile composite pipeline (Phase 3). Same blend state as
+        // textureDisplayDescriptor — premultiplied source RGB + alpha-over —
+        // so a back-to-front sequence of per-tile draws produces the same
+        // accumulated pixel values as a single full-canvas-quad composite of
+        // the corresponding monolithic texture. Vertex shader takes int4
+        // tileRect + int2 outputSize, fragment shader uses NEAREST sampler.
+        let compositeTileDescriptor = MTLRenderPipelineDescriptor()
+        compositeTileDescriptor.vertexFunction = compositeTileVertex
+        compositeTileDescriptor.fragmentFunction = compositeTileFragment
+        compositeTileDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        compositeTileDescriptor.colorAttachments[0].isBlendingEnabled = true
+        compositeTileDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        compositeTileDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        compositeTileDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        compositeTileDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        compositeTileDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        compositeTileDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
         // Texture display pipeline with zoom/pan transform support — same
         // premultiplied-source blend as above.
@@ -415,6 +442,7 @@ class CanvasRenderer: NSObject {
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
+            compositeTilePipelineState = try device.makeRenderPipelineState(descriptor: compositeTileDescriptor)
             floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
             referenceQuadPipelineState = try device.makeRenderPipelineState(descriptor: referenceQuadDescriptor)
             gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
