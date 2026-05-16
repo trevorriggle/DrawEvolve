@@ -1105,6 +1105,134 @@ class CanvasRenderer: NSObject {
         return textureToUIImage(finalTexture)
     }
 
+    // MARK: - Phase 3 composite verifier
+    //
+    // Compares the legacy `compositeLayersToTexture` output (monolithic
+    // sources) against `compositeLayersToTextureViaTiles` output (tile
+    // sources) for the same layer set, byte-by-byte. Runs in DEBUG only;
+    // Release strips it entirely.
+    //
+    // Three flags, same shape as Phase 2's tile verifier:
+    //   - `verifyCompositeEnabled` — master kill switch.
+    //   - `verifyCompositeAssertOnMismatch` — true (default): assert on
+    //     first byte beyond tolerance. false: log-only histogram per
+    //     callsite, silent on clean compositions.
+    //   - `verifyCompositePerChannelTolerance` — UInt8 tolerance for
+    //     |tile-mono| per byte. Default 0 (bit-exact). Phase 3 invariant
+    //     says drift is structurally impossible; if a mismatch surfaces
+    //     it's a real bug, not noise.
+    #if DEBUG
+    static var verifyCompositeEnabled: Bool = true
+    static var verifyCompositeAssertOnMismatch: Bool = true
+    static var verifyCompositePerChannelTolerance: UInt8 = 0
+    private static var hasLoggedCompositeVerifierActive: Bool = false
+
+    func verifyCompositeMatchesMonolithic(monoTex: MTLTexture,
+                                          tileTex: MTLTexture,
+                                          callsite: String) {
+        guard CanvasRenderer.verifyCompositeEnabled else { return }
+
+        if !CanvasRenderer.hasLoggedCompositeVerifierActive {
+            CanvasRenderer.hasLoggedCompositeVerifierActive = true
+            print("[composite-verify] active — verifyCompositeEnabled=true, " +
+                  "verifyCompositeAssertOnMismatch=\(CanvasRenderer.verifyCompositeAssertOnMismatch), " +
+                  "tolerance=\(CanvasRenderer.verifyCompositePerChannelTolerance)")
+        }
+
+        let w = monoTex.width
+        let h = monoTex.height
+        guard tileTex.width == w, tileTex.height == h else {
+            print("[composite-verify] dimension mismatch callsite=\(callsite) mono=(\(monoTex.width)x\(monoTex.height)) tile=(\(tileTex.width)x\(tileTex.height))")
+            return
+        }
+
+        let bytesPerRow = w * 4
+        let totalBytes = bytesPerRow * h
+        var monoBuf = Data(count: totalBytes)
+        var tileBuf = Data(count: totalBytes)
+
+        monoBuf.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            monoTex.getBytes(base, bytesPerRow: bytesPerRow,
+                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                             size: MTLSize(width: w, height: h, depth: 1)),
+                             mipmapLevel: 0)
+        }
+        tileBuf.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            tileTex.getBytes(base, bytesPerRow: bytesPerRow,
+                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                             size: MTLSize(width: w, height: h, depth: 1)),
+                             mipmapLevel: 0)
+        }
+
+        let assertOnMode = CanvasRenderer.verifyCompositeAssertOnMismatch
+        let tolerance = CanvasRenderer.verifyCompositePerChannelTolerance
+        var histogram: [Int] = [0, 0, 0, 0, 0, 0]
+        var firstBeyond: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? = nil
+        var beyondCount: Int = 0
+
+        monoBuf.withUnsafeBytes { mPtr in
+            tileBuf.withUnsafeBytes { tPtr in
+                guard let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                      let tBase = tPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                else { return }
+                scanLoop: for row in 0..<h {
+                    let rowStart = row * bytesPerRow
+                    for col in 0..<w {
+                        let pxOff = rowStart + col * 4
+                        for ch in 0..<4 {
+                            let m = mBase[pxOff + ch]
+                            let t = tBase[pxOff + ch]
+                            let absDiff: UInt8 = t > m ? t - m : m - t
+                            if absDiff == 0 { continue }
+                            switch absDiff {
+                            case 1: histogram[0] += 1
+                            case 2: histogram[1] += 1
+                            case 3: histogram[2] += 1
+                            case 4...7: histogram[3] += 1
+                            case 8...15: histogram[4] += 1
+                            default: histogram[5] += 1
+                            }
+                            if absDiff > tolerance {
+                                beyondCount += 1
+                                if firstBeyond == nil {
+                                    firstBeyond = (row, col, ch, t, m)
+                                }
+                                if assertOnMode { break scanLoop }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if assertOnMode {
+            if let mm = firstBeyond {
+                let channelName = ["B", "G", "R", "A"][mm.channel]
+                print("[composite-verify] MISMATCH callsite=\(callsite) " +
+                      "pixel=(\(mm.col),\(mm.row)) " +
+                      "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
+                      "monoByte=0x\(String(mm.monoByte, radix: 16)) " +
+                      "tolerance=\(tolerance)")
+                assertionFailure("[composite-verify] mismatch at \(callsite) pixel (\(mm.col),\(mm.row))")
+            }
+        } else {
+            let hasAnyDiff = histogram.contains { $0 > 0 }
+            if hasAnyDiff {
+                let labels = ["±1", "±2", "±3", "±4-7", "±8-15", "±16+"]
+                var parts: [String] = []
+                for i in 0..<histogram.count where histogram[i] > 0 {
+                    parts.append("\(labels[i]):\(histogram[i])")
+                }
+                print("[composite-verify] callsite=\(callsite) total=\(totalBytes) " +
+                      "mismatches_beyond_tolerance=\(beyondCount) " +
+                      "(\(parts.joined(separator: " ")))")
+            }
+        }
+    }
+    #endif
+
     /// Composite all visible layers onto a fresh white-backed texture and
     /// return it. Used by export and the eyedropper. Output pixels have
     /// alpha = 1.0 and straight (not premultiplied) RGB equal to what the
@@ -1171,6 +1299,21 @@ class CanvasRenderer: NSObject {
         renderEncoder.endEncoding()
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+
+        #if DEBUG
+        // Phase 3 parallel verifier: run the tile-based composite for the
+        // same layer set and compare byte-by-byte against the legacy
+        // monolithic composite above. Returned output to callers is still
+        // the legacy one — verifier is observation-only during Task 3.1.
+        // After 3.2's body swap, the legacy path is gone and this verifier
+        // call goes with it.
+        if CanvasRenderer.verifyCompositeEnabled,
+           let tileBased = compositeLayersToTextureViaTiles(layers: layers) {
+            verifyCompositeMatchesMonolithic(monoTex: finalTexture,
+                                             tileTex: tileBased,
+                                             callsite: "compositeLayersToTexture")
+        }
+        #endif
 
         return finalTexture
     }
