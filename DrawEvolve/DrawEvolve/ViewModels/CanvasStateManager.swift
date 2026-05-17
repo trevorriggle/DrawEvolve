@@ -538,8 +538,9 @@ class CanvasStateManager: ObservableObject {
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
                 nonisolated(unsafe) let unsafeTexture = texture
+                nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
                 Task.detached {
-                    if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                    if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                         await MainActor.run {
                             if let layer = self.layers.first(where: { $0.id == layerId }) {
                                 layer.updateThumbnail(thumbnail)
@@ -605,8 +606,9 @@ class CanvasStateManager: ObservableObject {
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
                 nonisolated(unsafe) let unsafeTexture = texture
+                nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
                 Task.detached {
-                    if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+                    if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                         await MainActor.run {
                             if let layer = self.layers.first(where: { $0.id == layerId }) {
                                 layer.updateThumbnail(thumbnail)
@@ -678,9 +680,10 @@ class CanvasStateManager: ObservableObject {
             let layerId = layer.id
             nonisolated(unsafe) let unsafeRenderer = renderer
             nonisolated(unsafe) let unsafeTexture = texture
+            nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
             Task.detached {
                 if let thumbnail = unsafeRenderer.generateThumbnail(
-                    from: unsafeTexture,
+                    fromTileGrid: unsafeTileGrid,
                     size: CGSize(width: 44, height: 44)
                 ) {
                     await MainActor.run {
@@ -801,9 +804,10 @@ class CanvasStateManager: ObservableObject {
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         let layerId = layers[selectedLayerIndex].id
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run { [weak self] in
                     guard let self = self,
                           currentLayerIndex < self.layers.count,
@@ -1061,9 +1065,10 @@ class CanvasStateManager: ObservableObject {
         // Update thumbnail
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         let layerId = layers[selectedLayerIndex].id
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run {
                     if let layer = self.layers.first(where: { $0.id == layerId }) {
                         layer.updateThumbnail(thumbnail)
@@ -1129,9 +1134,10 @@ class CanvasStateManager: ObservableObject {
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
         let layerId = layer.id
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run { [weak self] in
                     guard let self = self,
                           currentLayerIndex < self.layers.count,
@@ -1601,8 +1607,9 @@ class CanvasStateManager: ObservableObject {
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run {
                     if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
                         layer.updateThumbnail(thumbnail)
@@ -1778,8 +1785,9 @@ class CanvasStateManager: ObservableObject {
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run {
                     if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
                         layer.updateThumbnail(thumbnail)
@@ -1895,8 +1903,9 @@ class CanvasStateManager: ObservableObject {
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run {
                     if let layer = self.layers.first(where: { $0.id == self.layers[currentLayerIndex].id }) {
                         layer.updateThumbnail(thumbnail)
@@ -2253,9 +2262,10 @@ class CanvasStateManager: ObservableObject {
             let layerId = layer.id
             nonisolated(unsafe) let unsafeRenderer = renderer
             nonisolated(unsafe) let unsafeTexture = texture
+            nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
             Task.detached {
                 if let thumbnail = unsafeRenderer.generateThumbnail(
-                    from: unsafeTexture,
+                    fromTileGrid: unsafeTileGrid,
                     size: CGSize(width: 44, height: 44)
                 ) {
                     await MainActor.run {
@@ -2362,8 +2372,9 @@ class CanvasStateManager: ObservableObject {
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
         nonisolated(unsafe) let unsafeTexture = texture
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
         Task.detached {
-            if let thumbnail = unsafeRenderer.generateThumbnail(from: unsafeTexture, size: CGSize(width: 44, height: 44)) {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run {
                     if let l = self.layers[safe: currentLayerIndex] {
                         l.updateThumbnail(thumbnail)

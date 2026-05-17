@@ -2259,7 +2259,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                     canvasState.bumpLayerMutation()
                     DispatchQueue.global(qos: .utility).async {
-                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
                             DispatchQueue.main.async {
                                 self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
                             }
@@ -2310,8 +2310,9 @@ struct MetalCanvasView: UIViewRepresentable {
                             print("Smudge: recorded stroke undo (before: \(before.pixels.count)B, after: \(after.pixels.count)B)")
                         }
                         // Refresh thumbnail off-thread.
+                        let smudgeTileGrid: TileGrid? = layers[li].tileGrid
                         DispatchQueue.global(qos: .utility).async { [weak self] in
-                            if let thumbnail = renderer.generateThumbnail(from: layerTexture, size: CGSize(width: 44, height: 44)) {
+                            if let thumbnail = renderer.generateThumbnail(fromTileGrid: smudgeTileGrid, size: CGSize(width: 44, height: 44)) {
                                 DispatchQueue.main.async {
                                     self?.layers[li].updateThumbnail(thumbnail)
                                 }
@@ -2571,7 +2572,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         print("Recorded eraser stroke in history (before: \(before.pixels.count) bytes, after: \(after.pixels.count) bytes)")
                     }
                     DispatchQueue.global(qos: .utility).async {
-                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
                             DispatchQueue.main.async {
                                 guard let self = self,
                                       currentLayerIndex < self.layers.count else { return }
@@ -2642,7 +2643,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         ))
                     }
                     DispatchQueue.global(qos: .utility).async {
-                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
                             DispatchQueue.main.async {
                                 guard let self = self,
                                       strokeLayerIndex < self.layers.count else { return }
@@ -2733,7 +2734,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
 
                     DispatchQueue.global(qos: .utility).async {
-                        if let thumbnail = renderer.generateThumbnail(from: texture, size: CGSize(width: 44, height: 44)) {
+                        if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
                             DispatchQueue.main.async {
                                 self?.layers[currentLayerIndex].updateThumbnail(thumbnail)
                             }

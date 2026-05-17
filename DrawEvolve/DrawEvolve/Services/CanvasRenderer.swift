@@ -1426,6 +1426,83 @@ class CanvasRenderer: NSObject {
     }
 
     /// Generate a thumbnail preview from a layer texture
+    /// Phase 3 Task 3.3: tile-grid-sourced per-layer thumbnail.
+    ///
+    /// Composites the layer's sparse tile grid into a transient canvas-sized
+    /// intermediate texture (transparent background — preserves layer
+    /// transparency in the thumbnail), then delegates to
+    /// `generateThumbnail(from:size:)` for the downsample. Output is
+    /// visually equivalent to the monolithic-sourced thumbnail produced
+    /// when given `layer.texture`.
+    ///
+    /// Uses the same per-tile composite pipeline as
+    /// `compositeLayersToTextureViaTiles` (integer pixel coords, NEAREST
+    /// sampler, alpha-over blend). After Phase 4 removes `layer.texture`,
+    /// this is the only path to per-layer thumbnails.
+    func generateThumbnail(fromTileGrid tileGrid: TileGrid?, size: CGSize) -> UIImage? {
+        guard let tileGrid = tileGrid else { return nil }
+        let canvasWidth = Int(tileGrid.canvasSize.width)
+        let canvasHeight = Int(tileGrid.canvasSize.height)
+        guard canvasWidth > 0, canvasHeight > 0 else { return nil }
+
+        // Intermediate canvas-sized texture, transparent background.
+        // Storage .private — GPU-only; the downsample reads it as a
+        // shader input, no CPU readback needed at this stage.
+        let intermDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: canvasWidth,
+            height: canvasHeight,
+            mipmapped: false
+        )
+        intermDesc.storageMode = .private
+        intermDesc.usage = [.renderTarget, .shaderRead]
+
+        guard let intermediate = device.makeTexture(descriptor: intermDesc),
+              let cmdBuf = commandQueue.makeCommandBuffer(),
+              let tilePipeline = compositeTilePipelineState else {
+            return nil
+        }
+
+        let composeDesc = MTLRenderPassDescriptor()
+        composeDesc.colorAttachments[0].texture = intermediate
+        composeDesc.colorAttachments[0].loadAction = .clear
+        composeDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        composeDesc.colorAttachments[0].storeAction = .store
+
+        guard let composeEnc = cmdBuf.makeRenderCommandEncoder(descriptor: composeDesc) else {
+            return nil
+        }
+
+        composeEnc.setRenderPipelineState(tilePipeline)
+        let outputSize = SIMD2<Int32>(Int32(canvasWidth), Int32(canvasHeight))
+        let tileSize = tileGrid.tileSize
+        var opacityValue: Float = 1.0
+
+        for key in tileGrid.allocatedKeys() {
+            guard let tile = tileGrid.tile(at: key) else { continue }
+            let srcX = key.x * tileSize
+            let srcY = key.y * tileSize
+            let blitW = min(tileSize, canvasWidth - srcX)
+            let blitH = min(tileSize, canvasHeight - srcY)
+            if blitW <= 0 || blitH <= 0 { continue }
+
+            var uniforms = TileCompositeUniformsCPU(
+                tileRect: SIMD4<Int32>(Int32(srcX), Int32(srcY), Int32(blitW), Int32(blitH)),
+                outputSize: outputSize
+            )
+            composeEnc.setVertexBytes(&uniforms, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+            composeEnc.setFragmentTexture(tile.texture, index: 0)
+            composeEnc.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+            composeEnc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+
+        composeEnc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        return generateThumbnail(from: intermediate, size: size)
+    }
+
     func generateThumbnail(from texture: MTLTexture, size: CGSize) -> UIImage? {
         // Create a smaller texture for the thumbnail
         let thumbnailSize = MTLSize(
