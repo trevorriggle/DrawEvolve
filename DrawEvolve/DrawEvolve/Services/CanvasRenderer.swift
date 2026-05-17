@@ -4501,6 +4501,20 @@ class CanvasRenderer: NSObject {
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+
+        // Phase 3.1 soak follow-up: verifier was missing on this sync
+        // wipe-and-rebuild path. Now added per the rule established in
+        // commit 29a7635 — every sync dual-write callsite must end with
+        // verifyTileGridMatchesMonolithic. Catches any future regression
+        // in the inline blur-adjustment dual-write at end-of-call rather
+        // than letting it silently propagate into the composite path.
+        #if DEBUG
+        if let grid = tileGrid {
+            verifyTileGridMatchesMonolithic(monolithic: layerTexture,
+                                            tileGrid: grid,
+                                            callsite: "commitBlurAdjustment")
+        }
+        #endif
     }
 
     /// Free all blur-adjustment textures and clear bookkeeping. Called on
