@@ -56,6 +56,16 @@ class CanvasRenderer: NSObject {
     private var charcoalPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
+    /// Phase 3 Task 3.1 follow-up: legacy `compositeLayersToTexture` uses
+    /// this pipeline (quadVertex + compositeTileFragmentShader) instead of
+    /// `textureDisplayPipelineState` so the legacy composite samples with
+    /// NEAREST, matching the new tile-based composite path. Eliminates the
+    /// LINEAR-vs-NEAREST sampler divergence at stroke-edge fractional UVs
+    /// that the parallel verifier caught. Other consumers of textureDisplay
+    /// (per-frame screen render, generateThumbnail) keep LINEAR; this
+    /// pipeline state is scoped to the composite path only and goes away
+    /// in Task 3.2 when the legacy composite body is deleted.
+    private var compositeFullCanvasNearestPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
     private var floatingTexturePipelineState: MTLRenderPipelineState? // For floating selection drag preview
     /// Pipeline for per-tile composite under the tiling migration (Phase 3).
@@ -331,6 +341,27 @@ class CanvasRenderer: NSObject {
         compositeTileDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         compositeTileDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Phase 3 Task 3.1 follow-up: full-canvas-quad NEAREST pipeline.
+        // Same vertex shader as textureDisplayPipelineState (full-screen
+        // quad), same blend state, but uses compositeTileFragmentShader
+        // (NEAREST sampler) instead of textureDisplayFragment (LINEAR).
+        // Used by the legacy compositeLayersToTexture during the 3.1
+        // parallel-verifier window so its sampler matches the new tile-
+        // based path's NEAREST — eliminates the LINEAR-vs-NEAREST stroke-
+        // edge sampler divergence the verifier caught. Goes away in 3.2
+        // when the legacy composite body is deleted.
+        let compositeFullCanvasNearestDescriptor = MTLRenderPipelineDescriptor()
+        compositeFullCanvasNearestDescriptor.vertexFunction = quadVertex
+        compositeFullCanvasNearestDescriptor.fragmentFunction = compositeTileFragment
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].isBlendingEnabled = true
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        compositeFullCanvasNearestDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         // Texture display pipeline with zoom/pan transform support — same
         // premultiplied-source blend as above.
         let textureDisplayWithTransformDescriptor = MTLRenderPipelineDescriptor()
@@ -443,6 +474,7 @@ class CanvasRenderer: NSObject {
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
             compositeTilePipelineState = try device.makeRenderPipelineState(descriptor: compositeTileDescriptor)
+            compositeFullCanvasNearestPipelineState = try device.makeRenderPipelineState(descriptor: compositeFullCanvasNearestDescriptor)
             floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
             referenceQuadPipelineState = try device.makeRenderPipelineState(descriptor: referenceQuadDescriptor)
             gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
@@ -1268,8 +1300,11 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        guard let pipeline = textureDisplayPipelineState else {
-            print("ERROR: textureDisplayPipelineState not available")
+        // Phase 3 Task 3.1 follow-up: NEAREST sampler instead of LINEAR.
+        // Eliminates LINEAR-vs-NEAREST stroke-edge sampler divergence vs
+        // compositeLayersToTextureViaTiles. See pipeline state comment.
+        guard let pipeline = compositeFullCanvasNearestPipelineState else {
+            print("ERROR: compositeFullCanvasNearestPipelineState not available")
             return nil
         }
 
