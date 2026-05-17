@@ -1744,6 +1744,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         settings: brushSettings,
                         to: layerTexture,
                         layerId: strokeLayerId,
+                        tileGrid: layers[strokeLayerIndex].tileGrid,
                         screenSize: docSize
                     )
                 }

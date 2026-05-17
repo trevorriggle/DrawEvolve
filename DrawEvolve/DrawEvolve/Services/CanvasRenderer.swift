@@ -4826,6 +4826,7 @@ class CanvasRenderer: NSObject {
         settings: BrushSettings,
         to layerTexture: MTLTexture,
         layerId: UUID,
+        tileGrid: TileGrid? = nil,
         screenSize: CGSize
     ) {
         guard !stamps.isEmpty else { return }
@@ -4871,6 +4872,14 @@ class CanvasRenderer: NSObject {
             hardness: Float(settings.hardness),
             tileOrigin: SIMD2<Float>(0, 0)
         )
+
+        // Phase 2 hole #5: accumulate deposit scissor rects into a batch
+        // bbox for the post-loop tile-grid dual-write. Only the deposit
+        // pass writes to layerTexture; patch-update passes write to the
+        // patch textures (front/back), which are session-internal and
+        // not mirrored into the tile grid. First-stamp pickup-only path
+        // contributes nothing to bbox by construction.
+        var batchBbox: CGRect = .null
 
         for stamp in stamps {
             let safePressure: Float = {
@@ -4928,6 +4937,8 @@ class CanvasRenderer: NSObject {
                 let rectH = y1 - y0
                 if rectW > 0 && rectH > 0 {
                     let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
+                    let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
+                    batchBbox = batchBbox.isNull ? stampRect : batchBbox.union(stampRect)
 
                     let depositDescriptor = MTLRenderPassDescriptor()
                     depositDescriptor.colorAttachments[0].texture = layerTexture
@@ -4961,6 +4972,53 @@ class CanvasRenderer: NSObject {
         // last written (the most recent BACK after the final swap).
         smudgePatchFront = front
         smudgePatchBack = back
+
+        // === Phase 2 hole #5 fix: tile-grid dual-write (batched-deposit) ====
+        //
+        // Same pattern as appendBlurStrokeStamps (hole #3). Mirror this
+        // batch's deposits into the tile grid via blit-from-monolithic for
+        // tiles intersecting batchBbox, on the SAME command buffer as the
+        // per-stamp render encoders. Metal serialises encoders within a
+        // buffer; the blit reads the post-deposit layer texture.
+        //
+        // Async commit (no waitUntilCompleted) per the function's hot-path
+        // contract. Trust GPU queue ordering: subsequent ops on the same
+        // command queue serialise behind this batch. No verifier call —
+        // async commit means the verifier would race the not-yet-completed
+        // blit.
+        if let grid = tileGrid, !batchBbox.isNull, !batchBbox.isEmpty {
+            let tileKeys = grid.tilesIntersecting(batchBbox)
+            if !tileKeys.isEmpty {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+                }
+                if let blit = commandBuffer.makeBlitCommandEncoder() {
+                    let tileSize = grid.tileSize
+                    let texW = layerTexture.width
+                    let texH = layerTexture.height
+                    for key in tileKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, texW - srcX)
+                        let blitH = min(tileSize, texH - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+                        grid.updateTile(at: key) { tile in
+                            blit.copy(
+                                from: layerTexture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit.endEncoding()
+                }
+            }
+        }
+        // === End dual-write block ========================================
 
         commandBuffer.commit()
         // Don't waitUntilCompleted — touchesMoved is hot path. Subsequent
