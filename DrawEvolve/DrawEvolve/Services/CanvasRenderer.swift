@@ -58,6 +58,13 @@ class CanvasRenderer: NSObject {
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
     private var floatingTexturePipelineState: MTLRenderPipelineState? // For floating selection drag preview
+    /// Pipeline for per-tile composite under the tiling migration (Phase 3).
+    /// Vertex shader places a quad at the tile's integer pixel rect within
+    /// the output canvas; fragment shader samples the tile with NEAREST
+    /// filter. Same alpha-over blend as `textureDisplayPipelineState` so the
+    /// per-tile composite is bit-exact with the legacy full-canvas-quad
+    /// composite given Phase 2's tile<->mono invariant.
+    private var compositeTilePipelineState: MTLRenderPipelineState?
     /// Pipeline for reference-image quads rendered in screen space BETWEEN
     /// the canvas's white paper and the layer composite. ONLY used by the
     /// to-screen path; the save/AI/export composite (compositeLayersToTexture)
@@ -218,7 +225,9 @@ class CanvasRenderer: NSObject {
               let gaussianBlurMaskedFragment = library.makeFunction(name: "gaussianBlurMaskedShader"),
               let stampBlurDepositFragment = library.makeFunction(name: "stampBlurDepositShader"),
               let smudgePatchUpdateFragment = library.makeFunction(name: "smudgePatchUpdateShader"),
-              let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader") else {
+              let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader"),
+              let compositeTileVertex = library.makeFunction(name: "compositeTileVertexShader"),
+              let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -303,6 +312,24 @@ class CanvasRenderer: NSObject {
         textureDisplayDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
         textureDisplayDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         textureDisplayDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
+        // Per-tile composite pipeline (Phase 3). Same blend state as
+        // textureDisplayDescriptor — premultiplied source RGB + alpha-over —
+        // so a back-to-front sequence of per-tile draws produces the same
+        // accumulated pixel values as a single full-canvas-quad composite of
+        // the corresponding monolithic texture. Vertex shader takes int4
+        // tileRect + int2 outputSize, fragment shader uses NEAREST sampler.
+        let compositeTileDescriptor = MTLRenderPipelineDescriptor()
+        compositeTileDescriptor.vertexFunction = compositeTileVertex
+        compositeTileDescriptor.fragmentFunction = compositeTileFragment
+        compositeTileDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        compositeTileDescriptor.colorAttachments[0].isBlendingEnabled = true
+        compositeTileDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        compositeTileDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        compositeTileDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        compositeTileDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        compositeTileDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        compositeTileDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
         // Texture display pipeline with zoom/pan transform support — same
         // premultiplied-source blend as above.
@@ -415,6 +442,7 @@ class CanvasRenderer: NSObject {
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
+            compositeTilePipelineState = try device.makeRenderPipelineState(descriptor: compositeTileDescriptor)
             floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
             referenceQuadPipelineState = try device.makeRenderPipelineState(descriptor: referenceQuadDescriptor)
             gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
@@ -1077,6 +1105,134 @@ class CanvasRenderer: NSObject {
         return textureToUIImage(finalTexture)
     }
 
+    // MARK: - Phase 3 composite verifier
+    //
+    // Compares the legacy `compositeLayersToTexture` output (monolithic
+    // sources) against `compositeLayersToTextureViaTiles` output (tile
+    // sources) for the same layer set, byte-by-byte. Runs in DEBUG only;
+    // Release strips it entirely.
+    //
+    // Three flags, same shape as Phase 2's tile verifier:
+    //   - `verifyCompositeEnabled` — master kill switch.
+    //   - `verifyCompositeAssertOnMismatch` — true (default): assert on
+    //     first byte beyond tolerance. false: log-only histogram per
+    //     callsite, silent on clean compositions.
+    //   - `verifyCompositePerChannelTolerance` — UInt8 tolerance for
+    //     |tile-mono| per byte. Default 0 (bit-exact). Phase 3 invariant
+    //     says drift is structurally impossible; if a mismatch surfaces
+    //     it's a real bug, not noise.
+    #if DEBUG
+    static var verifyCompositeEnabled: Bool = true
+    static var verifyCompositeAssertOnMismatch: Bool = true
+    static var verifyCompositePerChannelTolerance: UInt8 = 0
+    private static var hasLoggedCompositeVerifierActive: Bool = false
+
+    func verifyCompositeMatchesMonolithic(monoTex: MTLTexture,
+                                          tileTex: MTLTexture,
+                                          callsite: String) {
+        guard CanvasRenderer.verifyCompositeEnabled else { return }
+
+        if !CanvasRenderer.hasLoggedCompositeVerifierActive {
+            CanvasRenderer.hasLoggedCompositeVerifierActive = true
+            print("[composite-verify] active — verifyCompositeEnabled=true, " +
+                  "verifyCompositeAssertOnMismatch=\(CanvasRenderer.verifyCompositeAssertOnMismatch), " +
+                  "tolerance=\(CanvasRenderer.verifyCompositePerChannelTolerance)")
+        }
+
+        let w = monoTex.width
+        let h = monoTex.height
+        guard tileTex.width == w, tileTex.height == h else {
+            print("[composite-verify] dimension mismatch callsite=\(callsite) mono=(\(monoTex.width)x\(monoTex.height)) tile=(\(tileTex.width)x\(tileTex.height))")
+            return
+        }
+
+        let bytesPerRow = w * 4
+        let totalBytes = bytesPerRow * h
+        var monoBuf = Data(count: totalBytes)
+        var tileBuf = Data(count: totalBytes)
+
+        monoBuf.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            monoTex.getBytes(base, bytesPerRow: bytesPerRow,
+                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                             size: MTLSize(width: w, height: h, depth: 1)),
+                             mipmapLevel: 0)
+        }
+        tileBuf.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            tileTex.getBytes(base, bytesPerRow: bytesPerRow,
+                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                             size: MTLSize(width: w, height: h, depth: 1)),
+                             mipmapLevel: 0)
+        }
+
+        let assertOnMode = CanvasRenderer.verifyCompositeAssertOnMismatch
+        let tolerance = CanvasRenderer.verifyCompositePerChannelTolerance
+        var histogram: [Int] = [0, 0, 0, 0, 0, 0]
+        var firstBeyond: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? = nil
+        var beyondCount: Int = 0
+
+        monoBuf.withUnsafeBytes { mPtr in
+            tileBuf.withUnsafeBytes { tPtr in
+                guard let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                      let tBase = tPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                else { return }
+                scanLoop: for row in 0..<h {
+                    let rowStart = row * bytesPerRow
+                    for col in 0..<w {
+                        let pxOff = rowStart + col * 4
+                        for ch in 0..<4 {
+                            let m = mBase[pxOff + ch]
+                            let t = tBase[pxOff + ch]
+                            let absDiff: UInt8 = t > m ? t - m : m - t
+                            if absDiff == 0 { continue }
+                            switch absDiff {
+                            case 1: histogram[0] += 1
+                            case 2: histogram[1] += 1
+                            case 3: histogram[2] += 1
+                            case 4...7: histogram[3] += 1
+                            case 8...15: histogram[4] += 1
+                            default: histogram[5] += 1
+                            }
+                            if absDiff > tolerance {
+                                beyondCount += 1
+                                if firstBeyond == nil {
+                                    firstBeyond = (row, col, ch, t, m)
+                                }
+                                if assertOnMode { break scanLoop }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if assertOnMode {
+            if let mm = firstBeyond {
+                let channelName = ["B", "G", "R", "A"][mm.channel]
+                print("[composite-verify] MISMATCH callsite=\(callsite) " +
+                      "pixel=(\(mm.col),\(mm.row)) " +
+                      "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
+                      "monoByte=0x\(String(mm.monoByte, radix: 16)) " +
+                      "tolerance=\(tolerance)")
+                assertionFailure("[composite-verify] mismatch at \(callsite) pixel (\(mm.col),\(mm.row))")
+            }
+        } else {
+            let hasAnyDiff = histogram.contains { $0 > 0 }
+            if hasAnyDiff {
+                let labels = ["±1", "±2", "±3", "±4-7", "±8-15", "±16+"]
+                var parts: [String] = []
+                for i in 0..<histogram.count where histogram[i] > 0 {
+                    parts.append("\(labels[i]):\(histogram[i])")
+                }
+                print("[composite-verify] callsite=\(callsite) total=\(totalBytes) " +
+                      "mismatches_beyond_tolerance=\(beyondCount) " +
+                      "(\(parts.joined(separator: " ")))")
+            }
+        }
+    }
+    #endif
+
     /// Composite all visible layers onto a fresh white-backed texture and
     /// return it. Used by export and the eyedropper. Output pixels have
     /// alpha = 1.0 and straight (not premultiplied) RGB equal to what the
@@ -1138,6 +1294,128 @@ class CanvasRenderer: NSObject {
             var opacityValue = layer.opacity
             renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
             renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+
+        renderEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        #if DEBUG
+        // Phase 3 parallel verifier: run the tile-based composite for the
+        // same layer set and compare byte-by-byte against the legacy
+        // monolithic composite above. Returned output to callers is still
+        // the legacy one — verifier is observation-only during Task 3.1.
+        // After 3.2's body swap, the legacy path is gone and this verifier
+        // call goes with it.
+        if CanvasRenderer.verifyCompositeEnabled,
+           let tileBased = compositeLayersToTextureViaTiles(layers: layers) {
+            verifyCompositeMatchesMonolithic(monoTex: finalTexture,
+                                             tileTex: tileBased,
+                                             callsite: "compositeLayersToTexture")
+        }
+        #endif
+
+        return finalTexture
+    }
+
+    /// Layout-matched twin of the Metal `TileCompositeUniforms` struct
+    /// (Shaders.metal, Phase 3 tile composite). int4 + int2 = 24 bytes; the
+    /// struct lays out identically on both sides because SIMD4<Int32> is
+    /// 16-byte aligned and SIMD2<Int32> is 8-byte aligned.
+    private struct TileCompositeUniformsCPU {
+        var tileRect: SIMD4<Int32>
+        var outputSize: SIMD2<Int32>
+    }
+
+    /// Phase 3 tile-based composite. Same contract as
+    /// `compositeLayersToTexture` — white-backed canvas-sized output,
+    /// straight RGB, alpha=1.0 — but the source for each visible layer is
+    /// its `tileGrid` (sparse), not its `texture` (monolithic). Bit-exact
+    /// with the monolithic-based composite given Phase 2's tile<->mono
+    /// invariant: per-tile quads land on integer pixel boundaries, NEAREST
+    /// sampler, same blend state.
+    ///
+    /// **Fallback for layers without a tile grid.** A visible layer that has
+    /// `texture != nil` but `tileGrid == nil` is an invariant violation
+    /// (Phase 2 pairs them at allocation), but if it happens the monolithic
+    /// composite would draw its pixels — to preserve correctness this
+    /// function draws the full layer texture as a single canvas-sized quad
+    /// in that case. Logged in DEBUG so the violation surfaces.
+    ///
+    /// Phase 3 Task 3.1b; verifier wiring lands in 3.1c.
+    func compositeLayersToTextureViaTiles(layers: [DrawingLayer]) -> MTLTexture? {
+        guard let finalTexture = createLayerTexture() else { return nil }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = finalTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor),
+              let tilePipeline = compositeTilePipelineState else {
+            return nil
+        }
+
+        renderEncoder.setScissorRect(MTLScissorRect(
+            x: 0, y: 0,
+            width: finalTexture.width,
+            height: finalTexture.height
+        ))
+
+        let outputSize = SIMD2<Int32>(Int32(finalTexture.width), Int32(finalTexture.height))
+
+        renderEncoder.setRenderPipelineState(tilePipeline)
+
+        for layer in layers where layer.isVisible {
+            guard let layerTexture = layer.texture else { continue }
+            var opacityValue = layer.opacity
+
+            // Fallback: layer has a monolithic but no tile grid (invariant
+            // violation). Draw the full layer texture as a single quad so
+            // the composite stays correct.
+            guard let grid = layer.tileGrid else {
+                #if DEBUG
+                print("⚠️ compositeLayersToTextureViaTiles: layer '\(layer.name)' has texture but no tileGrid — falling back to full-canvas quad")
+                #endif
+                var fallback = TileCompositeUniformsCPU(
+                    tileRect: SIMD4<Int32>(0, 0, Int32(layerTexture.width), Int32(layerTexture.height)),
+                    outputSize: outputSize
+                )
+                renderEncoder.setVertexBytes(&fallback, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+                renderEncoder.setFragmentTexture(layerTexture, index: 0)
+                renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+                renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                continue
+            }
+
+            let tileSize = grid.tileSize
+            let texW = layerTexture.width
+            let texH = layerTexture.height
+
+            // Iterate this layer's allocated tiles. Order within a layer
+            // doesn't matter because tiles within a single layer don't
+            // overlap (sparse grid by definition). Order BETWEEN layers
+            // matches `layers` array order — that's what produces the
+            // back-to-front alpha-over.
+            for key in grid.allocatedKeys() {
+                guard let tile = grid.tile(at: key) else { continue }
+                let srcX = key.x * tileSize
+                let srcY = key.y * tileSize
+                let blitW = min(tileSize, texW - srcX)
+                let blitH = min(tileSize, texH - srcY)
+                if blitW <= 0 || blitH <= 0 { continue }
+
+                var uniforms = TileCompositeUniformsCPU(
+                    tileRect: SIMD4<Int32>(Int32(srcX), Int32(srcY), Int32(blitW), Int32(blitH)),
+                    outputSize: outputSize
+                )
+                renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+                renderEncoder.setFragmentTexture(tile.texture, index: 0)
+                renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+                renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            }
         }
 
         renderEncoder.endEncoding()
