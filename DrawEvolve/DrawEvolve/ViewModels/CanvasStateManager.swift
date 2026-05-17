@@ -1238,11 +1238,23 @@ class CanvasStateManager: ObservableObject {
             }
 
             layer.texture = texture
-            // Pair the texture with an empty tile grid (Phase 2 Task 5).
+            // Pair the texture with a tile grid (Phase 2 Task 5).
             // Same lifetime as `layer.texture`; nil if texture allocation
             // ultimately failed.
-            if texture != nil {
-                layer.tileGrid = renderer.makeEmptyTileGrid()
+            //
+            // Phase 3.1 soak fix: previously this paired the loaded texture
+            // with an EMPTY tile grid, leaving mono/tile out of sync. The
+            // legacy compositeLayersToTexture (mono-source) sampled the
+            // loaded PNG content, while compositeLayersToTextureViaTiles
+            // (tile-source) saw no allocated tiles and contributed nothing
+            // — surfaced as ±2 LSB G-channel divergence at the first
+            // raster-order pixel where layer content existed. Routing
+            // through populateTileGridFromTexture rebuilds the tile keyspace
+            // bit-exact with the loaded monolithic.
+            if let tex = texture {
+                let grid = renderer.makeEmptyTileGrid()
+                layer.tileGrid = grid
+                renderer.populateTileGridFromTexture(tex, tileGrid: grid, callsite: "loadLayeredDrawing[ord:\(entry.ordinal)]")
             }
             layers.append(layer)
         }
