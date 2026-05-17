@@ -4247,6 +4247,11 @@ class CanvasRenderer: NSObject {
         let sigma: Float
         let kernelHalfWidth: Int32
         let blurStrength: Float
+        /// Phase 2 hole #3: tile grid captured at session start. Per-batch
+        /// `appendBlurStrokeStamps` reads this for the dual-write; the grid
+        /// is the same instance throughout the stroke since DrawingLayer
+        /// is a reference type.
+        let tileGrid: TileGrid?
     }
 
     private var activeBlurStrokeSession: BlurStrokeSession?
@@ -4261,7 +4266,8 @@ class CanvasRenderer: NSObject {
         to layerTexture: MTLTexture,
         settings: BrushSettings,
         screenSize: CGSize,
-        selectionPath: [CGPoint]?
+        selectionPath: [CGPoint]?,
+        tileGrid: TileGrid? = nil
     ) -> Bool {
         // Defensive: end any prior session that didn't get cleaned up
         // (tool change mid-stroke, view teardown, etc.).
@@ -4304,7 +4310,8 @@ class CanvasRenderer: NSObject {
             viewport: viewport,
             sigma: sigma,
             kernelHalfWidth: halfWidth,
-            blurStrength: blurStrength
+            blurStrength: blurStrength,
+            tileGrid: tileGrid
         )
         return true
     }
@@ -4333,6 +4340,13 @@ class CanvasRenderer: NSObject {
         let layerWidth = s.layerTexture.width
         let layerHeight = s.layerTexture.height
 
+        // Phase 2 hole #3: accumulate per-stamp scissor rects into a batch
+        // bbox. The bbox feeds the post-loop tile-grid dual-write so the
+        // tiles touched by THIS batch's deposits get refreshed from
+        // monolithic. Bbox stays in CGRect (not MTLScissorRect) so
+        // `tilesIntersecting` can union/clip cleanly.
+        var batchBbox: CGRect = .null
+
         for point in points {
             let safePressure: CGFloat = {
                 guard point.pressure.isFinite else { return 1.0 }
@@ -4355,6 +4369,10 @@ class CanvasRenderer: NSObject {
             let rectH = y1 - y0
             if rectW <= 0 || rectH <= 0 { continue }
             let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
+
+            // Accumulate into batch bbox for the post-loop dual-write.
+            let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
+            batchBbox = batchBbox.isNull ? stampRect : batchBbox.union(stampRect)
 
             // Pass 1: horizontal Gaussian, scissored.
             runGaussianPass(
@@ -4400,6 +4418,57 @@ class CanvasRenderer: NSObject {
             depositEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
             depositEncoder.endEncoding()
         }
+
+        // === Phase 2 hole #3 fix: tile-grid dual-write (batched-deposit) ====
+        //
+        // Mirror this batch's deposits into the tile grid by blitting every
+        // tile intersecting the accumulated stamp bbox from the post-deposit
+        // monolithic. Same command buffer as the deposits — Metal serialises
+        // encoders within a buffer, so the blit reads the post-deposit
+        // layer texture.
+        //
+        // Async commit (no waitUntilCompleted) per the function's existing
+        // contract. Tile-grid metadata mutations (updateTile,
+        // ensureTileWithClearIfNeeded) happen at submit time; actual tile
+        // pixels become bit-exact with monolithic at GPU completion time.
+        // Trust GPU queue ordering: subsequent ops on the same command
+        // queue serialise behind this batch's command buffer, so they read
+        // post-completion tile pixels. Matches the renderStroke async path's
+        // risk profile. No verifier call here — async commit means the
+        // verifier would race against the not-yet-completed blit. Next
+        // dual-write callsite's verifier (next stroke commit, next save)
+        // catches divergence if any.
+        if let grid = s.tileGrid, !batchBbox.isNull, !batchBbox.isEmpty {
+            let tileKeys = grid.tilesIntersecting(batchBbox)
+            if !tileKeys.isEmpty {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cb)
+                }
+                if let blit = cb.makeBlitCommandEncoder() {
+                    let tileSize = grid.tileSize
+                    for key in tileKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, layerWidth - srcX)
+                        let blitH = min(tileSize, layerHeight - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+                        grid.updateTile(at: key) { tile in
+                            blit.copy(
+                                from: s.layerTexture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit.endEncoding()
+                }
+            }
+        }
+        // === End dual-write block ========================================
 
         cb.commit()
         // No waitUntilCompleted — let the GPU pipeline this batch behind

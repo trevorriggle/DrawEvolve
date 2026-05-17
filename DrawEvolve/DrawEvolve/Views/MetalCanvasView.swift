@@ -1557,7 +1557,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     to: texture,
                     settings: brushSettings,
                     screenSize: blurDocSize,
-                    selectionPath: blurSelectionPath
+                    selectionPath: blurSelectionPath,
+                    tileGrid: layers[selectedLayerIndex].tileGrid
                 )
                 if blurStrokeActive {
                     flushBlurSubStroke()
