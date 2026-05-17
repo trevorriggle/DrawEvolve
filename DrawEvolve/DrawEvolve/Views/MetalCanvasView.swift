@@ -2694,7 +2694,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let strokeSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
                 let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
                     if stroke.tool == .blur {
-                        renderer.renderBlurStroke(stroke, to: texture, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
+                        renderer.renderBlurStroke(stroke, to: texture, tileGrid: layer.tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     } else {
                         renderer.renderStroke(stroke, to: texture, tileGrid: layer.tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     }

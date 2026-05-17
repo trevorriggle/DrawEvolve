@@ -4516,6 +4516,7 @@ class CanvasRenderer: NSObject {
     func renderBlurStroke(
         _ stroke: BrushStroke,
         to layerTexture: MTLTexture,
+        tileGrid: TileGrid? = nil,
         screenSize: CGSize,
         selectionPath: [CGPoint]?,
         completion: (() -> Void)? = nil
@@ -4565,6 +4566,9 @@ class CanvasRenderer: NSObject {
         // around the stamp center, with a small rounding margin. Computed
         // inline below since `radiusOnLayer` uses per-stamp pressure.
 
+        // Phase 2 hole #4: stroke-wide bbox for the post-loop tile dual-write.
+        var strokeBbox: CGRect = .null
+
         for point in stroke.points {
             let safePressure: CGFloat = {
                 guard point.pressure.isFinite else { return 1.0 }
@@ -4589,6 +4593,10 @@ class CanvasRenderer: NSObject {
                 continue
             }
             let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
+
+            // Accumulate for the post-loop dual-write.
+            let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
+            strokeBbox = strokeBbox.isNull ? stampRect : strokeBbox.union(stampRect)
 
             // Pass 1: horizontal Gaussian, scissored.
             runGaussianPass(
@@ -4636,6 +4644,50 @@ class CanvasRenderer: NSObject {
             depositEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
             depositEncoder.endEncoding()
         }
+
+        // === Phase 2 hole #4 fix: tile-grid dual-write (batched-deposit) ====
+        //
+        // One-shot variant of the appendBlurStrokeStamps pattern (hole #3).
+        // Mirror the entire stroke's deposits into the tile grid via
+        // blit-from-monolithic for tiles intersecting strokeBbox, on the
+        // SAME command buffer as the deposits. Metal serialises encoders
+        // within a buffer; the blit reads the post-deposit layer texture.
+        //
+        // Commit path is async via addCompletedHandler when completion is
+        // provided (the typical caller); same async-commit risk profile as
+        // hole #3. No verifier call here (would race against the not-yet-
+        // completed blit on the async path).
+        if let grid = tileGrid, !strokeBbox.isNull, !strokeBbox.isEmpty {
+            let tileKeys = grid.tilesIntersecting(strokeBbox)
+            if !tileKeys.isEmpty {
+                for key in tileKeys {
+                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+                }
+                if let blit = commandBuffer.makeBlitCommandEncoder() {
+                    let tileSize = grid.tileSize
+                    for key in tileKeys {
+                        let srcX = key.x * tileSize
+                        let srcY = key.y * tileSize
+                        let blitW = min(tileSize, layerWidth - srcX)
+                        let blitH = min(tileSize, layerHeight - srcY)
+                        if blitW <= 0 || blitH <= 0 { continue }
+                        grid.updateTile(at: key) { tile in
+                            blit.copy(
+                                from: layerTexture,
+                                sourceSlice: 0, sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                                to: tile.texture,
+                                destinationSlice: 0, destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                            )
+                        }
+                    }
+                    blit.endEncoding()
+                }
+            }
+        }
+        // === End dual-write block ========================================
 
         if let completion = completion {
             commandBuffer.addCompletedHandler { _ in
