@@ -2049,26 +2049,29 @@ class CanvasRenderer: NSObject {
     /// (vertex shader `quadVertexShaderWithTransform` already implements
     /// the canvas-flip mirror about viewport center, which lines up
     /// with texture-center for a 1:1 viewport).
-    func flipLayerTextureInPlace(_ texture: MTLTexture,
-                                  tileGrid: TileGrid? = nil,
+    func flipLayerTextureInPlace(tileGrid: TileGrid,
                                   flipHorizontal: Bool,
                                   flipVertical: Bool) {
         if !flipHorizontal && !flipVertical { return }
 
-        // Capture pre-flip allocated keys BEFORE the monolithic op. The
-        // monolithic pass doesn't touch the tile grid, so reading
-        // allocatedKeys() here vs after the monolithic pass would give the
-        // same set — capturing before is just clearer about intent.
-        let preFlipKeys: [TileKey] = tileGrid?.allocatedKeys() ?? []
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: flip-in-place failed to ensure staging atlas")
+            return
+        }
+
+        let atlasW = atlas.width
+        let atlasH = atlas.height
+        let tileSize = tileGrid.tileSize
+        let preFlipKeys = tileGrid.allocatedKeys()
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: texture.pixelFormat,
-            width: texture.width,
-            height: texture.height,
+            pixelFormat: atlas.pixelFormat,
+            width: atlasW,
+            height: atlasH,
             mipmapped: false
         )
         descriptor.usage = [.renderTarget, .shaderRead]
-        descriptor.storageMode = .shared
+        descriptor.storageMode = .private
 
         guard let temp = device.makeTexture(descriptor: descriptor),
               let pipelineState = textureDisplayWithTransformPipelineState,
@@ -2077,25 +2080,48 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // 1. Blit source pixels into the temp texture so the subsequent
-        //    render pass has something to sample (it cannot read and
-        //    write the same texture in one pass).
+        // 1. Compose every allocated tile into the atlas at its canvas
+        //    position so the flip pass has current layer content as a
+        //    source.
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            for key in preFlipKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            blit.endEncoding()
+        }
+
+        // 2. Blit atlas → temp so the render pass below has a sampleable
+        //    source (it cannot read and write the same texture in one pass).
         if let blit = commandBuffer.makeBlitCommandEncoder() {
             blit.copy(
-                from: texture, sourceSlice: 0, sourceLevel: 0,
+                from: atlas, sourceSlice: 0, sourceLevel: 0,
                 sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                sourceSize: MTLSize(width: atlasW, height: atlasH, depth: 1),
                 to: temp, destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
             )
             blit.endEncoding()
         }
 
-        // 2. Clear-and-render back into the layer. The clear + standard
+        // 3. Clear-and-render back into the atlas. The clear + standard
         //    source-over blend resolves to exactly the (flipped) source
         //    pixels.
         let renderDescriptor = MTLRenderPassDescriptor()
-        renderDescriptor.colorAttachments[0].texture = texture
+        renderDescriptor.colorAttachments[0].texture = atlas
         renderDescriptor.colorAttachments[0].loadAction = .clear
         renderDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         renderDescriptor.colorAttachments[0].storeAction = .store
@@ -2113,16 +2139,14 @@ class CanvasRenderer: NSObject {
 
         // Identity transform — no zoom, pan, rotation. The vertex shader
         // applies flip in screen-space relative to the viewport, which
-        // here equals the layer pixel size; mirror-about-viewport-center
-        // becomes mirror-about-layer-center.
+        // here equals the atlas pixel size; mirror-about-viewport-center
+        // becomes mirror-about-canvas-center.
         var transform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
         encoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
 
-        var viewport = SIMD2<Float>(Float(texture.width), Float(texture.height))
+        var viewport = SIMD2<Float>(Float(atlasW), Float(atlasH))
         encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
 
-        // canvasSize uniform is unused by the shader but the buffer
-        // slot must be bound. Pass the viewport for a benign value.
         var canvas = viewport
         encoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
 
@@ -2135,84 +2159,62 @@ class CanvasRenderer: NSObject {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        // === Phase 2 Task 4.8: tile-grid dual-write (re-key + blit) ======
+        // === Phase 4.5c: re-key + blit flipped atlas into tile grid =====
         //
-        // Result-then-mirror: after the monolithic flip lands, the post-
-        // flip pixels live at the same coordinates in `texture` as the
-        // post-flip canvas should show. The tile grid mirror is:
-        //
-        //   1. Compute the bijective re-key: (tx, ty) → (gridW-1-tx, ty)
-        //      for horizontal, (tx, gridH-1-ty) for vertical, both for HV.
-        //   2. Drop every pre-flip allocation (its content has moved).
+        // Result-then-mirror: after the atlas flip lands, the post-flip
+        // pixels live at canvas coordinates the post-flip canvas should
+        // show. Tile grid mirror:
+        //   1. Bijective re-key: (tx, ty) → (gridW-1-tx, ty) for H-flip,
+        //      (tx, gridH-1-ty) for V-flip, both for HV.
+        //   2. Drop every pre-flip allocation.
         //   3. For each post-flip key: ensureTile, then blit the new key's
-        //      pixel rect from post-flip monolithic into the tile.
-        //
-        // Works regardless of canvas alignment to tileSize. For partial-
-        // edge tiles (canvas not a multiple of tileSize) the blit covers
-        // only the in-canvas portion; the rest of the .private tile
-        // texture is undefined — Task 5's allocation-clear fix handles
-        // that case. Our canvas sizes (2048², 4096²) are exact multiples
-        // of 256, so partial tiles don't arise today.
-        if let grid = tileGrid, !preFlipKeys.isEmpty {
-            let gridW = grid.gridWidth
-            let gridH = grid.gridHeight
-            let tileSize = grid.tileSize
-            let texW = texture.width
-            let texH = texture.height
+        //      pixel rect from the post-flip atlas into the tile.
+        if preFlipKeys.isEmpty { return }
 
-            let postFlipKeys: [TileKey] = preFlipKeys.map { old in
-                TileKey(
-                    x: flipHorizontal ? (gridW - 1 - old.x) : old.x,
-                    y: flipVertical   ? (gridH - 1 - old.y) : old.y
-                )
-            }
+        let gridW = tileGrid.gridWidth
+        let gridH = tileGrid.gridHeight
 
-            // Drop pre-flip allocations FIRST so dropTile/ensureTile pairs
-            // that hit the same key (e.g., the middle column under H-flip
-            // on an odd grid width) don't leak stale content.
-            for old in preFlipKeys {
-                grid.dropTile(at: old)
-            }
-
-            if let mirrorBuf = commandQueue.makeCommandBuffer() {
-                // Pass 1: allocate-and-clear-if-needed for freshly-ensured
-                // tiles. Each call may encode an empty-clear render pass on
-                // mirrorBuf; can't overlap with an active blit encoder.
-                for newKey in postFlipKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: newKey, onCommandBuffer: mirrorBuf)
-                }
-                // Pass 2: blit data into tiles.
-                if let blit = mirrorBuf.makeBlitCommandEncoder() {
-                    for newKey in postFlipKeys {
-                        let srcX = newKey.x * tileSize
-                        let srcY = newKey.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-
-                        // try? only catches encoder-construction failure
-                        // inside the closure; blit.copy can't throw and the
-                        // encoder is guarded above. Present only to satisfy
-                        // updateTile's rethrows signature.
-                        grid.updateTile(at: newKey) { tile in
-                            blit.copy(
-                                from: texture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
-                    }
-                    blit.endEncoding()
-                }
-                mirrorBuf.commit()
-                mirrorBuf.waitUntilCompleted()
-            }
+        let postFlipKeys: [TileKey] = preFlipKeys.map { old in
+            TileKey(
+                x: flipHorizontal ? (gridW - 1 - old.x) : old.x,
+                y: flipVertical   ? (gridH - 1 - old.y) : old.y
+            )
         }
-        // === End dual-write block ========================================
+
+        for old in preFlipKeys {
+            tileGrid.dropTile(at: old)
+        }
+
+        if let mirrorBuf = commandQueue.makeCommandBuffer() {
+            for newKey in postFlipKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: newKey, onCommandBuffer: mirrorBuf)
+            }
+            if let blit = mirrorBuf.makeBlitCommandEncoder() {
+                for newKey in postFlipKeys {
+                    let nx = newKey.x * tileSize
+                    let ny = newKey.y * tileSize
+                    let blitW = min(tileSize, atlasW - nx)
+                    let blitH = min(tileSize, atlasH - ny)
+                    if blitW <= 0 || blitH <= 0 { continue }
+
+                    tileGrid.updateTile(at: newKey) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: nx, y: ny, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit.endEncoding()
+            }
+            mirrorBuf.commit()
+            mirrorBuf.waitUntilCompleted()
+        }
+        // === End atlas → tile blit block =================================
     }
 
     /// Upload a UIImage into a fresh Metal texture. Used to build the floating

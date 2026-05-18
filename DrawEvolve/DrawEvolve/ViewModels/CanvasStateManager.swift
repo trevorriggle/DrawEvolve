@@ -667,18 +667,16 @@ class CanvasStateManager: ObservableObject {
         guard !affected.isEmpty else { return }
 
         for layer in affected {
-            guard let texture = layer.texture else { continue }
+            guard let tileGrid = layer.tileGrid else { continue }
             renderer.flipLayerTextureInPlace(
-                texture,
-                tileGrid: layer.tileGrid,
+                tileGrid: tileGrid,
                 flipHorizontal: flipH,
                 flipVertical: flipV
             )
 
             let layerId = layer.id
             nonisolated(unsafe) let unsafeRenderer = renderer
-            nonisolated(unsafe) let unsafeTexture = texture
-            nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
+            nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
             Task.detached {
                 if let thumbnail = unsafeRenderer.generateThumbnail(
                     fromTileGrid: unsafeTileGrid,
@@ -2236,14 +2234,13 @@ class CanvasStateManager: ObservableObject {
         guard let renderer = renderer else { return }
         guard flipH || flipV else { return }
 
-        let affected = layers.filter { $0.isVisible && $0.texture != nil }
+        let affected = layers.filter { $0.isVisible && $0.tileGrid != nil }
         guard !affected.isEmpty else { return }
 
         for layer in affected {
-            guard let texture = layer.texture else { continue }
+            guard let tileGrid = layer.tileGrid else { continue }
             renderer.flipLayerTextureInPlace(
-                texture,
-                tileGrid: layer.tileGrid,
+                tileGrid: tileGrid,
                 flipHorizontal: flipH,
                 flipVertical: flipV
             )
