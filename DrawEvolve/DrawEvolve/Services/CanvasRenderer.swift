@@ -3050,6 +3050,20 @@ class CanvasRenderer: NSObject {
         }
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+
+        // Master audit C1: verifier was missing on this sync keyspace-
+        // rebuild path. Now added per the rule established in commit
+        // 29a7635 — every sync dual-write callsite must end with
+        // verifyTileGridMatchesMonolithic. Catches any future regression
+        // in restoreSnapshot's keyspace rebuild at end-of-call rather
+        // than letting it silently propagate into the composite/display
+        // path. `grid` is in scope from the guard let at the top of the
+        // keyspace-rebuild block.
+        #if DEBUG
+        verifyTileGridMatchesMonolithic(monolithic: texture,
+                                        tileGrid: grid,
+                                        callsite: "restoreSnapshot")
+        #endif
     }
 
     /// Render text to a texture at the specified location.
