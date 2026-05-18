@@ -1930,6 +1930,15 @@ class CanvasRenderer: NSObject {
 
         let tileKeys = tileGrid.tilesIntersecting(dirtyRect)
 
+        // Source B fix: clear the rotated-AABB-tile-aligned atlas region
+        // before compose. The dirty rect for composite-floating extends
+        // outside the input docRect when rotation != 0; unallocated tiles
+        // within that rotated extent must not carry stale pixels into the
+        // shader's loadAction=.load read.
+        if let clearRegion = atlasRegion(coveringTiles: tileKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: commandBuffer)
+        }
+
         // Compose tile state for the dirty bbox into the atlas so the
         // shader's loadAction=.load reads current layer pixels.
         if !tileKeys.isEmpty, let composeBlit = commandBuffer.makeBlitCommandEncoder() {
