@@ -3084,30 +3084,28 @@ class CanvasRenderer: NSObject {
     ///
     /// Phase 4.5 will delete the atlas → monolithic blit pair entirely
     /// when monolithic goes away.
-    func restoreSnapshot(_ snapshot: LayerSnapshot, to texture: MTLTexture, tileGrid: TileGrid? = nil) {
+    func restoreSnapshot(_ snapshot: LayerSnapshot, tileGrid: TileGrid) {
         drainCommandQueue()
 
-        guard let grid = tileGrid else { return }
-
+        let grid = tileGrid
         let savedKeys = Set(snapshot.tiles.keys)
 
         // Drop tiles in the current grid that aren't in the snapshot.
         // After this loop, any tile in the grid that's also in the
         // snapshot will get its content overwritten below; any tile
-        // not in the snapshot is gone (and the monolithic clear at
-        // step 5 zeros its region of the canvas to match).
+        // not in the snapshot is gone — those regions become
+        // transparent (which matched the pre-4.5 monolithic clear).
         for key in grid.allocatedKeys() where !savedKeys.contains(key) {
             grid.dropTile(at: key)
         }
 
         let tileSize = grid.tileSize
-        let canvasW = texture.width
-        let canvasH = texture.height
+        let canvasW = Int(canvasSize.width)
+        let canvasH = Int(canvasSize.height)
 
         // Pre-filter to validRestores: tuples carrying the per-tile
         // pixel dims so the subsequent loops don't recompute them and
-        // so mis-sized entries are skipped wholesale (rather than the
-        // bridge's silent skip-the-row-but-still-blit-stale-pixels).
+        // so mis-sized entries are skipped wholesale.
         var validRestores: [(key: TileKey, data: Data, copyW: Int, copyH: Int)] = []
         validRestores.reserveCapacity(snapshot.tiles.count)
         for (key, tileData) in snapshot.tiles {
@@ -3120,40 +3118,23 @@ class CanvasRenderer: NSObject {
             validRestores.append((key, tileData, copyW, copyH))
         }
 
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-
-        // Step 5: clear monolithic. Even on empty-snapshot restore (no
-        // valid tiles to write back) the clear is correct: result is a
-        // fully-transparent layer, matching the legacy
-        // `allocatedKeys.isEmpty → drop everything` semantic.
-        //
-        // texture.usage at createLayerTexture includes .renderTarget so
-        // this is valid. Encoder ends immediately; the render pass'
-        // .clear loadAction does the work. No draw calls needed.
-        let clearDesc = MTLRenderPassDescriptor()
-        clearDesc.colorAttachments[0].texture = texture
-        clearDesc.colorAttachments[0].loadAction = .clear
-        clearDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        clearDesc.colorAttachments[0].storeAction = .store
-        if let clearEnc = cmdBuf.makeRenderCommandEncoder(descriptor: clearDesc) {
-            clearEnc.endEncoding()
-        }
-
         if validRestores.isEmpty {
-            // Empty / all-invalid snapshot — just the clear suffices.
-            cmdBuf.commit()
-            cmdBuf.waitUntilCompleted()
+            // Empty / all-invalid snapshot — every grid tile is already
+            // dropped by the loop above, so the layer is now fully
+            // transparent. Nothing more to do.
             return
         }
 
-        // Step 4: CPU-upload each valid tile's data into the atlas at its
-        // canvas position. Atlas is .shared so texture.replace is legal;
-        // CPU writes complete before we commit the cmdBuf below, so the
-        // subsequent GPU blits see the post-upload atlas state.
         guard let atlas = ensureCanvasStagingAtlas() else {
             print("ERROR: restoreSnapshot — failed to ensure staging atlas")
             return
         }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        // CPU-upload each valid tile's data into the atlas at its canvas
+        // position. Atlas is .shared so texture.replace is legal; CPU
+        // writes complete before we commit cmdBuf below, so the subsequent
+        // GPU blits see the post-upload atlas state.
         for restore in validRestores {
             let dstX = restore.key.x * tileSize
             let dstY = restore.key.y * tileSize
@@ -3172,14 +3153,14 @@ class CanvasRenderer: NSObject {
             }
         }
 
-        // Step 6: allocate-and-clear-if-needed for every saved key.
-        // Each call may encode its own no-draw render pass on cmdBuf;
-        // safe because no blit encoder is open yet.
+        // Allocate-and-clear-if-needed for every saved key. Each call may
+        // encode its own no-draw render pass on cmdBuf; safe because no
+        // blit encoder is open yet.
         for restore in validRestores {
             _ = grid.ensureTileWithClearIfNeeded(at: restore.key, onCommandBuffer: cmdBuf)
         }
 
-        // Step 7: blit atlas → grid tile + atlas → monolithic per valid key.
+        // Blit atlas → grid tile per valid key.
         if let blit = cmdBuf.makeBlitCommandEncoder() {
             for restore in validRestores {
                 let dstX = restore.key.x * tileSize
@@ -3196,22 +3177,11 @@ class CanvasRenderer: NSObject {
                         destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                     )
                 }
-
-                blit.copy(
-                    from: atlas,
-                    sourceSlice: 0, sourceLevel: 0,
-                    sourceOrigin: MTLOrigin(x: dstX, y: dstY, z: 0),
-                    sourceSize: MTLSize(width: restore.copyW, height: restore.copyH, depth: 1),
-                    to: texture,
-                    destinationSlice: 0, destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
-                )
             }
             blit.endEncoding()
         }
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
-
     }
 
     // MARK: - Core Text rasterisation

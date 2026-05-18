@@ -2855,9 +2855,9 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .eraser,
                let beforeSnapshot = eraserBeforeSnapshot,
                selectedLayerIndex < layers.count,
-               let texture = layers[selectedLayerIndex].texture,
+               let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
-                renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+                renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
                 print("Eraser cancelled — restored layer to pre-stroke snapshot")
             }
             eraserBeforeSnapshot = nil
@@ -2871,9 +2871,9 @@ struct MetalCanvasView: UIViewRepresentable {
             if blurStrokeActive,
                let beforeSnapshot = blurStrokeBeforeSnapshot,
                let li = blurStrokeLayerIndex, li < layers.count,
-               let texture = layers[li].texture,
+               let tileGrid = layers[li].tileGrid,
                let renderer = renderer {
-                renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layers[li].tileGrid)
+                renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
                 renderer.cancelBlurStroke()
                 print("Blur cancelled — restored layer to pre-stroke snapshot")
             }

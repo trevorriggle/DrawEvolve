@@ -528,17 +528,16 @@ class CanvasStateManager: ObservableObject {
 
         switch action {
         case .stroke(let layerId, let beforeSnapshot, _):
-            // Restore the layer texture to its state before the stroke
+            // Restore the layer's tile grid to its state before the stroke
             if let layer = layers.first(where: { $0.id == layerId }),
-               let texture = layer.texture,
+               let tileGrid = layer.tileGrid,
                let renderer = renderer {
-                renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layer.tileGrid)
-                print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.totalByteCount) bytes)")
+                renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
+                print("Undo stroke - restored tile grid from snapshot (\(beforeSnapshot.totalByteCount) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
-                nonisolated(unsafe) let unsafeTexture = texture
-                nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
+                nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
                 Task.detached {
                     if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                         await MainActor.run {
@@ -596,17 +595,16 @@ class CanvasStateManager: ObservableObject {
 
         switch action {
         case .stroke(let layerId, _, let afterSnapshot):
-            // Restore the layer texture to its state after the stroke
+            // Restore the layer's tile grid to its state after the stroke
             if let layer = layers.first(where: { $0.id == layerId }),
-               let texture = layer.texture,
+               let tileGrid = layer.tileGrid,
                let renderer = renderer {
-                renderer.restoreSnapshot(afterSnapshot, to: texture, tileGrid: layer.tileGrid)
-                print("Redo stroke - restored texture from snapshot (\(afterSnapshot.totalByteCount) bytes)")
+                renderer.restoreSnapshot(afterSnapshot, tileGrid: tileGrid)
+                print("Redo stroke - restored tile grid from snapshot (\(afterSnapshot.totalByteCount) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
-                nonisolated(unsafe) let unsafeTexture = texture
-                nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
+                nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
                 Task.detached {
                     if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                         await MainActor.run {
@@ -1710,6 +1708,7 @@ class CanvasStateManager: ObservableObject {
     func renderSelectionInRealTime() {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let pixels = selectionPixels,
               let originalRect = selectionOriginalRect,
@@ -1718,7 +1717,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Step 1: Restore the base layer (with hole where selection was) from snapshot
-        renderer.restoreSnapshot(snapshot, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+        renderer.restoreSnapshot(snapshot, tileGrid: tileGrid)
 
         // Step 2: Calculate the current position with offset and scale applied
         let currentRect = CGRect(
@@ -1813,9 +1812,9 @@ class CanvasStateManager: ObservableObject {
     func cancelSelection() {
         if let renderer = renderer,
            selectedLayerIndex < layers.count,
-           let texture = layers[selectedLayerIndex].texture,
+           let tileGrid = layers[selectedLayerIndex].tileGrid,
            let beforeSnapshot = selectionBeforeSnapshot {
-            renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+            renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
         }
         clearSelection()
     }
