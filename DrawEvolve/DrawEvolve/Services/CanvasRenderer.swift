@@ -2542,8 +2542,7 @@ class CanvasRenderer: NSObject {
     func floodFill(
         at point: CGPoint,
         with color: UIColor,
-        in texture: MTLTexture,
-        tileGrid: TileGrid? = nil,
+        tileGrid: TileGrid,
         screenSize: CGSize,
         completion: @escaping () -> Void
     ) -> Bool {
@@ -2551,17 +2550,22 @@ class CanvasRenderer: NSObject {
         print("CanvasRenderer: Flood fill at \(point) with color")
         #endif
 
-        // Scale coordinates from screen space to texture space
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: floodFill — failed to ensure staging atlas")
+            return false
+        }
+
+        // Scale coordinates from screen space to canvas-pixel space
+        let scaleX = CGFloat(atlas.width) / screenSize.width
+        let scaleY = CGFloat(atlas.height) / screenSize.height
         let texturePoint = CGPoint(x: point.x * scaleX, y: point.y * scaleY)
 
         let startX = Int(texturePoint.x)
         let startY = Int(texturePoint.y)
 
         // Validate coordinates
-        guard startX >= 0, startY >= 0, startX < texture.width, startY < texture.height else {
-            print("ERROR: Point outside texture bounds")
+        guard startX >= 0, startY >= 0, startX < atlas.width, startY < atlas.height else {
+            print("ERROR: Point outside canvas bounds")
             return false
         }
 
@@ -2582,21 +2586,12 @@ class CanvasRenderer: NSObject {
         // tile-write cb. Hazard tracking ensures the blit reads the
         // post-write tile pixels. Drain is only needed for the
         // touchesCancelled-on-restoreSnapshot race shape (5b15e24).
-        let width = texture.width
-        let height = texture.height
+        let width = atlas.width
+        let height = atlas.height
         let bytesPerRow = width * 4
         let dataSize = bytesPerRow * height
 
-        guard let grid = tileGrid else {
-            print("ERROR: floodFill — tileGrid required (Phase 4.2d)")
-            return false
-        }
-
-        guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: floodFill — failed to ensure staging atlas")
-            return false
-        }
-
+        let grid = tileGrid
         let tileSize = grid.tileSize
         let allocated = grid.allocatedKeys()
 
@@ -2765,7 +2760,7 @@ class CanvasRenderer: NSObject {
             DispatchQueue.main.async { [weak self] in
                 data.withUnsafeBytes { ptr in
                     guard let baseAddress = ptr.baseAddress else { return }
-                    texture.replace(
+                    atlas.replace(
                         region: MTLRegion(
                             origin: MTLOrigin(x: 0, y: 0, z: 0),
                             size: MTLSize(width: width, height: height, depth: 1)
@@ -2776,27 +2771,19 @@ class CanvasRenderer: NSObject {
                     )
                 }
 
-                // === Phase 2 Task 4.7: tile-grid dual-write (blit from monolithic) =
+                // === Phase 4.5c: blit modified atlas region into tiles ====
                 //
-                // Canonical pattern. Previous shape used a buffer-to-texture
-                // sub-tile blit from a full-canvas MTLBuffer of the post-fill
-                // CPU data; that had two structural problems:
-                //   (a) freshly-allocated tiles got cleared to zero by
-                //       ensureTileWithClearIfNeeded, then only the
-                //       dirtyRect-intersection got blitted. Pixels inside the
-                //       tile but outside the dirtyRect stayed at zero while
-                //       monolithic at those pixels retained pre-fill content
-                //       (the canvas already-painted area the fill didn't
-                //       reach). That's a guaranteed mismatch for any new
-                //       allocation whose tile-bbox extends past the dirty bbox.
-                //   (b) sourceBytesPerRow alignment requirements aren't
-                //       universally honored across iOS GPUs for arbitrary
-                //       widths.
-                //
-                // Full-tile blit-from-monolithic eliminates both: every
-                // affected tile becomes a bit-exact copy of monolithic, which
-                // texture.replace just landed with the final post-fill state.
-                if let grid = tileGrid, fillCount > 0, let self = self {
+                // Full-tile blit from atlas — every affected tile becomes a
+                // bit-exact copy of the atlas, which atlas.replace just
+                // landed with the final post-fill state. Previous shape
+                // used a buffer-to-texture sub-tile blit with two structural
+                // problems: (a) freshly-allocated tiles whose tile-bbox
+                // extended past the dirty bbox had unfilled pixels left at
+                // zero, mismatching monolithic; (b) sourceBytesPerRow
+                // alignment requirements aren't universally honored across
+                // iOS GPUs for arbitrary widths. Full-tile blit-from-atlas
+                // resolves both.
+                if fillCount > 0, let self = self {
                     let dirtyRect = CGRect(
                         x: dirtyMinX,
                         y: dirtyMinY,
@@ -2805,8 +2792,8 @@ class CanvasRenderer: NSObject {
                     )
                     let tileKeys = grid.tilesIntersecting(dirtyRect)
                     let tileSize = grid.tileSize
-                    let texW = texture.width
-                    let texH = texture.height
+                    let atlasW = atlas.width
+                    let atlasH = atlas.height
 
                     if !tileKeys.isEmpty, let cmdBuf = self.commandQueue.makeCommandBuffer() {
                         for key in tileKeys {
@@ -2816,13 +2803,13 @@ class CanvasRenderer: NSObject {
                             for key in tileKeys {
                                 let srcX = key.x * tileSize
                                 let srcY = key.y * tileSize
-                                let blitW = min(tileSize, texW - srcX)
-                                let blitH = min(tileSize, texH - srcY)
+                                let blitW = min(tileSize, atlasW - srcX)
+                                let blitH = min(tileSize, atlasH - srcY)
                                 if blitW <= 0 || blitH <= 0 { continue }
 
                                 grid.updateTile(at: key) { tile in
                                     blit.copy(
-                                        from: texture,
+                                        from: atlas,
                                         sourceSlice: 0, sourceLevel: 0,
                                         sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
                                         sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
@@ -2838,7 +2825,7 @@ class CanvasRenderer: NSObject {
                         cmdBuf.waitUntilCompleted()
                     }
                 }
-                // === End dual-write block ================================
+                // === End atlas → tile blit block ==========================
 
                 completion()
             }

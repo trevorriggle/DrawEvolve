@@ -2305,7 +2305,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 pendingPaintBucketFill = nil
                 guard pending.layerIndex < layers.count,
                       layers[pending.layerIndex].id == pending.layerId,
-                      let texture = layers[pending.layerIndex].texture,
+                      let tileGrid = layers[pending.layerIndex].tileGrid,
                       let renderer = renderer,
                       let canvasState = canvasState else {
                     print("Paint bucket: pending fill abandoned — layer changed before lift")
@@ -2318,12 +2318,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 let currentLayerIndex = pending.layerIndex
                 let layerId = pending.layerId
                 let beforeSnapshot = pending.beforeSnapshot
-                let capturedTileGrid = layers[pending.layerIndex].tileGrid
+                let capturedTileGrid: TileGrid? = tileGrid
                 let dispatched = renderer.floodFill(
                     at: pending.docLocation,
                     with: brushSettings.color,
-                    in: texture,
-                    tileGrid: layers[pending.layerIndex].tileGrid,
+                    tileGrid: tileGrid,
                     screenSize: documentSize
                 ) { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
