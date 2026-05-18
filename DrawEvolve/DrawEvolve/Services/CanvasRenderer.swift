@@ -3113,67 +3113,11 @@ class CanvasRenderer: NSObject {
         #endif
     }
 
-    /// Render text to a texture at the specified location.
-    ///
-    /// Caller passes `location` in DOC space and `screenSize` = documentSize
-    /// (so the internal doc→texture scale is 1:1 in the current architecture).
-    ///
-    /// Two bugs the previous implementation had:
-    ///   1. Crash — it double-scaled `location` (callers were passing UIKit
-    ///      points as `screenSize` while `location` was already doc-space),
-    ///      so `destinationOrigin + sourceSize` walked off the texture and
-    ///      `blitEncoder.copy` Metal-asserted.
-    ///   2. White rectangle — the blit was a raw byte copy, so the entire
-    ///      rasterized text rect (transparent margins included) overwrote
-    ///      whatever was underneath. On an empty layer the rectangular hole
-    ///      revealed the white canvas background, hence the visible "white box".
-    ///
-    /// New approach: rasterize the text to a UIImage at scale=1.0 (so its
-    /// pixel dims match texture pixels), then route through `renderImage`,
-    /// which uses the same proven premultiplied-alpha Porter-Duff blend that
-    /// moved selections rely on. Same blend, same coordinate handling, no
-    /// new edge cases to debug.
-    func renderText(
-        _ text: String,
-        at location: CGPoint,
-        fontSize: CGFloat,
-        color: UIColor,
-        to texture: MTLTexture,
-        screenSize: CGSize
-    ) {
-        // Single-line, default-style adapter that routes through
-        // `rasterizeFloatingText` so legacy callers get the same Core Text
-        // path the floating-text pipeline uses.
-        let settings = TextSettings(
-            fontFamily: "Helvetica Neue",
-            fontFace: "HelveticaNeue",
-            size: fontSize,
-            color: color,
-            alignment: .leading,
-            leading: 0,
-            tracking: 0,
-            kerning: .auto,
-            italic: false
-        )
-        let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
-        guard let result = rasterizeFloatingText(
-            content: text,
-            settings: settings,
-            screenSize: screenSize,
-            textureSize: texSize
-        ) else { return }
-        let destRect = CGRect(origin: location, size: result.docSize)
-        // Dead-code path (renderText has no external callers as of Phase 2).
-        // Pass tileGrid: nil — if revived, callers should plumb the grid
-        // through renderText's signature.
-        renderImage(result.image, at: destRect, to: texture, tileGrid: nil, screenSize: screenSize)
-    }
-
     // MARK: - Core Text rasterisation
 
     /// Rasterise a string + TextSettings to a UIImage at canvas-native
-    /// resolution. Single source of truth for both legacy `renderText` and
-    /// the FloatingText pipeline.
+    /// resolution. The single text rasterisation path — used by the
+    /// FloatingText pipeline (live preview + commit).
     ///
     /// Returns the image and its doc-space size — anchor + this size is the
     /// rect callers blit into the layer (or pass to `renderFloatingTexture`
