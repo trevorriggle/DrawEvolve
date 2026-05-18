@@ -1163,44 +1163,58 @@ class CanvasRenderer: NSObject {
         return textureToUIImage(finalTexture)
     }
 
-    // MARK: - Phase 3 composite verifier
+    // MARK: - Phase 4.3 parallel-display verifier
     //
-    // Compares the legacy `compositeLayersToTexture` output (monolithic
-    // sources) against `compositeLayersToTextureViaTiles` output (tile
-    // sources) for the same layer set, byte-by-byte. Runs in DEBUG only;
-    // Release strips it entirely.
+    // Compares the monolithic-sourced display render (today's path —
+    // `renderTextureToScreen(layer.texture, ...)` per-layer composite
+    // onto the drawable) against the tile-sourced display render (Phase
+    // 4.3's new `renderTileGridToScreen` path, encoded onto an off-
+    // screen target). Byte-by-byte. Runs in DEBUG only; Release strips
+    // it entirely.
+    //
+    // Originally landed in Phase 3 Task 3.1c as `verifyCompositeMatches
+    // Monolithic` to validate `compositeLayersToTextureViaTiles` against
+    // the legacy composite. Phase 3.2 retired the legacy composite body
+    // and the function went unused. Phase 4.3 adapts it (per master
+    // audit § 4.1.9 decision — adapt rather than rewrite) for the live
+    // display-path comparison: same per-pixel compare loop + histogram +
+    // assert-on-mismatch shape, just pointed at a different pair of
+    // canvas-sized textures.
     //
     // Three flags, same shape as Phase 2's tile verifier:
-    //   - `verifyCompositeEnabled` — master kill switch.
-    //   - `verifyCompositeAssertOnMismatch` — true (default): assert on
-    //     first byte beyond tolerance. false: log-only histogram per
-    //     callsite, silent on clean compositions.
-    //   - `verifyCompositePerChannelTolerance` — UInt8 tolerance for
-    //     |tile-mono| per byte. Default 0 (bit-exact). Phase 3 invariant
-    //     says drift is structurally impossible; if a mismatch surfaces
-    //     it's a real bug, not noise.
+    //   - `verifyParallelDisplayEnabled` — master kill switch.
+    //   - `verifyParallelDisplayAssertOnMismatch` — true (default):
+    //     assert on first byte beyond tolerance. false: log-only
+    //     histogram per callsite, silent on clean compositions.
+    //   - `verifyParallelDisplayPerChannelTolerance` — UInt8 tolerance
+    //     for |tile-mono| per byte. Default 0 (bit-exact). Phase 4.3
+    //     invariant says drift is structurally impossible given Phase 3's
+    //     per-tile NEAREST sampler discipline carries through; if a
+    //     mismatch surfaces under transforms, it's a real bug (likely
+    //     sub-pixel rounding in the per-tile vertex math) and the right
+    //     fix is integer-aligned vertex math, not tolerance relaxation.
     #if DEBUG
-    static var verifyCompositeEnabled: Bool = true
-    static var verifyCompositeAssertOnMismatch: Bool = true
-    static var verifyCompositePerChannelTolerance: UInt8 = 0
-    private static var hasLoggedCompositeVerifierActive: Bool = false
+    static var verifyParallelDisplayEnabled: Bool = true
+    static var verifyParallelDisplayAssertOnMismatch: Bool = true
+    static var verifyParallelDisplayPerChannelTolerance: UInt8 = 0
+    private static var hasLoggedParallelDisplayVerifierActive: Bool = false
 
-    func verifyCompositeMatchesMonolithic(monoTex: MTLTexture,
-                                          tileTex: MTLTexture,
-                                          callsite: String) {
-        guard CanvasRenderer.verifyCompositeEnabled else { return }
+    func verifyParallelDisplayMatchesMonolithic(monoDisplay: MTLTexture,
+                                                tileDisplay: MTLTexture,
+                                                callsite: String) {
+        guard CanvasRenderer.verifyParallelDisplayEnabled else { return }
 
-        if !CanvasRenderer.hasLoggedCompositeVerifierActive {
-            CanvasRenderer.hasLoggedCompositeVerifierActive = true
-            print("[composite-verify] active — verifyCompositeEnabled=true, " +
-                  "verifyCompositeAssertOnMismatch=\(CanvasRenderer.verifyCompositeAssertOnMismatch), " +
-                  "tolerance=\(CanvasRenderer.verifyCompositePerChannelTolerance)")
+        if !CanvasRenderer.hasLoggedParallelDisplayVerifierActive {
+            CanvasRenderer.hasLoggedParallelDisplayVerifierActive = true
+            print("[display-verify] active — verifyParallelDisplayEnabled=true, " +
+                  "verifyParallelDisplayAssertOnMismatch=\(CanvasRenderer.verifyParallelDisplayAssertOnMismatch), " +
+                  "tolerance=\(CanvasRenderer.verifyParallelDisplayPerChannelTolerance)")
         }
 
-        let w = monoTex.width
-        let h = monoTex.height
-        guard tileTex.width == w, tileTex.height == h else {
-            print("[composite-verify] dimension mismatch callsite=\(callsite) mono=(\(monoTex.width)x\(monoTex.height)) tile=(\(tileTex.width)x\(tileTex.height))")
+        let w = monoDisplay.width
+        let h = monoDisplay.height
+        guard tileDisplay.width == w, tileDisplay.height == h else {
+            print("[display-verify] dimension mismatch callsite=\(callsite) mono=(\(monoDisplay.width)x\(monoDisplay.height)) tile=(\(tileDisplay.width)x\(tileDisplay.height))")
             return
         }
 
@@ -1211,21 +1225,21 @@ class CanvasRenderer: NSObject {
 
         monoBuf.withUnsafeMutableBytes { ptr in
             guard let base = ptr.baseAddress else { return }
-            monoTex.getBytes(base, bytesPerRow: bytesPerRow,
-                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                             size: MTLSize(width: w, height: h, depth: 1)),
-                             mipmapLevel: 0)
+            monoDisplay.getBytes(base, bytesPerRow: bytesPerRow,
+                                 from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                                 size: MTLSize(width: w, height: h, depth: 1)),
+                                 mipmapLevel: 0)
         }
         tileBuf.withUnsafeMutableBytes { ptr in
             guard let base = ptr.baseAddress else { return }
-            tileTex.getBytes(base, bytesPerRow: bytesPerRow,
-                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                             size: MTLSize(width: w, height: h, depth: 1)),
-                             mipmapLevel: 0)
+            tileDisplay.getBytes(base, bytesPerRow: bytesPerRow,
+                                 from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                                 size: MTLSize(width: w, height: h, depth: 1)),
+                                 mipmapLevel: 0)
         }
 
-        let assertOnMode = CanvasRenderer.verifyCompositeAssertOnMismatch
-        let tolerance = CanvasRenderer.verifyCompositePerChannelTolerance
+        let assertOnMode = CanvasRenderer.verifyParallelDisplayAssertOnMismatch
+        let tolerance = CanvasRenderer.verifyParallelDisplayPerChannelTolerance
         var histogram: [Int] = [0, 0, 0, 0, 0, 0]
         var firstBeyond: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? = nil
         var beyondCount: Int = 0
@@ -1268,12 +1282,12 @@ class CanvasRenderer: NSObject {
         if assertOnMode {
             if let mm = firstBeyond {
                 let channelName = ["B", "G", "R", "A"][mm.channel]
-                print("[composite-verify] MISMATCH callsite=\(callsite) " +
+                print("[display-verify] MISMATCH callsite=\(callsite) " +
                       "pixel=(\(mm.col),\(mm.row)) " +
                       "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
                       "monoByte=0x\(String(mm.monoByte, radix: 16)) " +
                       "tolerance=\(tolerance)")
-                assertionFailure("[composite-verify] mismatch at \(callsite) pixel (\(mm.col),\(mm.row))")
+                assertionFailure("[display-verify] mismatch at \(callsite) pixel (\(mm.col),\(mm.row))")
             }
         } else {
             let hasAnyDiff = histogram.contains { $0 > 0 }
@@ -1283,7 +1297,7 @@ class CanvasRenderer: NSObject {
                 for i in 0..<histogram.count where histogram[i] > 0 {
                     parts.append("\(labels[i]):\(histogram[i])")
                 }
-                print("[composite-verify] callsite=\(callsite) total=\(totalBytes) " +
+                print("[display-verify] callsite=\(callsite) total=\(totalBytes) " +
                       "mismatches_beyond_tolerance=\(beyondCount) " +
                       "(\(parts.joined(separator: " ")))")
             }
@@ -1314,17 +1328,19 @@ class CanvasRenderer: NSObject {
         // now read from the tile grid via compositeLayersToTextureViaTiles.
         //
         // Bit-exact with the legacy output, established by the Task 3.1
-        // parallel verifier soak (verifyCompositeMatchesMonolithic at
-        // tolerance=0, silent across the full soak set including
-        // eyedropper / multi-layer drawing-open / undo-redo / translate /
-        // flood fill / save). Multi-layer load fix (commit 987153e) was
-        // the load-bearing change that made tile-grid keyspace match
-        // monolithic content at load time.
+        // parallel verifier soak (the function that's now
+        // `verifyParallelDisplayMatchesMonolithic` was originally
+        // `verifyCompositeMatchesMonolithic`; ran at tolerance=0, silent
+        // across the full soak set including eyedropper / multi-layer
+        // drawing-open / undo-redo / translate / flood fill / save).
+        // Multi-layer load fix (commit 987153e) was the load-bearing
+        // change that made tile-grid keyspace match monolithic content
+        // at load time.
         //
-        // The verifyCompositeMatchesMonolithic function survives in this
-        // file (Phase 4 may want a similar mono-vs-tile compare during
-        // the display-path cutover). Its callsite here is removed — there
-        // are no longer two implementations to compare.
+        // Phase 4.3a adapted the function (rename + parameter shape) for
+        // the live display-path comparison. Its Phase 3 callsite here
+        // is gone; the new callsite is the per-frame parallel-display
+        // verifier in MetalCanvasView's draw loop (Phase 4.3c).
         return compositeLayersToTextureViaTiles(layers: layers)
     }
 
