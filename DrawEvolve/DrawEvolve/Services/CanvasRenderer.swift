@@ -5385,6 +5385,17 @@ class CanvasRenderer: NSObject {
             ? []
             : tileGrid.tilesIntersecting(strokeBbox)
 
+        // Source B fix: tile-aligned clear before compose. Same shape as
+        // appendBlurStrokeStamps (this is the deferred-batch variant).
+        // Tile-aligned (not raw bbox) because the post-stroke blit-back
+        // at the function's tail copies the FULL tile rect from atlas
+        // to tile; the in-tile-outside-bbox sliver of an unallocated
+        // tile must be cleared, or it leaks into the freshly-allocated
+        // tile.
+        if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: commandBuffer)
+        }
+
         // Compose bbox tile state into atlas so the deposit's loadAction=.load
         // reads current layer pixels.
         if !bboxKeys.isEmpty, let atlasCompose = commandBuffer.makeBlitCommandEncoder() {
