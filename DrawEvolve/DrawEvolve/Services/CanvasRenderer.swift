@@ -2808,25 +2808,99 @@ class CanvasRenderer: NSObject {
             return false
         }
 
-        // Read pixel data from texture
+        // Phase 4.2d: read pixel data from the tile grid via the staging
+        // atlas instead of getBytes on the monolithic. Same flat-buffer
+        // shape (width × height × 4 bytes, zero-filled) so the flood
+        // algorithm below runs unchanged.
+        //
+        // Pre-blit every allocated tile into the atlas at its canvas
+        // position (one command buffer, one waitUntilCompleted; same
+        // pattern as captureSnapshot). Then per-tile getBytes from the
+        // atlas into the flat buffer at the same canvas position.
+        // Unallocated tiles contribute nothing — their flat-buffer
+        // regions stay zero (transparent), which is the correct content.
+        //
+        // No drainCommandQueue at entry: Metal's command queue is FIFO,
+        // and the atlas-blit's GPU work serializes behind any in-flight
+        // tile-write cb. Hazard tracking ensures the blit reads the
+        // post-write tile pixels. Drain is only needed for the
+        // touchesCancelled-on-restoreSnapshot race shape (5b15e24).
         let width = texture.width
         let height = texture.height
         let bytesPerRow = width * 4
         let dataSize = bytesPerRow * height
 
-        var pixelData = Data(count: dataSize)
+        guard let grid = tileGrid else {
+            print("ERROR: floodFill — tileGrid required (Phase 4.2d)")
+            return false
+        }
 
+        guard let atlas = ensureSnapshotStagingAtlas() else {
+            print("ERROR: floodFill — failed to ensure staging atlas")
+            return false
+        }
+
+        let tileSize = grid.tileSize
+        let allocated = grid.allocatedKeys()
+
+        // Pre-blit allocated tiles into the atlas. Skipped entirely if
+        // the layer has no content — flat buffer stays all-zero, the
+        // target-color check below sees transparent, and the same-color
+        // early-out fires for a transparent fill.
+        if !allocated.isEmpty {
+            guard let prereadCB = commandQueue.makeCommandBuffer() else {
+                print("ERROR: floodFill — failed to create pre-read command buffer")
+                return false
+            }
+            if let blit = prereadCB.makeBlitCommandEncoder() {
+                for key in allocated {
+                    guard let tile = grid.tile(at: key) else { continue }
+                    let dstX = key.x * tileSize
+                    let dstY = key.y * tileSize
+                    let copyW = min(tileSize, width - dstX)
+                    let copyH = min(tileSize, height - dstY)
+                    if copyW <= 0 || copyH <= 0 { continue }
+                    blit.copy(
+                        from: tile.texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                        to: atlas,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                    )
+                }
+                blit.endEncoding()
+            }
+            prereadCB.commit()
+            prereadCB.waitUntilCompleted()
+        }
+
+        // Build flat canvas buffer from atlas. Data(count:) zero-fills
+        // in Swift, so unallocated tile regions stay transparent.
+        // Per-tile getBytes writes into the flat buffer at the tile's
+        // canvas-pixel position; dstBytesPerRow = full canvas row stride
+        // so each tile row lands at the correct offset.
+        var pixelData = Data(count: dataSize)
         pixelData.withUnsafeMutableBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
-                baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
+            guard let basePtr = ptr.baseAddress else { return }
+            for key in allocated {
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, width - dstX)
+                let copyH = min(tileSize, height - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                let dstOffset = dstY * bytesPerRow + dstX * 4
+                atlas.getBytes(
+                    basePtr.advanced(by: dstOffset),
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: dstX, y: dstY, z: 0),
+                        size: MTLSize(width: copyW, height: copyH, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
         }
 
         // Get target color at click point
