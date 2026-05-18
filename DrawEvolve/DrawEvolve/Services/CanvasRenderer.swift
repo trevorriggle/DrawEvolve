@@ -2983,6 +2983,11 @@ class CanvasRenderer: NSObject {
     /// for undo/redo. Pass `tileGrid` to capture keyspace fidelity; without
     /// it (legacy callers) the snapshot has an empty keyspace and restore
     /// drops the tile grid entirely on rollback (caller-aware degradation).
+    ///
+    /// TODO: audit whether captureSnapshot needs drainCommandQueue
+    /// protection from in-flight strokes (race shape: cap-for-op-N+1
+    /// while op-N deposit still async). Different from the touchesCancelled
+    /// race fixed in restoreSnapshot.
     func captureSnapshot(of texture: MTLTexture, tileGrid: TileGrid? = nil) -> LayerSnapshot? {
         // Verify texture is readable (iOS only supports .shared for CPU access)
         #if os(iOS)
@@ -3032,6 +3037,30 @@ class CanvasRenderer: NSObject {
                              allocatedKeys: tileGrid?.allocatedKeys() ?? [])
     }
 
+    /// Block the caller until every command buffer previously committed
+    /// on `commandQueue` has finished GPU execution. Implemented by
+    /// committing an empty cb and `waitUntilCompleted` on it — Metal's
+    /// queue is FIFO for cbs, so the empty buffer sequences behind all
+    /// earlier in-flight work.
+    ///
+    /// Cost: ~microseconds when the queue is idle; matches the time for
+    /// the most-recent in-flight cb to complete when one is pending.
+    /// Same latency the caller would pay if they were waiting on the cb
+    /// directly.
+    ///
+    /// Use case: callsites that need to mutate a texture via
+    /// `texture.replace` where that texture might still be attached as a
+    /// writeable render target on an async-committed
+    /// (no-`waitUntilCompleted`) cb. The canonical example is
+    /// `restoreSnapshot` called from a touch-cancellation path before
+    /// the in-flight stroke cb has drained — Metal's
+    /// `_validateReplaceRegion` aborts in that race window.
+    private func drainCommandQueue() {
+        guard let cb = commandQueue.makeCommandBuffer() else { return }
+        cb.commit()
+        cb.waitUntilCompleted()
+    }
+
     /// Restore a texture from a snapshot, including tile-grid keyspace.
     ///
     /// Pass `tileGrid` when the snapshot was captured with one. Restore
@@ -3044,6 +3073,18 @@ class CanvasRenderer: NSObject {
     /// Result: `grid.allocatedKeys()` == `snapshot.allocatedKeys` set-equal,
     /// each tile bit-exact with `texture`. Phase 3 composite-path correct.
     func restoreSnapshot(_ snapshot: LayerSnapshot, to texture: MTLTexture, tileGrid: TileGrid? = nil) {
+        // Drain any in-flight async-committed cbs (renderStroke async path,
+        // appendBlurStrokeStamps, renderBlurStroke, renderSmudgeStamps).
+        // touchesCancelled can fire restoreSnapshot WHILE a stroke's cb is
+        // still pending GPU completion — Metal considers the texture
+        // "currently attached as a writeable render target" until then, and
+        // texture.replace below would abort via _validateReplaceRegion. The
+        // drain is microseconds when nothing's in flight; the only non-zero
+        // cost is when there is something to drain, which is exactly the
+        // race we need to resolve. Mirrors C1's drain-before / verify-after
+        // architectural symmetry.
+        drainCommandQueue()
+
         let width = texture.width
         let height = texture.height
         let bytesPerRow = width * 4
