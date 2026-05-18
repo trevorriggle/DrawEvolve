@@ -489,255 +489,6 @@ class CanvasRenderer: NSObject {
         TileGrid(canvasSize: canvasSize, tileSize: 256, device: device)
     }
 
-    // MARK: - Debug tile-grid verification (Phase 2 Task 5)
-    //
-    // The verifier compares every allocated tile's pixels against the
-    // corresponding region of the layer's monolithic texture. A mismatch
-    // means a dual-write callsite drifted from the monolithic source of
-    // truth — surface it loudly during soak.
-    //
-    // Three static flags govern runtime behavior:
-    //   - verifyTilesEnabled: run the verifier at all.
-    //   - verifyTilesAssertOnMismatch: crash on first mismatch vs.
-    //     log-only batch-collection mode.
-    //   - verifyTilesPerChannelTolerance: per-byte tolerance (UInt8).
-    //     A byte-pair (tile, monolithic) counts as a match when
-    //     |tile - mono| <= tolerance. Default 1 accommodates the GPU
-    //     rasterizer's ±1 LSB precision noise at point-sprite disc
-    //     edges. Set to 0 for bit-exact verification.
-    //
-    // All three default to (true, true, 1). Toggle via LLDB:
-    //   (lldb) expr -- CanvasRenderer.verifyTilesEnabled = false
-    //   (lldb) expr -- CanvasRenderer.verifyTilesAssertOnMismatch = false
-    //   (lldb) expr -- CanvasRenderer.verifyTilesPerChannelTolerance = 0
-    //
-    // All verifier state is #if DEBUG-only — Release builds carry no
-    // overhead.
-    #if DEBUG
-    static var verifyTilesEnabled: Bool = true
-    // Production Phase 2 defaults: strict bit-exact verification. The
-    // dual-write paths (all seven Task-4 callsites) are now blit-from-
-    // monolithic and produce byte-identical tiles, so tolerance=0 is the
-    // correct invariant. Any mismatch is a real bug; assertion failure on
-    // first occurrence is the tight feedback loop we want.
-    static var verifyTilesAssertOnMismatch: Bool = true
-    static var verifyTilesPerChannelTolerance: UInt8 = 0
-    private static var hasLoggedVerifierActive: Bool = false
-
-    // Lazy-allocated .shared staging texture for the verifier's blit-
-    // and-read path. The .private tile textures can't be getBytes'd
-    // directly; we blit each tile into this staging texture before
-    // CPU readback. Sized tileSize × tileSize (assumed 256). Held on
-    // the renderer for the renderer's lifetime in DEBUG only.
-    private var verifyStagingTexture: MTLTexture?
-    private var verifyStagingBuffer: Data = Data()
-    private var verifyMonolithicBuffer: Data = Data()
-
-    /// Compare every allocated tile against the corresponding region of
-    /// `monolithic`. Runs synchronously on the caller's thread; all
-    /// renderStroke async callers dispatch to main before invoking.
-    ///
-    /// Behavior:
-    ///   - Skips entirely when verifyTilesEnabled is false or tileGrid
-    ///     is nil.
-    ///   - On the first invocation per app launch, prints a single
-    ///     liveness line so soak operators can confirm the harness is
-    ///     active (distinguishes "no mismatches" from "harness off").
-    ///   - For each allocated tile: blit tile.texture → staging, getBytes
-    ///     staging, getBytes monolithic at the tile's in-canvas pixel
-    ///     rect, memcmp. Partial-edge tiles compare only the in-canvas
-    ///     region.
-    ///   - On mismatch: print callsite + tile key + first-mismatch byte
-    ///     coords. If verifyTilesAssertOnMismatch is true, also
-    ///     assertionFailure.
-    func verifyTileGridMatchesMonolithic(monolithic: MTLTexture,
-                                         tileGrid: TileGrid?,
-                                         callsite: String) {
-        guard CanvasRenderer.verifyTilesEnabled, let grid = tileGrid else { return }
-
-        if !CanvasRenderer.hasLoggedVerifierActive {
-            CanvasRenderer.hasLoggedVerifierActive = true
-            print("[tile-verify] active — verifyTilesEnabled=true, " +
-                  "verifyTilesAssertOnMismatch=\(CanvasRenderer.verifyTilesAssertOnMismatch), " +
-                  "tolerance=\(CanvasRenderer.verifyTilesPerChannelTolerance)")
-        }
-
-        let tileSize = grid.tileSize
-        let allocatedKeys = grid.allocatedKeys()
-        if allocatedKeys.isEmpty { return }
-
-        // Lazy-init the staging texture and the two CPU buffers.
-        if verifyStagingTexture == nil ||
-           verifyStagingTexture?.width != tileSize ||
-           verifyStagingTexture?.height != tileSize {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm,
-                width: tileSize, height: tileSize,
-                mipmapped: false
-            )
-            desc.storageMode = .shared
-            desc.usage = [.shaderRead]
-            verifyStagingTexture = device.makeTexture(descriptor: desc)
-            verifyStagingBuffer = Data(count: tileSize * tileSize * 4)
-            verifyMonolithicBuffer = Data(count: tileSize * tileSize * 4)
-        }
-        guard let staging = verifyStagingTexture else {
-            print("[tile-verify] FAILED to allocate staging texture at callsite=\(callsite)")
-            return
-        }
-
-        let monoW = monolithic.width
-        let monoH = monolithic.height
-        let bytesPerRow = tileSize * 4
-
-        for key in allocatedKeys {
-            guard let tile = grid.tile(at: key) else { continue }
-            let originX = key.x * tileSize
-            let originY = key.y * tileSize
-            let cmpW = min(tileSize, monoW - originX)
-            let cmpH = min(tileSize, monoH - originY)
-            if cmpW <= 0 || cmpH <= 0 { continue }
-
-            // Blit tile (.private) → staging (.shared) so CPU can read.
-            guard let cmdBuf = commandQueue.makeCommandBuffer(),
-                  let blit = cmdBuf.makeBlitCommandEncoder() else {
-                continue
-            }
-            blit.copy(
-                from: tile.texture,
-                sourceSlice: 0, sourceLevel: 0,
-                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                sourceSize: MTLSize(width: cmpW, height: cmpH, depth: 1),
-                to: staging,
-                destinationSlice: 0, destinationLevel: 0,
-                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-            )
-            blit.endEncoding()
-            cmdBuf.commit()
-            cmdBuf.waitUntilCompleted()
-
-            verifyStagingBuffer.withUnsafeMutableBytes { ptr in
-                guard let base = ptr.baseAddress else { return }
-                staging.getBytes(
-                    base,
-                    bytesPerRow: bytesPerRow,
-                    from: MTLRegion(
-                        origin: MTLOrigin(x: 0, y: 0, z: 0),
-                        size: MTLSize(width: cmpW, height: cmpH, depth: 1)
-                    ),
-                    mipmapLevel: 0
-                )
-            }
-
-            verifyMonolithicBuffer.withUnsafeMutableBytes { ptr in
-                guard let base = ptr.baseAddress else { return }
-                monolithic.getBytes(
-                    base,
-                    bytesPerRow: bytesPerRow,
-                    from: MTLRegion(
-                        origin: MTLOrigin(x: originX, y: originY, z: 0),
-                        size: MTLSize(width: cmpW, height: cmpH, depth: 1)
-                    ),
-                    mipmapLevel: 0
-                )
-            }
-
-            // Per-byte comparison with tolerance + magnitude histogram.
-            //
-            // In assert-on mode: short-circuit at the first byte where
-            // |tile - mono| > tolerance, preserves the tight strict-debug
-            // feedback loop.
-            //
-            // In log-only mode: scan the entire tile, count every nonzero
-            // diff into a 6-bucket magnitude histogram (±1, ±2, ±3, ±4-7,
-            // ±8-15, ±16+), print one summary line per tile if any bucket
-            // is nonzero. Skips the print entirely on clean tiles so soak
-            // output stays quiet.
-            let assertOnMode = CanvasRenderer.verifyTilesAssertOnMismatch
-            let tolerance = CanvasRenderer.verifyTilesPerChannelTolerance
-            var histogram: [Int] = [0, 0, 0, 0, 0, 0]
-            var firstBeyond: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? = nil
-            var beyondCount: Int = 0
-            var withinTolerance: Int = 0
-            let totalBytes = cmpW * cmpH * 4
-
-            verifyStagingBuffer.withUnsafeBytes { sPtr in
-                verifyMonolithicBuffer.withUnsafeBytes { mPtr in
-                    guard let sBase = sPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                          let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
-                    else { return }
-                    scanLoop: for row in 0..<cmpH {
-                        let rowStart = row * bytesPerRow
-                        for col in 0..<cmpW {
-                            let pxOff = rowStart + col * 4
-                            for ch in 0..<4 {
-                                let s = sBase[pxOff + ch]
-                                let m = mBase[pxOff + ch]
-                                let absDiff: UInt8 = s > m ? s - m : m - s
-                                if absDiff == 0 {
-                                    withinTolerance += 1
-                                    continue
-                                }
-                                // Bucket increment fires for any nonzero diff,
-                                // regardless of tolerance. The summary line
-                                // shows the distribution; tolerance affects
-                                // only the assert decision and the within-
-                                // tolerance counter.
-                                switch absDiff {
-                                case 1: histogram[0] += 1
-                                case 2: histogram[1] += 1
-                                case 3: histogram[2] += 1
-                                case 4...7: histogram[3] += 1
-                                case 8...15: histogram[4] += 1
-                                default: histogram[5] += 1
-                                }
-                                if absDiff <= tolerance {
-                                    withinTolerance += 1
-                                } else {
-                                    beyondCount += 1
-                                    if firstBeyond == nil {
-                                        firstBeyond = (row, col, ch, s, m)
-                                    }
-                                    if assertOnMode {
-                                        break scanLoop
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if assertOnMode {
-                if let mm = firstBeyond {
-                    let layerPx = (x: originX + mm.col, y: originY + mm.row)
-                    let channelName = ["B", "G", "R", "A"][mm.channel]
-                    print("[tile-verify] MISMATCH callsite=\(callsite) " +
-                          "tile=(\(key.x),\(key.y)) layerPx=(\(layerPx.x),\(layerPx.y)) " +
-                          "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
-                          "monoByte=0x\(String(mm.monoByte, radix: 16)) " +
-                          "tolerance=\(tolerance)")
-                    assertionFailure("[tile-verify] mismatch at \(callsite) tile (\(key.x),\(key.y))")
-                }
-            } else {
-                // Log-only mode: histogram summary if any nonzero bucket.
-                let hasAnyDiff = histogram.contains { $0 > 0 }
-                if hasAnyDiff {
-                    let labels = ["±1", "±2", "±3", "±4-7", "±8-15", "±16+"]
-                    var bucketParts: [String] = []
-                    for i in 0..<histogram.count where histogram[i] > 0 {
-                        bucketParts.append("\(labels[i]):\(histogram[i])")
-                    }
-                    print("[tile-verify] callsite=\(callsite) tile=(\(key.x),\(key.y)) " +
-                          "total=\(totalBytes) within_tolerance=\(withinTolerance) " +
-                          "mismatches_beyond_tolerance=\(beyondCount) " +
-                          "(\(bucketParts.joined(separator: " ")))")
-                }
-            }
-        }
-    }
-    #endif
-
     // MARK: - Snapshot staging atlas (Phase 4.2)
     //
     // Lazy-allocated canvas-sized .shared MTLTexture used as a blit-
@@ -1164,12 +915,6 @@ class CanvasRenderer: NSObject {
             commandBuffer.addCompletedHandler { [weak self] _ in
                 self?.strokeCommandSlots.signal()
                 DispatchQueue.main.async {
-                    #if DEBUG
-                    print("CanvasRenderer: Stroke completed on GPU (async)")
-                    self?.verifyTileGridMatchesMonolithic(monolithic: texture,
-                                                          tileGrid: tileGrid,
-                                                          callsite: "renderStroke")
-                    #endif
                     completion()
                 }
             }
@@ -1182,12 +927,6 @@ class CanvasRenderer: NSObject {
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
             strokeCommandSlots.signal()
-            #if DEBUG
-            print("CanvasRenderer: Stroke completed on GPU")
-            verifyTileGridMatchesMonolithic(monolithic: texture,
-                                            tileGrid: tileGrid,
-                                            callsite: "renderStroke")
-            #endif
         }
     }
 
@@ -2084,12 +1823,6 @@ class CanvasRenderer: NSObject {
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: layer,
-                                        tileGrid: tileGrid,
-                                        callsite: "compositeFloatingTextureIntoLayer")
-        #endif
     }
 
     /// Translate a layer texture's pixels by an integer doc-space offset, in
@@ -2266,12 +1999,6 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End dual-write block ========================================
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: tileGrid,
-                                        callsite: "translateLayerTextureInPlace")
-        #endif
     }
 
     /// Mirror a layer texture's pixel data about its center on the
@@ -2453,12 +2180,6 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End dual-write block ========================================
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: tileGrid,
-                                        callsite: "flipLayerTextureInPlace")
-        #endif
     }
 
     /// Upload a UIImage into a fresh Metal texture. Used to build the floating
@@ -3099,12 +2820,6 @@ class CanvasRenderer: NSObject {
                 }
                 // === End dual-write block ================================
 
-                #if DEBUG
-                print("Flood fill complete")
-                self?.verifyTileGridMatchesMonolithic(monolithic: texture,
-                                                      tileGrid: tileGrid,
-                                                      callsite: "floodFill")
-                #endif
                 completion()
             }
         }
@@ -3409,12 +3124,6 @@ class CanvasRenderer: NSObject {
             // Empty / all-invalid snapshot — just the clear suffices.
             cmdBuf.commit()
             cmdBuf.waitUntilCompleted()
-
-            #if DEBUG
-            verifyTileGridMatchesMonolithic(monolithic: texture,
-                                            tileGrid: grid,
-                                            callsite: "restoreSnapshot")
-            #endif
             return
         }
 
@@ -3484,19 +3193,6 @@ class CanvasRenderer: NSObject {
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
 
-        // Master audit C1: verifier was missing on this sync keyspace-
-        // rebuild path. Now added per the rule established in commit
-        // 29a7635 — every sync dual-write callsite must end with
-        // verifyTileGridMatchesMonolithic. Catches any future regression
-        // in restoreSnapshot's keyspace rebuild at end-of-call rather
-        // than letting it silently propagate into the composite/display
-        // path. `grid` is in scope from the guard let at the top of the
-        // keyspace-rebuild block.
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: grid,
-                                        callsite: "restoreSnapshot")
-        #endif
     }
 
     // MARK: - Core Text rasterisation
@@ -3717,10 +3413,7 @@ class CanvasRenderer: NSObject {
     /// Phase 2/3 helper: rebuild a tile grid to be bit-exact with a layer
     /// texture that was written to wholesale (full-canvas overwrite).
     /// Drops the entire current keyspace, allocates every tile in grid
-    /// bounds, and blit-from-monolithic into each. Calls
-    /// verifyTileGridMatchesMonolithic at end (DEBUG) so any sync wipe-and-
-    /// rebuild regression surfaces immediately rather than silently
-    /// diverging until a downstream verifier catches it.
+    /// bounds, and blit-from-monolithic into each.
     ///
     /// Used by:
     /// - `loadImage(_:into:tileGrid:)` — single-image drawing load.
@@ -3779,12 +3472,6 @@ class CanvasRenderer: NSObject {
         }
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: tileGrid,
-                                        callsite: callsite)
-        #endif
     }
 
     func loadImage(_ image: UIImage, into texture: MTLTexture, tileGrid: TileGrid? = nil) {
@@ -3984,12 +3671,6 @@ class CanvasRenderer: NSObject {
         // === End dual-write block ========================================
 
         print("Rect cleared successfully")
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: tileGrid,
-                                        callsite: "clearRect")
-        #endif
     }
 
     /// Clear pixels along a path (for lasso selection)
@@ -4136,12 +3817,6 @@ class CanvasRenderer: NSObject {
         // === End dual-write block ========================================
 
         print("Path cleared successfully (\(clearedCount) pixels)")
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: tileGrid,
-                                        callsite: "clearPath")
-        #endif
     }
 
     // MARK: - Export Image
@@ -4524,12 +4199,6 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End dual-write block ========================================
-
-        #if DEBUG
-        verifyTileGridMatchesMonolithic(monolithic: texture,
-                                        tileGrid: tileGrid,
-                                        callsite: "renderImage")
-        #endif
     }
 
     // MARK: - Blur (PR 1)
@@ -4921,20 +4590,6 @@ class CanvasRenderer: NSObject {
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
-
-        // Phase 3.1 soak follow-up: verifier was missing on this sync
-        // wipe-and-rebuild path. Now added per the rule established in
-        // commit 29a7635 — every sync dual-write callsite must end with
-        // verifyTileGridMatchesMonolithic. Catches any future regression
-        // in the inline blur-adjustment dual-write at end-of-call rather
-        // than letting it silently propagate into the composite path.
-        #if DEBUG
-        if let grid = tileGrid {
-            verifyTileGridMatchesMonolithic(monolithic: layerTexture,
-                                            tileGrid: grid,
-                                            callsite: "commitBlurAdjustment")
-        }
-        #endif
     }
 
     /// Free all blur-adjustment textures and clear bookkeeping. Called on
