@@ -84,6 +84,32 @@ class CanvasRenderer: NSObject {
     private var smudgePatchUpdatePipelineState: MTLRenderPipelineState?
     private var smudgeDepositPipelineState: MTLRenderPipelineState?
 
+    // Wet-ink pipelines (Phase 4.6). Brush-family tools (usesWetInk = true)
+    // deposit per-stamp into `wetInkTexture` using these max-blend variants
+    // of the standard brush pipelines, then `commitWetInkToLayer` composites
+    // the wet-ink texture onto the active layer's tile grid at touchesEnded.
+    // Each variant reuses its layer-targeting twin's fragment shader; only
+    // the blend state differs (max-blend on both RGB and alpha so
+    // overlapping stamps within one stroke preserve the strongest single-
+    // stamp contribution per pixel instead of accumulating).
+    private var brushWetInkPipelineState: MTLRenderPipelineState?
+    private var pencilWetInkPipelineState: MTLRenderPipelineState?
+    private var inkPenWetInkPipelineState: MTLRenderPipelineState?
+    private var markerWetInkPipelineState: MTLRenderPipelineState?
+    private var airbrushWetInkPipelineState: MTLRenderPipelineState?
+    private var charcoalWetInkPipelineState: MTLRenderPipelineState?
+    /// Composite pipeline that deposits wet-ink × strokeOpacity onto the
+    /// layer (at commit) or the drawable (at frame overlay). Uses
+    /// `quadVertexShaderWithTransform` so the on-screen pass can pick up
+    /// zoom/pan/rotation/flip; the commit caller passes identity.
+    private var wetInkCompositePipelineState: MTLRenderPipelineState?
+    /// Canvas-sized scratch buffer for the active wet-ink stroke.
+    /// `.private` (no CPU readback path); cleared at allocation per the
+    /// Phase 4.5 Source A clear-on-alloc contract. Lazy-allocated on first
+    /// use, retained for renderer lifetime, reallocated on canvasSize
+    /// change. ~16 MB at 2048², ~64 MB at 4096² — same shape as the atlas.
+    private var wetInkTexture: MTLTexture?
+
     // 1x1 white texture used to draw an opaque canvas background quad
     private var whiteTexture: MTLTexture?
 
@@ -227,7 +253,8 @@ class CanvasRenderer: NSObject {
               let smudgePatchUpdateFragment = library.makeFunction(name: "smudgePatchUpdateShader"),
               let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader"),
               let compositeTileVertex = library.makeFunction(name: "compositeTileVertexShader"),
-              let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader") else {
+              let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader"),
+              let wetInkCompositeFragment = library.makeFunction(name: "wetInkCompositeShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -282,6 +309,53 @@ class CanvasRenderer: NSObject {
         let markerDescriptor = makeBrushVariantDescriptor(markerFragment)
         let airbrushDescriptor = makeBrushVariantDescriptor(airbrushFragment)
         let charcoalDescriptor = makeBrushVariantDescriptor(charcoalFragment)
+
+        // Wet-ink twins of every brush variant (Phase 4.6). Same shaders,
+        // max-blend on both RGB and alpha so overlapping stamps within one
+        // stroke preserve the strongest single-stamp contribution per pixel
+        // instead of accumulating. Source RGB uses `.sourceAlpha` so the
+        // wet-ink texture stays premultiplied (rgb/alpha == brush colour at
+        // any covered pixel); without that the wet-ink composite would read
+        // over-bright.
+        func makeBrushVariantWetInkDescriptor(_ fragment: MTLFunction) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = brushVertex
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = .bgra8Unorm
+            d.colorAttachments[0].isBlendingEnabled = true
+            d.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            d.colorAttachments[0].destinationRGBBlendFactor = .one
+            d.colorAttachments[0].rgbBlendOperation = .max
+            d.colorAttachments[0].sourceAlphaBlendFactor = .one
+            d.colorAttachments[0].destinationAlphaBlendFactor = .one
+            d.colorAttachments[0].alphaBlendOperation = .max
+            return d
+        }
+        let brushWetInkDescriptor = makeBrushVariantWetInkDescriptor(brushFragment)
+        let pencilWetInkDescriptor = makeBrushVariantWetInkDescriptor(pencilFragment)
+        let inkPenWetInkDescriptor = makeBrushVariantWetInkDescriptor(inkPenFragment)
+        let markerWetInkDescriptor = makeBrushVariantWetInkDescriptor(markerFragment)
+        let airbrushWetInkDescriptor = makeBrushVariantWetInkDescriptor(airbrushFragment)
+        let charcoalWetInkDescriptor = makeBrushVariantWetInkDescriptor(charcoalFragment)
+
+        // Wet-ink composite pipeline (Phase 4.6). Deposits wet-ink ×
+        // strokeOpacity onto the target (layer's tile grid at commit, or
+        // drawable at frame overlay). Uses the transform-aware quad vertex
+        // so the to-screen path picks up zoom/pan/rotation/flip; the
+        // tile-grid commit passes identity. Premultiplied source-over
+        // blend — the wet-ink shader scales BOTH rgb and alpha by
+        // strokeOpacity, preserving the premultiplied relationship.
+        let wetInkCompositeDescriptor = MTLRenderPipelineDescriptor()
+        wetInkCompositeDescriptor.vertexFunction = quadVertexWithTransform
+        wetInkCompositeDescriptor.fragmentFunction = wetInkCompositeFragment
+        wetInkCompositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        wetInkCompositeDescriptor.colorAttachments[0].isBlendingEnabled = true
+        wetInkCompositeDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        wetInkCompositeDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        wetInkCompositeDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        wetInkCompositeDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        wetInkCompositeDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        wetInkCompositeDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
         // Composite pipeline
         let compositeDescriptor = MTLRenderPipelineDescriptor()
@@ -450,6 +524,13 @@ class CanvasRenderer: NSObject {
             stampBlurDepositPipelineState = try device.makeRenderPipelineState(descriptor: stampBlurDepositDescriptor)
             smudgePatchUpdatePipelineState = try device.makeRenderPipelineState(descriptor: smudgePatchUpdateDescriptor)
             smudgeDepositPipelineState = try device.makeRenderPipelineState(descriptor: smudgeDepositDescriptor)
+            brushWetInkPipelineState = try device.makeRenderPipelineState(descriptor: brushWetInkDescriptor)
+            pencilWetInkPipelineState = try device.makeRenderPipelineState(descriptor: pencilWetInkDescriptor)
+            inkPenWetInkPipelineState = try device.makeRenderPipelineState(descriptor: inkPenWetInkDescriptor)
+            markerWetInkPipelineState = try device.makeRenderPipelineState(descriptor: markerWetInkDescriptor)
+            airbrushWetInkPipelineState = try device.makeRenderPipelineState(descriptor: airbrushWetInkDescriptor)
+            charcoalWetInkPipelineState = try device.makeRenderPipelineState(descriptor: charcoalWetInkDescriptor)
+            wetInkCompositePipelineState = try device.makeRenderPipelineState(descriptor: wetInkCompositeDescriptor)
         } catch {
             print("Failed to create pipeline states: \(error)")
         }
@@ -682,6 +763,342 @@ class CanvasRenderer: NSObject {
                 depth: 1
             )
         )
+    }
+
+    // MARK: - Wet-ink scratch buffer (Phase 4.6)
+    //
+    // Brush-family tools (`DrawingTool.usesWetInk == true`) deposit each
+    // stamp into `wetInkTexture` at full per-stamp alpha with max-blend.
+    // The texture accumulates the stroke's stamps across touchesMoved
+    // batches; at touchesEnded the wet-ink texture is composited onto
+    // the active layer's tile grid in one quad pass, applying the
+    // stroke's user-set opacity at commit time.
+    //
+    // This decouples per-stroke opacity from per-stamp blend math. The
+    // pre-Phase-4.6 path multiplied stamp alpha by stroke opacity at
+    // each stamp, so overlapping stamps in a single stroke accumulated
+    // toward fully opaque even at low stroke opacity. Wet-ink's per-
+    // stamp max-blend caps coverage at the strongest single-stamp
+    // alpha per pixel, then commit applies opacity once — semantically
+    // matches what users expect from opacity sliders in Procreate/PS.
+    //
+    // Lifecycle: lazy-allocated on first use, cleared at allocation
+    // (Phase 4.5 Source A contract), retained for renderer lifetime,
+    // reallocated on canvasSize change.
+
+    /// Lazily allocate the wet-ink scratch buffer at the current
+    /// `canvasSize`. Returns the texture, or nil on allocation failure.
+    /// Always returns a CLEARED texture — caller never sees uninitialized
+    /// memory (Phase 4.5 Source A contract).
+    @discardableResult
+    func ensureWetInkTexture() -> MTLTexture? {
+        let targetW = Int(canvasSize.width)
+        let targetH = Int(canvasSize.height)
+        guard targetW > 0, targetH > 0 else { return nil }
+        if let existing = wetInkTexture,
+           existing.width == targetW, existing.height == targetH {
+            return existing
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: targetW, height: targetH,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .private
+        guard let tex = device.makeTexture(descriptor: descriptor) else {
+            print("CanvasRenderer: failed to allocate wet-ink texture")
+            return nil
+        }
+        wetInkTexture = tex
+        // Source A contract: clear before first use.
+        clearTexture(tex)
+        return tex
+    }
+
+    /// Clear the wet-ink buffer to transparent. Called at stroke begin
+    /// (`touchesBegan`), after commit (so the next stroke starts clean),
+    /// and at cancel.
+    func clearWetInkTexture() {
+        guard let texture = wetInkTexture else { return }
+        clearTexture(texture)
+    }
+
+    /// Release the wet-ink texture. Called when the canvas closes —
+    /// keeping the canvas-sized allocation around across closed canvases
+    /// would defeat the lazy-alloc design.
+    func discardWetInkTexture() {
+        wetInkTexture = nil
+    }
+
+    /// Composite wet-ink × `strokeOpacity` onto the active layer's tile
+    /// grid. Applies the Source A+B clean canonical pattern:
+    ///   1. Clear bbox-tile-aligned atlas region.
+    ///   2. Compose intersecting tiles from grid into atlas.
+    ///   3. Render fullscreen quad through wetInkCompositePipelineState
+    ///      with scissor = bbox (writes wet-ink × opacity onto atlas
+    ///      via premultiplied-source-over blend).
+    ///   4. Blit modified bbox tiles from atlas back into the grid.
+    ///
+    /// Caller is responsible for clearing the wet-ink buffer afterward
+    /// (kept separate so callers can record snapshots between commit
+    /// and clear, for undo).
+    ///
+    /// `bbox` is in canvas-pixel coords — the union of every stamp's
+    /// footprint, accumulated by the coordinator across substroke
+    /// flushes. Empty bbox = no-op.
+    func commitWetInkToLayer(tileGrid: TileGrid,
+                              bbox: CGRect,
+                              opacity strokeOpacity: Float,
+                              completion: (() -> Void)? = nil) {
+        guard let wetInk = wetInkTexture,
+              let pipeline = wetInkCompositePipelineState,
+              let atlas = ensureCanvasStagingAtlas(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            completion?()
+            return
+        }
+        guard !bbox.isNull, !bbox.isEmpty else {
+            completion?()
+            return
+        }
+
+        let tileSize = tileGrid.tileSize
+        let atlasW = atlas.width
+        let atlasH = atlas.height
+        let bboxKeys = tileGrid.tilesIntersecting(bbox)
+
+        // Source B: clear bbox-tile-aligned atlas region before compose.
+        if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: commandBuffer)
+        }
+
+        // Compose-from-tiles: bbox-intersecting allocated tiles → atlas.
+        if !bboxKeys.isEmpty, let composeBlit = commandBuffer.makeBlitCommandEncoder() {
+            for key in bboxKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                composeBlit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            composeBlit.endEncoding()
+        }
+
+        // Render wet-ink × strokeOpacity into atlas. Scissor limits writes
+        // to the bbox; outside-bbox atlas pixels stay at their compose-
+        // step state (allocated tile content, or zero from the clear).
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = atlas
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            completion?()
+            return
+        }
+
+        // Scissor to the bbox (clamped to atlas bounds defensively).
+        let scissorX = max(0, Int(floor(bbox.minX)))
+        let scissorY = max(0, Int(floor(bbox.minY)))
+        let scissorW = min(atlasW - scissorX, Int(ceil(bbox.maxX)) - scissorX)
+        let scissorH = min(atlasH - scissorY, Int(ceil(bbox.maxY)) - scissorY)
+        if scissorW > 0, scissorH > 0 {
+            encoder.setScissorRect(MTLScissorRect(
+                x: scissorX, y: scissorY,
+                width: scissorW, height: scissorH
+            ))
+        }
+
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(wetInk, index: 0)
+
+        var opacity = strokeOpacity
+        encoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
+
+        // Identity transform: wet-ink and atlas share canvas-pixel coords.
+        var identityTransform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
+        encoder.setVertexBytes(&identityTransform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        var viewport = SIMD2<Float>(Float(atlasW), Float(atlasH))
+        encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var canvas = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
+        encoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+        var noFlip = SIMD2<Float>(0, 0)
+        encoder.setVertexBytes(&noFlip, length: MemoryLayout<SIMD2<Float>>.stride, index: 3)
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        encoder.endEncoding()
+
+        // Blit atlas → tile grid for the bbox tiles.
+        if !bboxKeys.isEmpty {
+            for key in bboxKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+            }
+            if let blit = commandBuffer.makeBlitCommandEncoder() {
+                for key in bboxKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, atlasW - srcX)
+                    let blitH = min(tileSize, atlasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit.endEncoding()
+            }
+        }
+
+        if let completion {
+            commandBuffer.addCompletedHandler { _ in
+                DispatchQueue.main.async { completion() }
+            }
+        }
+        commandBuffer.commit()
+    }
+
+    /// Composite wet-ink × `strokeOpacity` onto the drawable. Called every
+    /// frame during a wet-ink-using stroke so the live preview matches
+    /// the committed result. Same parameter shape as `renderTextureToScreen`
+    /// so the caller can pass the same zoom/pan/rotation/flip already
+    /// computed for the layer composite. No-op if wet-ink isn't allocated
+    /// (no stroke in progress).
+    func renderWetInkToScreen(
+        to renderEncoder: MTLRenderCommandEncoder,
+        opacity strokeOpacity: Float,
+        zoomScale: Float = 1.0,
+        panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
+        canvasRotation: Float = 0.0,
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0),
+        flipState: SIMD2<Float> = SIMD2<Float>(0, 0)
+    ) {
+        guard let wetInk = wetInkTexture,
+              let pipeline = wetInkCompositePipelineState else { return }
+
+        renderEncoder.setRenderPipelineState(pipeline)
+        renderEncoder.setFragmentTexture(wetInk, index: 0)
+
+        var opacity = strokeOpacity
+        renderEncoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
+
+        var transform = SIMD4<Float>(zoomScale, panOffset.x, panOffset.y, canvasRotation)
+        renderEncoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        var viewport = viewportSize
+        renderEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        var canvas = SIMD2<Float>(Float(canvasSize.width), Float(canvasSize.height))
+        renderEncoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+        var flip = flipState
+        renderEncoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 3)
+
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
+    /// Per-frame substroke flush: stamp `newPoints` into the wet-ink
+    /// scratch using the tool's wet-ink pipeline (max-blend variant of
+    /// the standard brush pipeline). Per-stamp uniforms.opacity is forced
+    /// to 1.0 here — per-stroke opacity is applied once at commit. Safe
+    /// with empty `newPoints` (returns early).
+    ///
+    /// Writes only to `wetInkTexture` (renderer-owned `.private`
+    /// session scratch); no canvasStagingAtlas interaction, so this path
+    /// is exempt from the Source B clear-before-compose pattern.
+    func appendStrokeStampsToWetInk(
+        _ stroke: BrushStroke,
+        newPoints: [BrushStroke.StrokePoint],
+        screenSize: CGSize,
+        selectionPath: [CGPoint]?
+    ) {
+        guard !newPoints.isEmpty else { return }
+        guard let wetInk = ensureWetInkTexture() else { return }
+
+        let pipeline: MTLRenderPipelineState? = {
+            switch stroke.tool {
+            case .pencil:   return pencilWetInkPipelineState
+            case .inkPen:   return inkPenWetInkPipelineState
+            case .marker:   return markerWetInkPipelineState
+            case .airbrush: return airbrushWetInkPipelineState
+            case .charcoal: return charcoalWetInkPipelineState
+            default:        return brushWetInkPipelineState
+            }
+        }()
+        guard let pipelineState = pipeline else { return }
+
+        strokeCommandSlots.wait()
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            strokeCommandSlots.signal()
+            return
+        }
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = wetInk
+        pass.colorAttachments[0].loadAction = .load
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            strokeCommandSlots.signal()
+            return
+        }
+        encoder.setRenderPipelineState(pipelineState)
+
+        let selectionMask = selectionMaskTexture(for: selectionPath, documentSize: screenSize) ?? noMaskTexture
+        encoder.setFragmentTexture(selectionMask, index: 2)
+
+        // Per-stamp uniforms. Opacity forced to 1.0 (per-stroke opacity
+        // lands at commit). Hardness / grain / colour pass through unchanged
+        // so each tool's identity (marker flat-top, airbrush quartic,
+        // charcoal grain) is preserved per stamp.
+        var uniforms = BrushUniforms(
+            color: stroke.settings.color,
+            size: Float(stroke.settings.size),
+            opacity: 1.0,
+            hardness: Float(stroke.settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0),
+            grainDensity: stroke.settings.grainDensity
+        )
+
+        let positions = newPoints.map { point in
+            SIMD2<Float>(Float(point.location.x), Float(point.location.y))
+        }
+        var viewportSizeVec = SIMD2<Float>(Float(wetInk.width), Float(wetInk.height))
+
+        for (index, point) in newPoints.enumerated() {
+            let safePressure: CGFloat = {
+                guard point.pressure.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressure))
+            }()
+            uniforms.pressure = Float(safePressure)
+
+            var position = positions[index]
+            encoder.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            encoder.setVertexBytes(&viewportSizeVec, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+
+            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+        }
+
+        encoder.endEncoding()
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.strokeCommandSlots.signal()
+        }
+        commandBuffer.commit()
     }
 
     // MARK: - Tile-display intermediate (Phase 4.3)

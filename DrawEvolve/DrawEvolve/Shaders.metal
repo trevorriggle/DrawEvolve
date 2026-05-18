@@ -785,6 +785,31 @@ fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
     return color;
 }
 
+// MARK: - Wet-ink composite (Phase 4.6)
+//
+// Wet-ink uses a single canvas-sized scratch texture. Brush-family
+// stamps deposit into the wet-ink texture during a stroke (max-blend
+// across overlapping stamps per pixel — see the `*WetInkPipelineState`
+// family, whose RGB blend uses `sourceAlpha` as the source factor with
+// `.max` op). That means the texture's RGB channel is already
+// premultiplied with the stamp's per-pixel alpha — RGB / alpha at any
+// pixel equals the brush colour. We therefore scale BOTH rgb and alpha
+// by `strokeOpacity` here so the premultiplied relationship is
+// preserved, and let the pipeline's standard
+// `(.one, .oneMinusSourceAlpha)` premultiplied-over blend deposit the
+// scaled result onto the target.
+//
+// Using `textureDisplayShader` here would be wrong: it only scales the
+// alpha channel, leaving RGB premultiplied with the un-scaled alpha —
+// the resulting pixel reads over-bright when strokeOpacity < 1.
+fragment float4 wetInkCompositeShader(VertexOut in [[stage_in]],
+                                       texture2d<float> wetInk [[texture(0)]],
+                                       constant float &strokeOpacity [[buffer(0)]]) {
+    constexpr sampler s(mag_filter::linear, min_filter::linear);
+    float4 c = wetInk.sample(s, in.texCoord);
+    return c * strokeOpacity;
+}
+
 // MARK: - Gaussian Blur (Effects)
 //
 // The blur tool family (Blur Brush + Blur Adjustment) shares two render
