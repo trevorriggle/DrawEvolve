@@ -1887,16 +1887,16 @@ class CanvasStateManager: ObservableObject {
     /// no per-pixel CPU work.
     func commitActiveLayerTranslation() {
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let beforeSnapshot = selectionBeforeSnapshot else {
             print("ERROR: Cannot commit layer translation - missing data")
             return
         }
 
-        renderer.translateLayerTextureInPlace(texture, tileGrid: layers[selectedLayerIndex].tileGrid, byDocOffset: selectionOffset, screenSize: documentSize)
+        renderer.translateLayerTextureInPlace(tileGrid: tileGrid, byDocOffset: selectionOffset, screenSize: documentSize)
 
-        let afterSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let afterSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
         if let after = afterSnapshot {
             let layerId = layers[selectedLayerIndex].id
             historyManager.record(.stroke(
@@ -1908,8 +1908,7 @@ class CanvasStateManager: ObservableObject {
 
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
-        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
                 await MainActor.run {

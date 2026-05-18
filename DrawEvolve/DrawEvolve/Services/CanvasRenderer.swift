@@ -1860,31 +1860,38 @@ class CanvasRenderer: NSObject {
     /// during the drag we only update an offset uniform (no pixel writes),
     /// then this single GPU pass actually moves the bits when the user lets go.
     func translateLayerTextureInPlace(
-        _ texture: MTLTexture,
-        tileGrid: TileGrid? = nil,
+        tileGrid: TileGrid,
         byDocOffset offset: CGPoint,
         screenSize: CGSize
     ) {
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: translate-in-place failed to ensure staging atlas")
+            return
+        }
+        let atlasW = atlas.width
+        let atlasH = atlas.height
+        let scaleX = CGFloat(atlasW) / screenSize.width
+        let scaleY = CGFloat(atlasH) / screenSize.height
         let dx = Int((offset.x * scaleX).rounded())
         let dy = Int((offset.y * scaleY).rounded())
 
         if dx == 0 && dy == 0 { return }
 
-        // Capture pre-translate allocated keys BEFORE the monolithic pass.
-        // The monolithic op doesn't touch the tile grid, so this is just
-        // for intent clarity — the set wouldn't change either way.
-        let preTranslateKeys: [TileKey] = tileGrid?.allocatedKeys() ?? []
+        let tileSize = tileGrid.tileSize
+        let preTranslateKeys = tileGrid.allocatedKeys()
 
+        // Temp scratch holds the pre-translate atlas content; we then
+        // clear the atlas and blit the temp pixels into the atlas at the
+        // shifted offset. Same algorithm as before, just relocated from
+        // layer.texture to atlas.
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: texture.pixelFormat,
-            width: texture.width,
-            height: texture.height,
+            pixelFormat: atlas.pixelFormat,
+            width: atlasW,
+            height: atlasH,
             mipmapped: false
         )
         descriptor.usage = [.renderTarget, .shaderRead]
-        descriptor.storageMode = .shared
+        descriptor.storageMode = .private
 
         guard let temp = device.makeTexture(descriptor: descriptor),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -1892,13 +1899,37 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // 1. Copy current layer to temp.
+        // 1. Compose every allocated tile into the atlas at its canvas
+        //    position so we have a current-content source to translate.
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            for key in preTranslateKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            blit.endEncoding()
+        }
+
+        // 2. Copy atlas → temp (so we can clear atlas and blit shifted
+        //    pixels back without overwriting our source).
         if let blit = commandBuffer.makeBlitCommandEncoder() {
             blit.copy(
-                from: texture,
+                from: atlas,
                 sourceSlice: 0, sourceLevel: 0,
                 sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                sourceSize: MTLSize(width: atlasW, height: atlasH, depth: 1),
                 to: temp,
                 destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
@@ -1906,9 +1937,9 @@ class CanvasRenderer: NSObject {
             blit.endEncoding()
         }
 
-        // 2. Clear layer to transparent.
+        // 3. Clear atlas to transparent.
         let clearDescriptor = MTLRenderPassDescriptor()
-        clearDescriptor.colorAttachments[0].texture = texture
+        clearDescriptor.colorAttachments[0].texture = atlas
         clearDescriptor.colorAttachments[0].loadAction = .clear
         clearDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         clearDescriptor.colorAttachments[0].storeAction = .store
@@ -1916,14 +1947,14 @@ class CanvasRenderer: NSObject {
             clearEncoder.endEncoding()
         }
 
-        // 3. Blit temp → layer at integer pixel offset, clipping the source
+        // 4. Blit temp → atlas at integer pixel offset, clipping the source
         //    region to the part that lands inside the destination.
         let srcX = max(0, -dx)
         let srcY = max(0, -dy)
         let dstX = max(0, dx)
         let dstY = max(0, dy)
-        let copyW = max(0, min(texture.width  - srcX, texture.width  - dstX))
-        let copyH = max(0, min(texture.height - srcY, texture.height - dstY))
+        let copyW = max(0, min(atlasW - srcX, atlasW - dstX))
+        let copyH = max(0, min(atlasH - srcY, atlasH - dstY))
 
         if copyW > 0, copyH > 0, let blit = commandBuffer.makeBlitCommandEncoder() {
             blit.copy(
@@ -1931,7 +1962,7 @@ class CanvasRenderer: NSObject {
                 sourceSlice: 0, sourceLevel: 0,
                 sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
                 sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
-                to: texture,
+                to: atlas,
                 destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
             )
@@ -1941,93 +1972,66 @@ class CanvasRenderer: NSObject {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        // === Phase 2 Task 4.9: tile-grid dual-write (shift + blit) =======
+        // === Phase 4.5c: blit translated atlas into tile grid ==============
         //
-        // Result-then-mirror: post-translate pixels live in `texture`.
+        // Result-then-mirror: post-translate pixels live in the atlas.
         // Mirror by:
         //   1. Compute post-translate destination key set: for each pre-
         //      translate allocated key K with pixel rect R_K, the content
-        //      lands at R_K + (dx, dy). Union the tilesIntersecting of
-        //      each shifted rect (clamped to canvas).
-        //   2. Drop all pre-translate allocations (their content has moved
-        //      or been clipped off-canvas).
+        //      lands at R_K + (dx, dy). Union tilesIntersecting of each
+        //      shifted rect (clamped to canvas).
+        //   2. Drop all pre-translate allocations.
         //   3. For each post-translate key: ensureTile + blit the new
-        //      key's pixel rect from post-translate monolithic.
-        //
-        // For sub-tile offsets (the typical drag case), a single source
-        // tile contributes content to up to 4 destination tiles. The
-        // post-translate set captures that 1→4 fan-out automatically via
-        // tilesIntersecting.
-        //
-        // Blit width/height = min(tileSize, texture.width/height - origin),
-        // so on canvas dims that are exact multiples of tileSize the blit
-        // is full-tile and partial-edge undefined-pixel concerns don't
-        // arise. Non-multiple canvas dims hit the same partial-edge case
-        // as flip; Task 5's allocation-clear fix covers it.
-        if let grid = tileGrid, !preTranslateKeys.isEmpty {
-            let tileSize = grid.tileSize
-            let texW = texture.width
-            let texH = texture.height
+        //      key's pixel rect from post-translate atlas.
+        if preTranslateKeys.isEmpty { return }
 
-            var postSet = Set<TileKey>()
-            for old in preTranslateKeys {
-                let shifted = CGRect(
-                    x: old.x * tileSize + dx,
-                    y: old.y * tileSize + dy,
-                    width: tileSize,
-                    height: tileSize
-                )
-                for k in grid.tilesIntersecting(shifted) {
-                    postSet.insert(k)
-                }
-            }
-
-            // Drop pre-translate allocations FIRST so dropTile/ensureTile
-            // pairs that hit the same key (small offsets where a source
-            // tile partially overlaps itself) don't leak stale content.
-            for old in preTranslateKeys {
-                grid.dropTile(at: old)
-            }
-
-            if let mirrorBuf = commandQueue.makeCommandBuffer() {
-                // Pass 1: allocate-and-clear-if-needed for freshly-ensured
-                // tiles. Each call may encode an empty-clear render pass on
-                // mirrorBuf; can't overlap with an active blit encoder.
-                for newKey in postSet {
-                    _ = grid.ensureTileWithClearIfNeeded(at: newKey, onCommandBuffer: mirrorBuf)
-                }
-                // Pass 2: blit data into tiles.
-                if let blit2 = mirrorBuf.makeBlitCommandEncoder() {
-                    for newKey in postSet {
-                        let srcX = newKey.x * tileSize
-                        let srcY = newKey.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-
-                        // try? only catches encoder-construction failure
-                        // inside the closure; blit.copy can't throw and the
-                        // encoder is guarded above. Present only to satisfy
-                        // updateTile's rethrows signature.
-                        grid.updateTile(at: newKey) { tile in
-                            blit2.copy(
-                                from: texture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
-                    }
-                    blit2.endEncoding()
-                }
-                mirrorBuf.commit()
-                mirrorBuf.waitUntilCompleted()
+        var postSet = Set<TileKey>()
+        for old in preTranslateKeys {
+            let shifted = CGRect(
+                x: old.x * tileSize + dx,
+                y: old.y * tileSize + dy,
+                width: tileSize,
+                height: tileSize
+            )
+            for k in tileGrid.tilesIntersecting(shifted) {
+                postSet.insert(k)
             }
         }
-        // === End dual-write block ========================================
+
+        for old in preTranslateKeys {
+            tileGrid.dropTile(at: old)
+        }
+
+        if let mirrorBuf = commandQueue.makeCommandBuffer() {
+            for newKey in postSet {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: newKey, onCommandBuffer: mirrorBuf)
+            }
+            if let blit2 = mirrorBuf.makeBlitCommandEncoder() {
+                for newKey in postSet {
+                    let nx = newKey.x * tileSize
+                    let ny = newKey.y * tileSize
+                    let blitW = min(tileSize, atlasW - nx)
+                    let blitH = min(tileSize, atlasH - ny)
+                    if blitW <= 0 || blitH <= 0 { continue }
+
+                    tileGrid.updateTile(at: newKey) { tile in
+                        blit2.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: nx, y: ny, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit2.endEncoding()
+            }
+            mirrorBuf.commit()
+            mirrorBuf.waitUntilCompleted()
+        }
+        // === End atlas → tile blit block =================================
     }
 
     /// Mirror a layer texture's pixel data about its center on the
