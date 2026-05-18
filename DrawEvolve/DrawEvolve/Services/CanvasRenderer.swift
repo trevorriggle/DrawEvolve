@@ -4350,7 +4350,25 @@ class CanvasRenderer: NSObject {
         )
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .private  // GPU-only — never read by CPU.
-        return device.makeTexture(descriptor: descriptor)
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        // Phase 4.5 follow-up (blur pink-ring fix, Source A):
+        // Metal `.private` textures are uninitialized at allocation
+        // and may hold bits from recently-freed memory in Metal's
+        // texture pool. The blur Gaussian samples this texture at
+        // kernel-half-width offsets from each output pixel — those
+        // offsets cross outside the per-stamp scissor's compose
+        // region into snapshot territory that the compose-from-tiles
+        // step never wrote (unallocated tile regions). Without this
+        // clear, any uninitialized garbage in the unwritten regions
+        // gets pulled in by the kernel, producing intermittent
+        // coloured rings around blur strokes near tile boundaries.
+        // Issuing the clear on the same command queue as subsequent
+        // compose writes — Metal's FIFO ordering serializes the
+        // clear before any later cb reads the texture.
+        clearTexture(texture)
+        return texture
     }
 
     /// Single-pass Gaussian. `target` and `source` must be different textures.
