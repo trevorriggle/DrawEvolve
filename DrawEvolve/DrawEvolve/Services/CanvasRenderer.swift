@@ -4869,7 +4869,7 @@ class CanvasRenderer: NSObject {
         tileGrid: TileGrid? = nil,
         screenSize: CGSize,
         selectionPath: [CGPoint]?,
-        completion: (() -> Void)? = nil
+        completion: @escaping () -> Void
     ) {
         guard let depositPipeline = stampBlurDepositPipelineState,
               let snapshot = makeBlurIntermediateTexture(),
@@ -4877,7 +4877,7 @@ class CanvasRenderer: NSObject {
               let scratchV = makeBlurIntermediateTexture(),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             print("⚠️ renderBlurStroke: pipeline or intermediate textures unavailable")
-            completion?()
+            completion()
             return
         }
 
@@ -5003,10 +5003,12 @@ class CanvasRenderer: NSObject {
         // SAME command buffer as the deposits. Metal serialises encoders
         // within a buffer; the blit reads the post-deposit layer texture.
         //
-        // Commit path is async via addCompletedHandler when completion is
-        // provided (the typical caller); same async-commit risk profile as
-        // hole #3. No verifier call here (would race against the not-yet-
-        // completed blit on the async path).
+        // Commit path is async via addCompletedHandler — caller must
+        // provide completion (signature is @escaping () -> Void, not
+        // optional, per master audit N3). Same async-commit risk profile
+        // as hole #3. No verifier call here (would race against the
+        // not-yet-completed blit). Prior sync-fallback path (else branch
+        // with waitUntilCompleted) was dead code and got deleted with N3.
         if let grid = tileGrid, !strokeBbox.isNull, !strokeBbox.isEmpty {
             let tileKeys = grid.tilesIntersecting(strokeBbox)
             if !tileKeys.isEmpty {
@@ -5039,15 +5041,10 @@ class CanvasRenderer: NSObject {
         }
         // === End dual-write block ========================================
 
-        if let completion = completion {
-            commandBuffer.addCompletedHandler { _ in
-                DispatchQueue.main.async { completion() }
-            }
-            commandBuffer.commit()
-        } else {
-            commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
+        commandBuffer.addCompletedHandler { _ in
+            DispatchQueue.main.async { completion() }
         }
+        commandBuffer.commit()
     }
 
     // MARK: - Smudge Stroke (PR 2)
