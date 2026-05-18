@@ -5687,6 +5687,17 @@ class CanvasRenderer: NSObject {
             : tileGrid.tilesIntersecting(composeBbox)
         let tileSize = tileGrid.tileSize
 
+        // Source B fix: tile-aligned clear before compose. Smudge has
+        // TWO atlas read paths (patch-update samples atlas as a texture
+        // input; deposit reads atlas via loadAction=.load) — both would
+        // pull stale pixels from unallocated bbox tiles without this
+        // clear. Tile-aligned (not raw bbox) for the same reason as the
+        // other dual-write functions: the post-batch blit-back copies
+        // whole tile rects from atlas to tile.
+        if let clearRegion = atlasRegion(coveringTiles: composeKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: commandBuffer)
+        }
+
         // Compose-from-tiles into atlas so the per-stamp patch-update + the
         // deposit's loadAction=.load both read current layer pixels.
         if !composeKeys.isEmpty, let composeBlit = commandBuffer.makeBlitCommandEncoder() {
