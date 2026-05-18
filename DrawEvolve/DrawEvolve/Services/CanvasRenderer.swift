@@ -796,6 +796,62 @@ class CanvasRenderer: NSObject {
         return atlas
     }
 
+    // MARK: - Tile-display intermediate (Phase 4.3b)
+    //
+    // Renderer-owned canvas-sized .private MTLTexture used as the
+    // tile-composite intermediate for `renderTileGridToScreen`. Distinct
+    // from the snapshot staging atlas: the atlas is .shared for CPU
+    // readback during snapshots/floodFill; this intermediate is .private
+    // because it's a GPU-only render target + shader input feeding the
+    // display path's transform pass. Different storage modes, different
+    // purposes — never conflate them.
+    //
+    // Memory: 16 MB at 2048², 64 MB at 4096². Allocated lazily on first
+    // renderTileGridToScreen call; retained for renderer lifetime;
+    // reused across every frame's tile-display composite. canvasSize
+    // change forces reallocation on next ensure call (mirrors the
+    // snapshot atlas's policy).
+    //
+    // Phase 4.3b decision (audit § 4.1 + dispatch γ): per-tile-to-screen
+    // under transforms is architecturally unsolvable without 1-pixel
+    // tile borders (Phase 2 redesign, out of scope). Instead sequence
+    // two already-validated operations: Phase 3's per-tile composite
+    // to a canvas-sized intermediate (bit-exact with monolithic at
+    // tolerance=0), then the existing display path's LINEAR-sampling
+    // transform pass with the intermediate as input. Both steps reuse
+    // tested shaders; no new sampler-dilemma surface.
+    private var tileDisplayIntermediate: MTLTexture?
+
+    /// Return a canvas-sized .private MTLTexture suitable as a render
+    /// target for the tile-composite intermediate. Reused across calls;
+    /// reallocates if the renderer's `canvasSize` has changed since the
+    /// last call. Returns nil only on Metal allocation failure or
+    /// zero/negative canvasSize.
+    private func ensureTileDisplayIntermediate() -> MTLTexture? {
+        let targetW = Int(canvasSize.width)
+        let targetH = Int(canvasSize.height)
+        guard targetW > 0, targetH > 0 else { return nil }
+
+        if let existing = tileDisplayIntermediate,
+           existing.width == targetW,
+           existing.height == targetH {
+            return existing
+        }
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: targetW, height: targetH,
+            mipmapped: false
+        )
+        desc.storageMode = .private
+        desc.usage = [.renderTarget, .shaderRead]
+        guard let tex = device.makeTexture(descriptor: desc) else {
+            return nil
+        }
+        tileDisplayIntermediate = tex
+        return tex
+    }
+
     /// Create a new texture for a layer
     func createLayerTexture() -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -1684,6 +1740,132 @@ class CanvasRenderer: NSObject {
 
         // Draw fullscreen quad (6 vertices for 2 triangles)
         renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
+    /// Phase 4.3b tile-source display path. Renders a single layer's
+    /// tile grid through the same display-side transform pipeline as
+    /// `renderTextureToScreen`, but with tiles as the source instead of
+    /// a monolithic layer texture.
+    ///
+    /// Implementation per audit § 4.3 + 4.3b dispatch decision γ:
+    /// **sequence** two already-validated operations rather than
+    /// invent a new per-tile-under-transforms shader.
+    ///
+    ///   1. Composite this layer's allocated tiles into the renderer-
+    ///      owned canvas-sized intermediate using Phase 3's tile
+    ///      composite pipeline (NEAREST sampler, integer-aligned
+    ///      per-tile quads). Bit-exact with the monolithic layer
+    ///      texture at tolerance=0 — Phase 3 verifier-clean.
+    ///   2. Pass the intermediate to `renderTextureToScreen`, which
+    ///      runs the existing LINEAR-sampling transform pipeline on the
+    ///      caller's render encoder. Identical to the monolithic
+    ///      display step.
+    ///
+    /// Why not direct per-tile-to-screen under transforms: the LINEAR
+    /// sampler at tile-texture boundaries reads texels that fall in
+    /// the adjacent tile, which lives in a SEPARATE MTLTexture — the
+    /// sampler can't see it, defaults to clamp-to-edge, and produces
+    /// 1-pixel seams of darkening at every tile boundary under any
+    /// non-identity transform. NEAREST sampler avoids the seam but
+    /// diverges from monolithic LINEAR display under transforms. The
+    /// only architectural fix is 1-pixel tile borders (Phase 2 redesign,
+    /// out of scope). γ avoids the problem entirely — the intermediate
+    /// is a CONTIGUOUS texture, no tile boundaries inside it, LINEAR
+    /// sampling on it works correctly across what used to be tile edges.
+    ///
+    /// Memory: 16-64 MB intermediate held for renderer lifetime
+    /// (lazy-allocated on first call). One extra render pass per
+    /// invocation vs the monolithic display path's single pass.
+    ///
+    /// Encoder lifecycle: the tile-composite step runs on its own
+    /// command buffer (committed without waitUntilCompleted; Metal's
+    /// FIFO queue + hazard tracking sequences the intermediate's write
+    /// before the read in the caller's still-open render encoder). The
+    /// caller's encoder is the `renderTextureToScreen` consumer — under
+    /// 4.3c it'll be a sample-frame off-screen encoder; under Phase
+    /// 4.4 it'll be the drawable's encoder.
+    func renderTileGridToScreen(
+        _ tileGrid: TileGrid,
+        layerOpacity: Float,
+        to renderEncoder: MTLRenderCommandEncoder,
+        zoomScale: Float = 1.0,
+        panOffset: SIMD2<Float> = SIMD2<Float>(0, 0),
+        canvasRotation: Float = 0.0,
+        viewportSize: SIMD2<Float> = SIMD2<Float>(0, 0),
+        flipState: SIMD2<Float> = SIMD2<Float>(0, 0)
+    ) {
+        guard let intermediate = ensureTileDisplayIntermediate(),
+              let composeCB = commandQueue.makeCommandBuffer(),
+              let tilePipeline = compositeTilePipelineState else {
+            print("⚠️ renderTileGridToScreen: intermediate / cmd buf / pipeline unavailable")
+            return
+        }
+
+        let canvasW = Int(canvasSize.width)
+        let canvasH = Int(canvasSize.height)
+
+        // Step 1: per-tile composite into the intermediate. Clear to
+        // transparent (the intermediate gets fully overwritten by the
+        // tile draws, but unallocated regions stay transparent — same
+        // semantics as the monolithic layer texture's unwritten pixels).
+        let composeDesc = MTLRenderPassDescriptor()
+        composeDesc.colorAttachments[0].texture = intermediate
+        composeDesc.colorAttachments[0].loadAction = .clear
+        composeDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        composeDesc.colorAttachments[0].storeAction = .store
+
+        guard let composeEnc = composeCB.makeRenderCommandEncoder(descriptor: composeDesc) else {
+            print("⚠️ renderTileGridToScreen: failed to create compose encoder")
+            return
+        }
+        composeEnc.setRenderPipelineState(tilePipeline)
+        let outputSize = SIMD2<Int32>(Int32(canvasW), Int32(canvasH))
+        let tileSize = tileGrid.tileSize
+        // Per-tile composite uses opacity=1.0 — the intermediate holds
+        // raw layer pixels. The display step (renderTextureToScreen
+        // below) applies layerOpacity. Matches the monolithic display
+        // path's "layer.texture at 1.0, display at layer.opacity"
+        // semantic.
+        var tileOpacity: Float = 1.0
+
+        for key in tileGrid.allocatedKeys() {
+            guard let tile = tileGrid.tile(at: key) else { continue }
+            let srcX = key.x * tileSize
+            let srcY = key.y * tileSize
+            let blitW = min(tileSize, canvasW - srcX)
+            let blitH = min(tileSize, canvasH - srcY)
+            if blitW <= 0 || blitH <= 0 { continue }
+
+            var uniforms = TileCompositeUniformsCPU(
+                tileRect: SIMD4<Int32>(Int32(srcX), Int32(srcY), Int32(blitW), Int32(blitH)),
+                outputSize: outputSize
+            )
+            composeEnc.setVertexBytes(&uniforms, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+            composeEnc.setFragmentTexture(tile.texture, index: 0)
+            composeEnc.setFragmentBytes(&tileOpacity, length: MemoryLayout<Float>.stride, index: 0)
+            composeEnc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+        composeEnc.endEncoding()
+        composeCB.commit()
+        // No waitUntilCompleted — Metal's command queue is FIFO and
+        // hazard tracking ensures the caller's renderEncoder reads the
+        // intermediate after this commit's GPU work completes.
+
+        // Step 2: render the intermediate to the caller's encoder with
+        // the full transform pipeline. Identical call shape to the
+        // monolithic display path — same shader (textureDisplayShader
+        // / LINEAR), same transform composition. Bit-exact with
+        // monolithic by construction.
+        renderTextureToScreen(
+            intermediate,
+            to: renderEncoder,
+            opacity: layerOpacity,
+            zoomScale: zoomScale,
+            panOffset: panOffset,
+            canvasRotation: canvasRotation,
+            viewportSize: viewportSize,
+            flipState: flipState
+        )
     }
 
     /// Set a scissor on the on-screen encoder that matches the canvas
