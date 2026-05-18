@@ -2280,6 +2280,21 @@ class CanvasRenderer: NSObject {
             return
         }
 
+        // Source B fix: clear the FULL atlas before compose. Flip copies
+        // atlas→temp at step 2 then the shader samples temp at flipped
+        // UVs to write atlas at step 3. The fragment shader's sampler
+        // can pull pixels across tile boundaries (linear interpolation
+        // or fractional-UV off-by-one with NEAREST), so any stale pixels
+        // in pre-compose atlas at unallocated tile regions could bleed
+        // into the flipped output at allocated-tile boundaries. Full-
+        // canvas clear required because the shader can sample anywhere
+        // in temp.
+        let fullCanvasRegion = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: atlasW, height: atlasH, depth: 1)
+        )
+        clearCanvasStagingAtlasRegion(fullCanvasRegion, on: commandBuffer)
+
         // 1. Compose every allocated tile into the atlas at its canvas
         //    position so the flip pass has current layer content as a
         //    source.
