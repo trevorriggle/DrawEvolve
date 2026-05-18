@@ -93,12 +93,22 @@ struct BrushSettingsView: View {
                 }
             }
 
-            // Opacity slider removed for v1.0 — the slider behaves like
-            // per-stamp flow, not per-stroke opacity, because each stamp
-            // blends independently. Until the wet-ink preview + scratch-
-            // buffer commit lands in v1.x the slider can't honor the
-            // user's "this stroke must not exceed N% alpha" expectation.
-            // brushSettings.opacity stays at its default (1.0) internally.
+            // Opacity slider (Phase 4.6 — wet-ink architecture). Bound to
+            // `BrushSettings.opacity`; routed through commitWetInkToLayer at
+            // stroke commit for brush-family tools. Read at touchesEnded so
+            // mid-stroke slider changes take effect at commit. Eraser/blur/
+            // smudge/shapes ignore opacity at the renderer level — the slider
+            // stays visible for consistency with Size / Hardness / Spacing
+            // (also "universal" properties that don't apply to every tool).
+            Section("Opacity") {
+                HStack {
+                    Text("Opacity")
+                    Spacer()
+                    Text(String(format: "%.0f%%", settings.opacity * 100))
+                        .foregroundColor(.primary)
+                }
+                Slider(value: $settings.opacity, in: 0...1)
+            }
 
             Section("Shape") {
                 HStack {
