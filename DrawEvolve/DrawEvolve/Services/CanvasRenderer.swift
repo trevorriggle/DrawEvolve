@@ -567,6 +567,90 @@ class CanvasRenderer: NSObject {
         return atlas
     }
 
+    // Pre-zeroed MTLBuffer used as a GPU-side blit source by
+    // `clearCanvasStagingAtlasRegion`. Sized to match the atlas
+    // (canvasW × canvasH × 4 bytes) so any region up to full-canvas
+    // can be cleared with a single buffer→texture blit. `.shared`
+    // storage so we can `memset` it once at allocation; on Apple
+    // Silicon unified memory makes GPU reads from `.shared` buffers
+    // effectively free.
+    //
+    // Lifecycle mirrors `canvasStagingAtlas`: lazy-allocated, retained
+    // for renderer lifetime, reallocated on canvasSize change.
+    private var atlasZeroBuffer: MTLBuffer?
+
+    private func ensureAtlasZeroBuffer() -> MTLBuffer? {
+        let canvasW = Int(canvasSize.width)
+        let canvasH = Int(canvasSize.height)
+        let required = canvasW * canvasH * 4
+        guard required > 0 else { return nil }
+        if let existing = atlasZeroBuffer, existing.length >= required {
+            return existing
+        }
+        guard let buf = device.makeBuffer(length: required, options: .storageModeShared) else {
+            return nil
+        }
+        memset(buf.contents(), 0, required)
+        atlasZeroBuffer = buf
+        return buf
+    }
+
+    /// Clear a region of `canvasStagingAtlas` to (0,0,0,0). Called by
+    /// dual-write functions BEFORE their compose-from-tiles step to
+    /// eliminate inter-op leakage (Source B fix for the Phase 4.5
+    /// blur pink-ring regression).
+    ///
+    /// **Why it's needed.** The compose-from-tiles step writes only
+    /// bbox-intersecting AND allocated tiles into the atlas; any
+    /// bbox-intersecting tile that's NOT allocated leaves its atlas
+    /// region holding stale pixels from a previous dual-write call
+    /// (the atlas is renderer-owned, never auto-cleared). The next
+    /// op's `loadAction = .load` then reads those stale pixels and
+    /// blends its output over them. Clearing the bbox region to
+    /// zero before compose establishes a known-clean baseline:
+    /// allocated tiles get their content; unallocated regions stay
+    /// transparent.
+    ///
+    /// **Mechanism.** Blit copy from the pre-zeroed `atlasZeroBuffer`
+    /// into the atlas at the region. Uses a fresh blit encoder on the
+    /// caller's command buffer — Metal serializes encoders within a
+    /// cb in submission order, so the clear lands before any
+    /// subsequent compose / render-pass-on-atlas reads.
+    ///
+    /// Region is clamped to atlas bounds defensively; pass any
+    /// MTLRegion and the helper will skip if it lands fully outside.
+    private func clearCanvasStagingAtlasRegion(_ region: MTLRegion,
+                                                on commandBuffer: MTLCommandBuffer) {
+        guard let atlas = ensureCanvasStagingAtlas(),
+              let zeros = ensureAtlasZeroBuffer() else { return }
+
+        // Clamp region to atlas bounds.
+        let originX = max(0, region.origin.x)
+        let originY = max(0, region.origin.y)
+        let endX = min(atlas.width, region.origin.x + region.size.width)
+        let endY = min(atlas.height, region.origin.y + region.size.height)
+        let clampedW = endX - originX
+        let clampedH = endY - originY
+        guard clampedW > 0, clampedH > 0 else { return }
+
+        let bytesPerRow = clampedW * 4
+        let bytesPerImage = bytesPerRow * clampedH
+
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        blit.copy(
+            from: zeros,
+            sourceOffset: 0,
+            sourceBytesPerRow: bytesPerRow,
+            sourceBytesPerImage: bytesPerImage,
+            sourceSize: MTLSize(width: clampedW, height: clampedH, depth: 1),
+            to: atlas,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: originX, y: originY, z: 0)
+        )
+        blit.endEncoding()
+    }
+
     // MARK: - Tile-display intermediate (Phase 4.3)
     //
     // Renderer-owned canvas-sized .private MTLTexture used as the
