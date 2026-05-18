@@ -1584,8 +1584,9 @@ class CanvasStateManager: ObservableObject {
         if let rect = activeSelection,
            let tileGrid = layers[selectedLayerIndex].tileGrid {
             renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
-        } else if let path = selectionPath {
-            renderer.clearPath(path, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
+        } else if let path = selectionPath,
+                  let tileGrid = layers[selectedLayerIndex].tileGrid {
+            renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
         }
 
         // Capture after snapshot
@@ -1687,7 +1688,9 @@ class CanvasStateManager: ObservableObject {
             // Verify extraction succeeded
             if let pixels = selectionPixels {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                renderer.clearPath(path, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
+                if let tileGrid = layers[selectedLayerIndex].tileGrid {
+                    renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
+                }
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
                 selectionLayerSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
                 // GPU-side mirror for the live drag preview. See note in the

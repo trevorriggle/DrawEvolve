@@ -3666,7 +3666,7 @@ class CanvasRenderer: NSObject {
     }
 
     /// Clear pixels along a path (for lasso selection)
-    func clearPath(_ path: [CGPoint], in texture: MTLTexture, tileGrid: TileGrid? = nil, screenSize: CGSize) {
+    func clearPath(_ path: [CGPoint], tileGrid: TileGrid, screenSize: CGSize) {
         print("CanvasRenderer: Clearing path with \(path.count) points")
 
         guard path.count >= 3 else {
@@ -3674,13 +3674,18 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // Scale path from screen space to texture space
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: Failed to ensure canvas staging atlas for clearPath")
+            return
+        }
+
+        // Scale path from screen space to atlas (canvas-pixel) space
+        let scaleX = CGFloat(atlas.width) / screenSize.width
+        let scaleY = CGFloat(atlas.height) / screenSize.height
         let scaledPath = path.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
 
-        let width = texture.width
-        let height = texture.height
+        let width = atlas.width
+        let height = atlas.height
 
         // Use point-in-polygon algorithm to determine which pixels to clear
         func isPointInPolygon(_ point: CGPoint, polygon: [CGPoint]) -> Bool {
@@ -3712,8 +3717,40 @@ class CanvasRenderer: NSObject {
         }
 
         // Region-local I/O: read only the path's bounding box rather than the
-        // whole texture (a 4096² lasso selection on a 4096² canvas was a
+        // whole canvas (a 4096² lasso selection on a 4096² canvas was a
         // 64 MiB read → 16× saving for typical selection sizes).
+        //
+        // Phase 4.5c: compose tiles intersecting the bbox into the staging
+        // atlas so getBytes pulls from current tile state (no monolithic).
+        let bboxPixelRect = CGRect(x: minX, y: minY, width: regionW, height: regionH)
+        let bboxKeys = tileGrid.tilesIntersecting(bboxPixelRect)
+        let tileSize = tileGrid.tileSize
+
+        if !bboxKeys.isEmpty,
+           let composeBuf = commandQueue.makeCommandBuffer(),
+           let blit = composeBuf.makeBlitCommandEncoder() {
+            for key in bboxKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, width - dstX)
+                let copyH = min(tileSize, height - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            blit.endEncoding()
+            composeBuf.commit()
+            composeBuf.waitUntilCompleted()
+        }
+
         let regionBytesPerRow = regionW * 4
         let region = MTLRegion(
             origin: MTLOrigin(x: minX, y: minY, z: 0),
@@ -3723,7 +3760,7 @@ class CanvasRenderer: NSObject {
 
         pixelData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
+            atlas.getBytes(
                 baseAddress,
                 bytesPerRow: regionBytesPerRow,
                 from: region,
@@ -3751,10 +3788,10 @@ class CanvasRenderer: NSObject {
             }
         }
 
-        // Write back the region only.
+        // Write back the modified region into the atlas only.
         pixelData.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            texture.replace(
+            atlas.replace(
                 region: region,
                 mipmapLevel: 0,
                 withBytes: baseAddress,
@@ -3762,51 +3799,42 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // === Phase 2 Task 4.5: tile-grid dual-write (blit from monolithic) =
+        // === Phase 4.5c: blit modified region from atlas back into tiles ==
         //
-        // Canonical pattern. Same rationale as clearRect — sub-tile
-        // buffer-to-texture blits had unhonored alignment requirements and
-        // didn't repair drift in the non-cleared portion of a tile that
-        // earlier callsites may have left misaligned. Full-tile blit from
-        // monolithic is bit-exact by construction.
-        if let grid = tileGrid, regionW > 0, regionH > 0 {
-            let bboxPixelRect = CGRect(x: minX, y: minY, width: regionW, height: regionH)
-            let tileKeys = grid.tilesIntersecting(bboxPixelRect)
-            let tileSize = grid.tileSize
-            let texW = texture.width
-            let texH = texture.height
-
-            if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
-                for key in tileKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
-                }
-                if let blit = cmdBuf.makeBlitCommandEncoder() {
-                    for key in tileKeys {
-                        let srcX = key.x * tileSize
-                        let srcY = key.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-
-                        grid.updateTile(at: key) { tile in
-                            blit.copy(
-                                from: texture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
-                    }
-                    blit.endEncoding()
-                }
-                cmdBuf.commit()
-                cmdBuf.waitUntilCompleted()
+        // Full-tile blit from atlas — sub-tile buffer-to-texture blits had
+        // unhonored alignment requirements and didn't repair drift in the
+        // non-cleared portion of a tile that earlier callsites may have left
+        // misaligned. Full-tile blit from atlas is bit-exact by construction.
+        if !bboxKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
+            for key in bboxKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
             }
+            if let blit = cmdBuf.makeBlitCommandEncoder() {
+                for key in bboxKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, width - srcX)
+                    let blitH = min(tileSize, height - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit.endEncoding()
+            }
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
         }
-        // === End dual-write block ========================================
+        // === End atlas → tile blit block =================================
 
         print("Path cleared successfully (\(clearedCount) pixels)")
     }
