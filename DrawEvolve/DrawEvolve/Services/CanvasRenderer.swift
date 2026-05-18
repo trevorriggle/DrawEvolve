@@ -489,45 +489,65 @@ class CanvasRenderer: NSObject {
         TileGrid(canvasSize: canvasSize, tileSize: 256, device: device)
     }
 
-    // MARK: - Snapshot staging atlas (Phase 4.2)
+    // MARK: - Canvas staging atlas (Phase 4.2 + 4.5c)
     //
-    // Lazy-allocated canvas-sized .shared MTLTexture used as a blit-
-    // destination intermediate for tile-native snapshot reads. Tile
-    // textures are .private (TileGrid.swift:111), so CPU readback of
-    // tile contents requires a blit through a .shared surface. The
-    // atlas is sized to the renderer's current canvasSize and reused
-    // across every captureSnapshot / restoreSnapshot / floodFill call
-    // that needs CPU-side tile pixels (4.2b–4.2d). canvasSize change
-    // (rare today — the cap at 2048 keeps it static; see N5 in the
-    // master audit) forces a reallocation on the next ensure call.
+    // Lazy-allocated canvas-sized .shared MTLTexture serving as the
+    // renderer's shared scratch surface for tile-native operations.
+    // Replaces the per-layer monolithic (DrawingLayer.texture) that
+    // existed in Phase 0-3 — one shared surface, not N per-layer
+    // allocations.
     //
-    // Memory: 16 MB at 2048², 64 MB at 4096². Same allocation profile
-    // as the original monolithic LayerSnapshot.pixels buffer — just
-    // held as a GPU/CPU staging surface instead of a one-shot CPU
-    // buffer. Allocated lazily on first snapshot so renderers that
-    // never snapshot don't pay the cost.
+    // Used for both READ and WRITE paths:
+    //   - READ (Phase 4.2): blit allocated tiles into the atlas, then
+    //     getBytes from atlas (captureSnapshot, floodFill's pre-blit).
+    //     Tile textures are .private; CPU readback requires a .shared
+    //     intermediate.
+    //   - WRITE (Phase 4.5c): dual-write functions render or
+    //     texture.replace into the atlas, then blit affected tile
+    //     regions back into the tile grid. Replaces the per-layer
+    //     .texture monolithic that previously served as the dual-write
+    //     scratch surface.
     //
-    // Pattern mirrors the verifier staging texture at ~line 532 but at
-    // canvas size instead of tile size. Both are .shared (.private
-    // can't be getBytes'd) and both serve as a one-way GPU→CPU bridge.
-    private var snapshotStagingAtlas: MTLTexture?
+    // Storage: .shared (CPU access needed for read-path getBytes +
+    // write-path texture.replace).
+    // Usage: [.shaderRead, .renderTarget, .pixelFormatView] —
+    // .renderTarget added in 4.5c for the dual-write functions that
+    // use render encoders (renderStroke, compositeFloating, flip,
+    // translate, blur variants, smudge); .shaderRead for sampler
+    // bindings; .pixelFormatView defensive for future blend-state
+    // variants.
+    //
+    // canvasSize change (rare — the 2048 cap in updateCanvasSize keeps
+    // it static today, N5 in the master audit) forces a reallocation
+    // on the next ensure call.
+    //
+    // Memory: 16 MB at 2048², 64 MB at 4096². ONE allocation per
+    // renderer (vs N allocations under the per-layer model). Allocated
+    // lazily on first use so renderers that never snapshot or write
+    // don't pay the cost.
+    //
+    // Concurrency: dual-writes on different layers do not happen
+    // simultaneously in DrawEvolve's user model (user draws on one
+    // layer at a time). Same-layer concurrency is handled by Metal
+    // hazard tracking + the `drainCommandQueue` defense at
+    // `restoreSnapshot` (commit 5b15e24).
+    private var canvasStagingAtlas: MTLTexture?
 
-    /// Return a canvas-sized .shared MTLTexture suitable as a blit
-    /// destination for tile reads. Reused across calls; reallocates if
-    /// the renderer's `canvasSize` has changed since the last call.
+    /// Return the renderer's shared canvas-sized .shared staging
+    /// MTLTexture, lazy-allocating on first call and reallocating on
+    /// canvasSize change. Used by both read-path operations
+    /// (captureSnapshot, floodFill) and write-path dual-write
+    /// operations (renderStroke, clearRect, renderImage, etc.).
     ///
-    /// Returns nil only on Metal allocation failure (out of GPU memory)
-    /// or zero/negative canvasSize. Callers should treat nil as a
-    /// failed operation and back out cleanly (return early, skip the
-    /// snapshot, etc.) — DO NOT proceed assuming a valid atlas.
-    ///
-    /// Phase 4.2 foundation. Consumers land in 4.2b–4.2d.
-    private func ensureSnapshotStagingAtlas() -> MTLTexture? {
+    /// Returns nil only on Metal allocation failure or zero/negative
+    /// canvasSize. Callers should treat nil as a failed operation and
+    /// back out cleanly — DO NOT proceed assuming a valid atlas.
+    private func ensureCanvasStagingAtlas() -> MTLTexture? {
         let targetW = Int(canvasSize.width)
         let targetH = Int(canvasSize.height)
         guard targetW > 0, targetH > 0 else { return nil }
 
-        if let existing = snapshotStagingAtlas,
+        if let existing = canvasStagingAtlas,
            existing.width == targetW,
            existing.height == targetH {
             return existing
@@ -539,11 +559,11 @@ class CanvasRenderer: NSObject {
             mipmapped: false
         )
         desc.storageMode = .shared
-        desc.usage = [.shaderRead]
+        desc.usage = [.shaderRead, .renderTarget, .pixelFormatView]
         guard let atlas = device.makeTexture(descriptor: desc) else {
             return nil
         }
-        snapshotStagingAtlas = atlas
+        canvasStagingAtlas = atlas
         return atlas
     }
 
@@ -2572,7 +2592,7 @@ class CanvasRenderer: NSObject {
             return false
         }
 
-        guard let atlas = ensureSnapshotStagingAtlas() else {
+        guard let atlas = ensureCanvasStagingAtlas() else {
             print("ERROR: floodFill — failed to ensure staging atlas")
             return false
         }
@@ -2924,7 +2944,7 @@ class CanvasRenderer: NSObject {
                                  tileSize: tileSize)
         }
 
-        guard let atlas = ensureSnapshotStagingAtlas() else {
+        guard let atlas = ensureCanvasStagingAtlas() else {
             print("ERROR: captureSnapshot — failed to ensure staging atlas")
             return nil
         }
@@ -3131,7 +3151,7 @@ class CanvasRenderer: NSObject {
         // canvas position. Atlas is .shared so texture.replace is legal;
         // CPU writes complete before we commit the cmdBuf below, so the
         // subsequent GPU blits see the post-upload atlas state.
-        guard let atlas = ensureSnapshotStagingAtlas() else {
+        guard let atlas = ensureCanvasStagingAtlas() else {
             print("ERROR: restoreSnapshot — failed to ensure staging atlas")
             return
         }
