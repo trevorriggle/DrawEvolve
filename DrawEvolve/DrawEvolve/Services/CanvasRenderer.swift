@@ -3999,9 +3999,14 @@ class CanvasRenderer: NSObject {
     /// sourceAlpha/oneMinusSourceAlpha blend factors). The previous version
     /// applied a straight-alpha Porter-Duff formula to premultiplied inputs,
     /// double-multiplying by srcA and shifting edge colors.
-    func renderImage(_ image: UIImage, at rect: CGRect, to texture: MTLTexture, tileGrid: TileGrid? = nil, screenSize: CGSize) {
+    func renderImage(_ image: UIImage, at rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) {
         guard let cgImage = image.cgImage else {
             print("ERROR: Failed to get CGImage")
+            return
+        }
+
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: renderImage — failed to ensure staging atlas")
             return
         }
 
@@ -4010,11 +4015,12 @@ class CanvasRenderer: NSObject {
         let h = cgImage.height
         guard w > 0, h > 0 else { return }
 
-        // Integer pixel offset in texture space. We truncate here; the CGImage
-        // was extracted at integer pixel bounds, so the render target must also
-        // be integer-aligned. Sub-pixel drag jitter is acceptable.
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
+        // Integer pixel offset in canvas-pixel space. We truncate here; the
+        // CGImage was extracted at integer pixel bounds, so the render
+        // target must also be integer-aligned. Sub-pixel drag jitter is
+        // acceptable.
+        let scaleX = CGFloat(atlas.width) / screenSize.width
+        let scaleY = CGFloat(atlas.height) / screenSize.height
         let x = Int(floor(rect.origin.x * scaleX))
         let y = Int(floor(rect.origin.y * scaleY))
 
@@ -4039,23 +4045,55 @@ class CanvasRenderer: NSObject {
         srcContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let srcData = srcContext.data else { return }
 
-        // Region-local I/O: clamp the image's destination rect to texture bounds
-        // and operate only on that intersection. A 256² text run was a 64 MiB
-        // full-texture read+write at 4096²; the clamped region is ~256 KiB.
-        let texWidth = texture.width
-        let texHeight = texture.height
+        // Region-local I/O: clamp the image's destination rect to canvas
+        // bounds and operate only on that intersection. A 256² text run was
+        // a 64 MiB full-canvas read+write at 4096²; the clamped region is
+        // ~256 KiB.
+        let canvasW = atlas.width
+        let canvasH = atlas.height
         let dstX = max(0, x)
         let dstY = max(0, y)
-        let dstEndX = min(texWidth, x + w)
-        let dstEndY = min(texHeight, y + h)
+        let dstEndX = min(canvasW, x + w)
+        let dstEndY = min(canvasH, y + h)
         let regionW = dstEndX - dstX
         let regionH = dstEndY - dstY
         guard regionW > 0, regionH > 0 else { return }
 
         // Where in the source image the visible top-left corner lives. Equal
-        // to (max(0, -x), max(0, -y)) when the image hangs off the texture.
+        // to (max(0, -x), max(0, -y)) when the image hangs off the canvas.
         let imgStartCol = dstX - x
         let imgStartRow = dstY - y
+
+        // Phase 4.5c: compose intersecting tiles into the atlas so the
+        // read sees current tile state.
+        let regionPixelRect = CGRect(x: dstX, y: dstY, width: regionW, height: regionH)
+        let tileKeys = tileGrid.tilesIntersecting(regionPixelRect)
+        let tileSize = tileGrid.tileSize
+
+        if !tileKeys.isEmpty,
+           let composeBuf = commandQueue.makeCommandBuffer(),
+           let blit = composeBuf.makeBlitCommandEncoder() {
+            for key in tileKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let posX = key.x * tileSize
+                let posY = key.y * tileSize
+                let copyW = min(tileSize, canvasW - posX)
+                let copyH = min(tileSize, canvasH - posY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: posX, y: posY, z: 0)
+                )
+            }
+            blit.endEncoding()
+            composeBuf.commit()
+            composeBuf.waitUntilCompleted()
+        }
 
         let regionBytesPerRow = regionW * 4
         var regionData = Data(count: regionBytesPerRow * regionH)
@@ -4066,7 +4104,7 @@ class CanvasRenderer: NSObject {
 
         regionData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
+            atlas.getBytes(
                 baseAddress,
                 bytesPerRow: regionBytesPerRow,
                 from: region,
@@ -4121,7 +4159,7 @@ class CanvasRenderer: NSObject {
 
         regionData.withUnsafeBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            texture.replace(
+            atlas.replace(
                 region: region,
                 mipmapLevel: 0,
                 withBytes: baseAddress,
@@ -4129,52 +4167,46 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // === Phase 2 Task 4.6: tile-grid dual-write (blit from monolithic) =
+        // === Phase 4.5c: blit modified region from atlas back into tiles ==
         //
-        // Canonical pattern. Same rationale as floodFill — freshly-allocated
-        // tiles where the image's region didn't fully cover the tile would
-        // previously be cleared to zero by ensureTileWithClearIfNeeded and
-        // then only the sub-tile blit landed inside the image's rect,
-        // leaving the rest of the tile at zero while monolithic kept its
-        // pre-existing content. Full-tile blit from monolithic is bit-exact.
-        if let grid = tileGrid, regionW > 0, regionH > 0 {
-            let regionPixelRect = CGRect(x: dstX, y: dstY, width: regionW, height: regionH)
-            let tileKeys = grid.tilesIntersecting(regionPixelRect)
-            let tileSize = grid.tileSize
-            let texW = texture.width
-            let texH = texture.height
-
-            if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
-                for key in tileKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
-                }
-                if let blit = cmdBuf.makeBlitCommandEncoder() {
-                    for key in tileKeys {
-                        let srcX = key.x * tileSize
-                        let srcY = key.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-
-                        grid.updateTile(at: key) { tile in
-                            blit.copy(
-                                from: texture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
-                    }
-                    blit.endEncoding()
-                }
-                cmdBuf.commit()
-                cmdBuf.waitUntilCompleted()
+        // Full-tile blit from atlas — sub-tile blits had two structural
+        // problems: (a) freshly-allocated tiles where the image's region
+        // didn't fully cover the tile got zeroed by ensureTileWithClearIfNeeded
+        // and only the image rect got blitted, leaving the rest at zero
+        // while monolithic kept pre-existing content. Full-tile blit from
+        // atlas eliminates that: every affected tile is bit-exact with
+        // the atlas, which carries pre-blend pixels everywhere outside
+        // the image rect and post-blend pixels inside it.
+        if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
+            for key in tileKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
             }
+            if let blit = cmdBuf.makeBlitCommandEncoder() {
+                for key in tileKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, canvasW - srcX)
+                    let blitH = min(tileSize, canvasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit.endEncoding()
+            }
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
         }
-        // === End dual-write block ========================================
+        // === End atlas → tile blit block =================================
     }
 
     // MARK: - Blur (PR 1)
