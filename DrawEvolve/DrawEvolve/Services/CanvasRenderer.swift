@@ -1236,179 +1236,6 @@ class CanvasRenderer: NSObject {
         return textureToUIImage(finalTexture)
     }
 
-    // MARK: - Phase 4.3 parallel-display verifier
-    //
-    // Compares two off-screen layer-composite renders byte-by-byte.
-    // Runs in DEBUG only; Release strips it entirely.
-    //
-    // Polarity inverted at Phase 4.4 (commit d7a5d4c):
-    //   - Mono shadow render — what the display path WOULD produce if
-    //     it still read from `layer.texture` per layer. The reference /
-    //     validator. No longer drives the user-visible drawable.
-    //   - Tile shadow render — structurally identical to the live
-    //     drawable's per-layer compose+draw pattern (4.4a). The path
-    //     we're shipping.
-    //
-    // Both renders go to drawable-shaped `.shared` off-screen targets
-    // via MetalCanvasView's `encodeLayerComposite`. The verifier reads
-    // both via `getBytes` and compares.
-    //
-    // Why the verifier doesn't read the live drawable directly: drawable
-    // textures on iOS are typically `framebufferOnly = true` for
-    // performance, so direct getBytes isn't legal without disabling
-    // optimizations in Release builds (the verifier is DEBUG-only but
-    // the MTKView config is global). Instead, the tile shadow renders
-    // through the SAME `encodeLayerComposite` code path the live
-    // drawable uses (per-layer compose+draw via
-    // `encodeLayerTileCompositeOntoIntermediate` + `renderTextureToScreen`).
-    // Structural equivalence: verifier-clean (mono shadow == tile
-    // shadow) implies live drawable == what mono path would have
-    // produced.
-    //
-    // Originally landed in Phase 3 Task 3.1c as `verifyCompositeMatches
-    // Monolithic` to validate `compositeLayersToTextureViaTiles` against
-    // the legacy composite. Phase 3.2 retired the legacy composite body
-    // and the function went unused. Phase 4.3 adapts it (per master
-    // audit § 4.1.9 decision — adapt rather than rewrite) for the live
-    // display-path comparison: same per-pixel compare loop + histogram +
-    // assert-on-mismatch shape, just pointed at a different pair of
-    // canvas-sized textures.
-    //
-    // Three flags, same shape as Phase 2's tile verifier:
-    //   - `verifyParallelDisplayEnabled` — master kill switch.
-    //   - `verifyParallelDisplayAssertOnMismatch` — true (default):
-    //     assert on first byte beyond tolerance. false: log-only
-    //     histogram per callsite, silent on clean compositions.
-    //   - `verifyParallelDisplayPerChannelTolerance` — UInt8 tolerance
-    //     for |tile-mono| per byte. Default 0 (bit-exact). Phase 4.3
-    //     invariant says drift is structurally impossible given Phase 3's
-    //     per-tile NEAREST sampler discipline carries through; if a
-    //     mismatch surfaces under transforms, it's a real bug (likely
-    //     sub-pixel rounding in the per-tile vertex math) and the right
-    //     fix is integer-aligned vertex math, not tolerance relaxation.
-    #if DEBUG
-    static var verifyParallelDisplayEnabled: Bool = true
-    static var verifyParallelDisplayAssertOnMismatch: Bool = true
-    static var verifyParallelDisplayPerChannelTolerance: UInt8 = 0
-    /// Post-touch sample window throttle. The hybrid sample rate from
-    /// audit § 4.1.8 specs "every frame for 5s post-touchesEnded" but
-    /// the actual cost (drawable-shaped getBytes × 2 per sample) makes
-    /// that ~2.6 GB/s of verifier traffic on iPad Pro drawable. Sim's
-    /// Metal emulation tax compounds. Stride=4 = every 4th frame for
-    /// 5s post-touch = ~75 sample frames over the window, cutting
-    /// traffic to ~650 MB/s while keeping coverage aggressive. Stride=1
-    /// = every frame (original spec). Stride=0 = disables post-touch
-    /// window (verifier still runs on 1Hz idle + transform-change).
-    /// Tunable via lldb.
-    static var verifyParallelDisplayPostTouchFrameStride: Int = 4
-    private static var hasLoggedParallelDisplayVerifierActive: Bool = false
-
-    func verifyParallelDisplayMatchesMonolithic(monoDisplay: MTLTexture,
-                                                tileDisplay: MTLTexture,
-                                                callsite: String) {
-        guard CanvasRenderer.verifyParallelDisplayEnabled else { return }
-
-        if !CanvasRenderer.hasLoggedParallelDisplayVerifierActive {
-            CanvasRenderer.hasLoggedParallelDisplayVerifierActive = true
-            print("[display-verify] active — verifyParallelDisplayEnabled=true, " +
-                  "verifyParallelDisplayAssertOnMismatch=\(CanvasRenderer.verifyParallelDisplayAssertOnMismatch), " +
-                  "tolerance=\(CanvasRenderer.verifyParallelDisplayPerChannelTolerance)")
-        }
-
-        let w = monoDisplay.width
-        let h = monoDisplay.height
-        guard tileDisplay.width == w, tileDisplay.height == h else {
-            print("[display-verify] dimension mismatch callsite=\(callsite) mono=(\(monoDisplay.width)x\(monoDisplay.height)) tile=(\(tileDisplay.width)x\(tileDisplay.height))")
-            return
-        }
-
-        let bytesPerRow = w * 4
-        let totalBytes = bytesPerRow * h
-        var monoBuf = Data(count: totalBytes)
-        var tileBuf = Data(count: totalBytes)
-
-        monoBuf.withUnsafeMutableBytes { ptr in
-            guard let base = ptr.baseAddress else { return }
-            monoDisplay.getBytes(base, bytesPerRow: bytesPerRow,
-                                 from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                                 size: MTLSize(width: w, height: h, depth: 1)),
-                                 mipmapLevel: 0)
-        }
-        tileBuf.withUnsafeMutableBytes { ptr in
-            guard let base = ptr.baseAddress else { return }
-            tileDisplay.getBytes(base, bytesPerRow: bytesPerRow,
-                                 from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                                 size: MTLSize(width: w, height: h, depth: 1)),
-                                 mipmapLevel: 0)
-        }
-
-        let assertOnMode = CanvasRenderer.verifyParallelDisplayAssertOnMismatch
-        let tolerance = CanvasRenderer.verifyParallelDisplayPerChannelTolerance
-        var histogram: [Int] = [0, 0, 0, 0, 0, 0]
-        var firstBeyond: (row: Int, col: Int, channel: Int, tileByte: UInt8, monoByte: UInt8)? = nil
-        var beyondCount: Int = 0
-
-        monoBuf.withUnsafeBytes { mPtr in
-            tileBuf.withUnsafeBytes { tPtr in
-                guard let mBase = mPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                      let tBase = tPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
-                else { return }
-                scanLoop: for row in 0..<h {
-                    let rowStart = row * bytesPerRow
-                    for col in 0..<w {
-                        let pxOff = rowStart + col * 4
-                        for ch in 0..<4 {
-                            let m = mBase[pxOff + ch]
-                            let t = tBase[pxOff + ch]
-                            let absDiff: UInt8 = t > m ? t - m : m - t
-                            if absDiff == 0 { continue }
-                            switch absDiff {
-                            case 1: histogram[0] += 1
-                            case 2: histogram[1] += 1
-                            case 3: histogram[2] += 1
-                            case 4...7: histogram[3] += 1
-                            case 8...15: histogram[4] += 1
-                            default: histogram[5] += 1
-                            }
-                            if absDiff > tolerance {
-                                beyondCount += 1
-                                if firstBeyond == nil {
-                                    firstBeyond = (row, col, ch, t, m)
-                                }
-                                if assertOnMode { break scanLoop }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if assertOnMode {
-            if let mm = firstBeyond {
-                let channelName = ["B", "G", "R", "A"][mm.channel]
-                print("[display-verify] MISMATCH callsite=\(callsite) " +
-                      "pixel=(\(mm.col),\(mm.row)) " +
-                      "channel=\(channelName) tileByte=0x\(String(mm.tileByte, radix: 16)) " +
-                      "monoByte=0x\(String(mm.monoByte, radix: 16)) " +
-                      "tolerance=\(tolerance)")
-                assertionFailure("[display-verify] mismatch at \(callsite) pixel (\(mm.col),\(mm.row))")
-            }
-        } else {
-            let hasAnyDiff = histogram.contains { $0 > 0 }
-            if hasAnyDiff {
-                let labels = ["±1", "±2", "±3", "±4-7", "±8-15", "±16+"]
-                var parts: [String] = []
-                for i in 0..<histogram.count where histogram[i] > 0 {
-                    parts.append("\(labels[i]):\(histogram[i])")
-                }
-                print("[display-verify] callsite=\(callsite) total=\(totalBytes) " +
-                      "mismatches_beyond_tolerance=\(beyondCount) " +
-                      "(\(parts.joined(separator: " ")))")
-            }
-        }
-    }
-    #endif
-
     /// Composite all visible layers onto a fresh white-backed texture and
     /// return it. Used by export and the eyedropper. Output pixels have
     /// alpha = 1.0 and straight (not premultiplied) RGB equal to what the
@@ -1431,20 +1258,13 @@ class CanvasRenderer: NSObject {
         // palette "Generate from canvas", eyedropper, CompositionAnalysisService)
         // now read from the tile grid via compositeLayersToTextureViaTiles.
         //
-        // Bit-exact with the legacy output, established by the Task 3.1
-        // parallel verifier soak (the function that's now
-        // `verifyParallelDisplayMatchesMonolithic` was originally
-        // `verifyCompositeMatchesMonolithic`; ran at tolerance=0, silent
-        // across the full soak set including eyedropper / multi-layer
-        // drawing-open / undo-redo / translate / flood fill / save).
+        // Bit-exactness with the legacy monolithic-source output was
+        // established by Phase 3.1's composite verifier soak (renamed at
+        // Phase 4.3a to verifyParallelDisplayMatchesMonolithic, deleted
+        // at Phase 4.5a alongside all other verifier infrastructure).
         // Multi-layer load fix (commit 987153e) was the load-bearing
         // change that made tile-grid keyspace match monolithic content
         // at load time.
-        //
-        // Phase 4.3a adapted the function (rename + parameter shape) for
-        // the live display-path comparison. Its Phase 3 callsite here
-        // is gone; the new callsite is the per-frame parallel-display
-        // verifier in MetalCanvasView's draw loop (Phase 4.3c).
         return compositeLayersToTextureViaTiles(layers: layers)
     }
 
