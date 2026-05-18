@@ -1264,7 +1264,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Smudge: renderer failed to allocate patch textures")
                     return
                 }
-                smudgeBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+                smudgeBeforeSnapshot = layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
                 smudgeStrokeLayerIndex = selectedLayerIndex
                 smudgeStrokeLayerId = layerId
                 smudgePendingTouchdown = BrushStroke.StrokePoint(
@@ -1456,7 +1456,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     docLocation: location,
                     layerIndex: selectedLayerIndex,
                     layerId: layers[selectedLayerIndex].id,
-                    beforeSnapshot: renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+                    beforeSnapshot: layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
                 )
                 print("Paint bucket: pending fill captured at \(location) (awaiting touchesEnded)")
                 return
@@ -2431,7 +2431,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let currentLayerIndex = pending.layerIndex
                 let layerId = pending.layerId
                 let beforeSnapshot = pending.beforeSnapshot
-                let capturedTileGrid: TileGrid? = tileGrid
+                let capturedTileGrid: TileGrid = tileGrid
                 let dispatched = renderer.floodFill(
                     at: pending.docLocation,
                     with: brushSettings.color,
@@ -2481,14 +2481,14 @@ struct MetalCanvasView: UIViewRepresentable {
                        let lid = strokeLayerId,
                        li < layers.count,
                        layers[li].id == lid,
-                       layers[li].tileGrid != nil {
+                       let smudgeTileGrid = layers[li].tileGrid {
                         // Drain the in-flight smudge command buffers before
                         // reading back. We don't have a handle to them
                         // here, but `captureSnapshot` issues a blit with
                         // waitUntilCompleted internally — that drain
                         // serialises behind any pending smudge dispatches
                         // on the same queue.
-                        let afterSnapshot = renderer.captureSnapshot(tileGrid: layers[li].tileGrid)
+                        let afterSnapshot = renderer.captureSnapshot(tileGrid: smudgeTileGrid)
                         if let before = beforeSnapshot, let after = afterSnapshot,
                            let canvasState = canvasState {
                             canvasState.historyManager.record(.stroke(
@@ -2733,7 +2733,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // would re-render the entire stroke and double-erase).
             if stroke.tool == .eraser {
                 guard selectedLayerIndex < layers.count,
-                      layers[selectedLayerIndex].tileGrid != nil,
+                      let capturedTileGrid = layers[selectedLayerIndex].tileGrid,
                       let renderer = renderer else {
                     currentStroke = nil
                     lastPoint = nil
@@ -2746,7 +2746,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 let beforeSnapshot = eraserBeforeSnapshot
                 let layerId = stroke.layerId
                 let currentLayerIndex = selectedLayerIndex
-                let capturedTileGrid = layers[selectedLayerIndex].tileGrid
                 let capturedCanvasState = canvasState
                 flushEraserSubStroke(view: view) { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
@@ -2812,7 +2811,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let beforeSnapshot = blurStrokeBeforeSnapshot
                 let strokeLayerIndex = blurStrokeLayerIndex ?? selectedLayerIndex
                 let strokeLayerId = blurStrokeLayerId ?? layer.id
-                let capturedTileGrid = layers[strokeLayerIndex].tileGrid
+                guard let capturedTileGrid = layers[strokeLayerIndex].tileGrid else { return }
                 let capturedCanvasState = canvasState
                 blurStrokeActive = false
                 blurStrokeBeforeSnapshot = nil
@@ -2872,7 +2871,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 let currentLayerIndex = selectedLayerIndex
                 let layerId = layer.id
-                let capturedTileGrid: TileGrid? = tileGrid
+                let capturedTileGrid: TileGrid = tileGrid
                 let capturedCanvasState = canvasState
 
                 // Async stroke commit: GPU pass runs without blocking the main

@@ -787,7 +787,7 @@ class CanvasStateManager: ObservableObject {
             rotation: Float(ft.rotation.radians)
         )
 
-        let afterSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let afterSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
         if let before = beforeSnapshot, let after = afterSnapshot {
             let layerId = layers[selectedLayerIndex].id
             historyManager.record(.stroke(
@@ -1453,7 +1453,7 @@ class CanvasStateManager: ObservableObject {
         // drag-release routes through commitSelection, which blits the
         // floating texture into the layer in a single GPU pass.
         clearSelection()
-        let beforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let beforeSnapshot = layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
         selectionBeforeSnapshot = beforeSnapshot
         selectionLayerSnapshot = beforeSnapshot   // empty layer — nothing to "restore" beyond it
         selectionPixels = resized
@@ -1548,26 +1548,24 @@ class CanvasStateManager: ObservableObject {
 
     func deleteSelectedPixels() {
         guard selectedLayerIndex < layers.count,
-              layers[selectedLayerIndex].tileGrid != nil,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer else {
             print("ERROR: Cannot delete selection - invalid layer or tile grid")
             return
         }
 
         // Capture before snapshot
-        let beforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let beforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
 
         // Delete pixels in selection (use documentSize for 1:1 coordinate mapping)
-        if let rect = activeSelection,
-           let tileGrid = layers[selectedLayerIndex].tileGrid {
+        if let rect = activeSelection {
             renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
-        } else if let path = selectionPath,
-                  let tileGrid = layers[selectedLayerIndex].tileGrid {
+        } else if let path = selectionPath {
             renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
         }
 
         // Capture after snapshot
-        let afterSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let afterSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
 
         // Record in history
         if let before = beforeSnapshot, let after = afterSnapshot {
@@ -1743,7 +1741,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         // Capture the current state as "after" for history
-        let afterSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let afterSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
 
         // Record in history (before = original with pixels, after = current with pixels moved)
         if let after = afterSnapshot {

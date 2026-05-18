@@ -3522,31 +3522,27 @@ class CanvasRenderer: NSObject {
     }
 
     /// Capture a snapshot of a layer's tile-grid contents for undo/redo.
-    /// Tile-native via the shared staging atlas (Phase 4.2b):
+    /// Tile-native via the shared staging atlas:
     ///   1. Ensure the atlas exists at current canvasSize.
-    ///   2. Blit every allocated tile from `grid` into its in-canvas
+    ///   2. Blit every allocated tile from `tileGrid` into its in-canvas
     ///      position on the atlas, on a single command buffer.
     ///   3. commit + waitUntilCompleted.
     ///   4. getBytes per tile from the atlas into a per-tile Data buffer
     ///      sized exactly to the tile's in-canvas footprint (partial-
     ///      edge tiles get smaller buffers; no slop).
     ///
-    /// Returns nil on Metal allocation failure or a missing tileGrid.
-    /// nil-tileGrid is no longer a supported path (Phase 4.5 removes the
-    /// optional entirely); the empty-tile-grid case (grid present,
-    /// `allocatedKeys().isEmpty`) IS supported and produces a snapshot
+    /// Returns nil only on Metal allocation failure or invalid canvas
+    /// dimensions. The empty-tile-grid case (grid present,
+    /// `allocatedKeys().isEmpty`) is supported and produces a snapshot
     /// with empty `tiles` — a legitimate empty-layer snapshot.
     ///
-    /// The `texture` parameter is no longer read for pixel content
-    /// (post-4.2b reads come from tile textures via the atlas) but is
-    /// retained for caller-side ergonomics + the canvas-pixel
-    /// dimensions. Phase 4.5 removes the parameter.
-    ///
-    /// TODO: audit whether captureSnapshot needs drainCommandQueue
-    /// protection from in-flight strokes (race shape: cap-for-op-N+1
-    /// while op-N deposit still async). Different from the
-    /// touchesCancelled race fixed in restoreSnapshot.
-    func captureSnapshot(tileGrid: TileGrid?) -> LayerSnapshot? {
+    /// Drain-before-snapshot semantics: production callers snapshot
+    /// from `addCompletedHandler` callbacks (renderStroke /
+    /// renderBlurStroke / appendBlurStrokeStamps / renderSmudgeStamps
+    /// all fire their completion AFTER their async cb drains), so
+    /// captureSnapshot itself doesn't drain. The cap-for-op-N+1-while-
+    /// op-N-async race shape doesn't reach here in normal use.
+    func captureSnapshot(tileGrid: TileGrid) -> LayerSnapshot? {
         let canvasW = Int(canvasSize.width)
         let canvasH = Int(canvasSize.height)
         guard canvasW > 0, canvasH > 0 else {
@@ -3554,15 +3550,7 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        guard let grid = tileGrid else {
-            // Pre-Phase-4.2 the nil path read monolithic via getBytes;
-            // post-4.2b, tile-grid is the source of truth, so a nil grid
-            // means no content to snapshot. Return nil so callers fail
-            // explicitly rather than silently storing zeros.
-            print("ERROR: captureSnapshot — nil tileGrid is not supported")
-            return nil
-        }
-
+        let grid = tileGrid
         let tileSize = grid.tileSize
         let allocated = grid.allocatedKeys()
 
