@@ -137,7 +137,7 @@ struct CanvasRenderSnapshot: Equatable {
             self.layerOpacities = state.layers.map { $0.opacity }
             self.layerVisibilities = state.layers.map { $0.isVisible }
             self.layerTextureIDs = state.layers.map {
-                $0.texture.map(ObjectIdentifier.init)
+                $0.tileGrid.map { ObjectIdentifier($0) }
             }
             self.isTranslatingActiveLayer = state.isTranslatingActiveLayer
             self.selectedLayerIndex = state.selectedLayerIndex
@@ -851,10 +851,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     renderer?.encodeLayerTileCompositeOntoIntermediate(grid, on: commandBuffer)
                     sourceTexture = renderer?.tileDisplayIntermediate
                 } else {
-                    #if DEBUG
-                    print("⚠️ draw(in:): layer '\(layer.name)' has no tileGrid — falling back to layer.texture")
-                    #endif
-                    sourceTexture = layer.texture
+                    // Phase 4.5e: layer.texture is gone. No tileGrid means
+                    // the layer has no content to draw — skip it.
+                    continue
                 }
                 guard let source = sourceTexture else { continue }
 
@@ -1019,42 +1018,25 @@ struct MetalCanvasView: UIViewRepresentable {
 
             var created = false
 
-            // Check all layers for missing textures
+            // Check all layers for missing tile grids
             for i in 0..<layers.count {
-                if layers[i].texture == nil {
+                if layers[i].tileGrid == nil {
                     #if DEBUG
-                    print("⚠️ Layer \(i) '\(layers[i].name)' has NIL texture - creating new one. Layer ID: \(layers[i].id)")
+                    print("⚠️ Layer \(i) '\(layers[i].name)' has NIL tileGrid - creating new one. Layer ID: \(layers[i].id)")
                     #endif
-                    layers[i].texture = renderer.createLayerTexture()
-                    if let tex = layers[i].texture {
-                        #if DEBUG
-                        print("   ✅ Created texture: \(ObjectIdentifier(tex))")
-                        #endif
+                    layers[i].tileGrid = renderer.makeEmptyTileGrid()
+                    if layers[i].tileGrid != nil {
                         created = true
-                        // Pair the texture with an empty tile grid (Phase 2
-                        // Task 5). Dual-write paths in CanvasRenderer
-                        // populate the grid on first write to each tile.
-                        if layers[i].tileGrid == nil {
-                            layers[i].tileGrid = renderer.makeEmptyTileGrid()
-                        }
-                    } else {
-                        #if DEBUG
-                        print("   ❌ FAILED to create texture!")
-                        #endif
                     }
                 }
             }
 
-            // Only verify if we created textures
             if created {
                 #if DEBUG
                 print("📋 Current layer state:")
                 for (i, layer) in layers.enumerated() {
-                    if let tex = layer.texture {
-                        print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: Texture \(ObjectIdentifier(tex))")
-                    } else {
-                        print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: ❌ NO TEXTURE")
-                    }
+                    let gridState = layer.tileGrid != nil ? "tileGrid ready" : "❌ NO GRID"
+                    print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: \(gridState)")
                 }
                 #endif
             }
@@ -1183,10 +1165,7 @@ struct MetalCanvasView: UIViewRepresentable {
             print("Touch began at screen: \(screenLocation) → document: \(location) with pressure \(pressure), tool: \(currentTool)")
             print("📍 Selected layer INDEX: \(selectedLayerIndex) of \(layers.count) total layers")
             if let layer = layers[safe: selectedLayerIndex] {
-                print("   Will draw to: '\(layer.name)' - has texture: \(layer.texture != nil)")
-                if let texture = layer.texture {
-                    print("   Texture ID: \(ObjectIdentifier(texture))")
-                }
+                print("   Will draw to: '\(layer.name)' - has tile grid: \(layer.tileGrid != nil)")
             } else {
                 print("   ❌ ERROR: selectedLayerIndex \(selectedLayerIndex) is OUT OF BOUNDS!")
             }
@@ -1211,9 +1190,9 @@ struct MetalCanvasView: UIViewRepresentable {
             // layer state the previous one wrote).
             if currentTool == .smudge {
                 guard selectedLayerIndex < layers.count,
-                      let layerTexture = layers[selectedLayerIndex].texture,
+                      layers[selectedLayerIndex].tileGrid != nil,
                       let renderer = renderer else {
-                    print("Smudge: cannot begin stroke — invalid layer or texture")
+                    print("Smudge: cannot begin stroke — invalid layer or tile grid")
                     return
                 }
                 let layerId = layers[selectedLayerIndex].id
@@ -1400,10 +1379,10 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
                 guard selectedLayerIndex < layers.count,
-                      let texture = layers[selectedLayerIndex].texture,
+                      layers[selectedLayerIndex].tileGrid != nil,
                       let renderer = renderer,
                       let canvasState = canvasState else {
-                    print("ERROR: Cannot prepare paint-bucket fill - invalid layer or texture")
+                    print("ERROR: Cannot prepare paint-bucket fill - invalid layer or tile grid")
                     pendingPaintBucketFill = nil
                     return
                 }
@@ -1605,9 +1584,9 @@ struct MetalCanvasView: UIViewRepresentable {
             // immediately flush the initial stamps so the very first dot
             // shows up on the layer without waiting for the next move.
             if currentTool == .eraser,
-               let texture = layers[selectedLayerIndex].texture,
+               let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
-                eraserBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+                eraserBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
                 eraserCommittedPointCount = 0
                 flushEraserSubStroke(view: view)
             }
@@ -2365,7 +2344,7 @@ struct MetalCanvasView: UIViewRepresentable {
                        let lid = strokeLayerId,
                        li < layers.count,
                        layers[li].id == lid,
-                       let layerTexture = layers[li].texture {
+                       layers[li].tileGrid != nil {
                         // Drain the in-flight smudge command buffers before
                         // reading back. We don't have a handle to them
                         // here, but `captureSnapshot` issues a blit with
@@ -2617,7 +2596,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // would re-render the entire stroke and double-erase).
             if stroke.tool == .eraser {
                 guard selectedLayerIndex < layers.count,
-                      let texture = layers[selectedLayerIndex].texture,
+                      layers[selectedLayerIndex].tileGrid != nil,
                       let renderer = renderer else {
                     currentStroke = nil
                     lastPoint = nil
@@ -2690,7 +2669,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // and skips the deferred dispatchStroke path below.
             if blurStrokeActive,
                stroke.tool == .blur,
-               let texture = layer.texture,
+               layer.tileGrid != nil,
                let renderer = renderer {
                 flushBlurSubStroke()  // final tail of points
                 let beforeSnapshot = blurStrokeBeforeSnapshot
@@ -2740,7 +2719,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            if let texture = layer.texture, let tileGrid = layer.tileGrid, let renderer = renderer {
+            if let tileGrid = layer.tileGrid, let renderer = renderer {
                 // Stroke points are in document space which matches canvas space
                 // IMPORTANT: Pass document size to ensure 1:1 coordinate mapping
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
@@ -2815,7 +2794,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             } else {
                 print("ERROR: Could not render stroke")
-                print("  - Texture exists: \(layer.texture != nil)")
+                print("  - Tile grid exists: \(layer.tileGrid != nil)")
                 print("  - Renderer exists: \(renderer != nil)")
             }
 

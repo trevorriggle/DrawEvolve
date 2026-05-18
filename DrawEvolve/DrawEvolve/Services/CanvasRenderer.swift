@@ -1097,31 +1097,16 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(tilePipeline)
 
+        let canvasW = finalTexture.width
+        let canvasH = finalTexture.height
+
         for layer in layers where layer.isVisible {
-            guard let layerTexture = layer.texture else { continue }
+            guard let grid = layer.tileGrid else { continue }
             var opacityValue = layer.opacity
 
-            // Fallback: layer has a monolithic but no tile grid (invariant
-            // violation). Draw the full layer texture as a single quad so
-            // the composite stays correct.
-            guard let grid = layer.tileGrid else {
-                #if DEBUG
-                print("⚠️ compositeLayersToTextureViaTiles: layer '\(layer.name)' has texture but no tileGrid — falling back to full-canvas quad")
-                #endif
-                var fallback = TileCompositeUniformsCPU(
-                    tileRect: SIMD4<Int32>(0, 0, Int32(layerTexture.width), Int32(layerTexture.height)),
-                    outputSize: outputSize
-                )
-                renderEncoder.setVertexBytes(&fallback, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
-                renderEncoder.setFragmentTexture(layerTexture, index: 0)
-                renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
-                renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-                continue
-            }
-
             let tileSize = grid.tileSize
-            let texW = layerTexture.width
-            let texH = layerTexture.height
+            let texW = canvasW
+            let texH = canvasH
 
             // Iterate this layer's allocated tiles. Order within a layer
             // doesn't matter because tiles within a single layer don't
@@ -1200,6 +1185,69 @@ class CanvasRenderer: NSObject {
     /// see PERF_ISSUES.md item on `getBytes` cost.
     func layerPNGData(of texture: MTLTexture) -> Data? {
         textureToUIImage(texture)?.pngData()
+    }
+
+    /// Compose a layer's sparse tile grid into a canvas-sized intermediate
+    /// and return the resulting UIImage as PNG bytes. Used by the layered-
+    /// save path (ONLINELAYERSTORE.md) — no per-layer monolithic needed.
+    func layerPNGData(fromTileGrid tileGrid: TileGrid) -> Data? {
+        let canvasWidth = Int(tileGrid.canvasSize.width)
+        let canvasHeight = Int(tileGrid.canvasSize.height)
+        guard canvasWidth > 0, canvasHeight > 0 else { return nil }
+
+        let intermDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: canvasWidth,
+            height: canvasHeight,
+            mipmapped: false
+        )
+        intermDesc.storageMode = .shared
+        intermDesc.usage = [.renderTarget, .shaderRead]
+
+        guard let intermediate = device.makeTexture(descriptor: intermDesc),
+              let cmdBuf = commandQueue.makeCommandBuffer(),
+              let tilePipeline = compositeTilePipelineState else {
+            return nil
+        }
+
+        let composeDesc = MTLRenderPassDescriptor()
+        composeDesc.colorAttachments[0].texture = intermediate
+        composeDesc.colorAttachments[0].loadAction = .clear
+        composeDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        composeDesc.colorAttachments[0].storeAction = .store
+
+        guard let composeEnc = cmdBuf.makeRenderCommandEncoder(descriptor: composeDesc) else {
+            return nil
+        }
+
+        composeEnc.setRenderPipelineState(tilePipeline)
+        let outputSize = SIMD2<Int32>(Int32(canvasWidth), Int32(canvasHeight))
+        let tileSize = tileGrid.tileSize
+        var opacityValue: Float = 1.0
+
+        for key in tileGrid.allocatedKeys() {
+            guard let tile = tileGrid.tile(at: key) else { continue }
+            let srcX = key.x * tileSize
+            let srcY = key.y * tileSize
+            let blitW = min(tileSize, canvasWidth - srcX)
+            let blitH = min(tileSize, canvasHeight - srcY)
+            if blitW <= 0 || blitH <= 0 { continue }
+
+            var uniforms = TileCompositeUniformsCPU(
+                tileRect: SIMD4<Int32>(Int32(srcX), Int32(srcY), Int32(blitW), Int32(blitH)),
+                outputSize: outputSize
+            )
+            composeEnc.setVertexBytes(&uniforms, length: MemoryLayout<TileCompositeUniformsCPU>.stride, index: 0)
+            composeEnc.setFragmentTexture(tile.texture, index: 0)
+            composeEnc.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+            composeEnc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+
+        composeEnc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        return textureToUIImage(intermediate)?.pngData()
     }
 
     /// Generate a thumbnail preview from a layer texture
@@ -3204,10 +3252,9 @@ class CanvasRenderer: NSObject {
     /// otherwise add unwanted right padding).
     func rasterizeFloatingText(
         _ floatingText: FloatingText,
-        for texture: MTLTexture,
         screenSize: CGSize
     ) -> (image: UIImage, docSize: CGSize)? {
-        let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
+        let texSize = canvasSize
 
         // Route path-bearing FloatingText through TextOnPathRenderer so
         // glyphs ride the arc-length LUT instead of laying out as a flat
@@ -3241,10 +3288,9 @@ class CanvasRenderer: NSObject {
     /// keeping the displayedRect logic shared with plain text.
     func rasterizeFloatingTextWithDocOrigin(
         _ floatingText: FloatingText,
-        for texture: MTLTexture,
         screenSize: CGSize
     ) -> (image: UIImage, docBounds: CGRect)? {
-        let texSize = CGSize(width: CGFloat(texture.width), height: CGFloat(texture.height))
+        let texSize = canvasSize
         if floatingText.path != nil, floatingText.pathLUT != nil {
             return TextOnPathRenderer.rasterize(
                 floatingText,
@@ -3803,19 +3849,51 @@ class CanvasRenderer: NSObject {
     // MARK: - Pixel Extraction for Selection Movement
 
     /// Extract pixels from a rectangular selection
-    func extractPixels(from rect: CGRect, in texture: MTLTexture, screenSize: CGSize) -> UIImage? {
+    func extractPixels(from rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) -> UIImage? {
         print("CanvasRenderer: Extracting pixels from rect \(rect)")
 
-        // Must use identical integer rect as clearRect — see note there.
-        guard let (x, y, w, h) = texturePixelRect(for: rect, in: texture, screenSize: screenSize) else {
-            print("ERROR: Rect outside texture bounds or empty")
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: extractPixels — failed to ensure staging atlas")
             return nil
         }
 
-        // Region-local read: pull only the selection rect, not the whole
-        // texture. Buffer is laid out exactly as the CGImage wants, so the
-        // intermediate full-texture → row-copy → selectionData step the
-        // previous version did is unnecessary.
+        // Must use identical integer rect as clearRect — see note there.
+        guard let (x, y, w, h) = texturePixelRect(for: rect, in: atlas, screenSize: screenSize) else {
+            print("ERROR: Rect outside canvas bounds or empty")
+            return nil
+        }
+
+        // Compose tile state for the selection bbox into the atlas so the
+        // getBytes below reads current tile content.
+        let pixelRect = CGRect(x: x, y: y, width: w, height: h)
+        let tileKeys = tileGrid.tilesIntersecting(pixelRect)
+        let tileSize = tileGrid.tileSize
+        if !tileKeys.isEmpty,
+           let cb = commandQueue.makeCommandBuffer(),
+           let blit = cb.makeBlitCommandEncoder() {
+            for key in tileKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlas.width - dstX)
+                let copyH = min(tileSize, atlas.height - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            blit.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+
+        // Region-local read.
         let selectionBytesPerRow = w * 4
         var selectionData = Data(count: selectionBytesPerRow * h)
         let region = MTLRegion(
@@ -3825,7 +3903,7 @@ class CanvasRenderer: NSObject {
 
         selectionData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
+            atlas.getBytes(
                 baseAddress,
                 bytesPerRow: selectionBytesPerRow,
                 from: region,
@@ -3867,7 +3945,7 @@ class CanvasRenderer: NSObject {
     }
 
     /// Extract pixels from a lasso/path selection with alpha masking
-    func extractPixels(fromPath path: [CGPoint], in texture: MTLTexture, screenSize: CGSize) -> UIImage? {
+    func extractPixels(fromPath path: [CGPoint], tileGrid: TileGrid, screenSize: CGSize) -> UIImage? {
         print("CanvasRenderer: Extracting pixels from path with \(path.count) points")
 
         guard path.count >= 3 else {
@@ -3875,16 +3953,21 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        // Scale path from screen space to texture space
-        let scaleX = CGFloat(texture.width) / screenSize.width
-        let scaleY = CGFloat(texture.height) / screenSize.height
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: extractPixels(fromPath:) — failed to ensure staging atlas")
+            return nil
+        }
+
+        // Scale path from screen space to canvas-pixel space
+        let scaleX = CGFloat(atlas.width) / screenSize.width
+        let scaleY = CGFloat(atlas.height) / screenSize.height
         let scaledPath = path.map { CGPoint(x: $0.x * scaleX, y: $0.y * scaleY) }
 
         // Find bounding box. floor/ceil so edge pixels aren't shaved.
         let minX = max(0, Int(floor(scaledPath.map { $0.x }.min() ?? 0)))
-        let maxX = min(texture.width - 1, Int(ceil(scaledPath.map { $0.x }.max() ?? CGFloat(texture.width))))
+        let maxX = min(atlas.width - 1, Int(ceil(scaledPath.map { $0.x }.max() ?? CGFloat(atlas.width))))
         let minY = max(0, Int(floor(scaledPath.map { $0.y }.min() ?? 0)))
-        let maxY = min(texture.height - 1, Int(ceil(scaledPath.map { $0.y }.max() ?? CGFloat(texture.height))))
+        let maxY = min(atlas.height - 1, Int(ceil(scaledPath.map { $0.y }.max() ?? CGFloat(atlas.height))))
 
         let w = maxX - minX + 1
         let h = maxY - minY + 1
@@ -3894,10 +3977,39 @@ class CanvasRenderer: NSObject {
             return nil
         }
 
-        // Region-local read of the path's bounding box. The region buffer is
-        // already laid out as the output CGImage wants, so we mask in place
-        // (zero pixels outside the polygon) instead of allocating a separate
-        // selectionData buffer.
+        // Compose tile state for the bbox into the atlas.
+        let pixelRect = CGRect(x: minX, y: minY, width: w, height: h)
+        let tileKeys = tileGrid.tilesIntersecting(pixelRect)
+        let tileSize = tileGrid.tileSize
+        if !tileKeys.isEmpty,
+           let cb = commandQueue.makeCommandBuffer(),
+           let blit = cb.makeBlitCommandEncoder() {
+            for key in tileKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlas.width - dstX)
+                let copyH = min(tileSize, atlas.height - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            blit.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+
+        // Region-local read of the path's bounding box. The region buffer
+        // is already laid out as the output CGImage wants, so we mask in
+        // place (zero pixels outside the polygon) instead of allocating a
+        // separate selectionData buffer.
         let selectionBytesPerRow = w * 4
         var selectionData = Data(count: selectionBytesPerRow * h)
         let region = MTLRegion(
@@ -3907,7 +4019,7 @@ class CanvasRenderer: NSObject {
 
         selectionData.withUnsafeMutableBytes { ptr in
             guard let baseAddress = ptr.baseAddress else { return }
-            texture.getBytes(
+            atlas.getBytes(
                 baseAddress,
                 bytesPerRow: selectionBytesPerRow,
                 from: region,
@@ -4448,7 +4560,7 @@ class CanvasRenderer: NSObject {
     /// when the user enters the blur adjustment tool and on each successful
     /// commit (so they can stack another adjustment).
     func beginBlurAdjustment(
-        sourceTexture: MTLTexture,
+        tileGrid: TileGrid,
         layerId: UUID,
         selectionPath: [CGPoint]?,
         documentSize: CGSize
@@ -4470,10 +4582,32 @@ class CanvasRenderer: NSObject {
         }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
-        // Snapshot the current layer state — every preview Gaussian samples
-        // from this, so subsequent slider tweaks don't compound on previous
-        // output.
-        blitCopy(commandBuffer: commandBuffer, source: sourceTexture, dest: snapshot)
+        // Compose every allocated tile into the snapshot at canvas-pixel
+        // position — every preview Gaussian samples from this snapshot, so
+        // it must reflect the layer's CURRENT tile state.
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            let tileSize = tileGrid.tileSize
+            let snapW = snapshot.width
+            let snapH = snapshot.height
+            for key in tileGrid.allocatedKeys() {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, snapW - dstX)
+                let copyH = min(tileSize, snapH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: snapshot,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            blit.endEncoding()
+        }
         // Initial preview = snapshot (sigma starts at 0%; user sees the
         // unmodified layer until they drag).
         blitCopy(commandBuffer: commandBuffer, source: snapshot, dest: preview)

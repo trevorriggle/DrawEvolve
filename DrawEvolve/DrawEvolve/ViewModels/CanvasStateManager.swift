@@ -240,8 +240,12 @@ class CanvasStateManager: ObservableObject {
             return false
         }
 
-        // Check if all layers have nil or empty textures
-        return layers.allSatisfy { $0.texture == nil }
+        // Check if all layers are empty (no tile grid, or grid with zero
+        // allocated tiles).
+        return layers.allSatisfy { layer in
+            guard let grid = layer.tileGrid else { return true }
+            return grid.allocatedKeys().isEmpty
+        }
     }
 
     init() {
@@ -765,11 +769,10 @@ class CanvasStateManager: ObservableObject {
         }
 
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let cachedTexture = ft.cachedTexture else {
-            print("⚠️ commitFloatingText: missing layer/texture/cached image — discarding")
+            print("⚠️ commitFloatingText: missing layer/tile-grid/cached image — discarding")
             return
         }
 
@@ -799,8 +802,7 @@ class CanvasStateManager: ObservableObject {
         // Refresh the layer thumbnail off-main, same pattern as renderStroke.
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
-        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
         let layerId = layers[selectedLayerIndex].id
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -1000,11 +1002,10 @@ class CanvasStateManager: ObservableObject {
         guard var ft = floatingText,
               let renderer = renderer,
               selectedLayerIndex < layers.count,
-              let layerTexture = layers[selectedLayerIndex].texture else { return }
+              layers[selectedLayerIndex].tileGrid != nil else { return }
 
         guard let result = renderer.rasterizeFloatingTextWithDocOrigin(
             ft,
-            for: layerTexture,
             screenSize: documentSize
         ) else {
             ft.cachedImage = nil
@@ -1096,7 +1097,6 @@ class CanvasStateManager: ObservableObject {
         guard selectedLayerIndex >= 0, selectedLayerIndex < layers.count else { return false }
         let layer = layers[selectedLayerIndex]
         guard !layer.isLocked else { return false }
-        guard let texture = layer.texture else { return false }
         guard let tileGrid = layer.tileGrid else { return false }
         guard let renderer = renderer else { return false }
         guard let image = PoseRasterizer.rasterize(
@@ -1128,8 +1128,7 @@ class CanvasStateManager: ObservableObject {
         // commitFloatingText / renderStroke.
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
-        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
         let layerId = layer.id
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -1302,13 +1301,15 @@ class CanvasStateManager: ObservableObject {
         var manifestLayers: [LayeredDrawingManifest.Layer] = []
 
         for (idx, layer) in layers.enumerated() {
-            // Lazy-init: a layer the user added but never drew on arrives
-            // with .texture == nil (texture creation runs on the next Metal
-            // draw cycle). Materialize an empty layer texture so we still
-            // preserve the slot in the manifest.
-            let tex = layer.texture ?? renderer.createLayerTexture()
-            guard let texture = tex,
-                  let png = renderer.layerPNGData(of: texture) else {
+            // Lazy-init: a layer the user added but never drew on may have
+            // tileGrid == nil. Materialize an empty grid so the layer keeps
+            // its slot in the manifest (PNG will be a fully-transparent
+            // canvas-sized image).
+            let grid = layer.tileGrid ?? renderer.makeEmptyTileGrid()
+            if layer.tileGrid == nil {
+                layer.tileGrid = grid
+            }
+            guard let png = renderer.layerPNGData(fromTileGrid: grid) else {
                 print("⚠️ exportLayeredPayload: failed to read layer \(idx) '\(layer.name)' — dropping from save")
                 continue
             }
@@ -1402,22 +1403,17 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        // `addLayer` only appends the DrawingLayer; texture creation is lazy
-        // inside MetalCanvasView.Coordinator.ensureLayerTextures(), which
-        // only runs during a Metal draw cycle. We need the texture NOW —
+        // `addLayer` only appends the DrawingLayer; tile-grid creation is
+        // lazy inside MetalCanvasView.Coordinator.ensureLayerTextures(),
+        // which only runs during a Metal draw cycle. We need the grid NOW —
         // commitSelection (called after the user drag-releases the imported
         // image) blits the floating texture into it, and the captureSnapshot
-        // calls below need a real MTLTexture.
-        if layers[selectedLayerIndex].texture == nil {
-            layers[selectedLayerIndex].texture = renderer.createLayerTexture()
-            // Pair with an empty tile grid (Phase 2 Task 5).
-            if layers[selectedLayerIndex].texture != nil &&
-               layers[selectedLayerIndex].tileGrid == nil {
-                layers[selectedLayerIndex].tileGrid = renderer.makeEmptyTileGrid()
-            }
+        // calls below need a real tile grid.
+        if layers[selectedLayerIndex].tileGrid == nil {
+            layers[selectedLayerIndex].tileGrid = renderer.makeEmptyTileGrid()
         }
-        guard let texture = layers[selectedLayerIndex].texture else {
-            print("ERROR: Cannot import image - failed to create texture")
+        guard layers[selectedLayerIndex].tileGrid != nil else {
+            print("ERROR: Cannot import image - failed to create tile grid")
             return
         }
 
@@ -1552,9 +1548,9 @@ class CanvasStateManager: ObservableObject {
 
     func deleteSelectedPixels() {
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
+              layers[selectedLayerIndex].tileGrid != nil,
               let renderer = renderer else {
-            print("ERROR: Cannot delete selection - invalid layer or texture")
+            print("ERROR: Cannot delete selection - invalid layer or tile grid")
             return
         }
 
@@ -1588,7 +1584,6 @@ class CanvasStateManager: ObservableObject {
         // Update thumbnail
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
         nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -1608,30 +1603,28 @@ class CanvasStateManager: ObservableObject {
     /// IMPORTANT: This captures snapshots and immediately clears the original pixels for fluent real-time movement
     func extractSelectionPixels() {
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer else {
-            print("ERROR: Cannot extract selection - invalid layer or texture")
+            print("ERROR: Cannot extract selection - invalid layer or tile grid")
             return
         }
 
         // Capture "before" snapshot for history (BEFORE any modifications)
-        selectionBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        selectionBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
 
         if let rect = activeSelection {
             // Extract pixels from rectangular selection
             // IMPORTANT: rect is in document space, so pass documentSize for 1:1 coordinate mapping
-            selectionPixels = renderer.extractPixels(from: rect, in: texture, screenSize: documentSize)
+            selectionPixels = renderer.extractPixels(from: rect, tileGrid: tileGrid, screenSize: documentSize)
             selectionOriginalRect = rect
             selectionOffset = .zero
 
             // Verify extraction succeeded
             if let pixels = selectionPixels {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                if let tileGrid = layers[selectedLayerIndex].tileGrid {
-                    renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
-                }
+                renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
-                selectionLayerSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+                selectionLayerSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
                 // Upload the extracted pixels to a Metal texture once. The
                 // draw loop composites this on top of the layer (which now
                 // has a hole) at originalRect + offset every frame — no CPU
@@ -1639,8 +1632,7 @@ class CanvasStateManager: ObservableObject {
                 floatingSelectionTexture = renderer.makeTexture(from: pixels)
                 print("✂️ Extracted rectangular selection: \(rect) and cleared original")
             } else {
-                print("❌ ERROR: Failed to extract rectangular selection")
-                print("  Rect: \(rect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
+                print("❌ ERROR: Failed to extract rectangular selection — rect \(rect), document \(documentSize)")
                 clearSelection() // Clear invalid selection
             }
         } else if let path = selectionPath {
@@ -1662,25 +1654,22 @@ class CanvasStateManager: ObservableObject {
             }
 
             // IMPORTANT: path is in document space, so pass documentSize for 1:1 coordinate mapping
-            selectionPixels = renderer.extractPixels(fromPath: path, in: texture, screenSize: documentSize)
+            selectionPixels = renderer.extractPixels(fromPath: path, tileGrid: tileGrid, screenSize: documentSize)
             selectionOriginalRect = boundingRect
             selectionOffset = .zero
 
             // Verify extraction succeeded
             if let pixels = selectionPixels {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                if let tileGrid = layers[selectedLayerIndex].tileGrid {
-                    renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
-                }
+                renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
-                selectionLayerSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+                selectionLayerSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
                 // GPU-side mirror for the live drag preview. See note in the
                 // rect-selection branch above.
                 floatingSelectionTexture = renderer.makeTexture(from: pixels)
                 print("✂️ Extracted lasso selection, bounding rect: \(boundingRect) and cleared original")
             } else {
-                print("❌ ERROR: Failed to extract lasso selection")
-                print("  Bounding rect: \(boundingRect), Texture: \(texture.width)x\(texture.height), Document: \(documentSize)")
+                print("❌ ERROR: Failed to extract lasso selection — bounding rect \(boundingRect), document \(documentSize)")
                 clearSelection() // Clear invalid selection
             }
         }
@@ -1690,7 +1679,6 @@ class CanvasStateManager: ObservableObject {
     /// This provides fluent animation by rendering directly to the texture as the user drags
     func renderSelectionInRealTime() {
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let pixels = selectionPixels,
@@ -1722,7 +1710,6 @@ class CanvasStateManager: ObservableObject {
     /// floating texture.
     func commitSelection() {
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let beforeSnapshot = selectionBeforeSnapshot else {
@@ -1771,7 +1758,6 @@ class CanvasStateManager: ObservableObject {
         // Update thumbnail
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
         nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -1851,15 +1837,15 @@ class CanvasStateManager: ObservableObject {
     /// and a single Metal blit moves the pixels on commit.
     func beginActiveLayerTranslation() {
         guard selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer else {
-            print("ERROR: Cannot begin layer translation - invalid layer or texture")
+            print("ERROR: Cannot begin layer translation - invalid layer or tile grid")
             return
         }
 
-        // Snapshot for undo/redo. No texture writes — the layer renders at
+        // Snapshot for undo/redo. No tile writes — the layer renders at
         // offset via the shader during drag.
-        selectionBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        selectionBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
         selectionOffset = .zero
         isTranslatingActiveLayer = true
     }
@@ -2243,10 +2229,9 @@ class CanvasStateManager: ObservableObject {
         // below covers Metal redraws; thumbnails live on @Published
         // `DrawingLayer.thumbnail` and need their own regen.
         for layer in affected {
-            guard let texture = layer.texture else { continue }
+            guard layer.tileGrid != nil else { continue }
             let layerId = layer.id
             nonisolated(unsafe) let unsafeRenderer = renderer
-            nonisolated(unsafe) let unsafeTexture = texture
             nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
             Task.detached {
                 if let thumbnail = unsafeRenderer.generateThumbnail(
@@ -2299,13 +2284,13 @@ class CanvasStateManager: ObservableObject {
         guard !blurAdjustmentActive else { return }
         guard let renderer = renderer,
               let layer = layers[safe: selectedLayerIndex],
-              let texture = layer.texture else {
-            print("⚠️ beginBlurAdjustment: missing renderer or layer texture; skipping")
+              let tileGrid = layer.tileGrid else {
+            print("⚠️ beginBlurAdjustment: missing renderer or layer tile grid; skipping")
             return
         }
         blurAdjustmentSigma = 0.0
         renderer.beginBlurAdjustment(
-            sourceTexture: texture,
+            tileGrid: tileGrid,
             layerId: layer.id,
             selectionPath: selectionPath,
             documentSize: documentSize
@@ -2328,7 +2313,6 @@ class CanvasStateManager: ObservableObject {
         guard blurAdjustmentActive,
               let renderer = renderer,
               let layer = layers[safe: selectedLayerIndex],
-              let texture = layer.texture,
               let tileGrid = layer.tileGrid else { return }
         let layerId = layer.id
 
@@ -2348,7 +2332,7 @@ class CanvasStateManager: ObservableObject {
         // from the new baseline (allows stacking blurs).
         blurAdjustmentSigma = 0.0
         renderer.beginBlurAdjustment(
-            sourceTexture: texture,
+            tileGrid: tileGrid,
             layerId: layerId,
             selectionPath: selectionPath,
             documentSize: documentSize
@@ -2357,7 +2341,6 @@ class CanvasStateManager: ObservableObject {
         // Update thumbnail off the main thread.
         let currentLayerIndex = selectedLayerIndex
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
         nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layer.tileGrid
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
