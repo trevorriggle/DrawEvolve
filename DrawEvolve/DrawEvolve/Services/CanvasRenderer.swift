@@ -651,6 +651,39 @@ class CanvasRenderer: NSObject {
         blit.endEncoding()
     }
 
+    /// Compute the MTLRegion covering the union of the given tile keys'
+    /// canvas-pixel rects. Used by Source B clear-before-compose callers
+    /// to derive a tile-aligned atlas region from a `bboxKeys` array
+    /// (typically the result of `tileGrid.tilesIntersecting(bbox)`).
+    ///
+    /// Tile-aligned (not raw bbox) because the post-render blit-back
+    /// step copies the FULL tile rect (256² or partial-edge) from atlas
+    /// back into each tile. A bbox-only clear would leave the in-tile-
+    /// but-outside-bbox sliver of an unallocated tile holding stale
+    /// pixels, which the blit-back would then persist into the
+    /// freshly-allocated tile.
+    ///
+    /// Returns nil for an empty input.
+    private func atlasRegion(coveringTiles keys: [TileKey], tileSize: Int) -> MTLRegion? {
+        guard let first = keys.first else { return nil }
+        var minTX = first.x, maxTX = first.x
+        var minTY = first.y, maxTY = first.y
+        for key in keys.dropFirst() {
+            if key.x < minTX { minTX = key.x }
+            if key.x > maxTX { maxTX = key.x }
+            if key.y < minTY { minTY = key.y }
+            if key.y > maxTY { maxTY = key.y }
+        }
+        return MTLRegion(
+            origin: MTLOrigin(x: minTX * tileSize, y: minTY * tileSize, z: 0),
+            size: MTLSize(
+                width: (maxTX - minTX + 1) * tileSize,
+                height: (maxTY - minTY + 1) * tileSize,
+                depth: 1
+            )
+        )
+    }
+
     // MARK: - Tile-display intermediate (Phase 4.3)
     //
     // Renderer-owned canvas-sized .private MTLTexture used as the
@@ -840,6 +873,18 @@ class CanvasRenderer: NSObject {
             strokeCommandSlots.signal()
             completion?()
             return
+        }
+
+        // Source B fix: clear the bbox-tile-aligned atlas region before
+        // compose. The compose loop below only writes ALLOCATED tiles
+        // (skips unallocated via `guard let tile = ... else { continue }`),
+        // and the atlas retains stale pixels from prior dual-write callers
+        // at unallocated tile positions. Without this clear, the render
+        // encoder's loadAction=.load reads those stale pixels and blends
+        // stamps over them, then the post-render blit-back persists the
+        // pollution into freshly-allocated tiles.
+        if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: commandBuffer)
         }
 
         // Compose-from-tiles into atlas (bbox-limited). Encoders within a
