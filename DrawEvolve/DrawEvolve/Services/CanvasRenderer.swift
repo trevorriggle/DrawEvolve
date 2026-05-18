@@ -712,20 +712,35 @@ class CanvasRenderer: NSObject {
     }
 
     func renderStroke(_ stroke: BrushStroke,
-                      to texture: MTLTexture,
-                      tileGrid: TileGrid? = nil,
+                      tileGrid: TileGrid,
                       screenSize: CGSize,
                       selectionPath: [CGPoint]?,
                       completion: (() -> Void)? = nil) {
         #if DEBUG
         print("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
-        print("  Texture ID: \(ObjectIdentifier(texture))")
         print("  Screen size: \(screenSize.width)x\(screenSize.height)")
-        print("  Texture size: \(texture.width)x\(texture.height)")
+        print("  Canvas size: \(canvasSize.width)x\(canvasSize.height)")
         print("  Tool: \(stroke.tool)")
         print("  Brush color: \(stroke.settings.color)")
         print("  Brush size: \(stroke.settings.size)")
         #endif
+
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: renderStroke — failed to ensure staging atlas")
+            completion?()
+            return
+        }
+
+        // Phase 4.5c: compose tile state for the stroke bbox into the atlas
+        // so the render encoder's loadAction=.load reads current pixel
+        // state. After the render, the bbox tiles get blitted back from
+        // the atlas. Bbox is computed before slot acquisition to keep the
+        // critical section narrow.
+        let bbox = strokeBoundingBox(stroke)
+        let bboxKeys = tileGrid.tilesIntersecting(bbox)
+        let tileSize = tileGrid.tileSize
+        let atlasW = atlas.width
+        let atlasH = atlas.height
 
         // Acquire a stroke command-buffer slot. Blocks the caller (touch
         // loop) when the GPU has 60 stroke buffers in flight, releasing
@@ -743,8 +758,32 @@ class CanvasRenderer: NSObject {
             return
         }
 
+        // Compose-from-tiles into atlas (bbox-limited). Encoders within a
+        // command buffer serialize, so the render encoder below sees the
+        // post-compose atlas via Metal's automatic hazard tracking.
+        if !bboxKeys.isEmpty, let composeBlit = commandBuffer.makeBlitCommandEncoder() {
+            for key in bboxKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                composeBlit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            composeBlit.endEncoding()
+        }
+
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].texture = atlas
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
 
@@ -805,28 +844,28 @@ class CanvasRenderer: NSObject {
             grainDensity: stroke.settings.grainDensity
         )
 
-        // CRITICAL FIX: Stroke points are already in document/texture coordinate space
-        // The screenSize parameter is actually documentSize (which should equal texture size)
-        // Points are already scaled correctly from screenToDocument(), so NO SCALING should be applied
+        // CRITICAL FIX: Stroke points are already in document/canvas coordinate space.
+        // The screenSize parameter is documentSize (which equals canvas size).
+        // Points are already scaled correctly from screenToDocument(), so NO SCALING should be applied.
         #if DEBUG
-        print("  Texture size: \(texture.width)x\(texture.height)")
+        print("  Canvas size: \(canvasSize.width)x\(canvasSize.height)")
         print("  Document size passed: \(screenSize.width)x\(screenSize.height)")
         #endif
 
-        // Document size and texture size should be identical (both are square canvas)
-        if abs(screenSize.width - CGFloat(texture.width)) > 1.0 || abs(screenSize.height - CGFloat(texture.height)) > 1.0 {
-            print("  ⚠️ WARNING: Document size (\(screenSize)) doesn't match texture size (\(texture.width)x\(texture.height))")
+        // Document size and canvas size should be identical (both are the same square canvas)
+        if abs(screenSize.width - canvasSize.width) > 1.0 || abs(screenSize.height - canvasSize.height) > 1.0 {
+            print("  ⚠️ WARNING: Document size (\(screenSize)) doesn't match canvas size (\(canvasSize))")
             print("  This will cause stroke misalignment!")
         }
 
-        // NO SCALING - points are already in texture coordinate space
+        // NO SCALING - points are already in canvas-pixel coordinate space
         let positions = stroke.points.map { point in
             SIMD2<Float>(
                 Float(point.location.x),
                 Float(point.location.y)
             )
         }
-        let viewportSize = SIMD2<Float>(Float(texture.width), Float(texture.height))
+        let viewportSize = SIMD2<Float>(Float(atlasW), Float(atlasH))
 
         // Render each point as a brush stamp
         var viewportSizeCopy = viewportSize
@@ -857,70 +896,51 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.endEncoding()
 
-        // === Phase 2 Task 4.1: tile-grid dual-write (blit from monolithic) =
+        // === Phase 4.5c: blit modified bbox region from atlas → tile grid =
         //
-        // After the monolithic encoder finishes rasterising every stamp,
-        // blit the affected tiles from monolithic into the layer's
-        // TileGrid on the SAME command buffer. Metal serialises encoders
-        // within a buffer in submission order, so the blits run after the
-        // render pass and read the post-render monolithic pixels.
+        // After the stamp encoder finishes rasterising every point into
+        // the atlas, blit the bbox tiles from atlas into the tile grid on
+        // the SAME command buffer. Metal serialises encoders within a
+        // buffer, so the blits run after the render pass and read the
+        // post-render atlas pixels.
         //
         // Bit-exact by construction: every tile pixel is a direct copy of
-        // the corresponding monolithic pixel. Replaces the original
-        // per-tile re-rasterisation approach (Phase 2 first cut), which
-        // produced ±1 LSB GPU rasterizer noise per stamp that compounded
-        // through alpha-over into ±8-15 visible drift over overlapping
-        // stamps. The blit approach matches what flip / translate /
-        // floodFill / renderImage / clearRect / clearPath / composite-
-        // FloatingTextureIntoLayer all use — one consistent dual-write
-        // pattern.
-        //
-        // Two-pass structure (same as other blit-only callsites):
+        // the corresponding atlas pixel. Two-pass structure:
         //   Pass 1: ensureTileWithClearIfNeeded encodes a no-draw
         //           loadAction=.clear render pass for any freshly-allocated
         //           tile, on the same command buffer. Must run before the
         //           blit encoder opens — Metal allows only one active
         //           encoder per buffer at a time.
         //   Pass 2: a single blit encoder copies tile-sized regions of
-        //           monolithic into each tile.
-        //
-        // The completion handler still fires once both passes finish.
-        if let grid = tileGrid {
-            let bbox = strokeBoundingBox(stroke)
-            let tileKeys = grid.tilesIntersecting(bbox)
-            let tileSize = grid.tileSize
-            let texW = texture.width
-            let texH = texture.height
+        //           atlas into each tile.
+        if !bboxKeys.isEmpty {
+            for key in bboxKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+            }
+            if let blit = commandBuffer.makeBlitCommandEncoder() {
+                for key in bboxKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, atlasW - srcX)
+                    let blitH = min(tileSize, atlasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
 
-            if !tileKeys.isEmpty {
-                for key in tileKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
-                }
-                if let blit = commandBuffer.makeBlitCommandEncoder() {
-                    for key in tileKeys {
-                        let srcX = key.x * tileSize
-                        let srcY = key.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-
-                        grid.updateTile(at: key) { tile in
-                            blit.copy(
-                                from: texture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
                     }
-                    blit.endEncoding()
                 }
+                blit.endEncoding()
             }
         }
-        // === End dual-write block ========================================
+        // === End atlas → tile blit block =================================
 
         if let completion = completion {
             // Async path: caller does its post-stroke work (snapshot, history,

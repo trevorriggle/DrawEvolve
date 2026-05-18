@@ -2194,7 +2194,7 @@ struct MetalCanvasView: UIViewRepresentable {
                   stroke.tool == .eraser,
                   stroke.points.count > eraserCommittedPointCount,
                   selectedLayerIndex < layers.count,
-                  let texture = layers[selectedLayerIndex].texture,
+                  let tileGrid = layers[selectedLayerIndex].tileGrid,
                   let renderer = renderer else {
                 onDone()
                 return
@@ -2213,8 +2213,7 @@ struct MetalCanvasView: UIViewRepresentable {
             eraserCommittedPointCount = stroke.points.count
             renderer.renderStroke(
                 subStroke,
-                to: texture,
-                tileGrid: layers[selectedLayerIndex].tileGrid,
+                tileGrid: tileGrid,
                 screenSize: documentSize,
                 selectionPath: selPath,
                 completion: onDone
@@ -2743,24 +2742,23 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            if let texture = layer.texture, let renderer = renderer {
-                // Stroke points are in document space which matches texture space
-                // IMPORTANT: Pass document size (not texture size) to ensure 1:1 coordinate mapping
+            if let texture = layer.texture, let tileGrid = layer.tileGrid, let renderer = renderer {
+                // Stroke points are in document space which matches canvas space
+                // IMPORTANT: Pass document size to ensure 1:1 coordinate mapping
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
-                print("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)' - Texture ID: \(ObjectIdentifier(texture))")
-                print("  Texture size: \(texture.width)x\(texture.height)")
+                print("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)'")
                 print("  Document size: \(documentSize.width)x\(documentSize.height)")
 
                 // Capture snapshot BEFORE rendering stroke
                 print("Capturing BEFORE snapshot...")
-                let beforeSnapshot = renderer.captureSnapshot(tileGrid: layer.tileGrid)
+                let beforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
                 if beforeSnapshot == nil {
                     print("WARNING: Failed to capture before snapshot")
                 }
 
                 let currentLayerIndex = selectedLayerIndex
                 let layerId = layer.id
-                let capturedTileGrid = layer.tileGrid
+                let capturedTileGrid: TileGrid? = tileGrid
                 let capturedCanvasState = canvasState
 
                 // Async stroke commit: GPU pass runs without blocking the main
@@ -2772,9 +2770,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 let strokeSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
                 let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
                     if stroke.tool == .blur {
-                        renderer.renderBlurStroke(stroke, to: texture, tileGrid: layer.tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
+                        renderer.renderBlurStroke(stroke, to: texture, tileGrid: tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     } else {
-                        renderer.renderStroke(stroke, to: texture, tileGrid: layer.tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
+                        renderer.renderStroke(stroke, tileGrid: tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     }
                 }
                 dispatchStroke { [weak self] in
