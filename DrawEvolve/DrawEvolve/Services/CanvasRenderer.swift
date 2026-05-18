@@ -3854,27 +3854,34 @@ class CanvasRenderer: NSObject {
         let bboxKeys = tileGrid.tilesIntersecting(bboxPixelRect)
         let tileSize = tileGrid.tileSize
 
-        if !bboxKeys.isEmpty,
-           let composeBuf = commandQueue.makeCommandBuffer(),
-           let blit = composeBuf.makeBlitCommandEncoder() {
-            for key in bboxKeys {
-                guard let tile = tileGrid.tile(at: key) else { continue }
-                let dstX = key.x * tileSize
-                let dstY = key.y * tileSize
-                let copyW = min(tileSize, width - dstX)
-                let copyH = min(tileSize, height - dstY)
-                if copyW <= 0 || copyH <= 0 { continue }
-                blit.copy(
-                    from: tile.texture,
-                    sourceSlice: 0, sourceLevel: 0,
-                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
-                    to: atlas,
-                    destinationSlice: 0, destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
-                )
+        if !bboxKeys.isEmpty, let composeBuf = commandQueue.makeCommandBuffer() {
+            // Source B fix: clear bbox-tile-aligned atlas region before
+            // compose. clearPath is read-modify-write — stale pixels in
+            // unallocated bbox tiles would flow through getBytes into
+            // pixelData, then back out via texture.replace at the bbox.
+            if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {
+                clearCanvasStagingAtlasRegion(clearRegion, on: composeBuf)
             }
-            blit.endEncoding()
+            if let blit = composeBuf.makeBlitCommandEncoder() {
+                for key in bboxKeys {
+                    guard let tile = tileGrid.tile(at: key) else { continue }
+                    let dstX = key.x * tileSize
+                    let dstY = key.y * tileSize
+                    let copyW = min(tileSize, width - dstX)
+                    let copyH = min(tileSize, height - dstY)
+                    if copyW <= 0 || copyH <= 0 { continue }
+                    blit.copy(
+                        from: tile.texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                        to: atlas,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                    )
+                }
+                blit.endEncoding()
+            }
             composeBuf.commit()
             composeBuf.waitUntilCompleted()
         }
