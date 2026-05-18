@@ -1101,47 +1101,47 @@ class CanvasRenderer: NSObject {
         commandBuffer.commit()
     }
 
-    // MARK: - Tile-display intermediate (Phase 4.3)
+    // MARK: - Tile-display intermediate
     //
-    // Renderer-owned canvas-sized .private MTLTexture used as the
-    // per-layer tile-composite intermediate for the parallel-display
-    // verifier's tile-source shadow path. Distinct from the snapshot
-    // staging atlas: the atlas is .shared for CPU readback during
-    // snapshots/floodFill; this intermediate is .private because it's
-    // a GPU-only render target + shader input feeding the display
-    // path's transform pass. Different storage modes, different
-    // purposes — never conflate them.
+    // Renderer-owned canvas-sized `.private` MTLTexture. Load-bearing
+    // for the **live drawable render path** in MetalCanvasView's
+    // `draw(in:)` (since Phase 4.4a, when the display path swapped from
+    // monolithic-source to tile-source). Each frame, the per-layer loop
+    // composes one layer's tiles into this intermediate, then runs the
+    // existing LINEAR-sampling display transform pass on the
+    // intermediate to draw onto the drawable. Each visible layer
+    // re-uses the same intermediate, alternating compose+draw render
+    // passes within a single command buffer.
     //
-    // Memory: 16 MB at 2048², 64 MB at 4096². Allocated lazily on first
+    // Distinct from `canvasStagingAtlas`:
+    //   - Atlas is `.shared` (CPU readback path for snapshots /
+    //     floodFill / extractPixels; CPU write path for dual-write
+    //     functions' compose-then-render).
+    //   - Intermediate is `.private` (GPU-only render target + shader
+    //     input; never touched by CPU).
+    // Different storage modes, different purposes — never conflate.
+    //
+    // Memory: 16 MB at 2048², 64 MB at 4096². Lazy-allocated on first
     // tile-display-composite call; retained for renderer lifetime;
-    // reused across every frame's tile-display composite. canvasSize
-    // change forces reallocation on next ensure call (mirrors the
-    // snapshot atlas's policy).
+    // reused every frame. `canvasSize` change forces reallocation on
+    // next ensure call (mirrors the atlas policy).
     //
-    // Per-layer reuse semantics (Phase 4.3 H2 fix): each call to
+    // Per-layer reuse semantics (Phase 4.3 H2 fix, preserved by 4.4a's
+    // live-drawable swap): each call to
     // `encodeLayerTileCompositeOntoIntermediate` clears the intermediate
-    // on load and writes ONE layer's tile content. Callers iterate
-    // layers within a single command buffer, interleaving compose
-    // passes with draw passes onto the shadow target. Metal's render-
-    // pass hazard tracking serializes the intermediate's writes
-    // against subsequent reads — each layer's draw pass reads its own
-    // intermediate state, not the last-composed layer's state. The
-    // original 4.3b design (single shared intermediate read by a
-    // single multi-draw encoder) raced under multi-layer because all
-    // draws on a single encoder read the final intermediate state.
+    // on load and writes ONE layer's tile content. The per-layer draw
+    // pass opens a new render encoder on the drawable with
+    // `loadAction = .load` and samples the intermediate. Metal's
+    // render-pass hazard tracking serialises the intermediate's writes
+    // against subsequent reads — each layer's draw reads its own
+    // intermediate state, not the last-composed layer's. (The 4.3b
+    // draft, which used a single multi-draw encoder, raced because all
+    // draws on one encoder saw the final intermediate state.)
     //
-    // Phase 4.3b decision γ (audit § 4.1 + dispatch): per-tile-to-screen
-    // under transforms is architecturally unsolvable without 1-pixel
-    // tile borders (Phase 2 redesign, out of scope). Instead sequence
-    // two already-validated operations: per-layer tile composite to the
-    // canvas-sized intermediate (bit-exact with the layer's monolithic
-    // texture at tolerance=0 — Phase 3 invariant), then the existing
-    // display path's LINEAR-sampling transform pass on the intermediate.
-    // Both steps reuse tested shaders; no new sampler-dilemma surface.
-    /// Exposed via `private(set)` so the Coordinator's parallel-display
-    /// verifier (DEBUG-only, MetalCanvasView Phase 4.3c) can bind it as
-    /// a fragment input in the per-layer draw pass without going through
-    /// an accessor. Writes still confined to the renderer.
+    // `private(set)` exposure: read-only access required by the
+    // draw-loop callsite in MetalCanvasView so it can pass the
+    // intermediate as the source texture to `renderTextureToScreen`.
+    // Writes remain confined to the renderer.
     private(set) var tileDisplayIntermediate: MTLTexture?
 
     /// Return a canvas-sized .private MTLTexture suitable as a render
@@ -3679,45 +3679,43 @@ class CanvasRenderer: NSObject {
         cb.waitUntilCompleted()
     }
 
-    /// Restore a texture + tile grid from a snapshot. Tile-native via
-    /// the shared staging atlas (Phase 4.2c).
+    /// Restore a tile grid from a snapshot. Tile-native — the layer
+    /// has no monolithic backing post-Phase-4.5e; the tile grid is the
+    /// sole source of truth.
     ///
     /// Flow:
-    ///   1. drainCommandQueue() — wait for any in-flight async stroke cb
-    ///      to drain (touchesCancelled race fix, commit 5b15e24).
+    ///   1. `drainCommandQueue()` — wait for any in-flight async stroke
+    ///      cb to drain. Solves the touchesCancelled race where Metal's
+    ///      `_validateReplaceRegion` aborted if a still-writeable render
+    ///      target was passed to `texture.replace` (commit 5b15e24).
     ///   2. Drop tiles in the current grid that are NOT in the snapshot's
-    ///      keyspace (cleans up tiles allocated by intervening ops).
-    ///   3. Pre-filter snapshot.tiles into a validRestores list, skipping
-    ///      entries whose key/data shape doesn't match captureSnapshot's
-    ///      per-tile layout. Used by every subsequent loop.
-    ///   4. CPU-upload each valid tile's Data into the staging atlas at
-    ///      its in-canvas position (texture.replace, .shared atlas).
-    ///   5. Clear monolithic via render encoder loadAction=.clear.
-    ///      Regions outside the saved-tile set stay transparent — matches
-    ///      the legacy "drop tiles not in keyspace → those regions become
-    ///      transparent" semantic.
-    ///   6. ensureTileWithClearIfNeeded for each valid key (allocates a
-    ///      fresh grid tile if absent; encoded on the cmdBuf).
-    ///   7. Open blit encoder: per valid key, copy atlas → grid tile AND
-    ///      atlas → monolithic at canvas position.
-    ///   8. commit + waitUntilCompleted.
-    ///   9. Verifier (drain-before / verify-after symmetry from C1, commit
-    ///      73e54d5).
+    ///      keyspace (cleans up tiles allocated by intervening ops; those
+    ///      regions of the layer become transparent again, matching the
+    ///      snapshot's "missing tile = transparent" semantic).
+    ///   3. Pre-filter `snapshot.tiles` into a `validRestores` list,
+    ///      skipping entries whose key/data shape doesn't match
+    ///      captureSnapshot's per-tile layout. Used by every subsequent
+    ///      loop.
+    ///   4. Empty/all-invalid snapshot: the step-2 drop already made the
+    ///      layer fully transparent; return early.
+    ///   5. CPU-upload each valid tile's Data into the staging atlas at
+    ///      its in-canvas position (`texture.replace` on `.shared` atlas).
+    ///   6. `ensureTileWithClearIfNeeded` for each valid key on the cmdBuf
+    ///      (allocates a fresh grid tile if absent).
+    ///   7. Open blit encoder: per valid key, copy atlas → grid tile.
+    ///   8. `commit + waitUntilCompleted`.
     ///
-    /// Result: `grid.allocatedKeys()` == `snapshot.tiles.keys` set-equal,
-    /// each grid tile + corresponding monolithic region bit-exact with
-    /// `snapshot.tiles[key]`. Display path (still reading monolithic in
-    /// Phase 2/3) shows the snapshot's content; composite path (tile-
-    /// sourced in Phase 3) shows the same.
+    /// Result: `grid.allocatedKeys()` == `snapshot.tiles.keys` (set-equal),
+    /// each grid tile bit-exact with `snapshot.tiles[key]`. The display
+    /// path (tile-source since Phase 4.4a) reads the restored content
+    /// directly.
     ///
-    /// Phase 4.2c migration: stripped the bridge `.pixels` reassembly +
-    /// `.allocatedKeys` array that 4.2b carried through. Restore now
-    /// reads `snapshot.tiles[key]` directly. No 16-64 MB transient
-    /// allocation per restore; only per-tile work proportional to the
-    /// number of saved tiles.
-    ///
-    /// Phase 4.5 will delete the atlas → monolithic blit pair entirely
-    /// when monolithic goes away.
+    /// History (kept short — full sequence in master audit Appendix D):
+    /// 4.2b made captureSnapshot tile-native; 4.2c stripped the
+    /// `.pixels` bridge so restore reads `snapshot.tiles[key]` directly
+    /// (~16-64 MB transient allocation eliminated per restore); 4.5d
+    /// stripped the atlas → monolithic blit pair (the per-layer
+    /// monolithic was deleted at 4.5e).
     func restoreSnapshot(_ snapshot: LayerSnapshot, tileGrid: TileGrid) {
         drainCommandQueue()
 
