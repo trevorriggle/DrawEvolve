@@ -3022,101 +3022,40 @@ class CanvasRenderer: NSObject {
         return true
     }
 
-    /// Phase 2.5: layer snapshot pairs canvas-pixel data with the tile-grid
-    /// keyspace at capture time. Restoring rebuilds both the monolithic and
-    /// the tile keyspace so undo/redo across DROP+ADD ops (translate today;
-    /// future ops that drop keys later) round-trip cleanly.
+    /// Layer snapshot for undo/redo. Tile-native (Phase 4.2b–c).
     ///
-    /// Without the keyspace capture, restoreSnapshot would leave tile grid
-    /// at whatever-it-was-when-undo-fired while monolithic rolled back —
-    /// the composite path (Phase 3) would render blank in any region whose
-    /// tiles were dropped between snapshot and restore (the translate-undo
-    /// case). This is the structural prerequisite for Phase 3's correctness.
-    ///
-    /// Phase 4.2b: the canonical field is now `tiles: [TileKey: Data]` —
-    /// per-tile pixel buffers keyed by tile coord. The legacy `pixels`
-    /// (full-canvas contiguous buffer) and `allocatedKeys` (keyspace array)
-    /// fields are presented as **bridge computed properties** for
-    /// restoreSnapshot's continued use. Both bridges are removed in 4.2c
-    /// when restoreSnapshot becomes tile-native.
+    /// Pairs per-tile pixel buffers with the tile-grid keyspace at
+    /// capture time. Restoring rebuilds the grid to match
+    /// `tiles.keys` exactly so undo/redo across DROP+ADD ops
+    /// (translate today; future ops that drop keys later) round-trip
+    /// cleanly. Without the keyspace capture, restoreSnapshot would
+    /// leave tile grid at whatever-it-was-when-undo-fired — the
+    /// composite path (Phase 3) would render blank in any region whose
+    /// tiles were dropped between snapshot and restore (the
+    /// translate-undo case). Structural prerequisite for Phase 3's
+    /// correctness (Phase 2.5 origin, commit 9427258).
     ///
     /// Per-tile buffer layout: each `tiles[key]` Data is sized exactly
-    /// `copyW × copyH × 4` bytes where copyW = min(tileSize, canvasWidth -
-    /// key.x*tileSize) and similarly for copyH. Partial-edge tiles (last
-    /// column/row on a non-tile-aligned canvas) get smaller buffers. No
-    /// slop bytes. captureSnapshot is the sole producer; the
-    /// canvasWidth/canvasHeight/tileSize fields let the bridge invert the
-    /// per-tile geometry on the consumer side without reading the renderer.
+    /// `copyW × copyH × 4` bytes where copyW = min(tileSize, canvasWidth
+    /// - key.x*tileSize) and similarly for copyH. Partial-edge tiles
+    /// (last column/row on a non-tile-aligned canvas) get smaller
+    /// buffers. No slop bytes. captureSnapshot is the sole producer.
+    ///
+    /// `canvasWidth`/`canvasHeight`/`tileSize` carry the geometry
+    /// captureSnapshot used so consumers can derive per-tile in-canvas
+    /// positions without reading the renderer's state.
+    ///
+    /// Phase 4.2c stripped the pre-existing bridge computed properties
+    /// (`pixels` for full-canvas reassembly, `allocatedKeys` as
+    /// `Array(tiles.keys)`). restoreSnapshot reads `tiles` directly now;
+    /// no caller needs the legacy shape.
     struct LayerSnapshot {
         let tiles: [TileKey: Data]
         let canvasWidth: Int
         let canvasHeight: Int
         let tileSize: Int
 
-        /// Bridge — keyspace as an array. Used by restoreSnapshot's
-        /// drop-tiles-not-in-snapshot + ensure-tiles-in-snapshot loops at
-        /// CanvasRenderer.swift:3165–3177 (pre-4.2c lines). Removed in
-        /// 4.2c when restoreSnapshot reads `tiles.keys` directly.
-        var allocatedKeys: [TileKey] { Array(tiles.keys) }
-
-        /// Bridge — full-canvas contiguous buffer reassembled on demand.
-        /// Used by restoreSnapshot's `texture.replace` at line ~3150
-        /// (pre-4.2c). Each access allocates 16–64 MB transiently;
-        /// freed when the returned Data goes out of scope. Removed in
-        /// 4.2c when restoreSnapshot writes per-tile from `tiles` directly.
-        ///
-        /// Reassembly math inverts captureSnapshot's per-tile layout:
-        /// every tile's Data is laid out at srcBytesPerRow = copyW × 4
-        /// (no slop), and the bridge memcpy's row-by-row into the full-
-        /// canvas buffer at the tile's in-canvas position (dstX, dstY) =
-        /// (key.x × tileSize, key.y × tileSize). Empty `tiles` →
-        /// zero-filled buffer (matches the legacy
-        /// `allocatedKeys.isEmpty → drop everything` semantic on restore).
-        var pixels: Data {
-            let dstBytesPerRow = canvasWidth * 4
-            var buf = Data(count: dstBytesPerRow * canvasHeight)
-
-            guard !tiles.isEmpty else { return buf }
-
-            buf.withUnsafeMutableBytes { dstRawPtr in
-                guard let dstBase = dstRawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                    return
-                }
-                for (key, tileData) in tiles {
-                    let dstX = key.x * tileSize
-                    let dstY = key.y * tileSize
-                    let copyW = min(tileSize, canvasWidth - dstX)
-                    let copyH = min(tileSize, canvasHeight - dstY)
-                    // Defensive: a tile whose key lies past the canvas
-                    // contributes nothing. captureSnapshot won't produce
-                    // this; guard for value-typed struct round-trips.
-                    if copyW <= 0 || copyH <= 0 { continue }
-
-                    let srcBytesPerRow = copyW * 4
-                    // Defensive: tileData size must match the expected
-                    // (copyW × copyH × 4) layout. Skip if mismatched —
-                    // partial data would produce row-misaligned garbage.
-                    if tileData.count != srcBytesPerRow * copyH { continue }
-
-                    tileData.withUnsafeBytes { srcRawPtr in
-                        guard let srcBase = srcRawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                            return
-                        }
-                        for row in 0..<copyH {
-                            let dstOffset = (dstY + row) * dstBytesPerRow + dstX * 4
-                            let srcOffset = row * srcBytesPerRow
-                            memcpy(dstBase.advanced(by: dstOffset),
-                                   srcBase.advanced(by: srcOffset),
-                                   srcBytesPerRow)
-                        }
-                    }
-                }
-            }
-            return buf
-        }
-
-        /// Total byte count across all tile buffers. Replaces the
-        /// pre-4.2b `snapshot.pixels.count` diagnostic — useful for the
+        /// Total byte count across all tile buffers. Used by the
         /// before/after byte-size logging at stroke commit and undo.
         var totalByteCount: Int {
             tiles.values.reduce(0) { $0 + $1.count }
@@ -3282,78 +3221,173 @@ class CanvasRenderer: NSObject {
         cb.waitUntilCompleted()
     }
 
-    /// Restore a texture from a snapshot, including tile-grid keyspace.
+    /// Restore a texture + tile grid from a snapshot. Tile-native via
+    /// the shared staging atlas (Phase 4.2c).
     ///
-    /// Pass `tileGrid` when the snapshot was captured with one. Restore
-    /// rebuilds the grid to match `snapshot.allocatedKeys` exactly:
-    ///   1. Drop tiles in the current grid that are NOT in the snapshot's
+    /// Flow:
+    ///   1. drainCommandQueue() — wait for any in-flight async stroke cb
+    ///      to drain (touchesCancelled race fix, commit 5b15e24).
+    ///   2. Drop tiles in the current grid that are NOT in the snapshot's
     ///      keyspace (cleans up tiles allocated by intervening ops).
-    ///   2. ensureTileWithClearIfNeeded + blit-from-monolithic for each
-    ///      key in the snapshot's keyspace (allocates missing tiles,
-    ///      refreshes content from the just-restored monolithic).
-    /// Result: `grid.allocatedKeys()` == `snapshot.allocatedKeys` set-equal,
-    /// each tile bit-exact with `texture`. Phase 3 composite-path correct.
+    ///   3. Pre-filter snapshot.tiles into a validRestores list, skipping
+    ///      entries whose key/data shape doesn't match captureSnapshot's
+    ///      per-tile layout. Used by every subsequent loop.
+    ///   4. CPU-upload each valid tile's Data into the staging atlas at
+    ///      its in-canvas position (texture.replace, .shared atlas).
+    ///   5. Clear monolithic via render encoder loadAction=.clear.
+    ///      Regions outside the saved-tile set stay transparent — matches
+    ///      the legacy "drop tiles not in keyspace → those regions become
+    ///      transparent" semantic.
+    ///   6. ensureTileWithClearIfNeeded for each valid key (allocates a
+    ///      fresh grid tile if absent; encoded on the cmdBuf).
+    ///   7. Open blit encoder: per valid key, copy atlas → grid tile AND
+    ///      atlas → monolithic at canvas position.
+    ///   8. commit + waitUntilCompleted.
+    ///   9. Verifier (drain-before / verify-after symmetry from C1, commit
+    ///      73e54d5).
+    ///
+    /// Result: `grid.allocatedKeys()` == `snapshot.tiles.keys` set-equal,
+    /// each grid tile + corresponding monolithic region bit-exact with
+    /// `snapshot.tiles[key]`. Display path (still reading monolithic in
+    /// Phase 2/3) shows the snapshot's content; composite path (tile-
+    /// sourced in Phase 3) shows the same.
+    ///
+    /// Phase 4.2c migration: stripped the bridge `.pixels` reassembly +
+    /// `.allocatedKeys` array that 4.2b carried through. Restore now
+    /// reads `snapshot.tiles[key]` directly. No 16-64 MB transient
+    /// allocation per restore; only per-tile work proportional to the
+    /// number of saved tiles.
+    ///
+    /// Phase 4.5 will delete the atlas → monolithic blit pair entirely
+    /// when monolithic goes away.
     func restoreSnapshot(_ snapshot: LayerSnapshot, to texture: MTLTexture, tileGrid: TileGrid? = nil) {
-        // Drain any in-flight async-committed cbs (renderStroke async path,
-        // appendBlurStrokeStamps, renderBlurStroke, renderSmudgeStamps).
-        // touchesCancelled can fire restoreSnapshot WHILE a stroke's cb is
-        // still pending GPU completion — Metal considers the texture
-        // "currently attached as a writeable render target" until then, and
-        // texture.replace below would abort via _validateReplaceRegion. The
-        // drain is microseconds when nothing's in flight; the only non-zero
-        // cost is when there is something to drain, which is exactly the
-        // race we need to resolve. Mirrors C1's drain-before / verify-after
-        // architectural symmetry.
         drainCommandQueue()
 
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-
-        snapshot.pixels.withUnsafeBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            texture.replace(
-                region: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0,
-                withBytes: baseAddress,
-                bytesPerRow: bytesPerRow
-            )
-        }
-
-        // Phase 2.5: keyspace rebuild. See LayerSnapshot doc for rationale.
         guard let grid = tileGrid else { return }
-        let savedSet = Set(snapshot.allocatedKeys)
-        for key in grid.allocatedKeys() where !savedSet.contains(key) {
+
+        let savedKeys = Set(snapshot.tiles.keys)
+
+        // Drop tiles in the current grid that aren't in the snapshot.
+        // After this loop, any tile in the grid that's also in the
+        // snapshot will get its content overwritten below; any tile
+        // not in the snapshot is gone (and the monolithic clear at
+        // step 5 zeros its region of the canvas to match).
+        for key in grid.allocatedKeys() where !savedKeys.contains(key) {
             grid.dropTile(at: key)
         }
 
-        if snapshot.allocatedKeys.isEmpty { return }
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        for key in snapshot.allocatedKeys {
-            _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
+        let tileSize = grid.tileSize
+        let canvasW = texture.width
+        let canvasH = texture.height
+
+        // Pre-filter to validRestores: tuples carrying the per-tile
+        // pixel dims so the subsequent loops don't recompute them and
+        // so mis-sized entries are skipped wholesale (rather than the
+        // bridge's silent skip-the-row-but-still-blit-stale-pixels).
+        var validRestores: [(key: TileKey, data: Data, copyW: Int, copyH: Int)] = []
+        validRestores.reserveCapacity(snapshot.tiles.count)
+        for (key, tileData) in snapshot.tiles {
+            let dstX = key.x * tileSize
+            let dstY = key.y * tileSize
+            let copyW = min(tileSize, canvasW - dstX)
+            let copyH = min(tileSize, canvasH - dstY)
+            if copyW <= 0 || copyH <= 0 { continue }
+            if tileData.count != copyW * copyH * 4 { continue }
+            validRestores.append((key, tileData, copyW, copyH))
         }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        // Step 5: clear monolithic. Even on empty-snapshot restore (no
+        // valid tiles to write back) the clear is correct: result is a
+        // fully-transparent layer, matching the legacy
+        // `allocatedKeys.isEmpty → drop everything` semantic.
+        //
+        // texture.usage at createLayerTexture includes .renderTarget so
+        // this is valid. Encoder ends immediately; the render pass'
+        // .clear loadAction does the work. No draw calls needed.
+        let clearDesc = MTLRenderPassDescriptor()
+        clearDesc.colorAttachments[0].texture = texture
+        clearDesc.colorAttachments[0].loadAction = .clear
+        clearDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        clearDesc.colorAttachments[0].storeAction = .store
+        if let clearEnc = cmdBuf.makeRenderCommandEncoder(descriptor: clearDesc) {
+            clearEnc.endEncoding()
+        }
+
+        if validRestores.isEmpty {
+            // Empty / all-invalid snapshot — just the clear suffices.
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
+
+            #if DEBUG
+            verifyTileGridMatchesMonolithic(monolithic: texture,
+                                            tileGrid: grid,
+                                            callsite: "restoreSnapshot")
+            #endif
+            return
+        }
+
+        // Step 4: CPU-upload each valid tile's data into the atlas at its
+        // canvas position. Atlas is .shared so texture.replace is legal;
+        // CPU writes complete before we commit the cmdBuf below, so the
+        // subsequent GPU blits see the post-upload atlas state.
+        guard let atlas = ensureSnapshotStagingAtlas() else {
+            print("ERROR: restoreSnapshot — failed to ensure staging atlas")
+            return
+        }
+        for restore in validRestores {
+            let dstX = restore.key.x * tileSize
+            let dstY = restore.key.y * tileSize
+            let bytesPerRow = restore.copyW * 4
+            restore.data.withUnsafeBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                atlas.replace(
+                    region: MTLRegion(
+                        origin: MTLOrigin(x: dstX, y: dstY, z: 0),
+                        size: MTLSize(width: restore.copyW, height: restore.copyH, depth: 1)
+                    ),
+                    mipmapLevel: 0,
+                    withBytes: base,
+                    bytesPerRow: bytesPerRow
+                )
+            }
+        }
+
+        // Step 6: allocate-and-clear-if-needed for every saved key.
+        // Each call may encode its own no-draw render pass on cmdBuf;
+        // safe because no blit encoder is open yet.
+        for restore in validRestores {
+            _ = grid.ensureTileWithClearIfNeeded(at: restore.key, onCommandBuffer: cmdBuf)
+        }
+
+        // Step 7: blit atlas → grid tile + atlas → monolithic per valid key.
         if let blit = cmdBuf.makeBlitCommandEncoder() {
-            let tileSize = grid.tileSize
-            for key in snapshot.allocatedKeys {
-                let srcX = key.x * tileSize
-                let srcY = key.y * tileSize
-                let blitW = min(tileSize, width - srcX)
-                let blitH = min(tileSize, height - srcY)
-                if blitW <= 0 || blitH <= 0 { continue }
-                grid.updateTile(at: key) { tile in
+            for restore in validRestores {
+                let dstX = restore.key.x * tileSize
+                let dstY = restore.key.y * tileSize
+
+                grid.updateTile(at: restore.key) { tile in
                     blit.copy(
-                        from: texture,
+                        from: atlas,
                         sourceSlice: 0, sourceLevel: 0,
-                        sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                        sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                        sourceOrigin: MTLOrigin(x: dstX, y: dstY, z: 0),
+                        sourceSize: MTLSize(width: restore.copyW, height: restore.copyH, depth: 1),
                         to: tile.texture,
                         destinationSlice: 0, destinationLevel: 0,
                         destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
                     )
                 }
+
+                blit.copy(
+                    from: atlas,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: dstX, y: dstY, z: 0),
+                    sourceSize: MTLSize(width: restore.copyW, height: restore.copyH, depth: 1),
+                    to: texture,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
             }
             blit.endEncoding()
         }
