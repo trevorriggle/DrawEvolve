@@ -845,24 +845,82 @@ struct MetalCanvasView: UIViewRepresentable {
                 )
             }
 
-            // Composite all visible layers to screen with zoom/pan/rotation transform.
-            // When the move tool is mid-drag with no rect/lasso selection, the
-            // active layer is rendered at an offset doc rect so the user sees
-            // a real-time preview without any per-frame texture writes.
+            // Phase 4.4a: end the background/references encoder before the
+            // per-layer composite. The tile-path layer composite uses
+            // alternating compose-onto-intermediate + draw-onto-drawable
+            // render passes, which can't share an encoder with the
+            // background pass (each render pass is its own encoder).
+            renderEncoder.endEncoding()
+
+            // Composite all visible layers via the tile path — encodes one
+            // compose render pass into the renderer's
+            // `tileDisplayIntermediate` per layer, then one draw render
+            // pass onto the drawable with .load (preserving background +
+            // back-references + prior layers' contributions).
+            //
+            // Per-layer compose+draw within ONE command buffer relies on
+            // Metal's render-pass hazard tracking to serialize the
+            // intermediate's writes against subsequent reads, so each
+            // layer's draw reads its own intermediate state. Same pattern
+            // as 4.3c's encodeLayerComposite(useTilePath: true), promoted
+            // here from shadow rendering to live drawable rendering.
+            //
+            // Move-tool whole-layer translate preview retained: when the
+            // active layer is mid-drag, its draw pass uses
+            // renderFloatingTexture at the offset docRect instead of
+            // renderTextureToScreen at the normal position.
+            //
+            // Blur-adjustment preview swap retained: when the active layer
+            // has a blur preview, the source for its draw pass is the
+            // renderer-owned monolithic preview texture (no tile compose).
             for (index, layer) in layers.enumerated() where layer.isVisible {
-                // Blur adjustment preview swap: while the blurAdjustment tool
-                // is active for this layer, the renderer hosts a preview
-                // texture (filterPreviewTexture) holding the live-blurred
-                // result. Display that instead of the layer's own texture so
-                // the user sees the in-progress blur until they ✓/✕.
-                let displayTexture: MTLTexture? = {
-                    if index == activeLayerIndex,
-                       let preview = renderer?.blurAdjustmentPreviewTexture(forLayer: layer.id) {
-                        return preview
+                // Determine the source texture for this layer's draw pass:
+                //   - Blur preview active for this layer: monolithic preview
+                //     texture (no compose pass needed; it's already a
+                //     canvas-sized monolithic surface).
+                //   - Else: compose this layer's tiles into intermediate,
+                //     use intermediate.
+                //   - Fallback (tileGrid nil — Phase 2 invariant violation):
+                //     use layer.texture directly.
+                let blurPreviewTex: MTLTexture? = {
+                    if index == activeLayerIndex {
+                        return renderer?.blurAdjustmentPreviewTexture(forLayer: layer.id)
                     }
-                    return layer.texture
+                    return nil
                 }()
-                guard let texture = displayTexture else { continue }
+
+                let sourceTexture: MTLTexture?
+                if let preview = blurPreviewTex {
+                    sourceTexture = preview
+                } else if let grid = layer.tileGrid {
+                    renderer?.encodeLayerTileCompositeOntoIntermediate(grid, on: commandBuffer)
+                    sourceTexture = renderer?.tileDisplayIntermediate
+                } else {
+                    #if DEBUG
+                    print("⚠️ draw(in:): layer '\(layer.name)' has no tileGrid — falling back to layer.texture")
+                    #endif
+                    sourceTexture = layer.texture
+                }
+                guard let source = sourceTexture else { continue }
+
+                // Open a new render pass on the drawable with .load to
+                // preserve background + back-references + prior layers'
+                // contributions. Scissor needs to be set per-encoder.
+                let drawDesc = MTLRenderPassDescriptor()
+                drawDesc.colorAttachments[0].texture = drawable.texture
+                drawDesc.colorAttachments[0].loadAction = .load
+                drawDesc.colorAttachments[0].storeAction = .store
+                guard let drawEnc = commandBuffer.makeRenderCommandEncoder(descriptor: drawDesc) else { continue }
+                renderer?.setCanvasFootprintScissor(
+                    on: drawEnc,
+                    drawableSize: view.drawableSize,
+                    viewportPoints: view.bounds.size,
+                    zoomScale: zoomScale,
+                    panOffset: panOffset,
+                    canvasRotation: rotation,
+                    flipHorizontal: flipH,
+                    flipVertical: flipV
+                )
 
                 if isTranslatingActiveLayer && index == activeLayerIndex && documentSize.width > 0 {
                     let docRect = CGRect(
@@ -872,9 +930,9 @@ struct MetalCanvasView: UIViewRepresentable {
                         height: documentSize.height
                     )
                     renderer?.renderFloatingTexture(
-                        texture,
+                        source,
                         atDocRect: docRect,
-                        to: renderEncoder,
+                        to: drawEnc,
                         opacity: layer.opacity,
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -884,8 +942,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     )
                 } else {
                     renderer?.renderTextureToScreen(
-                        texture,
-                        to: renderEncoder,
+                        source,
+                        to: drawEnc,
                         opacity: layer.opacity,
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -894,7 +952,31 @@ struct MetalCanvasView: UIViewRepresentable {
                         flipState: flipState
                     )
                 }
+                drawEnc.endEncoding()
             }
+
+            // Overlays render pass: floating selection + floating text +
+            // stroke preview on a final encoder with .load to preserve the
+            // layer-composited drawable contents below.
+            let overlayDesc = MTLRenderPassDescriptor()
+            overlayDesc.colorAttachments[0].texture = drawable.texture
+            overlayDesc.colorAttachments[0].loadAction = .load
+            overlayDesc.colorAttachments[0].storeAction = .store
+            guard let overlayEnc = commandBuffer.makeRenderCommandEncoder(descriptor: overlayDesc) else {
+                commandBuffer.present(drawable)
+                commandBuffer.commit()
+                return
+            }
+            renderer?.setCanvasFootprintScissor(
+                on: overlayEnc,
+                drawableSize: view.drawableSize,
+                viewportPoints: view.bounds.size,
+                zoomScale: zoomScale,
+                panOffset: panOffset,
+                canvasRotation: rotation,
+                flipHorizontal: flipH,
+                flipVertical: flipV
+            )
 
             // Floating selection (rect/lasso, or move on top of an existing
             // selection, or imported image). The active layer has a hole
@@ -912,7 +994,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     floating,
                     atDocRect: docRect,
                     rotation: Float(selectionRotationRad),
-                    to: renderEncoder,
+                    to: overlayEnc,
                     opacity: 1.0,
                     zoomScale: Float(zoomScale),
                     panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -938,7 +1020,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     ftTex,
                     atDocRect: floatingTextDocRect,
                     rotation: Float(floatingTextRotation),
-                    to: renderEncoder,
+                    to: overlayEnc,
                     opacity: 1.0,
                     zoomScale: Float(zoomScale),
                     panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -959,15 +1041,9 @@ struct MetalCanvasView: UIViewRepresentable {
             // preview to draw on the drawable.
             if let stroke = currentStroke, !stroke.points.isEmpty,
                stroke.tool != .blur, stroke.tool != .eraser {
-                let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
-                let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
-                let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
-                let flipH = MainActor.assumeIsolated { canvasState?.flipHorizontal ?? false }
-                let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
-
                 renderer?.renderStrokePreview(
                     stroke,
-                    to: renderEncoder,
+                    to: overlayEnc,
                     viewportSize: view.bounds.size,
                     drawableSize: view.drawableSize,
                     zoomScale: zoomScale,
@@ -978,7 +1054,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 )
             }
 
-            renderEncoder.endEncoding()
+            overlayEnc.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
 
