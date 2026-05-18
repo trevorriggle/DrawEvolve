@@ -5112,6 +5112,15 @@ class CanvasRenderer: NSObject {
             : s.tileGrid.tilesIntersecting(batchBbox)
         let tileSize = s.tileGrid.tileSize
 
+        // Source B fix: tile-aligned clear before compose. The post-batch
+        // blit-back at this function's tail (line ~5180) copies the FULL
+        // tile rect from atlas to tile for each bbox tile, so an
+        // in-tile-outside-bbox sliver of stale pixels would survive into
+        // the freshly-allocated tile via ensureTile→blit.
+        if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: cb)
+        }
+
         if !bboxKeys.isEmpty, let composeBlit = cb.makeBlitCommandEncoder() {
             for key in bboxKeys {
                 guard let tile = s.tileGrid.tile(at: key) else { continue }
