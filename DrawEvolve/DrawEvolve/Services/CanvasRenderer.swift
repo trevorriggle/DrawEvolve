@@ -4013,27 +4013,35 @@ class CanvasRenderer: NSObject {
         let pixelRect = CGRect(x: x, y: y, width: w, height: h)
         let tileKeys = tileGrid.tilesIntersecting(pixelRect)
         let tileSize = tileGrid.tileSize
-        if !tileKeys.isEmpty,
-           let cb = commandQueue.makeCommandBuffer(),
-           let blit = cb.makeBlitCommandEncoder() {
-            for key in tileKeys {
-                guard let tile = tileGrid.tile(at: key) else { continue }
-                let dstX = key.x * tileSize
-                let dstY = key.y * tileSize
-                let copyW = min(tileSize, atlas.width - dstX)
-                let copyH = min(tileSize, atlas.height - dstY)
-                if copyW <= 0 || copyH <= 0 { continue }
-                blit.copy(
-                    from: tile.texture,
-                    sourceSlice: 0, sourceLevel: 0,
-                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
-                    to: atlas,
-                    destinationSlice: 0, destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
-                )
+        if !tileKeys.isEmpty, let cb = commandQueue.makeCommandBuffer() {
+            // Source B fix: clear bbox-tile-aligned atlas region before
+            // compose. extract is read-only (no blit-back), so a raw-bbox
+            // clear would suffice — but tile-aligned matches the helper
+            // shape used everywhere else and only over-clears the
+            // in-tile-outside-bbox sliver, which is bounded and cheap.
+            if let clearRegion = atlasRegion(coveringTiles: tileKeys, tileSize: tileSize) {
+                clearCanvasStagingAtlasRegion(clearRegion, on: cb)
             }
-            blit.endEncoding()
+            if let blit = cb.makeBlitCommandEncoder() {
+                for key in tileKeys {
+                    guard let tile = tileGrid.tile(at: key) else { continue }
+                    let dstX = key.x * tileSize
+                    let dstY = key.y * tileSize
+                    let copyW = min(tileSize, atlas.width - dstX)
+                    let copyH = min(tileSize, atlas.height - dstY)
+                    if copyW <= 0 || copyH <= 0 { continue }
+                    blit.copy(
+                        from: tile.texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                        to: atlas,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                    )
+                }
+                blit.endEncoding()
+            }
             cb.commit()
             cb.waitUntilCompleted()
         }
@@ -4126,27 +4134,36 @@ class CanvasRenderer: NSObject {
         let pixelRect = CGRect(x: minX, y: minY, width: w, height: h)
         let tileKeys = tileGrid.tilesIntersecting(pixelRect)
         let tileSize = tileGrid.tileSize
-        if !tileKeys.isEmpty,
-           let cb = commandQueue.makeCommandBuffer(),
-           let blit = cb.makeBlitCommandEncoder() {
-            for key in tileKeys {
-                guard let tile = tileGrid.tile(at: key) else { continue }
-                let dstX = key.x * tileSize
-                let dstY = key.y * tileSize
-                let copyW = min(tileSize, atlas.width - dstX)
-                let copyH = min(tileSize, atlas.height - dstY)
-                if copyW <= 0 || copyH <= 0 { continue }
-                blit.copy(
-                    from: tile.texture,
-                    sourceSlice: 0, sourceLevel: 0,
-                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
-                    to: atlas,
-                    destinationSlice: 0, destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
-                )
+        if !tileKeys.isEmpty, let cb = commandQueue.makeCommandBuffer() {
+            // Source B fix: clear bbox-tile-aligned atlas region before
+            // compose. Same shape as extractPixels(from:) — read-only
+            // path, but uses the same tile-aligned helper for code
+            // uniformity. Stale pixels in unallocated bbox tiles would
+            // otherwise flow into the extracted UIImage's lasso-masked
+            // bounding box.
+            if let clearRegion = atlasRegion(coveringTiles: tileKeys, tileSize: tileSize) {
+                clearCanvasStagingAtlasRegion(clearRegion, on: cb)
             }
-            blit.endEncoding()
+            if let blit = cb.makeBlitCommandEncoder() {
+                for key in tileKeys {
+                    guard let tile = tileGrid.tile(at: key) else { continue }
+                    let dstX = key.x * tileSize
+                    let dstY = key.y * tileSize
+                    let copyW = min(tileSize, atlas.width - dstX)
+                    let copyH = min(tileSize, atlas.height - dstY)
+                    if copyW <= 0 || copyH <= 0 { continue }
+                    blit.copy(
+                        from: tile.texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                        to: atlas,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                    )
+                }
+                blit.endEncoding()
+            }
             cb.commit()
             cb.waitUntilCompleted()
         }
