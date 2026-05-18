@@ -4545,68 +4545,66 @@ class CanvasRenderer: NSObject {
         commandBuffer.commit()
     }
 
-    /// Bake the current preview into the supplied layer texture. Caller
+    /// Bake the current preview into the layer's tile grid. Caller
     /// records undo with snapshots taken before/after this call.
-    func commitBlurAdjustment(into layerTexture: MTLTexture, tileGrid: TileGrid? = nil) {
+    func commitBlurAdjustment(tileGrid: TileGrid) {
         guard let preview = blurAdjustmentPreview,
+              let atlas = ensureCanvasStagingAtlas(),
               let commandBuffer = commandQueue.makeCommandBuffer() else { return }
-        blitCopy(commandBuffer: commandBuffer, source: preview, dest: layerTexture)
+        blitCopy(commandBuffer: commandBuffer, source: preview, dest: atlas)
 
-        // === Phase 2 hole #6 fix: tile-grid dual-write (wipe + rebuild) ====
+        // === Phase 4.5c: blit atlas → tile grid (wipe + rebuild) ==========
         //
         // Blur adjustment writes a fully-blurred copy of the layer back into
-        // the layer texture (canvas-sized). Same wipe-and-rebuild semantic
-        // as loadImage rather than the refresh-allocated semantic of
-        // restoreSnapshot, for one specific reason: Gaussian blur is a
+        // the canvas-sized staging atlas. Wipe-and-rebuild rather than
+        // refresh-allocated, for one specific reason: Gaussian blur is a
         // convolution that can spread alpha into previously-empty tile
         // regions (e.g., a stroke near a tile boundary blurs outward and
         // deposits faint pixels into the adjacent tile). The tile grid
         // must allocate every tile in bounds to capture that smear; just
         // refreshing currently-allocated tiles would miss the new content.
         //
-        // Performed on the SAME command buffer as the preview→layer blit
+        // Performed on the SAME command buffer as the preview→atlas blit
         // above. Metal serialises encoders within a buffer, so the per-
-        // tile blit reads the post-blur monolithic.
-        if let grid = tileGrid {
-            for key in grid.allocatedKeys() {
-                grid.dropTile(at: key)
-            }
-            var allKeys: [TileKey] = []
-            allKeys.reserveCapacity(grid.gridWidth * grid.gridHeight)
-            for ty in 0..<grid.gridHeight {
-                for tx in 0..<grid.gridWidth {
-                    allKeys.append(TileKey(x: tx, y: ty))
-                }
-            }
-            for key in allKeys {
-                _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
-            }
-            if let blit = commandBuffer.makeBlitCommandEncoder() {
-                let tileSize = grid.tileSize
-                let texW = layerTexture.width
-                let texH = layerTexture.height
-                for key in allKeys {
-                    let srcX = key.x * tileSize
-                    let srcY = key.y * tileSize
-                    let blitW = min(tileSize, texW - srcX)
-                    let blitH = min(tileSize, texH - srcY)
-                    if blitW <= 0 || blitH <= 0 { continue }
-                    grid.updateTile(at: key) { tile in
-                        blit.copy(
-                            from: layerTexture,
-                            sourceSlice: 0, sourceLevel: 0,
-                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                            to: tile.texture,
-                            destinationSlice: 0, destinationLevel: 0,
-                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                        )
-                    }
-                }
-                blit.endEncoding()
+        // tile blit reads the post-blur atlas.
+        for key in tileGrid.allocatedKeys() {
+            tileGrid.dropTile(at: key)
+        }
+        var allKeys: [TileKey] = []
+        allKeys.reserveCapacity(tileGrid.gridWidth * tileGrid.gridHeight)
+        for ty in 0..<tileGrid.gridHeight {
+            for tx in 0..<tileGrid.gridWidth {
+                allKeys.append(TileKey(x: tx, y: ty))
             }
         }
-        // === End dual-write block ========================================
+        for key in allKeys {
+            _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+        }
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            let tileSize = tileGrid.tileSize
+            let atlasW = atlas.width
+            let atlasH = atlas.height
+            for key in allKeys {
+                let srcX = key.x * tileSize
+                let srcY = key.y * tileSize
+                let blitW = min(tileSize, atlasW - srcX)
+                let blitH = min(tileSize, atlasH - srcY)
+                if blitW <= 0 || blitH <= 0 { continue }
+                tileGrid.updateTile(at: key) { tile in
+                    blit.copy(
+                        from: atlas,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                        sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                        to: tile.texture,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    )
+                }
+            }
+            blit.endEncoding()
+        }
+        // === End atlas → tile blit block =================================
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()

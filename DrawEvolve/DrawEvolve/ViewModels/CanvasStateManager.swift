@@ -2348,12 +2348,13 @@ class CanvasStateManager: ObservableObject {
         guard blurAdjustmentActive,
               let renderer = renderer,
               let layer = layers[safe: selectedLayerIndex],
-              let texture = layer.texture else { return }
+              let texture = layer.texture,
+              let tileGrid = layer.tileGrid else { return }
         let layerId = layer.id
 
-        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
-        renderer.commitBlurAdjustment(into: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
-        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+        let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: tileGrid)
+        renderer.commitBlurAdjustment(tileGrid: tileGrid)
+        let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: tileGrid)
 
         if let before = beforeSnapshot, let after = afterSnapshot {
             historyManager.record(.stroke(
