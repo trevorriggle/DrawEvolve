@@ -2912,21 +2912,20 @@ class CanvasRenderer: NSObject {
     /// protection from in-flight strokes (race shape: cap-for-op-N+1
     /// while op-N deposit still async). Different from the
     /// touchesCancelled race fixed in restoreSnapshot.
-    func captureSnapshot(of texture: MTLTexture, tileGrid: TileGrid? = nil) -> LayerSnapshot? {
-        let canvasW = texture.width
-        let canvasH = texture.height
+    func captureSnapshot(tileGrid: TileGrid?) -> LayerSnapshot? {
+        let canvasW = Int(canvasSize.width)
+        let canvasH = Int(canvasSize.height)
         guard canvasW > 0, canvasH > 0 else {
-            print("ERROR: captureSnapshot — invalid texture dimensions (\(canvasW)×\(canvasH))")
+            print("ERROR: captureSnapshot — invalid canvas dimensions (\(canvasW)×\(canvasH))")
             return nil
         }
 
         guard let grid = tileGrid else {
-            // nil tileGrid path is deprecated. Pre-Phase-4.2 it read the
-            // monolithic via getBytes; post-4.2b, tile-grid is the source
-            // of truth and a nil grid means no content to snapshot.
-            // Return nil so callers fail explicitly rather than silently
-            // storing zeros. Phase 4.5 removes the optional entirely.
-            print("ERROR: captureSnapshot — nil tileGrid is no longer supported (Phase 4.2b)")
+            // Pre-Phase-4.2 the nil path read monolithic via getBytes;
+            // post-4.2b, tile-grid is the source of truth, so a nil grid
+            // means no content to snapshot. Return nil so callers fail
+            // explicitly rather than silently storing zeros.
+            print("ERROR: captureSnapshot — nil tileGrid is not supported")
             return nil
         }
 

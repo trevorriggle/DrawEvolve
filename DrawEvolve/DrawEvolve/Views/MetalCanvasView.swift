@@ -1228,7 +1228,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Smudge: renderer failed to allocate patch textures")
                     return
                 }
-                smudgeBeforeSnapshot = renderer.captureSnapshot(of: layerTexture, tileGrid: layers[selectedLayerIndex].tileGrid)
+                smudgeBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
                 smudgeStrokeLayerIndex = selectedLayerIndex
                 smudgeStrokeLayerId = layerId
                 smudgePendingTouchdown = BrushStroke.StrokePoint(
@@ -1420,7 +1420,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     docLocation: location,
                     layerIndex: selectedLayerIndex,
                     layerId: layers[selectedLayerIndex].id,
-                    beforeSnapshot: renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+                    beforeSnapshot: renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
                 )
                 print("Paint bucket: pending fill captured at \(location) (awaiting touchesEnded)")
                 return
@@ -1607,7 +1607,7 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .eraser,
                let texture = layers[selectedLayerIndex].texture,
                let renderer = renderer {
-                eraserBeforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+                eraserBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
                 eraserCommittedPointCount = 0
                 flushEraserSubStroke(view: view)
             }
@@ -1626,7 +1626,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let blurDocSize = MainActor.assumeIsolated {
                     canvasState?.documentSize ?? view.bounds.size
                 }
-                blurStrokeBeforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+                blurStrokeBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
                 blurStrokeLayerIndex = selectedLayerIndex
                 blurStrokeLayerId = layers[selectedLayerIndex].id
                 blurCommittedPointCount = 0
@@ -2326,7 +2326,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     tileGrid: layers[pending.layerIndex].tileGrid,
                     screenSize: documentSize
                 ) { [weak self] in
-                    let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: capturedTileGrid)
+                    let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if let before = beforeSnapshot, let after = afterSnapshot {
                         canvasState.historyManager.record(.stroke(
                             layerId: layerId,
@@ -2376,7 +2376,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         // waitUntilCompleted internally — that drain
                         // serialises behind any pending smudge dispatches
                         // on the same queue.
-                        let afterSnapshot = renderer.captureSnapshot(of: layerTexture, tileGrid: layers[li].tileGrid)
+                        let afterSnapshot = renderer.captureSnapshot(tileGrid: layers[li].tileGrid)
                         if let before = beforeSnapshot, let after = afterSnapshot,
                            let canvasState = canvasState {
                             canvasState.historyManager.record(.stroke(
@@ -2637,7 +2637,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let capturedTileGrid = layers[selectedLayerIndex].tileGrid
                 let capturedCanvasState = canvasState
                 flushEraserSubStroke(view: view) { [weak self] in
-                    let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: capturedTileGrid)
+                    let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if let before = beforeSnapshot,
                        let after = afterSnapshot,
                        let cs = capturedCanvasState {
@@ -2709,7 +2709,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 blurCommittedPointCount = 0
 
                 renderer.endBlurStroke { [weak self] in
-                    let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: capturedTileGrid)
+                    let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if let before = beforeSnapshot,
                        let after = afterSnapshot,
                        let cs = capturedCanvasState {
@@ -2754,7 +2754,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 // Capture snapshot BEFORE rendering stroke
                 print("Capturing BEFORE snapshot...")
-                let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layer.tileGrid)
+                let beforeSnapshot = renderer.captureSnapshot(tileGrid: layer.tileGrid)
                 if beforeSnapshot == nil {
                     print("WARNING: Failed to capture before snapshot")
                 }
@@ -2782,7 +2782,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Stroke committed successfully - texture should now contain the stroke")
 
                     print("Capturing AFTER snapshot...")
-                    let afterSnapshot = renderer.captureSnapshot(of: texture, tileGrid: capturedTileGrid)
+                    let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if afterSnapshot == nil {
                         print("WARNING: Failed to capture after snapshot")
                     }
