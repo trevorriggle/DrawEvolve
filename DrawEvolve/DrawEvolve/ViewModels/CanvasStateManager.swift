@@ -1581,8 +1581,9 @@ class CanvasStateManager: ObservableObject {
         let beforeSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
 
         // Delete pixels in selection (use documentSize for 1:1 coordinate mapping)
-        if let rect = activeSelection {
-            renderer.clearRect(rect, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
+        if let rect = activeSelection,
+           let tileGrid = layers[selectedLayerIndex].tileGrid {
+            renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
         } else if let path = selectionPath {
             renderer.clearPath(path, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
         }
@@ -1644,7 +1645,9 @@ class CanvasStateManager: ObservableObject {
             // Verify extraction succeeded
             if let pixels = selectionPixels {
                 // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                renderer.clearRect(rect, in: texture, tileGrid: layers[selectedLayerIndex].tileGrid, screenSize: documentSize)
+                if let tileGrid = layers[selectedLayerIndex].tileGrid {
+                    renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
+                }
                 // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
                 selectionLayerSnapshot = renderer.captureSnapshot(of: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
                 // Upload the extracted pixels to a Metal texture once. The

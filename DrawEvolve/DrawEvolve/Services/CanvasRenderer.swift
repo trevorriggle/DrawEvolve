@@ -3581,19 +3581,24 @@ class CanvasRenderer: NSObject {
         return (x0, y0, w, h)
     }
 
-    func clearRect(_ rect: CGRect, in texture: MTLTexture, tileGrid: TileGrid? = nil, screenSize: CGSize) {
+    func clearRect(_ rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) {
         print("CanvasRenderer: Clearing rect \(rect)")
 
-        // Convert doc-space rect to integer pixel rect. Use floor/ceil so every
-        // pixel the rect touches is included, then clamp to texture bounds.
-        // clearRect and extractPixels MUST use identical integer rects or
-        // extracted/cleared regions drift and leave ghost pixels on move.
-        guard let (x, y, w, h) = texturePixelRect(for: rect, in: texture, screenSize: screenSize) else {
-            print("ERROR: Rect outside texture bounds or empty")
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: Failed to ensure canvas staging atlas for clearRect")
             return
         }
 
-        // Region-local I/O: at 4096² a full-texture getBytes is 64 MiB on every
+        // Convert doc-space rect to integer pixel rect. Use floor/ceil so every
+        // pixel the rect touches is included, then clamp to atlas bounds.
+        // clearRect and extractPixels MUST use identical integer rects or
+        // extracted/cleared regions drift and leave ghost pixels on move.
+        guard let (x, y, w, h) = texturePixelRect(for: rect, in: atlas, screenSize: screenSize) else {
+            print("ERROR: Rect outside canvas bounds or empty")
+            return
+        }
+
+        // Region-local I/O: at 4096² a full-canvas getBytes is 64 MiB on every
         // selection commit. We only need to write zeros into the work
         // rectangle, so allocate a buffer the size of the rect and skip the
         // read entirely (we're overwriting every byte anyway).
@@ -3605,7 +3610,7 @@ class CanvasRenderer: NSObject {
         let zeros = [UInt8](repeating: 0, count: regionBytesPerRow * h)
         zeros.withUnsafeBufferPointer { buf in
             guard let baseAddress = buf.baseAddress else { return }
-            texture.replace(
+            atlas.replace(
                 region: region,
                 mipmapLevel: 0,
                 withBytes: baseAddress,
@@ -3613,67 +3618,49 @@ class CanvasRenderer: NSObject {
             )
         }
 
-        // === Phase 2 Task 4.4: tile-grid dual-write (blit from monolithic) =
+        // === Phase 4.5c: blit zeroed region from staging atlas into tiles ==
         //
         // Canonical pattern (matches renderStroke / compositeFloating / flip /
         // translate). Pass 1: ensureTileWithClearIfNeeded for every
         // intersecting tile — allocates and clears any new tile so its
         // unblitted region is well-defined. Pass 2: full-tile blit from
-        // monolithic, bit-exact by construction.
-        //
-        // Replaces the previous "skip-unallocated / dropTile-full /
-        // buffer-to-texture-partial" pattern. That pattern was structurally
-        // unsound: (a) the partial-tile buffer-to-texture blit's
-        // sourceBytesPerRow has device-specific alignment requirements not
-        // honored for arbitrary rect widths; (b) the skip-unallocated branch
-        // assumed prior callsites had already allocated the tile, but any
-        // prior callsite that ALSO skipped (e.g., another clearRect) could
-        // leave the tile permanently unallocated while monolithic accumulated
-        // writes, producing silent drift visible only when a later op forced
-        // allocation; (c) sub-tile blits don't repair drift in the
-        // non-cleared portion of a tile if some earlier callsite left it
-        // misaligned with monolithic.
-        //
-        // The canonical pattern resolves all three by always blitting the
-        // whole tile from post-write monolithic.
-        if let grid = tileGrid {
-            let pixelRect = CGRect(x: x, y: y, width: w, height: h)
-            let tileKeys = grid.tilesIntersecting(pixelRect)
-            let tileSize = grid.tileSize
-            let texW = texture.width
-            let texH = texture.height
+        // staging atlas, bit-exact by construction.
+        let pixelRect = CGRect(x: x, y: y, width: w, height: h)
+        let tileKeys = tileGrid.tilesIntersecting(pixelRect)
+        let tileSize = tileGrid.tileSize
+        let atlasW = atlas.width
+        let atlasH = atlas.height
 
-            if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
-                for key in tileKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
-                }
-                if let blit = cmdBuf.makeBlitCommandEncoder() {
-                    for key in tileKeys {
-                        let srcX = key.x * tileSize
-                        let srcY = key.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-
-                        grid.updateTile(at: key) { tile in
-                            blit.copy(
-                                from: texture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
-                    }
-                    blit.endEncoding()
-                }
-                cmdBuf.commit()
-                cmdBuf.waitUntilCompleted()
+        if !tileKeys.isEmpty, let cmdBuf = commandQueue.makeCommandBuffer() {
+            for key in tileKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
             }
+            if let blit = cmdBuf.makeBlitCommandEncoder() {
+                for key in tileKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, atlasW - srcX)
+                    let blitH = min(tileSize, atlasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit.endEncoding()
+            }
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()
         }
-        // === End dual-write block ========================================
+        // === End atlas → tile blit block =================================
 
         print("Rect cleared successfully")
     }
