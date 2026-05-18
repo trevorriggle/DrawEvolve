@@ -31,8 +31,11 @@ struct BrushSizeRailHorizontal: View {
     @Binding var size: CGFloat
     /// Optional binding for the secondary hardness track. nil keeps
     /// the legacy single-track layout.
-    /// TODO: add opacity slider once wet-ink pipeline lands (see BrushSettingsView.swift ~96–101)
     var hardness: Binding<CGFloat>? = nil
+    /// Optional binding for the tertiary opacity track (Phase 4.6
+    /// follow-up). Stacked below the hardness track when both are
+    /// present. Callers pass `$canvasState.brushSettings.opacity`.
+    var opacity: Binding<CGFloat>? = nil
     /// Matches BrushSizeRail and BrushSettingsView so all three surfaces
     /// agree on bounds. Don't widen here without widening there too.
     var range: ClosedRange<CGFloat> = 1...200
@@ -55,12 +58,18 @@ struct BrushSizeRailHorizontal: View {
     /// size change at any position.
     private static let sizeCurve: CGFloat = 1.0
     private static let hardnessCurve: CGFloat = 1.0
+    /// Linear opacity curve — see BrushSizeRail for rationale.
+    private static let opacityCurve: CGFloat = 1.0
 
     private static let singleTrackHeight: CGFloat = 36
     /// Combined height when the hardness track is present. Two 30pt
     /// tracks plus a small gutter; matches the rail's chrome feeling
     /// "thin" while doubling the controls available.
     private static let dualTrackHeight: CGFloat = 64
+    /// Three-track height — adds the opacity track stacked below
+    /// hardness. ~34pt taller than dual; eats more thumb territory but
+    /// matches Procreate's iPhone slider layout.
+    private static let tripleTrackHeight: CGFloat = 98
     /// Max preview disc diameter so the disc doesn't tower over the
     /// rail at large brush sizes on iPhone. Mirrors the iPad cap.
     static let previewDiameterCap: CGFloat = 80
@@ -70,6 +79,7 @@ struct BrushSizeRailHorizontal: View {
     private static let trackToTrackOffset: CGFloat = 30 + 4
 
     private static let previewHardnessFallback: CGFloat = 1.0
+    private static let previewOpacityFallback: CGFloat = 1.0
 
     /// Single source of truth for what the preview disc renders — see
     /// BrushSizeRail.previewModel for rationale.
@@ -77,7 +87,8 @@ struct BrushSizeRailHorizontal: View {
         let docDiameter = screenDiameter?(size) ?? size
         return BrushPreviewModel(
             diameter: min(docDiameter, Self.previewDiameterCap),
-            hardness: hardness?.wrappedValue ?? Self.previewHardnessFallback
+            hardness: hardness?.wrappedValue ?? Self.previewHardnessFallback,
+            opacity: opacity?.wrappedValue ?? Self.previewOpacityFallback
         )
     }
 
@@ -109,10 +120,23 @@ struct BrushSizeRailHorizontal: View {
                         trackTopClearance: Self.trackToTrackOffset
                     )
                 }
+                if let opacity {
+                    HorizontalRailTrack(
+                        value: opacity,
+                        range: 0...1,
+                        curve: Self.opacityCurve,
+                        accessibilityLabel: "Brush opacity",
+                        accessibilityValue: "\(Int(opacity.wrappedValue * 100)) percent",
+                        readoutText: "\(Int(opacity.wrappedValue * 100))%",
+                        accessibilityStep: 0.05,
+                        previewModel: previewModel,
+                        trackTopClearance: Self.trackToTrackOffset * 2
+                    )
+                }
             }
         }
         .padding(.leading, 10)
-        .frame(height: hardness == nil ? Self.singleTrackHeight : Self.dualTrackHeight)
+        .frame(height: railHeight)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(uiColor: .systemBackground).opacity(0.95))
@@ -133,11 +157,24 @@ struct BrushSizeRailHorizontal: View {
                 Text("hardness")
                     .frame(height: 30, alignment: .center)
             }
+            if opacity != nil {
+                Text("opacity")
+                    .frame(height: 30, alignment: .center)
+            }
         }
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(.secondary)
         .frame(width: 56, alignment: .leading)
         .allowsHitTesting(false)
+    }
+
+    /// Container-height selector — three-way switch between legacy
+    /// single-track, the size+hardness dual, and the new
+    /// size+hardness+opacity triple (Phase 4.6 follow-up).
+    private var railHeight: CGFloat {
+        if opacity != nil { return Self.tripleTrackHeight }
+        if hardness != nil { return Self.dualTrackHeight }
+        return Self.singleTrackHeight
     }
 }
 
@@ -282,6 +319,12 @@ private struct WidthPreferenceKey: PreferenceKey {
         BrushSizeRailHorizontal(size: .constant(40))
             .padding(.horizontal, 16)
         BrushSizeRailHorizontal(size: .constant(40), hardness: .constant(0.6))
+            .padding(.horizontal, 16)
+        BrushSizeRailHorizontal(
+            size: .constant(40),
+            hardness: .constant(0.6),
+            opacity: .constant(0.75)
+        )
             .padding(.horizontal, 16)
     }
     .padding()

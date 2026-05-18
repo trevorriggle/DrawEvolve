@@ -800,6 +800,7 @@ struct DrawingCanvasView: View {
                         BrushSizeRailHorizontal(
                             size: $canvasState.brushSettings.size,
                             hardness: $canvasState.brushSettings.hardness,
+                            opacity: $canvasState.brushSettings.opacity,
                             screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
                         )
                             .padding(.horizontal, 16)
@@ -2078,6 +2079,7 @@ struct DrawingCanvasView: View {
                         BrushSizeRail(
                             size: $canvasState.brushSettings.size,
                             hardness: $canvasState.brushSettings.hardness,
+                            opacity: $canvasState.brushSettings.opacity,
                             screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
                         )
                             .transition(.move(edge: .trailing).combined(with: .opacity))

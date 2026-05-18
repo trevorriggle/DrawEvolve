@@ -32,10 +32,12 @@ struct BrushPreviewModel: Equatable {
     /// Raw slider value 0...1. The shader applies the same perceptual
     /// remap the brush fragment shader does, so passing raw is correct.
     var hardness: CGFloat
-    /// Reserved for a future opacity slider. Defaults to fully opaque
-    /// so the disc behaves as today; once a third rail track lands,
-    /// callers can wire `$canvasState.brushSettings.opacity` here and
-    /// nothing else in the disc needs to change.
+    /// Raw slider value 0...1. Wired from the rail's opacity track
+    /// (Phase 4.6 follow-up — wet-ink shipped, opacity is now
+    /// meaningful end-to-end). Applied via `.opacity(...)` on the
+    /// disc; defaults to fully opaque so legacy single/dual-track
+    /// callers that don't pass an opacity binding render the same as
+    /// before.
     var opacity: CGFloat = 1.0
 }
 

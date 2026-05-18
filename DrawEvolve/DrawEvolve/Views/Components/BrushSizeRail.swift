@@ -33,8 +33,13 @@ struct BrushSizeRail: View {
     /// rail keeps its legacy single-track layout. Callers that own a
     /// BrushSettings (the canvas) pass `$canvasState.brushSettings.hardness`
     /// to surface the new control.
-    /// TODO: add opacity slider once wet-ink pipeline lands (see BrushSettingsView.swift ~96–101)
     var hardness: Binding<CGFloat>? = nil
+    /// Optional binding for the tertiary opacity track (Phase 4.6
+    /// follow-up — wet-ink shipped, opacity is now meaningful). Wired
+    /// through `commitWetInkToLayer` at stroke commit. The slider sits
+    /// to the right of the hardness track when both are present;
+    /// callers pass `$canvasState.brushSettings.opacity`.
+    var opacity: Binding<CGFloat>? = nil
     /// Matches the range surfaced in `BrushSettingsView` (1...200) so the
     /// rail and the full panel agree on bounds.
     var range: ClosedRange<CGFloat> = 1...200
@@ -58,6 +63,10 @@ struct BrushSizeRail: View {
     /// shader-space value at 0.85 so dragging the rail below ~0.92
     /// still renders "pencil"-looking strokes.
     private static let hardnessCurve: CGFloat = 1.0
+    /// Opacity curve. Linear — opacity perception is approximately
+    /// linear at the slider level, matching how every reference app
+    /// (Procreate, Photoshop) presents it.
+    private static let opacityCurve: CGFloat = 1.0
 
     private static let containerHeight: CGFloat = 200
     /// Single-track width (size only) — preserves legacy chrome for
@@ -66,6 +75,9 @@ struct BrushSizeRail: View {
     /// Two-track width — fits the size + hardness tracks side by side
     /// with a small gap.
     private static let containerWidthDual: CGFloat = 76
+    /// Three-track width — adds the opacity track to the right of the
+    /// hardness track.
+    private static let containerWidthTriple: CGFloat = 116
     /// Max preview disc diameter so a 200px brush at high zoom doesn't
     /// blow out the rail's chrome. Exposed so the inner tracks can
     /// position the disc from the same constant the parent uses.
@@ -81,16 +93,21 @@ struct BrushSizeRail: View {
     /// matching the solid-circle preview behaviour the rail had before
     /// the unified disc landed.
     private static let previewHardnessFallback: CGFloat = 1.0
+    /// Opacity used to drive the preview disc when no opacity binding
+    /// is provided. 1.0 = fully opaque (the disc behaves as it did
+    /// before the third track landed).
+    private static let previewOpacityFallback: CGFloat = 1.0
 
-    /// Single source of truth for what the preview disc renders. Both
+    /// Single source of truth for what the preview disc renders. All
     /// tracks read from this so the disc looks identical whether the
-    /// user is scrubbing size or hardness — only the anchor position
-    /// differs (next to whichever knob the user is dragging).
+    /// user is scrubbing size, hardness, or opacity — only the anchor
+    /// position differs (next to whichever knob the user is dragging).
     private var previewModel: BrushPreviewModel {
         let docDiameter = screenDiameter?(size) ?? size
         return BrushPreviewModel(
             diameter: min(docDiameter, Self.previewDiameterCap),
-            hardness: hardness?.wrappedValue ?? Self.previewHardnessFallback
+            hardness: hardness?.wrappedValue ?? Self.previewHardnessFallback,
+            opacity: opacity?.wrappedValue ?? Self.previewOpacityFallback
         )
     }
 
@@ -122,10 +139,23 @@ struct BrushSizeRail: View {
                         trackLeadingClearance: Self.trackToTrackOffset
                     )
                 }
+                if let opacity {
+                    VerticalRailTrack(
+                        value: opacity,
+                        range: 0...1,
+                        curve: Self.opacityCurve,
+                        accessibilityLabel: "Brush opacity",
+                        accessibilityValue: "\(Int(opacity.wrappedValue * 100)) percent",
+                        readoutText: "\(Int(opacity.wrappedValue * 100))%",
+                        accessibilityStep: 0.05,
+                        previewModel: previewModel,
+                        trackLeadingClearance: Self.trackToTrackOffset * 2
+                    )
+                }
             }
             .padding(.horizontal, 4)
             .frame(
-                width: hardness == nil ? Self.containerWidthSingle : Self.containerWidthDual,
+                width: railWidth,
                 height: Self.containerHeight
             )
             .background(
@@ -139,8 +169,8 @@ struct BrushSizeRail: View {
     /// Header labels sit above the chrome so they live outside every
     /// track's drag gesture. Each label is centered over its track
     /// (track frame is 30pt; we use the same frame on the label so
-    /// "hardness" overflows its 30pt slot symmetrically rather than
-    /// pulling everything left).
+    /// "hardness" / "opacity" overflow their 30pt slots symmetrically
+    /// rather than pulling everything left).
     @ViewBuilder
     private var labelRow: some View {
         HStack(spacing: 8) {
@@ -152,11 +182,26 @@ struct BrushSizeRail: View {
                     .minimumScaleFactor(0.7)
                     .frame(width: 30, alignment: .center)
             }
+            if opacity != nil {
+                Text("opacity")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: 30, alignment: .center)
+            }
         }
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 4)
         .allowsHitTesting(false)
+    }
+
+    /// Container width selector — three-way switch between legacy
+    /// single-track callers, the size+hardness dual layout, and the
+    /// new size+hardness+opacity triple layout (Phase 4.6 follow-up).
+    private var railWidth: CGFloat {
+        if opacity != nil { return Self.containerWidthTriple }
+        if hardness != nil { return Self.containerWidthDual }
+        return Self.containerWidthSingle
     }
 }
 
@@ -300,6 +345,11 @@ extension BrushSizeRail {
     HStack {
         BrushSizeRail(size: .constant(40))
         BrushSizeRail(size: .constant(40), hardness: .constant(0.6))
+        BrushSizeRail(
+            size: .constant(40),
+            hardness: .constant(0.6),
+            opacity: .constant(0.75)
+        )
     }
     .padding()
     .background(Color.gray.opacity(0.2))
