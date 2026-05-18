@@ -3400,71 +3400,13 @@ class CanvasRenderer: NSObject {
 
     // MARK: - Load Image
 
-    /// Load a UIImage into a texture (for editing existing drawings)
-    /// Phase 2/3 helper: rebuild a tile grid to be bit-exact with a layer
-    /// texture that was written to wholesale (full-canvas overwrite).
-    /// Drops the entire current keyspace, allocates every tile in grid
-    /// bounds, and blit-from-monolithic into each.
+    /// Load a UIImage into a layer's tile grid via the shared canvas
+    /// staging atlas. CGImage gets drawn into a CG bitmap at canvas size,
+    /// the bytes land in the atlas, and a full-canvas wipe + tile-rebuild
+    /// blits each tile from the atlas. No per-layer monolithic detour.
     ///
-    /// Used by:
-    /// - `loadImage(_:into:tileGrid:)` — single-image drawing load.
-    /// - Multi-layer drawing load (per-layer PNG path in CanvasStateManager).
-    /// - Any future op that does a full-canvas texture overwrite.
-    ///
-    /// Sync: creates its own command buffer and waits for completion before
-    /// returning. Safe to call after the caller has finalised its own
-    /// monolithic write (`texture.replace` or finished render encoder).
-    ///
-    /// The rule going forward (per Phase 3.1 soak findings): every sync
-    /// dual-write path must call the verifier at end. Async batched-deposit
-    /// paths still skip it (documented race).
-    func populateTileGridFromTexture(_ texture: MTLTexture,
-                                     tileGrid: TileGrid,
-                                     callsite: String) {
-        for key in tileGrid.allocatedKeys() {
-            tileGrid.dropTile(at: key)
-        }
-
-        var allKeys: [TileKey] = []
-        allKeys.reserveCapacity(tileGrid.gridWidth * tileGrid.gridHeight)
-        for ty in 0..<tileGrid.gridHeight {
-            for tx in 0..<tileGrid.gridWidth {
-                allKeys.append(TileKey(x: tx, y: ty))
-            }
-        }
-
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        for key in allKeys {
-            _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
-        }
-        if let blit = cmdBuf.makeBlitCommandEncoder() {
-            let tileSize = tileGrid.tileSize
-            let texW = texture.width
-            let texH = texture.height
-            for key in allKeys {
-                let srcX = key.x * tileSize
-                let srcY = key.y * tileSize
-                let blitW = min(tileSize, texW - srcX)
-                let blitH = min(tileSize, texH - srcY)
-                if blitW <= 0 || blitH <= 0 { continue }
-                tileGrid.updateTile(at: key) { tile in
-                    blit.copy(
-                        from: texture,
-                        sourceSlice: 0, sourceLevel: 0,
-                        sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                        sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                        to: tile.texture,
-                        destinationSlice: 0, destinationLevel: 0,
-                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                    )
-                }
-            }
-            blit.endEncoding()
-        }
-        cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
-    }
-
+    /// Synchronous (waits on the GPU before returning). Safe to call
+    /// after any prior dual-write completes.
     func loadImage(_ image: UIImage, tileGrid: TileGrid) {
         print("CanvasRenderer: Loading image into tile grid via staging atlas")
 
@@ -3517,10 +3459,50 @@ class CanvasRenderer: NSObject {
             bytesPerRow: bytesPerRow
         )
 
-        // Phase 4.5c: monolithic write removed. Image lands in the shared
-        // staging atlas, then the tile grid is rebuilt full-canvas via the
-        // existing blit-from-monolithic helper (now sourcing from atlas).
-        populateTileGridFromTexture(atlas, tileGrid: tileGrid, callsite: "loadImage")
+        // Wipe the entire tile keyspace and rebuild full-canvas from the
+        // atlas. Inline what was `populateTileGridFromTexture` — that helper
+        // was a Phase-2 dual-write artifact whose only remaining caller is
+        // this function.
+        for key in tileGrid.allocatedKeys() {
+            tileGrid.dropTile(at: key)
+        }
+
+        var allKeys: [TileKey] = []
+        allKeys.reserveCapacity(tileGrid.gridWidth * tileGrid.gridHeight)
+        for ty in 0..<tileGrid.gridHeight {
+            for tx in 0..<tileGrid.gridWidth {
+                allKeys.append(TileKey(x: tx, y: ty))
+            }
+        }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+        for key in allKeys {
+            _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cmdBuf)
+        }
+        if let blit = cmdBuf.makeBlitCommandEncoder() {
+            let tileSize = tileGrid.tileSize
+            for key in allKeys {
+                let srcX = key.x * tileSize
+                let srcY = key.y * tileSize
+                let blitW = min(tileSize, width - srcX)
+                let blitH = min(tileSize, height - srcY)
+                if blitW <= 0 || blitH <= 0 { continue }
+                tileGrid.updateTile(at: key) { tile in
+                    blit.copy(
+                        from: atlas,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                        sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                        to: tile.texture,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    )
+                }
+            }
+            blit.endEncoding()
+        }
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
 
         print("✅ Image loaded successfully into tile grid")
     }

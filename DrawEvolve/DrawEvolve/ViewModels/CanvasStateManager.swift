@@ -1225,37 +1225,20 @@ class CanvasStateManager: ObservableObject {
                 ? payload.layerPNGs[pngIndex]
                 : nil
 
-            var texture: MTLTexture? = nil
+            // Phase 4.5d: tile-grid-direct load. Builds the grid for the
+            // layer and routes the image through CanvasRenderer.loadImage,
+            // which writes into the shared staging atlas and blits straight
+            // to tiles — no per-layer monolithic detour.
+            let grid = renderer.makeEmptyTileGrid()
+            layer.tileGrid = grid
+
             if let bytes = pngData, let image = UIImage(data: bytes) {
-                texture = renderer.makeTexture(from: image)
-            }
-
-            if texture == nil {
-                // Sha-mismatched / missing / undecodable bytes: insert an empty
-                // layer at this ordinal so the rest of the stack keeps its
-                // shape. Caller's toast tells the user something's off.
+                renderer.loadImage(image, tileGrid: grid)
+            } else {
+                // Sha-mismatched / missing / undecodable bytes: leave the
+                // grid empty so the rest of the stack keeps its shape.
+                // Caller's toast tells the user something's off.
                 missingOrdinals.append(entry.ordinal)
-                texture = renderer.createLayerTexture()
-            }
-
-            layer.texture = texture
-            // Pair the texture with a tile grid (Phase 2 Task 5).
-            // Same lifetime as `layer.texture`; nil if texture allocation
-            // ultimately failed.
-            //
-            // Phase 3.1 soak fix: previously this paired the loaded texture
-            // with an EMPTY tile grid, leaving mono/tile out of sync. The
-            // legacy compositeLayersToTexture (mono-source) sampled the
-            // loaded PNG content, while compositeLayersToTextureViaTiles
-            // (tile-source) saw no allocated tiles and contributed nothing
-            // — surfaced as ±2 LSB G-channel divergence at the first
-            // raster-order pixel where layer content existed. Routing
-            // through populateTileGridFromTexture rebuilds the tile keyspace
-            // bit-exact with the loaded monolithic.
-            if let tex = texture {
-                let grid = renderer.makeEmptyTileGrid()
-                layer.tileGrid = grid
-                renderer.populateTileGridFromTexture(tex, tileGrid: grid, callsite: "loadLayeredDrawing[ord:\(entry.ordinal)]")
             }
             layers.append(layer)
         }
