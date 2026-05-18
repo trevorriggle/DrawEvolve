@@ -1253,6 +1253,17 @@ class CanvasRenderer: NSObject {
     static var verifyParallelDisplayEnabled: Bool = true
     static var verifyParallelDisplayAssertOnMismatch: Bool = true
     static var verifyParallelDisplayPerChannelTolerance: UInt8 = 0
+    /// Post-touch sample window throttle. The hybrid sample rate from
+    /// audit § 4.1.8 specs "every frame for 5s post-touchesEnded" but
+    /// the actual cost (drawable-shaped getBytes × 2 per sample) makes
+    /// that ~2.6 GB/s of verifier traffic on iPad Pro drawable. Sim's
+    /// Metal emulation tax compounds. Stride=4 = every 4th frame for
+    /// 5s post-touch = ~75 sample frames over the window, cutting
+    /// traffic to ~650 MB/s while keeping coverage aggressive. Stride=1
+    /// = every frame (original spec). Stride=0 = disables post-touch
+    /// window (verifier still runs on 1Hz idle + transform-change).
+    /// Tunable via lldb.
+    static var verifyParallelDisplayPostTouchFrameStride: Int = 4
     private static var hasLoggedParallelDisplayVerifierActive: Bool = false
 
     func verifyParallelDisplayMatchesMonolithic(monoDisplay: MTLTexture,

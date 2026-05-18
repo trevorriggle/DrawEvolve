@@ -381,6 +381,49 @@ struct MetalCanvasView: UIViewRepresentable {
         @Binding var selectedLayerIndex: Int
 
         private var renderer: CanvasRenderer?
+
+        // MARK: - Phase 4.3c parallel-display verifier state
+        //
+        // Off-screen render targets for the per-frame parallel-display
+        // verifier (audit § 4.3 + 4.3c dispatch). Both drawable-shaped,
+        // .shared so the verifier's getBytes works. Lazy-allocated on
+        // first sample; reallocated if drawableSize changes (orientation,
+        // window resize). DEBUG-only — Release builds never touch these.
+        //
+        // `monoShadowTexture` receives the monolithic layer-composite
+        // path (renderTextureToScreen per visible layer).
+        // `tileShadowTexture` receives the tile layer-composite path
+        // (renderTileGridToScreen per visible layer, which sequences
+        // Phase 3's tile composite + the existing display transform).
+        // `verifyParallelDisplayMatchesMonolithic` compares them byte-
+        // by-byte at sample frames.
+        #if DEBUG
+        private var monoShadowTexture: MTLTexture?
+        private var tileShadowTexture: MTLTexture?
+
+        /// Set in `touchesEnded` to mark the start of the post-touch
+        /// sample window (5s, throttled by
+        /// `verifyParallelDisplayPostTouchFrameStride`).
+        private var lastTouchesEndedTime: CFTimeInterval?
+
+        /// Per-frame counter for the 1Hz idle sample throttle (`%60==0`).
+        /// Wraparound via overflow-allowed `&+=` is fine — modulo
+        /// behavior unchanged on overflow.
+        private var parallelDisplayFrameCounter: Int = 0
+
+        /// Snapshot of (zoom, pan, rotation, flip) at last sample, used
+        /// to detect transform-state transitions (a third sample
+        /// trigger besides post-touch and 1Hz idle).
+        private var lastSampledTransformState: (
+            zoom: CGFloat,
+            panX: CGFloat,
+            panY: CGFloat,
+            rotation: CGFloat,
+            flipH: Bool,
+            flipV: Bool
+        )?
+        #endif
+
         private var currentStroke: BrushStroke?
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
@@ -935,7 +978,247 @@ struct MetalCanvasView: UIViewRepresentable {
             renderEncoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+
+            // Phase 4.3c parallel-display verifier hook. Runs after the
+            // drawable's cb is committed so the user-visible frame isn't
+            // delayed by the verifier's own cb commits + waits. Sample-
+            // rate gated; #if DEBUG-only.
+            #if DEBUG
+            parallelDisplayFrameCounter &+= 1
+            if shouldSampleParallelDisplayThisFrame() {
+                runParallelDisplayVerifier(view: view)
+                lastSampledTransformState = captureCurrentTransformState()
+            }
+            #endif
         }
+
+        #if DEBUG
+        // MARK: - Phase 4.3c parallel-display verifier (DEBUG only)
+
+        /// Decide whether to run the parallel-display verifier on this
+        /// frame. Three combined triggers per audit § 4.1.8:
+        ///   1. Post-touch window: every Nth frame for 5s after the
+        ///      last touchesEnded (N = verifyParallelDisplayPostTouch-
+        ///      FrameStride; default 4). Catches stroke-commit-then-
+        ///      idle drift.
+        ///   2. 1Hz idle: every 60th frame regardless of state.
+        ///      Catches slow drift on a static canvas.
+        ///   3. Transform-state change: any zoom/pan/rotation/flip
+        ///      transition. Catches per-tile vertex math errors under
+        ///      transforms — the new ground Phase 4.3 closes.
+        /// Master verifier-enable flag also gates.
+        private func shouldSampleParallelDisplayThisFrame() -> Bool {
+            guard CanvasRenderer.verifyParallelDisplayEnabled else { return false }
+
+            let now = CACurrentMediaTime()
+
+            // 1. Post-touch window with stride throttle.
+            let postTouchActive: Bool = {
+                guard let t = lastTouchesEndedTime else { return false }
+                if (now - t) >= 5.0 { return false }
+                let stride = CanvasRenderer.verifyParallelDisplayPostTouchFrameStride
+                return stride > 0 && (parallelDisplayFrameCounter % stride == 0)
+            }()
+
+            // 2. 1Hz idle baseline.
+            let frameThrottle = (parallelDisplayFrameCounter % 60 == 0)
+
+            // 3. Transform-state change.
+            let currentState = captureCurrentTransformState()
+            let transformChanged: Bool = {
+                guard let last = lastSampledTransformState else { return true }
+                return last != currentState
+            }()
+
+            return postTouchActive || frameThrottle || transformChanged
+        }
+
+        /// Snapshot the current zoom/pan/rotation/flip state for the
+        /// transform-change sample trigger.
+        private func captureCurrentTransformState() -> (
+            zoom: CGFloat, panX: CGFloat, panY: CGFloat,
+            rotation: CGFloat, flipH: Bool, flipV: Bool
+        ) {
+            guard let cs = canvasState else {
+                return (1.0, 0, 0, 0, false, false)
+            }
+            return MainActor.assumeIsolated {
+                (cs.zoomScale, cs.panOffset.x, cs.panOffset.y,
+                 cs.canvasRotation.radians, cs.flipHorizontal, cs.flipVertical)
+            }
+        }
+
+        /// Lazy-allocate the monolithic-source shadow render target at
+        /// the current drawable size. `.shared` so the verifier's
+        /// getBytes works; `[.renderTarget, .shaderRead]` for the
+        /// composite path's bindings.
+        private func ensureMonoShadowTexture(view: MTKView) -> MTLTexture? {
+            let targetW = Int(view.drawableSize.width)
+            let targetH = Int(view.drawableSize.height)
+            guard targetW > 0, targetH > 0, let device = view.device else { return nil }
+            if let existing = monoShadowTexture,
+               existing.width == targetW, existing.height == targetH {
+                return existing
+            }
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: targetW, height: targetH,
+                mipmapped: false
+            )
+            desc.storageMode = .shared
+            desc.usage = [.renderTarget, .shaderRead]
+            monoShadowTexture = device.makeTexture(descriptor: desc)
+            return monoShadowTexture
+        }
+
+        /// Lazy-allocate the tile-source shadow render target. Same
+        /// shape and storage as `monoShadowTexture` so the verifier
+        /// compares apples-to-apples.
+        private func ensureTileShadowTexture(view: MTKView) -> MTLTexture? {
+            let targetW = Int(view.drawableSize.width)
+            let targetH = Int(view.drawableSize.height)
+            guard targetW > 0, targetH > 0, let device = view.device else { return nil }
+            if let existing = tileShadowTexture,
+               existing.width == targetW, existing.height == targetH {
+                return existing
+            }
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: targetW, height: targetH,
+                mipmapped: false
+            )
+            desc.storageMode = .shared
+            desc.usage = [.renderTarget, .shaderRead]
+            tileShadowTexture = device.makeTexture(descriptor: desc)
+            return tileShadowTexture
+        }
+
+        /// Run the parallel-display verifier for this frame. Renders the
+        /// monolithic and tile layer-composite paths to off-screen
+        /// shadow targets, then byte-compares them via
+        /// `verifyParallelDisplayMatchesMonolithic`.
+        ///
+        /// Display-only surface: background + per-visible-layer
+        /// composite. Excludes blur-adjustment preview, translate
+        /// preview, floating selection/text overlays, stroke preview,
+        /// references, marching ants. The verifier compares the
+        /// underlying layer composite (where mono vs tile can differ);
+        /// the excluded overlays render identically in both paths
+        /// because they don't depend on layer.texture vs layer.tileGrid.
+        private func runParallelDisplayVerifier(view: MTKView) {
+            guard let renderer = renderer,
+                  let monoShadow = ensureMonoShadowTexture(view: view),
+                  let tileShadow = ensureTileShadowTexture(view: view) else {
+                return
+            }
+
+            // Render monolithic-source composite into monoShadow.
+            guard let monoCB = renderer.commandQueue.makeCommandBuffer() else { return }
+            let monoDesc = MTLRenderPassDescriptor()
+            monoDesc.colorAttachments[0].texture = monoShadow
+            monoDesc.colorAttachments[0].loadAction = .clear
+            monoDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            monoDesc.colorAttachments[0].storeAction = .store
+            guard let monoEnc = monoCB.makeRenderCommandEncoder(descriptor: monoDesc) else { return }
+            encodeLayerComposite(into: monoEnc, view: view, useTilePath: false)
+            monoEnc.endEncoding()
+            monoCB.commit()
+
+            // Render tile-source composite into tileShadow. Same setup
+            // and same caller-side ops; only the per-layer render call
+            // differs (renderTextureToScreen vs renderTileGridToScreen).
+            guard let tileCB = renderer.commandQueue.makeCommandBuffer() else { return }
+            let tileDesc = MTLRenderPassDescriptor()
+            tileDesc.colorAttachments[0].texture = tileShadow
+            tileDesc.colorAttachments[0].loadAction = .clear
+            tileDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            tileDesc.colorAttachments[0].storeAction = .store
+            guard let tileEnc = tileCB.makeRenderCommandEncoder(descriptor: tileDesc) else { return }
+            encodeLayerComposite(into: tileEnc, view: view, useTilePath: true)
+            tileEnc.endEncoding()
+            tileCB.commit()
+
+            // Wait for both shadow renders to complete on the GPU before
+            // the verifier's getBytes reads them.
+            monoCB.waitUntilCompleted()
+            tileCB.waitUntilCompleted()
+
+            renderer.verifyParallelDisplayMatchesMonolithic(
+                monoDisplay: monoShadow,
+                tileDisplay: tileShadow,
+                callsite: "displayLoop"
+            )
+        }
+
+        /// Encode the layer-composite slice of the display loop into
+        /// the given encoder. Used by both shadow renders. Branches on
+        /// `useTilePath` for the per-layer call. Mirrors draw(in:)'s
+        /// background + layer-iteration steps verbatim, dropping the
+        /// overlays (translate preview, floating selection/text,
+        /// stroke preview, references, marching ants) — they're
+        /// identical in both paths and don't affect the comparison.
+        ///
+        /// Drift between this and the real draw(in:) is the WHOLE
+        /// point — if draw(in:) gains a new layer-render path that
+        /// this helper doesn't mirror, the verifier mismatch surfaces
+        /// the drift. Audit § 4.3c open question 1 went with Option A
+        /// (inline) over Option B (refactor for sharing) for this
+        /// reason.
+        private func encodeLayerComposite(into encoder: MTLRenderCommandEncoder,
+                                          view: MTKView,
+                                          useTilePath: Bool) {
+            guard let renderer = renderer else { return }
+
+            let zoomScale = MainActor.assumeIsolated { canvasState?.zoomScale ?? 1.0 }
+            let panOffset = MainActor.assumeIsolated { canvasState?.panOffset ?? .zero }
+            let rotation = MainActor.assumeIsolated { canvasState?.canvasRotation.radians ?? 0.0 }
+            let flipH = MainActor.assumeIsolated { canvasState?.flipHorizontal ?? false }
+            let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
+            let flipState = SIMD2<Float>(flipH ? 1 : 0, flipV ? 1 : 0)
+
+            renderer.renderCanvasBackground(
+                to: encoder,
+                zoomScale: Float(zoomScale),
+                panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                canvasRotation: Float(rotation),
+                viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                flipState: flipState
+            )
+
+            // Per-layer composite. Skips blur-preview swap and translate
+            // preview overlay — both render identically in the two paths
+            // anyway (they read renderer-owned monolithic intermediates,
+            // not the layer's tile grid). The verifier surface IS the
+            // raw layer.texture vs layer.tileGrid comparison.
+            for layer in layers where layer.isVisible {
+                if useTilePath {
+                    guard let grid = layer.tileGrid else { continue }
+                    renderer.renderTileGridToScreen(
+                        grid,
+                        layerOpacity: layer.opacity,
+                        to: encoder,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
+                    )
+                } else {
+                    guard let texture = layer.texture else { continue }
+                    renderer.renderTextureToScreen(
+                        texture,
+                        to: encoder,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
+                    )
+                }
+            }
+        }
+        #endif
 
         func ensureLayerTextures() {
             guard let renderer = renderer else { return }
@@ -2163,6 +2446,15 @@ struct MetalCanvasView: UIViewRepresentable {
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("=== TOUCH ENDED ===")
+
+            // Phase 4.3c parallel-display verifier hook. Kick off the
+            // 5s post-touch sample window. Sample rate during the
+            // window is throttled by
+            // CanvasRenderer.verifyParallelDisplayPostTouchFrameStride
+            // (default 4 = every 4th frame). DEBUG-only.
+            #if DEBUG
+            lastTouchesEndedTime = CACurrentMediaTime()
+            #endif
 
             // Hover-cursor suppression flag rides every early return in
             // this function. defer covers them all from one place.
