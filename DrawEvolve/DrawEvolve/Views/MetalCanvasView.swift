@@ -929,6 +929,34 @@ struct MetalCanvasView: UIViewRepresentable {
                         flipState: flipState
                     )
                 }
+
+                // Wet-ink live overlay (Phase 4.6c). For the active layer
+                // when a wet-ink-using stroke is in progress, composite
+                // wet-ink × brushSettings.opacity onto the drawable AFTER
+                // the layer's own content but BEFORE drawEnc.endEncoding —
+                // wet-ink overlays on top of its own layer's composite,
+                // BELOW subsequent layers' composites (those open their
+                // own draw passes later in this loop). Matches what
+                // commitWetInkToLayer will deposit at touchesEnded, so
+                // the live preview is bit-equivalent to the final result.
+                //
+                // Opacity reads from `brushSettings.opacity` at draw time
+                // so mid-stroke opacity changes appear live in the
+                // preview, matching the commit-time behavior in 4.6b.
+                if index == activeLayerIndex,
+                   let stroke = currentStroke,
+                   stroke.tool.usesWetInk {
+                    renderer?.renderWetInkToScreen(
+                        to: drawEnc,
+                        opacity: Float(brushSettings.opacity),
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
+                    )
+                }
+
                 drawEnc.endEncoding()
             }
 
@@ -1016,8 +1044,14 @@ struct MetalCanvasView: UIViewRepresentable {
             // into the active layer texture in `touchesMoved`, and the every-
             // frame layer composite picks up the cuts — there's no separate
             // preview to draw on the drawable.
+            // Skip wet-ink-using tools (Phase 4.6c): wet-ink stamps deposit
+            // into wetInkTexture during touchesMoved, and the per-layer
+            // wet-ink overlay above draws the accumulated wet-ink on the
+            // active layer. Drawing renderStrokePreview here would double
+            // the stamps (wet-ink overlay AND stroke-preview trail).
             if let stroke = currentStroke, !stroke.points.isEmpty,
-               stroke.tool != .blur, stroke.tool != .eraser {
+               stroke.tool != .blur, stroke.tool != .eraser,
+               !stroke.tool.usesWetInk {
                 renderer?.renderStrokePreview(
                     stroke,
                     to: overlayEnc,
