@@ -108,6 +108,20 @@ class CanvasRenderer: NSObject {
     /// Phase 4.5 Source A clear-on-alloc contract. Lazy-allocated on first
     /// use, retained for renderer lifetime, reallocated on canvasSize
     /// change. ~16 MB at 2048², ~64 MB at 4096² — same shape as the atlas.
+    ///
+    /// **Residue contract (Phase 4.6 race fix):** this texture may
+    /// contain stamps from prior strokes. `commitWetInkToLayer` does NOT
+    /// clear it after commit because a deferred-async clear can race
+    /// against the next stroke's touchesBegan and wipe its initial
+    /// stamps. Callers that need a clean slate must call
+    /// `clearWetInkTexture` before reading. The standard flow handles
+    /// this automatically: the next wet-ink stroke's touchesBegan runs
+    /// `ensureWetInkTexture` → `clearWetInkTexture` → reset session
+    /// state → `flushWetInkSubStroke`, so wet-ink is always clean when
+    /// the first stamp lands. The renderWetInkToScreen live overlay path
+    /// is gated on `currentStroke != nil && tool.usesWetInk` so residue
+    /// is invisible between strokes; no other call path reads this
+    /// texture today.
     private var wetInkTexture: MTLTexture?
 
     // 1x1 white texture used to draw an opaque canvas background quad
@@ -867,6 +881,21 @@ class CanvasRenderer: NSObject {
         let atlasW = atlas.width
         let atlasH = atlas.height
         let bboxKeys = tileGrid.tilesIntersecting(bbox)
+
+        // C2 (Phase 4.6 audit follow-up): bail when bbox is fully off
+        // canvas. `tilesIntersecting` returns empty when bbox is outside
+        // the grid; in that state we'd otherwise run a fullscreen-quad
+        // render unrestricted (the scissor math returns negative
+        // dimensions and the `if scissorW > 0, scissorH > 0` guard skips
+        // setting the scissor). Atlas would receive an unscoped
+        // wet-ink-over-atlas write — a no-op visually because wet-ink at
+        // off-canvas points is empty (Metal viewport-clips the point
+        // primitives), but wasteful GPU work and a fragile invariant.
+        // Skipping cleanly here removes both.
+        guard !bboxKeys.isEmpty else {
+            completion?()
+            return
+        }
 
         // Source B: clear bbox-tile-aligned atlas region before compose.
         if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {

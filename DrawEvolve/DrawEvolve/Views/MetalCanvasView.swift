@@ -2894,16 +2894,26 @@ struct MetalCanvasView: UIViewRepresentable {
                     } else if stroke.tool.usesWetInk {
                         // Wet-ink commit: composite the accumulated wet-ink
                         // scratch onto the active layer's tile grid at the
-                        // stroke's per-stroke opacity, then clear wet-ink
-                        // so the next stroke starts fresh.
+                        // stroke's per-stroke opacity.
+                        //
+                        // No post-commit `clearWetInkTexture()` — that
+                        // earlier shape introduced a Metal-queue ordering
+                        // race (Phase 4.6 follow-up audit). The clear
+                        // committed via `DispatchQueue.main.async` could
+                        // be deferred past the next stroke's touchesBegan,
+                        // causing the new stroke's initial stamps to be
+                        // wiped and prior-stroke residue to bleed into
+                        // the new stroke. The next wet-ink stroke's
+                        // touchesBegan clears wet-ink via the
+                        // ensure/clear/reset/flush sequence, which is
+                        // sufficient given the residue contract on
+                        // `wetInkTexture`.
                         renderer.commitWetInkToLayer(
                             tileGrid: tileGrid,
                             bbox: wetInkBbox,
-                            opacity: wetInkStrokeOpacity
-                        ) {
-                            renderer.clearWetInkTexture()
-                            completion()
-                        }
+                            opacity: wetInkStrokeOpacity,
+                            completion: completion
+                        )
                     } else {
                         renderer.renderStroke(stroke, tileGrid: tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     }
