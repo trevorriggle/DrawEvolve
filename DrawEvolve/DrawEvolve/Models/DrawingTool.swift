@@ -114,6 +114,26 @@ enum DrawingTool {
         case .bodyPose: return "Body Pose"
         }
     }
+
+    /// True for brush-family stamp tools that route through the wet-ink
+    /// scratch buffer (Phase 4.6). Each stamp deposits into wetInkTexture
+    /// at full per-stamp alpha with max-blend; touchesEnded commits the
+    /// wet-ink onto the active layer's tile grid with the stroke's
+    /// per-stroke opacity. Decouples per-stroke opacity from per-stamp
+    /// blend math so overlapping stamps within one stroke don't
+    /// accumulate toward fully opaque at low stroke opacity.
+    ///
+    /// Eraser intentionally NOT included: destination-out blend has a
+    /// different composition path. Shape tools route separately. Pose
+    /// tools and selection tools don't paint.
+    var usesWetInk: Bool {
+        switch self {
+        case .brush, .pencil, .inkPen, .marker, .airbrush, .charcoal:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// Brush settings
