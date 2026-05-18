@@ -1620,22 +1620,21 @@ struct MetalCanvasView: UIViewRepresentable {
             // the deferred dispatchStroke path at touchesEnded still
             // runs as a fallback.
             if currentTool == .blur,
-               let texture = layers[selectedLayerIndex].texture,
+               let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
                 let blurSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
                 let blurDocSize = MainActor.assumeIsolated {
                     canvasState?.documentSize ?? view.bounds.size
                 }
-                blurStrokeBeforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+                blurStrokeBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
                 blurStrokeLayerIndex = selectedLayerIndex
                 blurStrokeLayerId = layers[selectedLayerIndex].id
                 blurCommittedPointCount = 0
                 blurStrokeActive = renderer.beginBlurStroke(
-                    to: texture,
+                    tileGrid: tileGrid,
                     settings: brushSettings,
                     screenSize: blurDocSize,
-                    selectionPath: blurSelectionPath,
-                    tileGrid: layers[selectedLayerIndex].tileGrid
+                    selectionPath: blurSelectionPath
                 )
                 if blurStrokeActive {
                     flushBlurSubStroke()
