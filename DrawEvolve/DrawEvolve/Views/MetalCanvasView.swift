@@ -830,13 +830,12 @@ struct MetalCanvasView: UIViewRepresentable {
             // renderer-owned monolithic preview texture (no tile compose).
             for (index, layer) in layers.enumerated() where layer.isVisible {
                 // Determine the source texture for this layer's draw pass:
-                //   - Blur preview active for this layer: monolithic preview
-                //     texture (no compose pass needed; it's already a
-                //     canvas-sized monolithic surface).
-                //   - Else: compose this layer's tiles into intermediate,
-                //     use intermediate.
-                //   - Fallback (tileGrid nil — Phase 2 invariant violation):
-                //     use layer.texture directly.
+                //   - Blur preview active for this layer: renderer-owned
+                //     canvas-sized preview texture (no compose pass needed).
+                //   - Else: compose this layer's tiles into the tile-display
+                //     intermediate, use intermediate as source.
+                //   - tileGrid nil: invariant violation post-Phase-4.5e —
+                //     skip the layer (no content to draw).
                 let blurPreviewTex: MTLTexture? = {
                     if index == activeLayerIndex {
                         return renderer?.blurAdjustmentPreviewTexture(forLayer: layer.id)
