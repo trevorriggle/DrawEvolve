@@ -1758,9 +1758,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 guard let strokeLayerIndex = smudgeStrokeLayerIndex,
                       let strokeLayerId = smudgeStrokeLayerId,
                       strokeLayerIndex < layers.count,
-                      let layerTexture = layers[strokeLayerIndex].texture,
+                      let strokeTileGrid = layers[strokeLayerIndex].tileGrid,
                       layers[strokeLayerIndex].id == strokeLayerId else {
-                    // Layer changed mid-stroke (or texture went away).
+                    // Layer changed mid-stroke (or tile grid went away).
                     // Sanity-assert and bail. The renderer's own assert in
                     // `renderSmudgeStamps` is the authoritative guard;
                     // this is the early-out so we don't even try.
@@ -1818,9 +1818,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     renderer.renderSmudgeStamps(
                         batch,
                         settings: brushSettings,
-                        to: layerTexture,
                         layerId: strokeLayerId,
-                        tileGrid: layers[strokeLayerIndex].tileGrid,
+                        tileGrid: strokeTileGrid,
                         screenSize: docSize
                     )
                 }

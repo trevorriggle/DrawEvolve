@@ -5312,17 +5312,17 @@ class CanvasRenderer: NSObject {
     func renderSmudgeStamps(
         _ stamps: [BrushStroke.StrokePoint],
         settings: BrushSettings,
-        to layerTexture: MTLTexture,
         layerId: UUID,
-        tileGrid: TileGrid? = nil,
+        tileGrid: TileGrid,
         screenSize: CGSize
     ) {
         guard !stamps.isEmpty else { return }
         guard let patchUpdatePipeline = smudgePatchUpdatePipelineState,
               let depositPipeline = smudgeDepositPipelineState,
               var front = smudgePatchFront,
-              var back = smudgePatchBack else {
-            print("⚠️ renderSmudgeStamps: pipeline or patch textures unavailable")
+              var back = smudgePatchBack,
+              let atlas = ensureCanvasStagingAtlas() else {
+            print("⚠️ renderSmudgeStamps: pipeline / patch / atlas unavailable")
             return
         }
         // Hard sanity: layer must not change mid-stroke (patch is sized to
@@ -5340,8 +5340,59 @@ class CanvasRenderer: NSObject {
 
         let strength = max(0, min(1, settings.smudgeStrength))
         let halfSize = SIMD2<Float>(smudgePatchHalfSize, smudgePatchHalfSize)
-        let layerSize = SIMD2<Float>(Float(layerTexture.width), Float(layerTexture.height))
-        var viewport = SIMD2<Float>(Float(layerTexture.width), Float(layerTexture.height))
+        let atlasW = atlas.width
+        let atlasH = atlas.height
+        let layerSize = SIMD2<Float>(Float(atlasW), Float(atlasH))
+        var viewport = SIMD2<Float>(Float(atlasW), Float(atlasH))
+
+        // Pre-compute the bbox covering every stamp's pickup region
+        // (stampCenter ± patchHalfSize). The patch-update samples layer
+        // pixels in that region, and the deposit footprint is bounded by
+        // the same region (radius ≤ halfSize), so a single composed bbox
+        // serves both reads and the post-batch blit-back.
+        let pickupHalf = Int(ceil(CGFloat(smudgePatchHalfSize))) + 4
+        var composeBbox: CGRect = .null
+        for stamp in stamps {
+            let cx = Int(stamp.location.x.rounded())
+            let cy = Int(stamp.location.y.rounded())
+            let x0 = max(0, cx - pickupHalf)
+            let y0 = max(0, cy - pickupHalf)
+            let x1 = min(atlasW, cx + pickupHalf)
+            let y1 = min(atlasH, cy + pickupHalf)
+            let rectW = x1 - x0
+            let rectH = y1 - y0
+            if rectW <= 0 || rectH <= 0 { continue }
+            let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
+            composeBbox = composeBbox.isNull ? stampRect : composeBbox.union(stampRect)
+        }
+
+        let composeKeys = (composeBbox.isNull || composeBbox.isEmpty)
+            ? []
+            : tileGrid.tilesIntersecting(composeBbox)
+        let tileSize = tileGrid.tileSize
+
+        // Compose-from-tiles into atlas so the per-stamp patch-update + the
+        // deposit's loadAction=.load both read current layer pixels.
+        if !composeKeys.isEmpty, let composeBlit = commandBuffer.makeBlitCommandEncoder() {
+            for key in composeKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                composeBlit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            composeBlit.endEncoding()
+        }
 
         // PR 3 — selection mask cached at beginSmudgeStroke. Defensive
         // fallback: if it's unexpectedly nil (e.g. caller skipped begin),
@@ -5360,14 +5411,6 @@ class CanvasRenderer: NSObject {
             hardness: Float(settings.hardness),
             tileOrigin: SIMD2<Float>(0, 0)
         )
-
-        // Phase 2 hole #5: accumulate deposit scissor rects into a batch
-        // bbox for the post-loop tile-grid dual-write. Only the deposit
-        // pass writes to layerTexture; patch-update passes write to the
-        // patch textures (front/back), which are session-internal and
-        // not mirrored into the tile grid. First-stamp pickup-only path
-        // contributes nothing to bbox by construction.
-        var batchBbox: CGRect = .null
 
         for stamp in stamps {
             let safePressure: Float = {
@@ -5389,7 +5432,8 @@ class CanvasRenderer: NSObject {
             )
 
             // ----- Pass 1: patch update — full quad on the BACK patch.
-            // Reads FRONT patch + layer, mixes, writes BACK.
+            // Reads FRONT patch + atlas (composed layer state), mixes,
+            // writes BACK.
             let updateDescriptor = MTLRenderPassDescriptor()
             updateDescriptor.colorAttachments[0].texture = back
             updateDescriptor.colorAttachments[0].loadAction = .dontCare
@@ -5399,7 +5443,7 @@ class CanvasRenderer: NSObject {
             }
             updateEncoder.setRenderPipelineState(patchUpdatePipeline)
             updateEncoder.setFragmentTexture(front, index: 0)
-            updateEncoder.setFragmentTexture(layerTexture, index: 1)
+            updateEncoder.setFragmentTexture(atlas, index: 1)
             updateEncoder.setFragmentTexture(selectionMask, index: 2)
             updateEncoder.setFragmentBytes(&smudgeUniforms, length: MemoryLayout<SmudgeUniformsCPU>.stride, index: 0)
             updateEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -5419,17 +5463,15 @@ class CanvasRenderer: NSObject {
                 let cy = Int(stamp.location.y.rounded())
                 let x0 = max(0, cx - footprint)
                 let y0 = max(0, cy - footprint)
-                let x1 = min(layerTexture.width, cx + footprint)
-                let y1 = min(layerTexture.height, cy + footprint)
+                let x1 = min(atlasW, cx + footprint)
+                let y1 = min(atlasH, cy + footprint)
                 let rectW = x1 - x0
                 let rectH = y1 - y0
                 if rectW > 0 && rectH > 0 {
                     let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
-                    let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
-                    batchBbox = batchBbox.isNull ? stampRect : batchBbox.union(stampRect)
 
                     let depositDescriptor = MTLRenderPassDescriptor()
-                    depositDescriptor.colorAttachments[0].texture = layerTexture
+                    depositDescriptor.colorAttachments[0].texture = atlas
                     depositDescriptor.colorAttachments[0].loadAction = .load
                     depositDescriptor.colorAttachments[0].storeAction = .store
                     if let depositEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: depositDescriptor) {
@@ -5461,52 +5503,46 @@ class CanvasRenderer: NSObject {
         smudgePatchFront = front
         smudgePatchBack = back
 
-        // === Phase 2 hole #5 fix: tile-grid dual-write (batched-deposit) ====
+        // === Phase 4.5c: blit modified atlas region into tile grid ========
         //
-        // Same pattern as appendBlurStrokeStamps (hole #3). Mirror this
-        // batch's deposits into the tile grid via blit-from-monolithic for
-        // tiles intersecting batchBbox, on the SAME command buffer as the
-        // per-stamp render encoders. Metal serialises encoders within a
-        // buffer; the blit reads the post-deposit layer texture.
+        // Mirror this batch's deposits into the tile grid by blitting
+        // every tile in composeBbox from the post-deposit atlas. Same
+        // command buffer as the deposits — Metal serialises encoders
+        // within a buffer, so the blit reads the post-deposit atlas.
+        // composeBbox covers every stamp's pickup region (≥ deposit
+        // footprint), so the blit-back stays in sync with what the
+        // deposits actually changed.
         //
-        // Async commit (no waitUntilCompleted) per the function's hot-path
-        // contract. Trust GPU queue ordering: subsequent ops on the same
-        // command queue serialise behind this batch. No verifier call —
-        // async commit means the verifier would race the not-yet-completed
-        // blit.
-        if let grid = tileGrid, !batchBbox.isNull, !batchBbox.isEmpty {
-            let tileKeys = grid.tilesIntersecting(batchBbox)
-            if !tileKeys.isEmpty {
-                for key in tileKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
-                }
-                if let blit = commandBuffer.makeBlitCommandEncoder() {
-                    let tileSize = grid.tileSize
-                    let texW = layerTexture.width
-                    let texH = layerTexture.height
-                    for key in tileKeys {
-                        let srcX = key.x * tileSize
-                        let srcY = key.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
-                        grid.updateTile(at: key) { tile in
-                            blit.copy(
-                                from: layerTexture,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
+        // Async commit (no waitUntilCompleted) per the function's hot-
+        // path contract. Subsequent ops on the same queue serialise
+        // behind this batch.
+        if !composeKeys.isEmpty {
+            for key in composeKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+            }
+            if let blit = commandBuffer.makeBlitCommandEncoder() {
+                for key in composeKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, atlasW - srcX)
+                    let blitH = min(tileSize, atlasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
                     }
-                    blit.endEncoding()
                 }
+                blit.endEncoding()
             }
         }
-        // === End dual-write block ========================================
+        // === End atlas → tile blit block =================================
 
         commandBuffer.commit()
         // Don't waitUntilCompleted — touchesMoved is hot path. Subsequent
