@@ -1051,12 +1051,12 @@ class CanvasStateManager: ObservableObject {
     func loadImage(_ image: UIImage) {
         guard let renderer = renderer,
               selectedLayerIndex < layers.count,
-              let texture = layers[selectedLayerIndex].texture else {
-            print("ERROR: Cannot load image - renderer or layer not available")
+              let tileGrid = layers[selectedLayerIndex].tileGrid else {
+            print("ERROR: Cannot load image - renderer or tile grid not available")
             return
         }
 
-        renderer.loadImage(image, into: texture, tileGrid: layers[selectedLayerIndex].tileGrid)
+        renderer.loadImage(image, tileGrid: tileGrid)
 
         // IMPORTANT: Mark that we've loaded an existing image so buttons enable
         hasLoadedExistingImage = true
@@ -1064,8 +1064,7 @@ class CanvasStateManager: ObservableObject {
 
         // Update thumbnail
         nonisolated(unsafe) let unsafeRenderer = renderer
-        nonisolated(unsafe) let unsafeTexture = texture
-        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = layers[selectedLayerIndex].tileGrid
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
         let layerId = layers[selectedLayerIndex].id
         Task.detached {
             if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {

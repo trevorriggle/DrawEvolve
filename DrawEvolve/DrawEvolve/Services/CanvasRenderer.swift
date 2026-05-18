@@ -3494,23 +3494,23 @@ class CanvasRenderer: NSObject {
         cmdBuf.waitUntilCompleted()
     }
 
-    func loadImage(_ image: UIImage, into texture: MTLTexture, tileGrid: TileGrid? = nil) {
-        print("CanvasRenderer: Loading image into texture")
-        print("  Texture ID: \(ObjectIdentifier(texture))")
-        print("  Texture size: \(texture.width)x\(texture.height)")
-        print("  Texture usage: \(texture.usage.rawValue)")
-        print("  Texture storage mode: \(texture.storageMode.rawValue)")
+    func loadImage(_ image: UIImage, tileGrid: TileGrid) {
+        print("CanvasRenderer: Loading image into tile grid via staging atlas")
 
         guard let cgImage = image.cgImage else {
             print("ERROR: Failed to get CGImage from UIImage")
             return
         }
 
-        let width = texture.width
-        let height = texture.height
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            print("ERROR: Failed to ensure canvas staging atlas for loadImage")
+            return
+        }
+
+        let width = atlas.width
+        let height = atlas.height
         let bytesPerRow = width * 4
 
-        // Create a CGContext to render the image
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
 
@@ -3527,46 +3527,31 @@ class CanvasRenderer: NSObject {
             return
         }
 
-        // Draw the image into the context (scaling to fit texture)
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // Get pixel data
         guard let data = context.data else {
             print("ERROR: Failed to get context data")
             return
         }
 
-        // Copy pixel data into the texture
         let region = MTLRegion(
             origin: MTLOrigin(x: 0, y: 0, z: 0),
             size: MTLSize(width: width, height: height, depth: 1)
         )
 
-        texture.replace(
+        atlas.replace(
             region: region,
             mipmapLevel: 0,
             withBytes: data,
             bytesPerRow: bytesPerRow
         )
 
-        // Phase 2 hole #2 fix: tile-grid dual-write (wipe + rebuild) via
-        // the shared `populateTileGridFromTexture` helper. loadImage always
-        // writes the FULL canvas (CGContext.draw at (0,0,width,height) —
-        // image is scaled to fill the texture), so the tile grid is
-        // rebuilt full-canvas. Helper handles drop-all + ensure-all +
-        // blit-from-mono + DEBUG verifier call.
-        if let grid = tileGrid {
-            populateTileGridFromTexture(texture, tileGrid: grid, callsite: "loadImage")
-        }
+        // Phase 4.5c: monolithic write removed. Image lands in the shared
+        // staging atlas, then the tile grid is rebuilt full-canvas via the
+        // existing blit-from-monolithic helper (now sourcing from atlas).
+        populateTileGridFromTexture(atlas, tileGrid: tileGrid, callsite: "loadImage")
 
-        print("✅ Image loaded successfully into texture")
-        print("  First 4 pixels (BGRA): ", terminator: "")
-        data.withMemoryRebound(to: UInt8.self, capacity: 16) { ptr in
-            for i in 0..<16 {
-                print("\(ptr[i])", terminator: i % 4 == 3 ? " " : ",")
-            }
-        }
-        print()
+        print("✅ Image loaded successfully into tile grid")
     }
 
     // MARK: - Selection Operations
