@@ -382,24 +382,41 @@ struct MetalCanvasView: UIViewRepresentable {
 
         private var renderer: CanvasRenderer?
 
-        // MARK: - Phase 4.3c parallel-display verifier state
+        // MARK: - Phase 4.3 parallel-display verifier state
         //
         // Off-screen render targets for the per-frame parallel-display
-        // verifier (audit § 4.3 + 4.3c dispatch). Both drawable-shaped,
-        // .shared so the verifier's getBytes works. Lazy-allocated on
-        // first sample; reallocated if drawableSize changes (orientation,
-        // window resize). DEBUG-only — Release builds never touch these.
+        // verifier (audit § 4.3 + 4.3c dispatch, polarity inverted at
+        // 4.4a). Both drawable-shaped, .shared so the verifier's
+        // getBytes works. Lazy-allocated on first sample; reallocated if
+        // drawableSize changes (orientation, window resize). DEBUG-only
+        // — Release builds never touch these.
         //
-        // `monoShadowTexture` receives the monolithic layer-composite
-        // path (single render pass — renderCanvasBackground + per-layer
-        // renderTextureToScreen on one encoder).
-        // `tileShadowTexture` receives the tile layer-composite path
-        // (background pass + per-layer compose-into-intermediate +
-        // draw-intermediate-onto-shadow, all within one cb so Metal
-        // hazard tracking serializes the intermediate's per-layer
-        // write/read sequence).
-        // `verifyParallelDisplayMatchesMonolithic` compares them byte-
-        // by-byte at sample frames.
+        // Post-4.4a polarity:
+        //   - `monoShadowTexture` receives the MONOLITHIC layer-composite
+        //     path (single render pass — renderCanvasBackground + per-
+        //     layer renderTextureToScreen on one encoder). This is the
+        //     reference/validator path — what the display would produce
+        //     if it still read from layer.texture per layer. NOT what
+        //     drives the user-visible drawable.
+        //   - `tileShadowTexture` receives the TILE layer-composite path
+        //     (background pass + per-layer compose-into-intermediate +
+        //     draw-intermediate-onto-shadow, all within one cb so Metal
+        //     hazard tracking serializes the intermediate's per-layer
+        //     write/read sequence). This is STRUCTURALLY IDENTICAL to
+        //     what the live drawable runs in `draw(in:)` post-4.4a (same
+        //     `encodeLayerTileCompositeOntoIntermediate` + per-layer
+        //     `renderTextureToScreen`/`renderFloatingTexture` pattern).
+        //     Verifier-clean implies the live drawable matches what mono
+        //     would have produced.
+        //
+        // `verifyParallelDisplayMatchesMonolithic` compares the two
+        // shadow textures byte-by-byte at sample frames.
+        //
+        // Why not read the live drawable directly: drawable textures on
+        // iOS are framebufferOnly by default; getBytes on them requires
+        // disabling that optimization, which would affect Release perf
+        // for a DEBUG-only verifier. Instead the verifier validates via
+        // structural equivalence of the two off-screen renders.
         #if DEBUG
         private var monoShadowTexture: MTLTexture?
         private var tileShadowTexture: MTLTexture?
@@ -1227,12 +1244,15 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         /// Encode the layer-composite slice of the display loop onto the
-        /// given command buffer, targeting `target`. Used by both shadow
-        /// renders. Branches on `useTilePath`:
+        /// given command buffer, targeting `target`. Used by BOTH shadow
+        /// renders in `runParallelDisplayVerifier`. Branches on
+        /// `useTilePath`:
         ///
         ///   - **Mono path (false):** ONE render pass on `target`. Clear,
         ///     background, per-layer renderTextureToScreen — same shape
-        ///     as the actual draw(in:) layer loop.
+        ///     as the pre-4.4a `draw(in:)` layer loop (which no longer
+        ///     drives the user-visible drawable; this helper is now the
+        ///     only place that mono-source rendering happens).
         ///
         ///   - **Tile path (true):** N+1 alternating render passes on the
         ///     same cb. Pass 1 = clear `target` + background. Then per
@@ -1245,17 +1265,35 @@ struct MetalCanvasView: UIViewRepresentable {
         ///     within the same cb — no explicit waitUntilCompleted per
         ///     layer needed.
         ///
+        ///     **Structurally identical to the live `draw(in:)` post-4.4a:**
+        ///     same per-layer `encodeLayerTileCompositeOntoIntermediate`
+        ///     calls + per-layer `renderTextureToScreen(intermediate, ...)`
+        ///     draw passes. Verifier-clean (mono shadow == tile shadow)
+        ///     implies the live drawable matches what the mono path
+        ///     would have produced. This structural-equivalence argument
+        ///     is the load-bearing validation mechanism in Phase 4.4 —
+        ///     the verifier doesn't read the live drawable directly
+        ///     (drawable textures are framebufferOnly by default), but
+        ///     the tile shadow is bit-exact with what the live drawable
+        ///     ran through the same code path.
+        ///
         /// Why the tile path can't use a single encoder: the intermediate
         /// would be in its LAST-composed-layer state by the time any
         /// draw on a shared encoder executes (Metal flushes all writes
         /// before any reads in a single encoder). Separate render
         /// passes per layer let hazard tracking enforce the per-layer
-        /// write/read order.
+        /// write/read order. This is exactly the H2 bug from 4.3b that
+        /// the e97a2ba fix resolved.
         ///
         /// Mirrors draw(in:)'s background + layer-iteration steps verbatim,
         /// dropping the overlays (translate preview, floating selection/
         /// text, stroke preview, references, marching ants) — both paths
-        /// skip them, so they don't affect the comparison.
+        /// skip them, so they don't affect the verifier comparison. The
+        /// live drawable applies overlays in additional render passes
+        /// after the layer composite; those overlays' rendering is
+        /// independent of texture-vs-tileGrid and is not verifier-
+        /// validated (acceptable because overlays don't differ between
+        /// paths).
         ///
         /// Drift between this and the real draw(in:) is the WHOLE point —
         /// if draw(in:) gains a new layer-render path that this helper

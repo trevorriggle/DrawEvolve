@@ -1238,13 +1238,32 @@ class CanvasRenderer: NSObject {
 
     // MARK: - Phase 4.3 parallel-display verifier
     //
-    // Compares the monolithic-sourced display render (today's path —
-    // `renderTextureToScreen(layer.texture, ...)` per-layer composite
-    // onto the drawable) against the tile-sourced display render (Phase
-    // 4.3's per-layer compose-onto-intermediate + draw-onto-shadow path
-    // implemented in MetalCanvasView's `encodeLayerComposite` with
-    // `useTilePath: true`, encoded onto an off-screen target). Byte-by-
-    // byte. Runs in DEBUG only; Release strips it entirely.
+    // Compares two off-screen layer-composite renders byte-by-byte.
+    // Runs in DEBUG only; Release strips it entirely.
+    //
+    // Polarity inverted at Phase 4.4 (commit d7a5d4c):
+    //   - Mono shadow render — what the display path WOULD produce if
+    //     it still read from `layer.texture` per layer. The reference /
+    //     validator. No longer drives the user-visible drawable.
+    //   - Tile shadow render — structurally identical to the live
+    //     drawable's per-layer compose+draw pattern (4.4a). The path
+    //     we're shipping.
+    //
+    // Both renders go to drawable-shaped `.shared` off-screen targets
+    // via MetalCanvasView's `encodeLayerComposite`. The verifier reads
+    // both via `getBytes` and compares.
+    //
+    // Why the verifier doesn't read the live drawable directly: drawable
+    // textures on iOS are typically `framebufferOnly = true` for
+    // performance, so direct getBytes isn't legal without disabling
+    // optimizations in Release builds (the verifier is DEBUG-only but
+    // the MTKView config is global). Instead, the tile shadow renders
+    // through the SAME `encodeLayerComposite` code path the live
+    // drawable uses (per-layer compose+draw via
+    // `encodeLayerTileCompositeOntoIntermediate` + `renderTextureToScreen`).
+    // Structural equivalence: verifier-clean (mono shadow == tile
+    // shadow) implies live drawable == what mono path would have
+    // produced.
     //
     // Originally landed in Phase 3 Task 3.1c as `verifyCompositeMatches
     // Monolithic` to validate `compositeLayersToTextureViaTiles` against
