@@ -4308,27 +4308,38 @@ class CanvasRenderer: NSObject {
         let tileKeys = tileGrid.tilesIntersecting(regionPixelRect)
         let tileSize = tileGrid.tileSize
 
-        if !tileKeys.isEmpty,
-           let composeBuf = commandQueue.makeCommandBuffer(),
-           let blit = composeBuf.makeBlitCommandEncoder() {
-            for key in tileKeys {
-                guard let tile = tileGrid.tile(at: key) else { continue }
-                let posX = key.x * tileSize
-                let posY = key.y * tileSize
-                let copyW = min(tileSize, canvasW - posX)
-                let copyH = min(tileSize, canvasH - posY)
-                if copyW <= 0 || copyH <= 0 { continue }
-                blit.copy(
-                    from: tile.texture,
-                    sourceSlice: 0, sourceLevel: 0,
-                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
-                    to: atlas,
-                    destinationSlice: 0, destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: posX, y: posY, z: 0)
-                )
+        if !tileKeys.isEmpty, let composeBuf = commandQueue.makeCommandBuffer() {
+            // Source B fix: clear the bbox-tile-aligned atlas region
+            // before compose so unallocated bbox tiles read as zero
+            // instead of inheriting stale pixels from prior dual-write
+            // callers. (loadAction=.load doesn't apply here — we read
+            // via getBytes — but the same leak shape applies: stale
+            // pixels would flow into the read buffer, then through the
+            // Porter-Duff blend, then back into the atlas at the bbox
+            // position via texture.replace.)
+            if let clearRegion = atlasRegion(coveringTiles: tileKeys, tileSize: tileSize) {
+                clearCanvasStagingAtlasRegion(clearRegion, on: composeBuf)
             }
-            blit.endEncoding()
+            if let blit = composeBuf.makeBlitCommandEncoder() {
+                for key in tileKeys {
+                    guard let tile = tileGrid.tile(at: key) else { continue }
+                    let posX = key.x * tileSize
+                    let posY = key.y * tileSize
+                    let copyW = min(tileSize, canvasW - posX)
+                    let copyH = min(tileSize, canvasH - posY)
+                    if copyW <= 0 || copyH <= 0 { continue }
+                    blit.copy(
+                        from: tile.texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                        to: atlas,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: posX, y: posY, z: 0)
+                    )
+                }
+                blit.endEncoding()
+            }
             composeBuf.commit()
             composeBuf.waitUntilCompleted()
         }
