@@ -1915,8 +1915,12 @@ class CanvasRenderer: NSObject {
         // and the composite preserved that divergence — visible in soak
         // as catastrophic ±16+ mismatches).
         //
-        // Selection rotation is irrelevant here — the post-rotation
-        // pixels are already in monolithic; we copy them verbatim.
+        // Selection rotation is applied by the shader (R(-θ) around rect
+        // center, Shaders.metal:309-346). Pixel content in monolithic IS
+        // the post-rotation result — we copy verbatim from monolithic to
+        // tiles. But the tile-key set must cover the rotated extent, not
+        // the un-rotated input rect, because shader-rotation moves pixels
+        // outside pixelRect's AABB. Master audit C2.
         if let grid = tileGrid {
             // pixelRect: docRect converted to layer-pixel space, same
             // scale the monolithic pass used above.
@@ -1926,7 +1930,50 @@ class CanvasRenderer: NSObject {
                 width: docRect.width * scale,
                 height: docRect.height * scale
             )
-            let tileKeys = grid.tilesIntersecting(pixelRect)
+
+            // Rotated AABB: rotate pixelRect's four corners by `rotation`
+            // radians around the rect center, then take the axis-aligned
+            // bounding box of the rotated corners. Matches the shader's
+            // R(-θ) sign convention exactly so the tile-key set covers
+            // every pixel the shader could touch.
+            //
+            // The `rotation == 0` early return is an OPTIMIZATION, not a
+            // correctness requirement — the rotated-AABB math degenerates
+            // correctly when rotation is exactly 0 (cosθ=1, sinθ=0 → each
+            // corner maps to itself → AABB == pixelRect) or tiny-but-
+            // nonzero. Future readers should not treat the early return
+            // as a special case to preserve when refactoring.
+            let dirtyRect: CGRect = {
+                if rotation == 0 { return pixelRect }
+                let cx = pixelRect.midX
+                let cy = pixelRect.midY
+                let cosT = cos(CGFloat(rotation))
+                let sinT = sin(CGFloat(rotation))
+                let corners: [CGPoint] = [
+                    CGPoint(x: pixelRect.minX, y: pixelRect.minY),
+                    CGPoint(x: pixelRect.maxX, y: pixelRect.minY),
+                    CGPoint(x: pixelRect.minX, y: pixelRect.maxY),
+                    CGPoint(x: pixelRect.maxX, y: pixelRect.maxY),
+                ]
+                let rotated = corners.map { p -> CGPoint in
+                    let rx = p.x - cx
+                    let ry = p.y - cy
+                    return CGPoint(
+                        x:  rx * cosT + ry * sinT + cx,
+                        y: -rx * sinT + ry * cosT + cy
+                    )
+                }
+                let xs = rotated.map(\.x)
+                let ys = rotated.map(\.y)
+                let minX = xs.min()!
+                let maxX = xs.max()!
+                let minY = ys.min()!
+                let maxY = ys.max()!
+                return CGRect(x: minX, y: minY,
+                              width: maxX - minX, height: maxY - minY)
+            }()
+
+            let tileKeys = grid.tilesIntersecting(dirtyRect)
             let tileSize = grid.tileSize
             let texW = layer.width
             let texH = layer.height
