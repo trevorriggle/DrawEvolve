@@ -738,6 +738,64 @@ class CanvasRenderer: NSObject {
     }
     #endif
 
+    // MARK: - Snapshot staging atlas (Phase 4.2)
+    //
+    // Lazy-allocated canvas-sized .shared MTLTexture used as a blit-
+    // destination intermediate for tile-native snapshot reads. Tile
+    // textures are .private (TileGrid.swift:111), so CPU readback of
+    // tile contents requires a blit through a .shared surface. The
+    // atlas is sized to the renderer's current canvasSize and reused
+    // across every captureSnapshot / restoreSnapshot / floodFill call
+    // that needs CPU-side tile pixels (4.2b–4.2d). canvasSize change
+    // (rare today — the cap at 2048 keeps it static; see N5 in the
+    // master audit) forces a reallocation on the next ensure call.
+    //
+    // Memory: 16 MB at 2048², 64 MB at 4096². Same allocation profile
+    // as the original monolithic LayerSnapshot.pixels buffer — just
+    // held as a GPU/CPU staging surface instead of a one-shot CPU
+    // buffer. Allocated lazily on first snapshot so renderers that
+    // never snapshot don't pay the cost.
+    //
+    // Pattern mirrors the verifier staging texture at ~line 532 but at
+    // canvas size instead of tile size. Both are .shared (.private
+    // can't be getBytes'd) and both serve as a one-way GPU→CPU bridge.
+    private var snapshotStagingAtlas: MTLTexture?
+
+    /// Return a canvas-sized .shared MTLTexture suitable as a blit
+    /// destination for tile reads. Reused across calls; reallocates if
+    /// the renderer's `canvasSize` has changed since the last call.
+    ///
+    /// Returns nil only on Metal allocation failure (out of GPU memory)
+    /// or zero/negative canvasSize. Callers should treat nil as a
+    /// failed operation and back out cleanly (return early, skip the
+    /// snapshot, etc.) — DO NOT proceed assuming a valid atlas.
+    ///
+    /// Phase 4.2 foundation. Consumers land in 4.2b–4.2d.
+    private func ensureSnapshotStagingAtlas() -> MTLTexture? {
+        let targetW = Int(canvasSize.width)
+        let targetH = Int(canvasSize.height)
+        guard targetW > 0, targetH > 0 else { return nil }
+
+        if let existing = snapshotStagingAtlas,
+           existing.width == targetW,
+           existing.height == targetH {
+            return existing
+        }
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: targetW, height: targetH,
+            mipmapped: false
+        )
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead]
+        guard let atlas = device.makeTexture(descriptor: desc) else {
+            return nil
+        }
+        snapshotStagingAtlas = atlas
+        return atlas
+    }
+
     /// Create a new texture for a layer
     func createLayerTexture() -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
