@@ -768,20 +768,20 @@ class CanvasStateManager: ObservableObject {
 
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let cachedTexture = ft.cachedTexture else {
             print("⚠️ commitFloatingText: missing layer/texture/cached image — discarding")
             return
         }
 
-        let beforeSnapshot = renderer.captureSnapshot(tileGrid: layers[selectedLayerIndex].tileGrid)
+        let beforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
 
         let displayed = ft.displayedRect
         let docRect = displayed
         renderer.compositeFloatingTextureIntoLayer(
             cachedTexture,
-            into: texture,
-            tileGrid: layers[selectedLayerIndex].tileGrid,
+            tileGrid: tileGrid,
             atDocRect: docRect,
             rotation: Float(ft.rotation.radians)
         )
@@ -1742,6 +1742,7 @@ class CanvasStateManager: ObservableObject {
     func commitSelection() {
         guard selectedLayerIndex < layers.count,
               let texture = layers[selectedLayerIndex].texture,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let beforeSnapshot = selectionBeforeSnapshot else {
             print("ERROR: Cannot commit selection - missing data")
@@ -1761,8 +1762,7 @@ class CanvasStateManager: ObservableObject {
             )
             renderer.compositeFloatingTextureIntoLayer(
                 floating,
-                into: texture,
-                tileGrid: layers[selectedLayerIndex].tileGrid,
+                tileGrid: tileGrid,
                 atDocRect: finalRect,
                 rotation: Float(selectionRotation.radians)
             )

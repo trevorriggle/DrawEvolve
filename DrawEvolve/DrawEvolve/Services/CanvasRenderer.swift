@@ -1690,20 +1690,95 @@ class CanvasRenderer: NSObject {
     /// identity for the bake — we're writing into canvas-space, not screen.
     func compositeFloatingTextureIntoLayer(
         _ floating: MTLTexture,
-        into layer: MTLTexture,
-        tileGrid: TileGrid? = nil,
+        tileGrid: TileGrid,
         atDocRect docRect: CGRect,
         rotation: Float = 0.0
     ) {
         guard let pipelineState = floatingTexturePipelineState,
+              let atlas = ensureCanvasStagingAtlas(),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
             print("ERROR: Cannot composite floating texture")
             return
         }
 
+        let atlasW = atlas.width
+        let atlasH = atlas.height
+        let tileSize = tileGrid.tileSize
+
+        // Convert doc rect into canvas-pixel rect for shader and bbox calc.
+        let scale = CGFloat(atlasW) / canvasSize.width
+        let pixelRect = CGRect(
+            x: docRect.origin.x * scale,
+            y: docRect.origin.y * scale,
+            width: docRect.width * scale,
+            height: docRect.height * scale
+        )
+
+        // Rotated AABB: rotate pixelRect's four corners by `rotation` radians
+        // around the rect center, then take the axis-aligned bounding box of
+        // the rotated corners. Matches the shader's R(-θ) sign convention
+        // exactly so the tile-key set covers every pixel the shader could
+        // touch. The `rotation == 0` early return is an optimization; the
+        // math degenerates correctly when rotation is 0 (corners map to
+        // themselves → AABB == pixelRect).
+        let dirtyRect: CGRect = {
+            if rotation == 0 { return pixelRect }
+            let cx = pixelRect.midX
+            let cy = pixelRect.midY
+            let cosT = cos(CGFloat(rotation))
+            let sinT = sin(CGFloat(rotation))
+            let corners: [CGPoint] = [
+                CGPoint(x: pixelRect.minX, y: pixelRect.minY),
+                CGPoint(x: pixelRect.maxX, y: pixelRect.minY),
+                CGPoint(x: pixelRect.minX, y: pixelRect.maxY),
+                CGPoint(x: pixelRect.maxX, y: pixelRect.maxY),
+            ]
+            let rotated = corners.map { p -> CGPoint in
+                let rx = p.x - cx
+                let ry = p.y - cy
+                return CGPoint(
+                    x:  rx * cosT + ry * sinT + cx,
+                    y: -rx * sinT + ry * cosT + cy
+                )
+            }
+            let xs = rotated.map(\.x)
+            let ys = rotated.map(\.y)
+            let minX = xs.min()!
+            let maxX = xs.max()!
+            let minY = ys.min()!
+            let maxY = ys.max()!
+            return CGRect(x: minX, y: minY,
+                          width: maxX - minX, height: maxY - minY)
+        }()
+
+        let tileKeys = tileGrid.tilesIntersecting(dirtyRect)
+
+        // Compose tile state for the dirty bbox into the atlas so the
+        // shader's loadAction=.load reads current layer pixels.
+        if !tileKeys.isEmpty, let composeBlit = commandBuffer.makeBlitCommandEncoder() {
+            for key in tileKeys {
+                guard let tile = tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                composeBlit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            composeBlit.endEncoding()
+        }
+
         let descriptor = MTLRenderPassDescriptor()
-        descriptor.colorAttachments[0].texture = layer
-        descriptor.colorAttachments[0].loadAction = .load   // preserve existing layer pixels
+        descriptor.colorAttachments[0].texture = atlas
+        descriptor.colorAttachments[0].loadAction = .load   // preserve composed pixels
         descriptor.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
@@ -1716,150 +1791,64 @@ class CanvasRenderer: NSObject {
         var opacity: Float = 1.0
         encoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.stride, index: 0)
 
-        // Identity transform — we render in canvas/doc space, viewport == layer size.
+        // Identity transform — we render in canvas/doc space, viewport == atlas size.
         var transform = SIMD4<Float>(1.0, 0.0, 0.0, 0.0)
         encoder.setVertexBytes(&transform, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
 
-        var viewport = SIMD2<Float>(Float(layer.width), Float(layer.height))
+        var viewport = SIMD2<Float>(Float(atlasW), Float(atlasH))
         encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
 
-        // canvasSize uniform must match the texture-pixel coordinate space we're
-        // writing into. Layer pixel dims serve as both viewport and canvas here
-        // because the doc-space rect maps 1:1 onto layer pixels.
-        var canvas = SIMD2<Float>(Float(layer.width), Float(layer.height))
+        var canvas = SIMD2<Float>(Float(atlasW), Float(atlasH))
         encoder.setVertexBytes(&canvas, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
 
-        // Convert doc rect into layer-pixel-space rect for the shader. Rest of
-        // the codebase treats docSize == layer size 1:1, but we scale through
-        // canvasSize.width to be explicit so this stays correct if that ever
-        // changes.
-        let scale = CGFloat(layer.width) / canvasSize.width
         var rect = SIMD4<Float>(
-            Float(docRect.origin.x * scale),
-            Float(docRect.origin.y * scale),
-            Float(docRect.width * scale),
-            Float(docRect.height * scale)
+            Float(pixelRect.origin.x),
+            Float(pixelRect.origin.y),
+            Float(pixelRect.width),
+            Float(pixelRect.height)
         )
         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 3)
 
         var rot = rotation
         encoder.setVertexBytes(&rot, length: MemoryLayout<Float>.stride, index: 4)
 
-        // Flip is identity here — we're baking into the layer texture in
+        // Flip is identity here — we're baking into the layer's tiles in
         // canvas-space, where the user's display flip doesn't apply.
-        // Layer textures are unaffected by the display flip; only the
-        // per-frame screen composite mirrors. Passing zero ensures the
-        // shader's required buffer slot is bound.
         var flip = SIMD2<Float>(0, 0)
         encoder.setVertexBytes(&flip, length: MemoryLayout<SIMD2<Float>>.stride, index: 5)
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
 
-        // === Phase 2 Task 4.3: tile-grid dual-write (blit from monolithic) =
-        //
-        // After the monolithic composite ends, blit the affected tiles
-        // from `layer` (monolithic) into the TileGrid on the SAME command
-        // buffer. Bit-exact by construction. Replaces the original
-        // per-tile re-render approach (with the viewport+canvasSize
-        // substitution trick), which inherited renderStroke's
-        // ±1 LSB rasterizer drift via the alpha-over blend (the
-        // post-renderStroke tile state diverged slightly from monolithic,
-        // and the composite preserved that divergence — visible in soak
-        // as catastrophic ±16+ mismatches).
-        //
-        // Selection rotation is applied by the shader (R(-θ) around rect
-        // center, Shaders.metal:309-346). Pixel content in monolithic IS
-        // the post-rotation result — we copy verbatim from monolithic to
-        // tiles. But the tile-key set must cover the rotated extent, not
-        // the un-rotated input rect, because shader-rotation moves pixels
-        // outside pixelRect's AABB. Master audit C2.
-        if let grid = tileGrid {
-            // pixelRect: docRect converted to layer-pixel space, same
-            // scale the monolithic pass used above.
-            let pixelRect = CGRect(
-                x: docRect.origin.x * scale,
-                y: docRect.origin.y * scale,
-                width: docRect.width * scale,
-                height: docRect.height * scale
-            )
-
-            // Rotated AABB: rotate pixelRect's four corners by `rotation`
-            // radians around the rect center, then take the axis-aligned
-            // bounding box of the rotated corners. Matches the shader's
-            // R(-θ) sign convention exactly so the tile-key set covers
-            // every pixel the shader could touch.
-            //
-            // The `rotation == 0` early return is an OPTIMIZATION, not a
-            // correctness requirement — the rotated-AABB math degenerates
-            // correctly when rotation is exactly 0 (cosθ=1, sinθ=0 → each
-            // corner maps to itself → AABB == pixelRect) or tiny-but-
-            // nonzero. Future readers should not treat the early return
-            // as a special case to preserve when refactoring.
-            let dirtyRect: CGRect = {
-                if rotation == 0 { return pixelRect }
-                let cx = pixelRect.midX
-                let cy = pixelRect.midY
-                let cosT = cos(CGFloat(rotation))
-                let sinT = sin(CGFloat(rotation))
-                let corners: [CGPoint] = [
-                    CGPoint(x: pixelRect.minX, y: pixelRect.minY),
-                    CGPoint(x: pixelRect.maxX, y: pixelRect.minY),
-                    CGPoint(x: pixelRect.minX, y: pixelRect.maxY),
-                    CGPoint(x: pixelRect.maxX, y: pixelRect.maxY),
-                ]
-                let rotated = corners.map { p -> CGPoint in
-                    let rx = p.x - cx
-                    let ry = p.y - cy
-                    return CGPoint(
-                        x:  rx * cosT + ry * sinT + cx,
-                        y: -rx * sinT + ry * cosT + cy
-                    )
-                }
-                let xs = rotated.map(\.x)
-                let ys = rotated.map(\.y)
-                let minX = xs.min()!
-                let maxX = xs.max()!
-                let minY = ys.min()!
-                let maxY = ys.max()!
-                return CGRect(x: minX, y: minY,
-                              width: maxX - minX, height: maxY - minY)
-            }()
-
-            let tileKeys = grid.tilesIntersecting(dirtyRect)
-            let tileSize = grid.tileSize
-            let texW = layer.width
-            let texH = layer.height
-
-            if !tileKeys.isEmpty {
+        // === Phase 4.5c: blit modified atlas region into tile grid ========
+        if !tileKeys.isEmpty {
+            for key in tileKeys {
+                _ = tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
+            }
+            if let blit = commandBuffer.makeBlitCommandEncoder() {
                 for key in tileKeys {
-                    _ = grid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: commandBuffer)
-                }
-                if let blit = commandBuffer.makeBlitCommandEncoder() {
-                    for key in tileKeys {
-                        let srcX = key.x * tileSize
-                        let srcY = key.y * tileSize
-                        let blitW = min(tileSize, texW - srcX)
-                        let blitH = min(tileSize, texH - srcY)
-                        if blitW <= 0 || blitH <= 0 { continue }
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, atlasW - srcX)
+                    let blitH = min(tileSize, atlasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
 
-                        grid.updateTile(at: key) { tile in
-                            blit.copy(
-                                from: layer,
-                                sourceSlice: 0, sourceLevel: 0,
-                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
-                                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
-                                to: tile.texture,
-                                destinationSlice: 0, destinationLevel: 0,
-                                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                            )
-                        }
+                    tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
                     }
-                    blit.endEncoding()
                 }
+                blit.endEncoding()
             }
         }
-        // === End dual-write block ========================================
+        // === End atlas → tile blit block =================================
 
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
