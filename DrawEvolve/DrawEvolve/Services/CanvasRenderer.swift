@@ -2085,6 +2085,20 @@ class CanvasRenderer: NSObject {
             return
         }
 
+        // Source B fix: clear the FULL atlas before compose. Translate
+        // copies all-of-atlas into temp at step 2 (regardless of bbox),
+        // then step 4 blits a shifted source region from temp back into
+        // atlas. If atlas had stale pixels in unallocated tile regions
+        // pre-compose, those stale pixels would land in temp, then in
+        // the translated atlas, then in the post-translate tile grid.
+        // Full-canvas clear required (not tile-aligned) because temp's
+        // entire content is read by step 4's offset blit.
+        let fullCanvasRegion = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: atlasW, height: atlasH, depth: 1)
+        )
+        clearCanvasStagingAtlasRegion(fullCanvasRegion, on: commandBuffer)
+
         // 1. Compose every allocated tile into the atlas at its canvas
         //    position so we have a current-content source to translate.
         if let blit = commandBuffer.makeBlitCommandEncoder() {
