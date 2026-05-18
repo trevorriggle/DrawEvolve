@@ -391,10 +391,13 @@ struct MetalCanvasView: UIViewRepresentable {
         // window resize). DEBUG-only — Release builds never touch these.
         //
         // `monoShadowTexture` receives the monolithic layer-composite
-        // path (renderTextureToScreen per visible layer).
+        // path (single render pass — renderCanvasBackground + per-layer
+        // renderTextureToScreen on one encoder).
         // `tileShadowTexture` receives the tile layer-composite path
-        // (renderTileGridToScreen per visible layer, which sequences
-        // Phase 3's tile composite + the existing display transform).
+        // (background pass + per-layer compose-into-intermediate +
+        // draw-intermediate-onto-shadow, all within one cb so Metal
+        // hazard tracking serializes the intermediate's per-layer
+        // write/read sequence).
         // `verifyParallelDisplayMatchesMonolithic` compares them byte-
         // by-byte at sample frames.
         #if DEBUG
@@ -1112,30 +1115,27 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Render monolithic-source composite into monoShadow.
+            // Render monolithic-source composite into monoShadow. Single
+            // cb with one render pass — per-layer renderTextureToScreen
+            // onto the same encoder.
             guard let monoCB = renderer.commandQueue.makeCommandBuffer() else { return }
-            let monoDesc = MTLRenderPassDescriptor()
-            monoDesc.colorAttachments[0].texture = monoShadow
-            monoDesc.colorAttachments[0].loadAction = .clear
-            monoDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-            monoDesc.colorAttachments[0].storeAction = .store
-            guard let monoEnc = monoCB.makeRenderCommandEncoder(descriptor: monoDesc) else { return }
-            encodeLayerComposite(into: monoEnc, view: view, useTilePath: false)
-            monoEnc.endEncoding()
+            encodeLayerComposite(into: monoCB, target: monoShadow, view: view, useTilePath: false)
             monoCB.commit()
 
-            // Render tile-source composite into tileShadow. Same setup
-            // and same caller-side ops; only the per-layer render call
-            // differs (renderTextureToScreen vs renderTileGridToScreen).
+            // Render tile-source composite into tileShadow. Single cb
+            // with multiple render passes — per-layer compose-into-
+            // intermediate then draw-onto-shadow, alternating. Metal's
+            // hazard tracking serializes the intermediate's writes
+            // against the subsequent reads across passes, so each
+            // layer's draw reads its own intermediate state.
+            //
+            // Phase 4.3 H2 fix replaces the broken renderTileGridToScreen
+            // (4.3b) whose single-shared-intermediate model raced when
+            // called multiple times on a single outer encoder — the
+            // shared intermediate ended up holding the LAST-composed
+            // layer's content for ALL the per-layer draws.
             guard let tileCB = renderer.commandQueue.makeCommandBuffer() else { return }
-            let tileDesc = MTLRenderPassDescriptor()
-            tileDesc.colorAttachments[0].texture = tileShadow
-            tileDesc.colorAttachments[0].loadAction = .clear
-            tileDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-            tileDesc.colorAttachments[0].storeAction = .store
-            guard let tileEnc = tileCB.makeRenderCommandEncoder(descriptor: tileDesc) else { return }
-            encodeLayerComposite(into: tileEnc, view: view, useTilePath: true)
-            tileEnc.endEncoding()
+            encodeLayerComposite(into: tileCB, target: tileShadow, view: view, useTilePath: true)
             tileCB.commit()
 
             // Wait for both shadow renders to complete on the GPU before
@@ -1150,21 +1150,44 @@ struct MetalCanvasView: UIViewRepresentable {
             )
         }
 
-        /// Encode the layer-composite slice of the display loop into
-        /// the given encoder. Used by both shadow renders. Branches on
-        /// `useTilePath` for the per-layer call. Mirrors draw(in:)'s
-        /// background + layer-iteration steps verbatim, dropping the
-        /// overlays (translate preview, floating selection/text,
-        /// stroke preview, references, marching ants) — they're
-        /// identical in both paths and don't affect the comparison.
+        /// Encode the layer-composite slice of the display loop onto the
+        /// given command buffer, targeting `target`. Used by both shadow
+        /// renders. Branches on `useTilePath`:
         ///
-        /// Drift between this and the real draw(in:) is the WHOLE
-        /// point — if draw(in:) gains a new layer-render path that
-        /// this helper doesn't mirror, the verifier mismatch surfaces
-        /// the drift. Audit § 4.3c open question 1 went with Option A
-        /// (inline) over Option B (refactor for sharing) for this
-        /// reason.
-        private func encodeLayerComposite(into encoder: MTLRenderCommandEncoder,
+        ///   - **Mono path (false):** ONE render pass on `target`. Clear,
+        ///     background, per-layer renderTextureToScreen — same shape
+        ///     as the actual draw(in:) layer loop.
+        ///
+        ///   - **Tile path (true):** N+1 alternating render passes on the
+        ///     same cb. Pass 1 = clear `target` + background. Then per
+        ///     visible layer: render pass writing the layer's tile
+        ///     content into `tileDisplayIntermediate` (cleared on load),
+        ///     followed by a render pass drawing the intermediate onto
+        ///     `target` (.load to preserve background + prior layers) at
+        ///     layer.opacity. Metal's render-pass hazard tracking
+        ///     serializes intermediate writes against subsequent reads
+        ///     within the same cb — no explicit waitUntilCompleted per
+        ///     layer needed.
+        ///
+        /// Why the tile path can't use a single encoder: the intermediate
+        /// would be in its LAST-composed-layer state by the time any
+        /// draw on a shared encoder executes (Metal flushes all writes
+        /// before any reads in a single encoder). Separate render
+        /// passes per layer let hazard tracking enforce the per-layer
+        /// write/read order.
+        ///
+        /// Mirrors draw(in:)'s background + layer-iteration steps verbatim,
+        /// dropping the overlays (translate preview, floating selection/
+        /// text, stroke preview, references, marching ants) — both paths
+        /// skip them, so they don't affect the comparison.
+        ///
+        /// Drift between this and the real draw(in:) is the WHOLE point —
+        /// if draw(in:) gains a new layer-render path that this helper
+        /// doesn't mirror, the verifier mismatch surfaces the drift.
+        /// Audit § 4.3c open question 1 went with Option A (inline) over
+        /// Option B (refactor for sharing) for this reason.
+        private func encodeLayerComposite(into commandBuffer: MTLCommandBuffer,
+                                          target: MTLTexture,
                                           view: MTKView,
                                           useTilePath: Bool) {
             guard let renderer = renderer else { return }
@@ -1175,47 +1198,77 @@ struct MetalCanvasView: UIViewRepresentable {
             let flipH = MainActor.assumeIsolated { canvasState?.flipHorizontal ?? false }
             let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
             let flipState = SIMD2<Float>(flipH ? 1 : 0, flipV ? 1 : 0)
+            let zoomF = Float(zoomScale)
+            let panF = SIMD2<Float>(Float(panOffset.x), Float(panOffset.y))
+            let rotF = Float(rotation)
+            let viewportF = SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
 
-            renderer.renderCanvasBackground(
-                to: encoder,
-                zoomScale: Float(zoomScale),
-                panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
-                canvasRotation: Float(rotation),
-                viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
-                flipState: flipState
-            )
+            if !useTilePath {
+                // Mono path: one render pass with clear + background +
+                // per-layer renderTextureToScreen onto the same encoder.
+                let desc = MTLRenderPassDescriptor()
+                desc.colorAttachments[0].texture = target
+                desc.colorAttachments[0].loadAction = .clear
+                desc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                desc.colorAttachments[0].storeAction = .store
+                guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: desc) else { return }
 
-            // Per-layer composite. Skips blur-preview swap and translate
-            // preview overlay — both render identically in the two paths
-            // anyway (they read renderer-owned monolithic intermediates,
-            // not the layer's tile grid). The verifier surface IS the
-            // raw layer.texture vs layer.tileGrid comparison.
-            for layer in layers where layer.isVisible {
-                if useTilePath {
-                    guard let grid = layer.tileGrid else { continue }
-                    renderer.renderTileGridToScreen(
-                        grid,
-                        layerOpacity: layer.opacity,
-                        to: encoder,
-                        zoomScale: Float(zoomScale),
-                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
-                        canvasRotation: Float(rotation),
-                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
-                        flipState: flipState
-                    )
-                } else {
+                renderer.renderCanvasBackground(
+                    to: enc, zoomScale: zoomF, panOffset: panF,
+                    canvasRotation: rotF, viewportSize: viewportF, flipState: flipState
+                )
+                for layer in layers where layer.isVisible {
                     guard let texture = layer.texture else { continue }
                     renderer.renderTextureToScreen(
-                        texture,
-                        to: encoder,
-                        opacity: layer.opacity,
-                        zoomScale: Float(zoomScale),
-                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
-                        canvasRotation: Float(rotation),
-                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
-                        flipState: flipState
+                        texture, to: enc, opacity: layer.opacity,
+                        zoomScale: zoomF, panOffset: panF, canvasRotation: rotF,
+                        viewportSize: viewportF, flipState: flipState
                     )
                 }
+                enc.endEncoding()
+                return
+            }
+
+            // Tile path: alternating compose + draw render passes within
+            // one cb. Pass 0 = clear target + background.
+            let bgDesc = MTLRenderPassDescriptor()
+            bgDesc.colorAttachments[0].texture = target
+            bgDesc.colorAttachments[0].loadAction = .clear
+            bgDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            bgDesc.colorAttachments[0].storeAction = .store
+            if let bgEnc = commandBuffer.makeRenderCommandEncoder(descriptor: bgDesc) {
+                renderer.renderCanvasBackground(
+                    to: bgEnc, zoomScale: zoomF, panOffset: panF,
+                    canvasRotation: rotF, viewportSize: viewportF, flipState: flipState
+                )
+                bgEnc.endEncoding()
+            }
+
+            // Per-layer: compose pass into intermediate, then draw pass
+            // onto target with .load (preserving background + prior
+            // layers' contributions).
+            for layer in layers where layer.isVisible {
+                guard let grid = layer.tileGrid else { continue }
+
+                // Compose this layer's tiles into the shared intermediate
+                // (cleared on load — wipes any prior layer's content).
+                renderer.encodeLayerTileCompositeOntoIntermediate(grid, on: commandBuffer)
+
+                // Draw the intermediate onto the shadow target with this
+                // layer's opacity. .load preserves prior layers' alpha-
+                // blended contributions.
+                guard let intermediate = renderer.tileDisplayIntermediate else { continue }
+                let drawDesc = MTLRenderPassDescriptor()
+                drawDesc.colorAttachments[0].texture = target
+                drawDesc.colorAttachments[0].loadAction = .load
+                drawDesc.colorAttachments[0].storeAction = .store
+                guard let drawEnc = commandBuffer.makeRenderCommandEncoder(descriptor: drawDesc) else { continue }
+                renderer.renderTextureToScreen(
+                    intermediate, to: drawEnc, opacity: layer.opacity,
+                    zoomScale: zoomF, panOffset: panF, canvasRotation: rotF,
+                    viewportSize: viewportF, flipState: flipState
+                )
+                drawEnc.endEncoding()
             }
         }
         #endif
