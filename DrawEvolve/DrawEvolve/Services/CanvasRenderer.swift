@@ -3032,67 +3032,230 @@ class CanvasRenderer: NSObject {
     /// the composite path (Phase 3) would render blank in any region whose
     /// tiles were dropped between snapshot and restore (the translate-undo
     /// case). This is the structural prerequisite for Phase 3's correctness.
+    ///
+    /// Phase 4.2b: the canonical field is now `tiles: [TileKey: Data]` —
+    /// per-tile pixel buffers keyed by tile coord. The legacy `pixels`
+    /// (full-canvas contiguous buffer) and `allocatedKeys` (keyspace array)
+    /// fields are presented as **bridge computed properties** for
+    /// restoreSnapshot's continued use. Both bridges are removed in 4.2c
+    /// when restoreSnapshot becomes tile-native.
+    ///
+    /// Per-tile buffer layout: each `tiles[key]` Data is sized exactly
+    /// `copyW × copyH × 4` bytes where copyW = min(tileSize, canvasWidth -
+    /// key.x*tileSize) and similarly for copyH. Partial-edge tiles (last
+    /// column/row on a non-tile-aligned canvas) get smaller buffers. No
+    /// slop bytes. captureSnapshot is the sole producer; the
+    /// canvasWidth/canvasHeight/tileSize fields let the bridge invert the
+    /// per-tile geometry on the consumer side without reading the renderer.
     struct LayerSnapshot {
-        let pixels: Data
-        let allocatedKeys: [TileKey]
+        let tiles: [TileKey: Data]
+        let canvasWidth: Int
+        let canvasHeight: Int
+        let tileSize: Int
+
+        /// Bridge — keyspace as an array. Used by restoreSnapshot's
+        /// drop-tiles-not-in-snapshot + ensure-tiles-in-snapshot loops at
+        /// CanvasRenderer.swift:3165–3177 (pre-4.2c lines). Removed in
+        /// 4.2c when restoreSnapshot reads `tiles.keys` directly.
+        var allocatedKeys: [TileKey] { Array(tiles.keys) }
+
+        /// Bridge — full-canvas contiguous buffer reassembled on demand.
+        /// Used by restoreSnapshot's `texture.replace` at line ~3150
+        /// (pre-4.2c). Each access allocates 16–64 MB transiently;
+        /// freed when the returned Data goes out of scope. Removed in
+        /// 4.2c when restoreSnapshot writes per-tile from `tiles` directly.
+        ///
+        /// Reassembly math inverts captureSnapshot's per-tile layout:
+        /// every tile's Data is laid out at srcBytesPerRow = copyW × 4
+        /// (no slop), and the bridge memcpy's row-by-row into the full-
+        /// canvas buffer at the tile's in-canvas position (dstX, dstY) =
+        /// (key.x × tileSize, key.y × tileSize). Empty `tiles` →
+        /// zero-filled buffer (matches the legacy
+        /// `allocatedKeys.isEmpty → drop everything` semantic on restore).
+        var pixels: Data {
+            let dstBytesPerRow = canvasWidth * 4
+            var buf = Data(count: dstBytesPerRow * canvasHeight)
+
+            guard !tiles.isEmpty else { return buf }
+
+            buf.withUnsafeMutableBytes { dstRawPtr in
+                guard let dstBase = dstRawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return
+                }
+                for (key, tileData) in tiles {
+                    let dstX = key.x * tileSize
+                    let dstY = key.y * tileSize
+                    let copyW = min(tileSize, canvasWidth - dstX)
+                    let copyH = min(tileSize, canvasHeight - dstY)
+                    // Defensive: a tile whose key lies past the canvas
+                    // contributes nothing. captureSnapshot won't produce
+                    // this; guard for value-typed struct round-trips.
+                    if copyW <= 0 || copyH <= 0 { continue }
+
+                    let srcBytesPerRow = copyW * 4
+                    // Defensive: tileData size must match the expected
+                    // (copyW × copyH × 4) layout. Skip if mismatched —
+                    // partial data would produce row-misaligned garbage.
+                    if tileData.count != srcBytesPerRow * copyH { continue }
+
+                    tileData.withUnsafeBytes { srcRawPtr in
+                        guard let srcBase = srcRawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                            return
+                        }
+                        for row in 0..<copyH {
+                            let dstOffset = (dstY + row) * dstBytesPerRow + dstX * 4
+                            let srcOffset = row * srcBytesPerRow
+                            memcpy(dstBase.advanced(by: dstOffset),
+                                   srcBase.advanced(by: srcOffset),
+                                   srcBytesPerRow)
+                        }
+                    }
+                }
+            }
+            return buf
+        }
+
+        /// Total byte count across all tile buffers. Replaces the
+        /// pre-4.2b `snapshot.pixels.count` diagnostic — useful for the
+        /// before/after byte-size logging at stroke commit and undo.
+        var totalByteCount: Int {
+            tiles.values.reduce(0) { $0 + $1.count }
+        }
     }
 
-    /// Capture a snapshot of a texture's pixel data + tile-grid keyspace
-    /// for undo/redo. Pass `tileGrid` to capture keyspace fidelity; without
-    /// it (legacy callers) the snapshot has an empty keyspace and restore
-    /// drops the tile grid entirely on rollback (caller-aware degradation).
+    /// Capture a snapshot of a layer's tile-grid contents for undo/redo.
+    /// Tile-native via the shared staging atlas (Phase 4.2b):
+    ///   1. Ensure the atlas exists at current canvasSize.
+    ///   2. Blit every allocated tile from `grid` into its in-canvas
+    ///      position on the atlas, on a single command buffer.
+    ///   3. commit + waitUntilCompleted.
+    ///   4. getBytes per tile from the atlas into a per-tile Data buffer
+    ///      sized exactly to the tile's in-canvas footprint (partial-
+    ///      edge tiles get smaller buffers; no slop).
+    ///
+    /// Returns nil on Metal allocation failure or a missing tileGrid.
+    /// nil-tileGrid is no longer a supported path (Phase 4.5 removes the
+    /// optional entirely); the empty-tile-grid case (grid present,
+    /// `allocatedKeys().isEmpty`) IS supported and produces a snapshot
+    /// with empty `tiles` — a legitimate empty-layer snapshot.
+    ///
+    /// The `texture` parameter is no longer read for pixel content
+    /// (post-4.2b reads come from tile textures via the atlas) but is
+    /// retained for caller-side ergonomics + the canvas-pixel
+    /// dimensions. Phase 4.5 removes the parameter.
     ///
     /// TODO: audit whether captureSnapshot needs drainCommandQueue
     /// protection from in-flight strokes (race shape: cap-for-op-N+1
-    /// while op-N deposit still async). Different from the touchesCancelled
-    /// race fixed in restoreSnapshot.
+    /// while op-N deposit still async). Different from the
+    /// touchesCancelled race fixed in restoreSnapshot.
     func captureSnapshot(of texture: MTLTexture, tileGrid: TileGrid? = nil) -> LayerSnapshot? {
-        // Verify texture is readable (iOS only supports .shared for CPU access)
-        #if os(iOS)
-        guard texture.storageMode == .shared else {
-            print("ERROR: Cannot capture snapshot - texture storage mode is \(texture.storageMode.rawValue) (need .shared)")
-            return nil
-        }
-        #else
-        guard texture.storageMode == .shared || texture.storageMode == .managed else {
-            print("ERROR: Cannot capture snapshot - texture storage mode is \(texture.storageMode.rawValue) (need .shared or .managed)")
-            return nil
-        }
-        #endif
-
-        let width = texture.width
-        let height = texture.height
-        let bytesPerRow = width * 4
-        let dataSize = bytesPerRow * height
-
-        guard dataSize > 0 else {
-            print("ERROR: Invalid texture size for snapshot")
+        let canvasW = texture.width
+        let canvasH = texture.height
+        guard canvasW > 0, canvasH > 0 else {
+            print("ERROR: captureSnapshot — invalid texture dimensions (\(canvasW)×\(canvasH))")
             return nil
         }
 
-        var pixelData = Data(count: dataSize)
+        guard let grid = tileGrid else {
+            // nil tileGrid path is deprecated. Pre-Phase-4.2 it read the
+            // monolithic via getBytes; post-4.2b, tile-grid is the source
+            // of truth and a nil grid means no content to snapshot.
+            // Return nil so callers fail explicitly rather than silently
+            // storing zeros. Phase 4.5 removes the optional entirely.
+            print("ERROR: captureSnapshot — nil tileGrid is no longer supported (Phase 4.2b)")
+            return nil
+        }
 
-        let success = pixelData.withUnsafeMutableBytes { ptr -> Bool in
-            guard let baseAddress = ptr.baseAddress else {
-                print("ERROR: Failed to get base address for pixel data")
-                return false
+        let tileSize = grid.tileSize
+        let allocated = grid.allocatedKeys()
+
+        // Empty-grid case is legitimate (just-created layer that has no
+        // tiles allocated yet). Return an empty-tiles snapshot — restore
+        // interprets `tiles.keys.isEmpty` as "drop everything," which
+        // matches the pre-4.2 `allocatedKeys.isEmpty` semantic.
+        if allocated.isEmpty {
+            return LayerSnapshot(tiles: [:],
+                                 canvasWidth: canvasW,
+                                 canvasHeight: canvasH,
+                                 tileSize: tileSize)
+        }
+
+        guard let atlas = ensureSnapshotStagingAtlas() else {
+            print("ERROR: captureSnapshot — failed to ensure staging atlas")
+            return nil
+        }
+
+        guard let cb = commandQueue.makeCommandBuffer() else {
+            print("ERROR: captureSnapshot — failed to create command buffer")
+            return nil
+        }
+
+        // Blit each allocated tile into its canvas-pixel position on the
+        // atlas. Single command buffer; one waitUntilCompleted. Atlas is
+        // reused across snapshots — captureSnapshot only consumes it via
+        // getBytes in this scope, so any pixels remaining from a previous
+        // snapshot's tiles get overwritten by new blits (or sit in tiles
+        // not in this snapshot's keyspace; harmless because we only
+        // getBytes from the keys we just blitted).
+        if let blit = cb.makeBlitCommandEncoder() {
+            for key in allocated {
+                guard let tile = grid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, canvasW - dstX)
+                let copyH = min(tileSize, canvasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                blit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
             }
+            blit.endEncoding()
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
 
-            texture.getBytes(
-                baseAddress,
-                bytesPerRow: bytesPerRow,
-                from: MTLRegion(
-                    origin: MTLOrigin(x: 0, y: 0, z: 0),
-                    size: MTLSize(width: width, height: height, depth: 1)
-                ),
-                mipmapLevel: 0
-            )
-            return true
+        // getBytes per tile from the atlas at the tile's in-canvas
+        // position. Each per-tile buffer is sized EXACTLY to the tile's
+        // in-canvas footprint — partial-edge tiles get smaller buffers,
+        // no slop. The bridge `.pixels` computed property inverts this
+        // layout on the consumer side.
+        var tiles: [TileKey: Data] = [:]
+        tiles.reserveCapacity(allocated.count)
+
+        for key in allocated {
+            let dstX = key.x * tileSize
+            let dstY = key.y * tileSize
+            let copyW = min(tileSize, canvasW - dstX)
+            let copyH = min(tileSize, canvasH - dstY)
+            if copyW <= 0 || copyH <= 0 { continue }
+
+            let bytesPerRow = copyW * 4
+            var data = Data(count: bytesPerRow * copyH)
+            data.withUnsafeMutableBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                atlas.getBytes(
+                    base,
+                    bytesPerRow: bytesPerRow,
+                    from: MTLRegion(
+                        origin: MTLOrigin(x: dstX, y: dstY, z: 0),
+                        size: MTLSize(width: copyW, height: copyH, depth: 1)
+                    ),
+                    mipmapLevel: 0
+                )
+            }
+            tiles[key] = data
         }
 
-        guard success else { return nil }
-        return LayerSnapshot(pixels: pixelData,
-                             allocatedKeys: tileGrid?.allocatedKeys() ?? [])
+        return LayerSnapshot(tiles: tiles,
+                             canvasWidth: canvasW,
+                             canvasHeight: canvasH,
+                             tileSize: tileSize)
     }
 
     /// Block the caller until every command buffer previously committed

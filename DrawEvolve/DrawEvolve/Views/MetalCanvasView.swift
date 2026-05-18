@@ -2307,7 +2307,7 @@ struct MetalCanvasView: UIViewRepresentable {
                                 beforeSnapshot: before,
                                 afterSnapshot: after
                             ))
-                            print("Smudge: recorded stroke undo (before: \(before.pixels.count)B, after: \(after.pixels.count)B)")
+                            print("Smudge: recorded stroke undo (before: \(before.totalByteCount)B, after: \(after.totalByteCount)B)")
                         }
                         // Refresh thumbnail off-thread.
                         let smudgeTileGrid: TileGrid? = layers[li].tileGrid
@@ -2569,7 +2569,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             beforeSnapshot: before,
                             afterSnapshot: after
                         ))
-                        print("Recorded eraser stroke in history (before: \(before.pixels.count) bytes, after: \(after.pixels.count) bytes)")
+                        print("Recorded eraser stroke in history (before: \(before.totalByteCount) bytes, after: \(after.totalByteCount) bytes)")
                     }
                     DispatchQueue.global(qos: .utility).async {
                         if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -2717,7 +2717,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             beforeSnapshot: before,
                             afterSnapshot: after
                         ))
-                        print("Recorded stroke in history (before: \(before.pixels.count) bytes, after: \(after.pixels.count) bytes)")
+                        print("Recorded stroke in history (before: \(before.totalByteCount) bytes, after: \(after.totalByteCount) bytes)")
                     }
 
                     // Mark the drawing dirty for auto-save. Stroke commit

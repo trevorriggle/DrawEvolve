@@ -533,7 +533,7 @@ class CanvasStateManager: ObservableObject {
                let texture = layer.texture,
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, to: texture, tileGrid: layer.tileGrid)
-                print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.pixels.count) bytes)")
+                print("Undo stroke - restored texture from snapshot (\(beforeSnapshot.totalByteCount) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
@@ -601,7 +601,7 @@ class CanvasStateManager: ObservableObject {
                let texture = layer.texture,
                let renderer = renderer {
                 renderer.restoreSnapshot(afterSnapshot, to: texture, tileGrid: layer.tileGrid)
-                print("Redo stroke - restored texture from snapshot (\(afterSnapshot.pixels.count) bytes)")
+                print("Redo stroke - restored texture from snapshot (\(afterSnapshot.totalByteCount) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
