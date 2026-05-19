@@ -11,6 +11,114 @@ import MetalKit
 import UIKit
 import CoreText
 
+#if DEBUG
+enum CanvasStrokeDiagnostics {
+    static var isEnabled = true
+
+    static func log(_ message: @autoclosure () -> String) {
+        guard isEnabled else { return }
+        print("🧪 CANVAS \(message())")
+    }
+
+    static func shortID(_ id: UUID) -> String {
+        String(id.uuidString.prefix(8))
+    }
+
+    static func format(_ value: CGFloat) -> String {
+        String(format: "%.2f", Double(value))
+    }
+
+    static func format(_ value: Float) -> String {
+        String(format: "%.3f", Double(value))
+    }
+
+    static func format(_ value: SIMD4<Float>) -> String {
+        "(\(format(value.x)), \(format(value.y)), \(format(value.z)), \(format(value.w)))"
+    }
+
+    static func format(_ point: CGPoint) -> String {
+        "(\(format(point.x)), \(format(point.y)))"
+    }
+
+    static func format(_ rect: CGRect) -> String {
+        if rect.isNull { return "null" }
+        return "x=\(format(rect.origin.x)) y=\(format(rect.origin.y)) w=\(format(rect.width)) h=\(format(rect.height))"
+    }
+
+    static func format(_ color: UIColor) -> String {
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 0
+        if color.getRed(&r, green: &g, blue: &b, alpha: &a) {
+            return "rgba=(\(format(r)), \(format(g)), \(format(b)), \(format(a)))"
+        }
+        return "rgba=<unresolved>"
+    }
+
+    static func format(_ settings: BrushSettings) -> String {
+        "size=\(format(settings.size)) opacity=\(format(settings.opacity)) hardness=\(format(settings.hardness)) spacing=\(format(settings.spacing)) grain=\(format(settings.grainDensity)) \(format(settings.color))"
+    }
+
+    static func ranges(for points: [BrushStroke.StrokePoint]) -> String {
+        guard let first = points.first else {
+            return "points=0 pressure=n/a pressureAlpha=n/a"
+        }
+        var minPressure = first.pressure
+        var maxPressure = first.pressure
+        var minPressureAlpha = first.pressureAlpha
+        var maxPressureAlpha = first.pressureAlpha
+        for point in points.dropFirst() {
+            minPressure = min(minPressure, point.pressure)
+            maxPressure = max(maxPressure, point.pressure)
+            minPressureAlpha = min(minPressureAlpha, point.pressureAlpha)
+            maxPressureAlpha = max(maxPressureAlpha, point.pressureAlpha)
+        }
+        return "points=\(points.count) pressure=\(format(minPressure))...\(format(maxPressure)) pressureAlpha=\(format(minPressureAlpha))...\(format(maxPressureAlpha))"
+    }
+
+    static func stampSource(_ point: BrushStroke.StrokePoint) -> String {
+        "input=\(point.inputType.diagnosticName) loc=\(format(point.location)) sourcePressure=\(format(point.pressure)) sourcePressureAlpha=\(format(point.pressureAlpha))"
+    }
+
+    static func uniforms(size: Float, opacity: Float, hardness: Float, pressure: Float, pressureAlpha: Float, color: SIMD4<Float>) -> String {
+        "size=\(format(size)) opacity=\(format(opacity)) hardness=\(format(hardness)) pressure=\(format(pressure)) pressureAlpha=\(format(pressureAlpha)) color=\(format(color))"
+    }
+
+    static func stampBoundingBox(points: [BrushStroke.StrokePoint], brushSize: CGFloat) -> CGRect {
+        guard let first = points.first else { return .null }
+        let radius = max(1, brushSize * 0.5)
+        var rect = CGRect(
+            x: first.location.x - radius,
+            y: first.location.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        for point in points.dropFirst() {
+            rect = rect.union(CGRect(
+                x: point.location.x - radius,
+                y: point.location.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            ))
+        }
+        return rect
+    }
+
+    static func tileSummary(_ keys: [TileKey], limit: Int = 24) -> String {
+        let sorted = keys.sorted {
+            if $0.y == $1.y { return $0.x < $1.x }
+            return $0.y < $1.y
+        }
+        let shown = sorted.prefix(limit).map { "(\($0.x),\($0.y))" }.joined(separator: " ")
+        if sorted.count > limit {
+            return "count=\(sorted.count) [\(shown) ...]"
+        }
+        return "count=\(sorted.count) [\(shown)]"
+    }
+}
+#endif
+
 /// Mirror of `ReferenceQuadUniforms` in Shaders.metal. Field order and
 /// alignment match the MSL struct exactly. Total stride 40 bytes:
 /// 8*3 (three float2) + 4*4 (four float — opacity, flipX, flipY,
@@ -195,6 +303,7 @@ class CanvasRenderer: NSObject {
     private var smudgePatchHalfSize: Float = 0
     private var smudgeStampIndex: Int = 0
     private var smudgeStrokeLayerId: UUID?
+    private var smudgeDiagnosticStrokeID: UUID?
     // Selection mask for the active smudge stroke (PR 3). Rasterized once
     // in `beginSmudgeStroke` and reused across every `renderSmudgeStamps`
     // batch — selection geometry is fixed for the duration of a stroke.
@@ -827,6 +936,9 @@ class CanvasRenderer: NSObject {
         wetInkTexture = tex
         // Source A contract: clear before first use.
         clearTexture(tex)
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("wetInk allocate+clear texture=\(targetW)x\(targetH)")
+        #endif
         return tex
     }
 
@@ -836,6 +948,9 @@ class CanvasRenderer: NSObject {
     func clearWetInkTexture() {
         guard let texture = wetInkTexture else { return }
         clearTexture(texture)
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("wetInk clear scheduled texture=\(texture.width)x\(texture.height)")
+        #endif
     }
 
     /// Release the wet-ink texture. Called when the canvas closes —
@@ -881,6 +996,10 @@ class CanvasRenderer: NSObject {
         let atlasW = atlas.width
         let atlasH = atlas.height
         let bboxKeys = tileGrid.tilesIntersecting(bbox)
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("wetInk commit enter opacity=\(CanvasStrokeDiagnostics.format(strokeOpacity)) bbox={\(CanvasStrokeDiagnostics.format(bbox))} bboxKeys=\(CanvasStrokeDiagnostics.tileSummary(bboxKeys)) allocatedBefore=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys()))")
+        #endif
 
         // C2 (Phase 4.6 audit follow-up): bail when bbox is fully off
         // canvas. `tilesIntersecting` returns empty when bbox is outside
@@ -995,6 +1114,10 @@ class CanvasRenderer: NSObject {
             }
         }
 
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("wetInk commit scheduled atlas=\(atlasW)x\(atlasH) allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys()))")
+        #endif
+
         if let completion {
             commandBuffer.addCompletedHandler { _ in
                 DispatchQueue.main.async { completion() }
@@ -1052,10 +1175,16 @@ class CanvasRenderer: NSObject {
         _ stroke: BrushStroke,
         newPoints: [BrushStroke.StrokePoint],
         screenSize: CGSize,
-        selectionPath: [CGPoint]?
+        selectionPath: [CGPoint]?,
+        stampIndexBase: Int = 0
     ) {
         guard !newPoints.isEmpty else { return }
         guard let wetInk = ensureWetInkTexture() else { return }
+
+        #if DEBUG
+        let diagnosticBbox = CanvasStrokeDiagnostics.stampBoundingBox(points: newPoints, brushSize: stroke.settings.size)
+        CanvasStrokeDiagnostics.log("wetInk flush stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: newPoints)) bbox={\(CanvasStrokeDiagnostics.format(diagnosticBbox))} settings{\(CanvasStrokeDiagnostics.format(stroke.settings))}")
+        #endif
 
         let pipeline: MTLRenderPipelineState? = {
             switch stroke.tool {
@@ -1120,6 +1249,9 @@ class CanvasRenderer: NSObject {
             uniforms.pressureAlpha = Float(safePressureAlpha)
 
             var position = positions[index]
+            #if DEBUG
+            CanvasStrokeDiagnostics.log("stamp stage=wetInk stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) idx=\(stampIndexBase + index) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.stampSource(point)) uniforms{\(CanvasStrokeDiagnostics.uniforms(size: uniforms.size, opacity: uniforms.opacity, hardness: uniforms.hardness, pressure: uniforms.pressure, pressureAlpha: uniforms.pressureAlpha, color: uniforms.color))}")
+            #endif
             encoder.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
             encoder.setVertexBytes(&viewportSizeVec, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
@@ -1283,6 +1415,7 @@ class CanvasRenderer: NSObject {
                       tileGrid: TileGrid,
                       screenSize: CGSize,
                       selectionPath: [CGPoint]?,
+                      stampIndexBase: Int = 0,
                       completion: (() -> Void)? = nil) {
         #if DEBUG
         print("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
@@ -1309,6 +1442,10 @@ class CanvasRenderer: NSObject {
         let tileSize = tileGrid.tileSize
         let atlasW = atlas.width
         let atlasH = atlas.height
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("renderStroke enter stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) bbox={\(CanvasStrokeDiagnostics.format(bbox))} bboxKeys=\(CanvasStrokeDiagnostics.tileSummary(bboxKeys)) allocatedBefore=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys())) settings{\(CanvasStrokeDiagnostics.format(stroke.settings))}")
+        #endif
 
         // Acquire a stroke command-buffer slot. Blocks the caller (touch
         // loop) when the GPU has 60 stroke buffers in flight, releasing
@@ -1469,6 +1606,9 @@ class CanvasRenderer: NSObject {
 
             // Copy position to avoid overlapping access
             var position = positions[index]
+            #if DEBUG
+            CanvasStrokeDiagnostics.log("stamp stage=renderStroke stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) idx=\(stampIndexBase + index) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.stampSource(point)) uniforms{\(CanvasStrokeDiagnostics.uniforms(size: uniforms.size, opacity: uniforms.opacity, hardness: uniforms.hardness, pressure: uniforms.pressure, pressureAlpha: uniforms.pressureAlpha, color: uniforms.color))}")
+            #endif
 
             renderEncoder.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
             renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
@@ -1526,6 +1666,10 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End atlas → tile blit block =================================
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("renderStroke scheduled stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys()))")
+        #endif
 
         if let completion = completion {
             // Async path: caller does its post-stroke work (snapshot, history,
@@ -5441,6 +5585,7 @@ class CanvasRenderer: NSObject {
     // tools and the existing test surface still go through that path.
 
     private struct BlurStrokeSession {
+        let strokeID: UUID
         let snapshot: MTLTexture
         let scratchH: MTLTexture
         let scratchV: MTLTexture
@@ -5467,6 +5612,7 @@ class CanvasRenderer: NSObject {
     /// should fall back to the deferred `renderBlurStroke` path.
     @discardableResult
     func beginBlurStroke(
+        strokeID: UUID,
         tileGrid: TileGrid,
         settings: BrushSettings,
         screenSize: CGSize,
@@ -5528,6 +5674,7 @@ class CanvasRenderer: NSObject {
         let viewport = SIMD2<Float>(Float(snapshot.width), Float(snapshot.height))
 
         activeBlurStrokeSession = BlurStrokeSession(
+            strokeID: strokeID,
             snapshot: snapshot,
             scratchH: scratchH,
             scratchV: scratchV,
@@ -5545,7 +5692,7 @@ class CanvasRenderer: NSObject {
     /// Run H+V Gaussian + stamp deposit for each point in `points` on
     /// a single fresh command buffer, async-committed. No-op if there's
     /// no active session (caller bailed before begin succeeded).
-    func appendBlurStrokeStamps(_ points: [BrushStroke.StrokePoint]) {
+    func appendBlurStrokeStamps(_ points: [BrushStroke.StrokePoint], stampIndexBase: Int = 0) {
         guard !points.isEmpty,
               let s = activeBlurStrokeSession,
               let depositPipeline = stampBlurDepositPipelineState,
@@ -5572,10 +5719,10 @@ class CanvasRenderer: NSObject {
         // deposits run, and blit the modified atlas region back into the
         // tile grid afterwards.
         var batchBbox: CGRect = .null
-        var stampPlans: [(point: BrushStroke.StrokePoint, scissor: MTLScissorRect)] = []
+        var stampPlans: [(stampIndex: Int, point: BrushStroke.StrokePoint, scissor: MTLScissorRect)] = []
         stampPlans.reserveCapacity(points.count)
 
-        for point in points {
+        for (index, point) in points.enumerated() {
             let safePressure: CGFloat = {
                 guard point.pressure.isFinite else { return 1.0 }
                 return max(0, min(1, point.pressure))
@@ -5596,7 +5743,7 @@ class CanvasRenderer: NSObject {
             let rectH = y1 - y0
             if rectW <= 0 || rectH <= 0 { continue }
             let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
-            stampPlans.append((point, scissor))
+            stampPlans.append((stampIndex: stampIndexBase + index, point: point, scissor: scissor))
 
             let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
             batchBbox = batchBbox.isNull ? stampRect : batchBbox.union(stampRect)
@@ -5613,6 +5760,10 @@ class CanvasRenderer: NSObject {
             ? []
             : s.tileGrid.tilesIntersecting(batchBbox)
         let tileSize = s.tileGrid.tileSize
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("blurRealtime flush stroke=\(CanvasStrokeDiagnostics.shortID(s.strokeID)) tool=blur \(CanvasStrokeDiagnostics.ranges(for: points)) bbox={\(CanvasStrokeDiagnostics.format(batchBbox))} bboxKeys=\(CanvasStrokeDiagnostics.tileSummary(bboxKeys)) settings{\(CanvasStrokeDiagnostics.format(s.settings))}")
+        #endif
 
         // Source B fix: tile-aligned clear before compose. The post-batch
         // blit-back at this function's tail (line ~5180) copies the FULL
@@ -5694,6 +5845,9 @@ class CanvasRenderer: NSObject {
             depositEncoder.setFragmentTexture(s.selectionMask, index: 2)
 
             var stampPosition = SIMD2<Float>(Float(point.location.x), Float(point.location.y))
+            #if DEBUG
+            CanvasStrokeDiagnostics.log("stamp stage=blurRealtime stroke=\(CanvasStrokeDiagnostics.shortID(s.strokeID)) idx=\(plan.stampIndex) tool=blur \(CanvasStrokeDiagnostics.stampSource(point)) uniforms{\(CanvasStrokeDiagnostics.uniforms(size: uniforms.size, opacity: uniforms.opacity, hardness: uniforms.hardness, pressure: uniforms.pressure, pressureAlpha: uniforms.pressureAlpha, color: uniforms.color))}")
+            #endif
             depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
             depositEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
             depositEncoder.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
@@ -5738,6 +5892,10 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End atlas → tile blit block =================================
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("blurRealtime scheduled stroke=\(CanvasStrokeDiagnostics.shortID(s.strokeID)) tool=blur allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(s.tileGrid.allocatedKeys()))")
+        #endif
 
         cb.commit()
         // No waitUntilCompleted — let the GPU pipeline this batch behind
@@ -5858,10 +6016,10 @@ class CanvasRenderer: NSObject {
         // then compose tile state for that bbox into the atlas. Second pass
         // runs the per-stamp Gaussian + deposit into atlas.
         var strokeBbox: CGRect = .null
-        var stampPlans: [(point: BrushStroke.StrokePoint, scissor: MTLScissorRect)] = []
+        var stampPlans: [(stampIndex: Int, point: BrushStroke.StrokePoint, scissor: MTLScissorRect)] = []
         stampPlans.reserveCapacity(stroke.points.count)
 
-        for point in stroke.points {
+        for (index, point) in stroke.points.enumerated() {
             let safePressure: CGFloat = {
                 guard point.pressure.isFinite else { return 1.0 }
                 return max(0, min(1, point.pressure))
@@ -5882,7 +6040,7 @@ class CanvasRenderer: NSObject {
             let rectH = y1 - y0
             if rectW <= 0 || rectH <= 0 { continue }
             let scissor = MTLScissorRect(x: x0, y: y0, width: rectW, height: rectH)
-            stampPlans.append((point, scissor))
+            stampPlans.append((stampIndex: index, point: point, scissor: scissor))
 
             let stampRect = CGRect(x: x0, y: y0, width: rectW, height: rectH)
             strokeBbox = strokeBbox.isNull ? stampRect : strokeBbox.union(stampRect)
@@ -5891,6 +6049,10 @@ class CanvasRenderer: NSObject {
         let bboxKeys = (strokeBbox.isNull || strokeBbox.isEmpty)
             ? []
             : tileGrid.tilesIntersecting(strokeBbox)
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("renderBlurStroke enter stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) bbox={\(CanvasStrokeDiagnostics.format(strokeBbox))} bboxKeys=\(CanvasStrokeDiagnostics.tileSummary(bboxKeys)) allocatedBefore=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys())) settings{\(CanvasStrokeDiagnostics.format(stroke.settings))}")
+        #endif
 
         // Source B fix: tile-aligned clear before compose. Same shape as
         // appendBlurStrokeStamps (this is the deferred-batch variant).
@@ -5972,6 +6134,9 @@ class CanvasRenderer: NSObject {
             depositEncoder.setFragmentTexture(selectionMask, index: 2)
 
             var stampPosition = SIMD2<Float>(Float(point.location.x), Float(point.location.y))
+            #if DEBUG
+            CanvasStrokeDiagnostics.log("stamp stage=renderBlurStroke stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) idx=\(plan.stampIndex) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.stampSource(point)) uniforms{\(CanvasStrokeDiagnostics.uniforms(size: uniforms.size, opacity: uniforms.opacity, hardness: uniforms.hardness, pressure: uniforms.pressure, pressureAlpha: uniforms.pressureAlpha, color: uniforms.color))}")
+            #endif
             depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
             depositEncoder.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
             depositEncoder.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
@@ -6009,6 +6174,10 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End atlas → tile blit block =================================
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("renderBlurStroke scheduled stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys()))")
+        #endif
 
         commandBuffer.addCompletedHandler { _ in
             DispatchQueue.main.async { completion() }
@@ -6088,7 +6257,8 @@ class CanvasRenderer: NSObject {
     /// records the active layer's id; later calls to `renderSmudgeStamps`
     /// assert the layer hasn't changed mid-stroke (textures are sized to
     /// the layer at this point in time).
-    func beginSmudgeStroke(brushSize: CGFloat,
+    func beginSmudgeStroke(strokeID: UUID,
+                           brushSize: CGFloat,
                            layerId: UUID,
                            selectionPath: [CGPoint]?,
                            documentSize: CGSize) -> Bool {
@@ -6105,6 +6275,7 @@ class CanvasRenderer: NSObject {
         smudgePatchHalfSize = Float(brushSize) * 0.5
         smudgeStampIndex = 0
         smudgeStrokeLayerId = layerId
+        smudgeDiagnosticStrokeID = strokeID
         // PR 3 — selection mask cached for the duration of the stroke.
         // Selection geometry is fixed across a stroke, so we rasterize
         // once here and reuse for every patch-update + deposit pair.
@@ -6122,6 +6293,7 @@ class CanvasRenderer: NSObject {
         smudgePatchHalfSize = 0
         smudgeStampIndex = 0
         smudgeStrokeLayerId = nil
+        smudgeDiagnosticStrokeID = nil
         smudgeSelectionMask = nil
     }
 
@@ -6199,6 +6371,13 @@ class CanvasRenderer: NSObject {
             : tileGrid.tilesIntersecting(composeBbox)
         let tileSize = tileGrid.tileSize
 
+        #if DEBUG
+        let diagnosticStrokeID = smudgeDiagnosticStrokeID
+        if let diagnosticStrokeID {
+            CanvasStrokeDiagnostics.log("smudge flush stroke=\(CanvasStrokeDiagnostics.shortID(diagnosticStrokeID)) tool=smudge \(CanvasStrokeDiagnostics.ranges(for: stamps)) bbox={\(CanvasStrokeDiagnostics.format(composeBbox))} bboxKeys=\(CanvasStrokeDiagnostics.tileSummary(composeKeys)) settings{\(CanvasStrokeDiagnostics.format(settings))}")
+        }
+        #endif
+
         // Source B fix: tile-aligned clear before compose. Smudge has
         // TWO atlas read paths (patch-update samples atlas as a texture
         // input; deposit reads atlas via loadAction=.load) — both would
@@ -6252,6 +6431,7 @@ class CanvasRenderer: NSObject {
         )
 
         for stamp in stamps {
+            let currentStampIndex = smudgeStampIndex
             let safePressure: Float = {
                 guard stamp.pressure.isFinite else { return 1.0 }
                 return Float(max(0, min(1, stamp.pressure)))
@@ -6273,6 +6453,12 @@ class CanvasRenderer: NSObject {
                 layerSize: layerSize,
                 weight: pickupWeight
             )
+
+            #if DEBUG
+            if let diagnosticStrokeID {
+                CanvasStrokeDiagnostics.log("stamp stage=smudgePickup stroke=\(CanvasStrokeDiagnostics.shortID(diagnosticStrokeID)) idx=\(currentStampIndex) tool=smudge \(CanvasStrokeDiagnostics.stampSource(stamp)) pickupWeight=\(CanvasStrokeDiagnostics.format(pickupWeight))")
+            }
+            #endif
 
             // ----- Pass 1: patch update — full quad on the BACK patch.
             // Reads FRONT patch + atlas (composed layer state), mixes,
@@ -6327,6 +6513,11 @@ class CanvasRenderer: NSObject {
                         brushUniforms.pressureAlpha = safePressureAlpha
 
                         var stampPosition = stampCenter
+                        #if DEBUG
+                        if let diagnosticStrokeID {
+                            CanvasStrokeDiagnostics.log("stamp stage=smudgeDeposit stroke=\(CanvasStrokeDiagnostics.shortID(diagnosticStrokeID)) idx=\(currentStampIndex) tool=smudge \(CanvasStrokeDiagnostics.stampSource(stamp)) uniforms{\(CanvasStrokeDiagnostics.uniforms(size: brushUniforms.size, opacity: brushUniforms.opacity, hardness: brushUniforms.hardness, pressure: brushUniforms.pressure, pressureAlpha: brushUniforms.pressureAlpha, color: brushUniforms.color))}")
+                        }
+                        #endif
                         depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
                         depositEncoder.setVertexBytes(&brushUniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
                         depositEncoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
@@ -6387,6 +6578,12 @@ class CanvasRenderer: NSObject {
             }
         }
         // === End atlas → tile blit block =================================
+
+        #if DEBUG
+        if let diagnosticStrokeID {
+            CanvasStrokeDiagnostics.log("smudge scheduled stroke=\(CanvasStrokeDiagnostics.shortID(diagnosticStrokeID)) tool=smudge allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys()))")
+        }
+        #endif
 
         commandBuffer.commit()
         // Don't waitUntilCompleted — touchesMoved is hot path. Subsequent

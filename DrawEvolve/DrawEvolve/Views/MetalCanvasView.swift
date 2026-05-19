@@ -404,6 +404,7 @@ struct MetalCanvasView: UIViewRepresentable {
         // 1.0) so shape strokes don't inherit the size-fudge's alpha-
         // capping side effect. See `computePressure(for:)`.
         private var shapeStartPressureAlpha: CGFloat?
+        private var shapeStartInputType: BrushStroke.InputType?
         // Two-finger perfect-shape constraint.
         // `shapePrimaryTouchID` is the touch that opened the shape stroke;
         // any additional touches that land while the shape is in progress
@@ -482,6 +483,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var isSmudgeStrokeActive = false
         private var smudgeStrokeLayerIndex: Int?
         private var smudgeStrokeLayerId: UUID?
+        private var smudgeStrokeID: UUID?
         // Stamp 0 of the stroke is the touchdown point — captured here in
         // `touchesBegan` and prepended to the first `renderSmudgeStamps`
         // batch in `touchesMoved` (so it dispatches as the pickup-only
@@ -564,6 +566,7 @@ struct MetalCanvasView: UIViewRepresentable {
         // Companion alpha-pressure for snap-to-line. Same rationale as
         // `shapeStartPressureAlpha`.
         private var snapLatestPressureAlpha: CGFloat = 1.0
+        private var snapLatestInputType: BrushStroke.InputType = .unknown
         private var snapLatestTimestamp: TimeInterval = 0
         private static let snapToLineHoldDuration: TimeInterval = 0.6
         private static let snapToLineMovementThreshold: CGFloat = 2.0   // screen pts
@@ -1166,6 +1169,21 @@ struct MetalCanvasView: UIViewRepresentable {
             }
         }
 
+        private func diagnosticInputType(for touch: UITouch) -> BrushStroke.InputType {
+            switch touch.type {
+            case .direct:
+                return .direct
+            case .indirect:
+                return .indirect
+            case .pencil:
+                return .pencil
+            case .indirectPointer:
+                return .indirectPointer
+            @unknown default:
+                return .unknown
+            }
+        }
+
         // Touch handling for drawing
         func touchesBegan(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
             print("👆 === TOUCH BEGAN ===")
@@ -1222,6 +1240,7 @@ struct MetalCanvasView: UIViewRepresentable {
             let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
 
             let (pressure, pressureAlpha) = computePressure(for: touch)
+            let inputType = diagnosticInputType(for: touch)
             let timestamp = touch.timestamp
 
             // One-time coordinate-pipeline diagnostic for bug 1.1 (stroke offset).
@@ -1280,7 +1299,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 // pass it once at begin and the renderer rasterises + caches.
                 let smudgeSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
                 let smudgeDocSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
-                if !renderer.beginSmudgeStroke(brushSize: brushSettings.size,
+                let strokeID = UUID()
+                if !renderer.beginSmudgeStroke(strokeID: strokeID,
+                                               brushSize: brushSettings.size,
                                                layerId: layerId,
                                                selectionPath: smudgeSelectionPath,
                                                documentSize: smudgeDocSize) {
@@ -1290,10 +1311,12 @@ struct MetalCanvasView: UIViewRepresentable {
                 smudgeBeforeSnapshot = layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
                 smudgeStrokeLayerIndex = selectedLayerIndex
                 smudgeStrokeLayerId = layerId
+                smudgeStrokeID = strokeID
                 smudgePendingTouchdown = BrushStroke.StrokePoint(
                     location: location,
                     pressure: pressure,
                     pressureAlpha: pressureAlpha,
+                    inputType: inputType,
                     timestamp: timestamp
                 )
                 isSmudgeStrokeActive = true
@@ -1309,6 +1332,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
                 print("Smudge: began stroke on layer \(selectedLayerIndex) at \(location)")
+                #if DEBUG
+                CanvasStrokeDiagnostics.log("stroke begin stroke=\(CanvasStrokeDiagnostics.shortID(strokeID)) tool=smudge input=\(inputType.diagnosticName) slider{\(CanvasStrokeDiagnostics.format(brushSettings))} pressure=\(CanvasStrokeDiagnostics.format(pressure)) pressureAlpha=\(CanvasStrokeDiagnostics.format(pressureAlpha)) start=\(CanvasStrokeDiagnostics.format(location))")
+                #endif
                 return
             }
 
@@ -1622,6 +1648,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // drag; preview and commit both read it.
                 shapeStartPressure = pressure
                 shapeStartPressureAlpha = pressureAlpha
+                shapeStartInputType = inputType
                 // Track the primary touch ID so a second finger landing
                 // mid-drag can be routed into the perfect-shape
                 // constraint path instead of starting a competing stroke.
@@ -1635,6 +1662,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 location: location,
                 pressure: pressure,
                 pressureAlpha: pressureAlpha,
+                inputType: inputType,
                 timestamp: timestamp
             )
 
@@ -1659,6 +1687,11 @@ struct MetalCanvasView: UIViewRepresentable {
             lastPoint = location
             lastTimestamp = timestamp
             print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
+            #if DEBUG
+            if let currentStroke {
+                CanvasStrokeDiagnostics.log("stroke begin stroke=\(CanvasStrokeDiagnostics.shortID(currentStroke.id)) tool=\(currentTool) input=\(inputType.diagnosticName) slider{\(CanvasStrokeDiagnostics.format(brushSettings))} pressure=\(CanvasStrokeDiagnostics.format(pressure)) pressureAlpha=\(CanvasStrokeDiagnostics.format(pressureAlpha)) start=\(CanvasStrokeDiagnostics.format(location))")
+            }
+            #endif
 
             // Tier-1.5 eraser real-time commit. Capture the pre-stroke
             // snapshot here (not in touchesEnded — by the time the user
@@ -1711,6 +1744,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 blurStrokeLayerId = layers[selectedLayerIndex].id
                 blurCommittedPointCount = 0
                 blurStrokeActive = renderer.beginBlurStroke(
+                    strokeID: currentStroke?.id ?? UUID(),
                     tileGrid: tileGrid,
                     settings: brushSettings,
                     screenSize: blurDocSize,
@@ -1744,6 +1778,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 snapLatestDoc = location
                 snapLatestPressure = pressure
                 snapLatestPressureAlpha = pressureAlpha
+                snapLatestInputType = inputType
                 snapLatestTimestamp = timestamp
                 isSnappedToLine = false
                 armStationaryTimer()
@@ -1860,6 +1895,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     let sampleScreen = sample.location(in: view)
                     let sampleLoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
                     let (samplePressure, samplePressureAlpha) = computePressure(for: sample)
+                    let sampleInputType = diagnosticInputType(for: sample)
                     let sampleTimestamp = sample.timestamp
 
                     if let last = lastPoint {
@@ -1885,6 +1921,7 @@ struct MetalCanvasView: UIViewRepresentable {
                                     location: interpLocation,
                                     pressure: interpPressure.isFinite ? interpPressure : 1.0,
                                     pressureAlpha: interpPressureAlpha.isFinite ? interpPressureAlpha : 1.0,
+                                    inputType: sampleInputType,
                                     timestamp: sampleTimestamp
                                 ))
                             }
@@ -2060,6 +2097,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let touchdownPressure = computePressure(for: touch)
                 let endPressure = shapeStartPressure ?? touchdownPressure.size
                 let endPressureAlpha = shapeStartPressureAlpha ?? touchdownPressure.alpha
+                let endInputType = shapeStartInputType ?? diagnosticInputType(for: touch)
                 let constrainPerfect = !shapeConstraintTouchIDs.isEmpty
                 // Rectangle and circle should be SCREEN-axis-aligned regardless
                 // of canvas rotation/zoom/pan. We generate their path in
@@ -2082,6 +2120,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         tool: currentTool,
                         pressure: endPressure,
                         pressureAlpha: endPressureAlpha,
+                        inputType: endInputType,
                         timestamp: touch.timestamp,
                         constrainPerfect: constrainPerfect
                     )
@@ -2090,6 +2129,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             location: canvasState.screenToDocument(sp.location),
                             pressure: sp.pressure,
                             pressureAlpha: sp.pressureAlpha,
+                            inputType: sp.inputType,
                             timestamp: sp.timestamp
                         )
                     }
@@ -2100,6 +2140,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         tool: currentTool,
                         pressure: endPressure,
                         pressureAlpha: endPressureAlpha,
+                        inputType: endInputType,
                         timestamp: touch.timestamp,
                         constrainPerfect: constrainPerfect
                     )
@@ -2130,6 +2171,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     let snapSamplePressure = computePressure(for: lastSample)
                     snapLatestPressure = snapSamplePressure.size
                     snapLatestPressureAlpha = snapSamplePressure.alpha
+                    snapLatestInputType = diagnosticInputType(for: lastSample)
                     snapLatestTimestamp = lastSample.timestamp
 
                     if isSnappedToLine, let start = snapToLineStartDoc {
@@ -2158,6 +2200,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     let sampleScreen = sample.location(in: view)
                     let sampleLoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
                     let (samplePressure, samplePressureAlpha) = computePressure(for: sample)
+                    let sampleInputType = diagnosticInputType(for: sample)
                     let sampleTimestamp = sample.timestamp
 
                     if let last = lastPoint {
@@ -2204,6 +2247,7 @@ struct MetalCanvasView: UIViewRepresentable {
                                     location: interpLocation,
                                     pressure: interpPressure.isFinite ? interpPressure : 1.0,
                                     pressureAlpha: interpPressureAlpha.isFinite ? interpPressureAlpha : 1.0,
+                                    inputType: sampleInputType,
                                     timestamp: sampleTimestamp
                                 ))
                             }
@@ -2310,8 +2354,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 canvasState?.documentSize ?? view.bounds.size
             }
             let selPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+            let stampIndexBase = eraserCommittedPointCount
             let newPoints = Array(stroke.points[eraserCommittedPointCount..<stroke.points.count])
             let subStroke = BrushStroke(
+                id: stroke.id,
                 points: newPoints,
                 settings: stroke.settings,
                 tool: .eraser,
@@ -2323,6 +2369,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 tileGrid: tileGrid,
                 screenSize: documentSize,
                 selectionPath: selPath,
+                stampIndexBase: stampIndexBase,
                 completion: onDone
             )
         }
@@ -2350,6 +2397,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 canvasState?.documentSize ?? .zero
             }
             let selPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+            let stampIndexBase = wetInkCommittedPointCount
             let newPoints = Array(stroke.points[wetInkCommittedPointCount..<stroke.points.count])
             wetInkCommittedPointCount = stroke.points.count
 
@@ -2377,7 +2425,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 stroke,
                 newPoints: newPoints,
                 screenSize: documentSize,
-                selectionPath: selPath
+                selectionPath: selPath,
+                stampIndexBase: stampIndexBase
             )
         }
 
@@ -2394,8 +2443,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
             let newPoints = Array(stroke.points[blurCommittedPointCount..<stroke.points.count])
+            let stampIndexBase = blurCommittedPointCount
             blurCommittedPointCount = stroke.points.count
-            renderer.appendBlurStrokeStamps(newPoints)
+            renderer.appendBlurStrokeStamps(newPoints, stampIndexBase: stampIndexBase)
         }
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -2520,6 +2570,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let beforeSnapshot = smudgeBeforeSnapshot
                 smudgeStrokeLayerIndex = nil
                 smudgeStrokeLayerId = nil
+                smudgeStrokeID = nil
                 smudgePendingTouchdown = nil
                 smudgeBeforeSnapshot = nil
 
@@ -2794,6 +2845,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 let layerId = stroke.layerId
                 let currentLayerIndex = selectedLayerIndex
                 let capturedCanvasState = canvasState
+                #if DEBUG
+                CanvasStrokeDiagnostics.log("eraser commit begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) strokeSettingsAtBegin{\(CanvasStrokeDiagnostics.format(stroke.settings))} slidersAtCommit{\(CanvasStrokeDiagnostics.format(brushSettings))}")
+                #endif
                 flushEraserSubStroke(view: view) { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if let before = beforeSnapshot,
@@ -2935,6 +2989,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 // commit, matching Procreate/PS behavior.
                 let wetInkStrokeOpacity = Float(brushSettings.opacity)
                 let wetInkBbox = wetInkStrokeBbox ?? .zero
+                #if DEBUG
+                CanvasStrokeDiagnostics.log("stroke commit begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) strokeSettingsAtBegin{\(CanvasStrokeDiagnostics.format(stroke.settings))} slidersAtCommit{\(CanvasStrokeDiagnostics.format(brushSettings))} wetInkBbox={\(CanvasStrokeDiagnostics.format(wetInkBbox))}")
+                #endif
                 let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
                     if stroke.tool == .blur {
                         renderer.renderBlurStroke(stroke, tileGrid: tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
@@ -3114,6 +3171,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 isSmudgeStrokeActive = false
                 smudgeStrokeLayerIndex = nil
                 smudgeStrokeLayerId = nil
+                smudgeStrokeID = nil
                 smudgePendingTouchdown = nil
                 smudgeBeforeSnapshot = nil
                 renderer?.endSmudgeStroke()
@@ -3306,6 +3364,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         location: CGPoint(x: W - p.location.x, y: p.location.y),
                         pressure: p.pressure,
                         pressureAlpha: p.pressureAlpha,
+                        inputType: p.inputType,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3316,6 +3375,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         location: CGPoint(x: p.location.x, y: H - p.location.y),
                         pressure: p.pressure,
                         pressureAlpha: p.pressureAlpha,
+                        inputType: p.inputType,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3326,6 +3386,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         location: CGPoint(x: W - p.location.x, y: H - p.location.y),
                         pressure: p.pressure,
                         pressureAlpha: p.pressureAlpha,
+                        inputType: p.inputType,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3374,6 +3435,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         location: CGPoint(x: rotatedX, y: rotatedY),
                         pressure: p.pressure,
                         pressureAlpha: p.pressureAlpha,
+                        inputType: p.inputType,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3461,6 +3523,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 to: snappedTarget,
                 pressure: snapLatestPressure,
                 pressureAlpha: snapLatestPressureAlpha,
+                inputType: snapLatestInputType,
                 timestamp: snapLatestTimestamp
             )
             let docSize = MainActor.assumeIsolated {
@@ -3505,6 +3568,7 @@ struct MetalCanvasView: UIViewRepresentable {
             shapeStartScreen = nil
             shapeStartPressure = nil
             shapeStartPressureAlpha = nil
+            shapeStartInputType = nil
             shapePrimaryTouchID = nil
             shapeConstraintTouchIDs.removeAll()
         }
@@ -3519,6 +3583,7 @@ struct MetalCanvasView: UIViewRepresentable {
             tool: DrawingTool,
             pressure: CGFloat,
             pressureAlpha: CGFloat,
+            inputType: BrushStroke.InputType,
             timestamp: TimeInterval,
             constrainPerfect: Bool = false
         ) -> [BrushStroke.StrokePoint] {
@@ -3527,11 +3592,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 : end
             switch tool {
             case .line:
-                return generateLinePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp)
+                return generateLinePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp)
             case .rectangle:
-                return generateRectanglePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp)
+                return generateRectanglePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp)
             case .circle:
-                return generateCirclePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp)
+                return generateCirclePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp)
             default:
                 return []
             }
@@ -3573,6 +3638,7 @@ struct MetalCanvasView: UIViewRepresentable {
             to end: CGPoint,
             pressure: CGFloat,
             pressureAlpha: CGFloat,
+            inputType: BrushStroke.InputType,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             let distance = hypot(end.x - start.x, end.y - start.y)
@@ -3590,6 +3656,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     location: location,
                     pressure: pressure,
                     pressureAlpha: pressureAlpha,
+                    inputType: inputType,
                     timestamp: timestamp
                 ))
             }
@@ -3601,6 +3668,7 @@ struct MetalCanvasView: UIViewRepresentable {
             to end: CGPoint,
             pressure: CGFloat,
             pressureAlpha: CGFloat,
+            inputType: BrushStroke.InputType,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             let spacing = brushSettings.size * brushSettings.spacing
@@ -3608,17 +3676,17 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Top edge (start to top-right)
             let topRight = CGPoint(x: end.x, y: start.y)
-            points.append(contentsOf: generateLineSegment(from: start, to: topRight, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: start, to: topRight, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp))
 
             // Right edge (top-right to end)
-            points.append(contentsOf: generateLineSegment(from: topRight, to: end, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: topRight, to: end, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp))
 
             // Bottom edge (end to bottom-left)
             let bottomLeft = CGPoint(x: start.x, y: end.y)
-            points.append(contentsOf: generateLineSegment(from: end, to: bottomLeft, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: end, to: bottomLeft, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp))
 
             // Left edge (bottom-left back to start)
-            points.append(contentsOf: generateLineSegment(from: bottomLeft, to: start, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: bottomLeft, to: start, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, inputType: inputType, timestamp: timestamp))
 
             return points
         }
@@ -3628,6 +3696,7 @@ struct MetalCanvasView: UIViewRepresentable {
             to end: CGPoint,
             pressure: CGFloat,
             pressureAlpha: CGFloat,
+            inputType: BrushStroke.InputType,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             // Calculate center point and radii for ellipse
@@ -3666,6 +3735,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     location: location,
                     pressure: pressure,
                     pressureAlpha: pressureAlpha,
+                    inputType: inputType,
                     timestamp: timestamp
                 ))
             }
@@ -3678,6 +3748,7 @@ struct MetalCanvasView: UIViewRepresentable {
             spacing: CGFloat,
             pressure: CGFloat,
             pressureAlpha: CGFloat,
+            inputType: BrushStroke.InputType,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             let distance = hypot(end.x - start.x, end.y - start.y)
@@ -3694,6 +3765,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     location: location,
                     pressure: pressure,
                     pressureAlpha: pressureAlpha,
+                    inputType: inputType,
                     timestamp: timestamp
                 ))
             }

@@ -272,11 +272,43 @@ struct BrushSettings: Codable {
 
 /// Represents a single brush stroke
 struct BrushStroke {
-    let id = UUID()
+    let id: UUID
     var points: [StrokePoint]
     let settings: BrushSettings
     let tool: DrawingTool
     let layerId: UUID
+
+    init(
+        id: UUID = UUID(),
+        points: [StrokePoint],
+        settings: BrushSettings,
+        tool: DrawingTool,
+        layerId: UUID
+    ) {
+        self.id = id
+        self.points = points
+        self.settings = settings
+        self.tool = tool
+        self.layerId = layerId
+    }
+
+    enum InputType: String {
+        case direct
+        case indirect
+        case indirectPointer
+        case pencil
+        case unknown
+
+        var diagnosticName: String {
+            switch self {
+            case .direct: return "direct/finger-mouse"
+            case .indirect: return "indirect"
+            case .indirectPointer: return "indirectPointer"
+            case .pencil: return "pencil"
+            case .unknown: return "unknown"
+            }
+        }
+    }
 
     struct StrokePoint {
         let location: CGPoint
@@ -294,6 +326,7 @@ struct BrushStroke {
         // returns the same value for both fields; finger returns 1.0 here
         // and 0.75 for size.
         let pressureAlpha: CGFloat
+        let inputType: InputType
         let timestamp: TimeInterval
 
         // Back-compat init: callers that don't differentiate (shape /
@@ -305,10 +338,12 @@ struct BrushStroke {
         init(location: CGPoint,
              pressure: CGFloat,
              pressureAlpha: CGFloat? = nil,
+             inputType: InputType = .unknown,
              timestamp: TimeInterval) {
             self.location = location
             self.pressure = pressure
             self.pressureAlpha = pressureAlpha ?? pressure
+            self.inputType = inputType
             self.timestamp = timestamp
         }
     }
