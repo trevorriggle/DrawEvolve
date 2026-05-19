@@ -321,18 +321,29 @@ class CanvasStateManager: ObservableObject {
                     self.beginBlurAdjustment()
                 }
 
-                // Brush-variant calibration. Each variant (pencil / inkPen /
-                // marker / airbrush / charcoal / brush) has its own size /
-                // opacity / hardness / spacing / grainDensity defaults so a
-                // freshly-selected Charcoal actually LOOKS like charcoal —
-                // not like a default brush. Without this snap-back, all five
-                // shaders rendered against the same generic settings produce
-                // near-identical strokes (the user-visible "they all look
-                // the same" complaint).
+                // Brush-variant calibration. The user-facing rail sliders
+                // (size / hardness / opacity / spacing) PERSIST across
+                // tool switches — switching from a 50px brush to charcoal
+                // gives you a 50px charcoal, not a 24px one. Tool identity
+                // now comes purely from the per-tool fragment shader
+                // (cubic curve for pencil, quartic spatial falloff +
+                // squared pressure for airbrush, mix-floor + procedural
+                // grain for charcoal, etc.) — not from the per-tool
+                // default knob values that used to snap back on every
+                // switch.
                 //
-                // Preserves the color across the switch — only the brush-
-                // shape knobs reset. Pressure / minPressureSize / maxPressureSize
-                // also carry through since they're user-prefs, not per-brush.
+                // The only field that still resets per-tool is
+                // `grainDensity`, which is charcoal-only (hidden in the
+                // settings panel for other tools per BrushSettingsView's
+                // `if activeTool == .charcoal` gate). Snapping it lets
+                // first-time-charcoal land at the speckled default rather
+                // than whatever the user might have set in a prior
+                // session.
+                //
+                // Preserved across the switch: color, pressureSensitivity,
+                // min/maxPressureSize (user-prefs), blurStrength /
+                // smudgeStrength (effect-tool params), AND the four rail
+                // sliders.
                 if let defaults = BrushSettings.defaults(for: newTool) {
                     var next = defaults
                     next.color = self.brushSettings.color
@@ -344,6 +355,11 @@ class CanvasStateManager: ObservableObject {
                     // when bouncing between brush variants.
                     next.blurStrength = self.brushSettings.blurStrength
                     next.smudgeStrength = self.brushSettings.smudgeStrength
+                    // Rail sliders persist — see comment block above.
+                    next.size = self.brushSettings.size
+                    next.opacity = self.brushSettings.opacity
+                    next.hardness = self.brushSettings.hardness
+                    next.spacing = self.brushSettings.spacing
                     self.brushSettings = next
                 }
             }
