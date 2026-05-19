@@ -508,30 +508,6 @@ struct MetalCanvasView: UIViewRepresentable {
         private var eraserBeforeSnapshot: CanvasRenderer.LayerSnapshot?
         private var eraserCommittedPointCount: Int = 0
 
-        // Wet-ink stroke session state (Phase 4.6). Each touchesMoved
-        // peels off newly-arrived points and dispatches them to
-        // wetInkTexture via `appendStrokeStampsToWetInk`. touchesEnded
-        // composites the accumulated wet-ink onto the active layer's
-        // tile grid with the stroke's per-stroke opacity, then clears
-        // wet-ink.
-        //
-        // `wetInkStrokeBbox` accumulates the union of every stamp's
-        // footprint across the stroke (per-stamp bbox = stamp center
-        // ± brush radius, in canvas-pixel coords). commitWetInkToLayer
-        // uses this as the bbox parameter for clear-region + compose +
-        // blit-back, so its work is bounded to the stroke's footprint.
-        // nil at touchesBegan; set on first flush; reset to nil after
-        // commit or cancel.
-        //
-        // No before-snapshot ivar (unlike eraser): wet-ink writes only
-        // to the private wet-ink scratch during touchesMoved, never to
-        // the layer. At touchesEnded the layer is still in pre-stroke
-        // state, so the existing dispatchStroke before-snapshot capture
-        // is correct. touchesCancelled clears wet-ink without commit;
-        // no rollback needed because the layer was never mutated.
-        private var wetInkCommittedPointCount: Int = 0
-        private var wetInkStrokeBbox: CGRect?
-
         // Real-time blur stroke session (experiment/blur-brush-realtime).
         // Mirrors the eraser substroke flush pattern: capture before-snapshot
         // at touchesBegan, peel off newly-arrived points each touchesMoved
@@ -945,33 +921,6 @@ struct MetalCanvasView: UIViewRepresentable {
                     )
                 }
 
-                // Wet-ink live overlay (Phase 4.6c). For the active layer
-                // when a wet-ink-using stroke is in progress, composite
-                // wet-ink × brushSettings.opacity onto the drawable AFTER
-                // the layer's own content but BEFORE drawEnc.endEncoding —
-                // wet-ink overlays on top of its own layer's composite,
-                // BELOW subsequent layers' composites (those open their
-                // own draw passes later in this loop). Matches what
-                // commitWetInkToLayer will deposit at touchesEnded, so
-                // the live preview is bit-equivalent to the final result.
-                //
-                // Opacity reads from `brushSettings.opacity` at draw time
-                // so mid-stroke opacity changes appear live in the
-                // preview, matching the commit-time behavior in 4.6b.
-                if index == activeLayerIndex,
-                   let stroke = currentStroke,
-                   stroke.tool.usesWetInk {
-                    renderer?.renderWetInkToScreen(
-                        to: drawEnc,
-                        opacity: Float(brushSettings.opacity),
-                        zoomScale: Float(zoomScale),
-                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
-                        canvasRotation: Float(rotation),
-                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
-                        flipState: flipState
-                    )
-                }
-
                 drawEnc.endEncoding()
             }
 
@@ -1059,14 +1008,8 @@ struct MetalCanvasView: UIViewRepresentable {
             // into the active layer texture in `touchesMoved`, and the every-
             // frame layer composite picks up the cuts — there's no separate
             // preview to draw on the drawable.
-            // Skip wet-ink-using tools (Phase 4.6c): wet-ink stamps deposit
-            // into wetInkTexture during touchesMoved, and the per-layer
-            // wet-ink overlay above draws the accumulated wet-ink on the
-            // active layer. Drawing renderStrokePreview here would double
-            // the stamps (wet-ink overlay AND stroke-preview trail).
             if let stroke = currentStroke, !stroke.points.isEmpty,
-               stroke.tool != .blur, stroke.tool != .eraser,
-               !stroke.tool.usesWetInk {
+               stroke.tool != .blur, stroke.tool != .eraser {
                 renderer?.renderStrokePreview(
                     stroke,
                     to: overlayEnc,
@@ -1135,11 +1078,11 @@ struct MetalCanvasView: UIViewRepresentable {
         // the stamp. For non-Pencil input we keep `size = 0.75` so finger
         // strokes feel size-comparable to Pencil (the original rationale
         // for the 0.75 fudge), but `alpha = 1.0` so the user's opacity
-        // slider isn't silently capped at 75% — pre-Phase-4.6 premul-over
-        // accumulation masked that capping by saturating dense strokes
-        // back toward fully opaque; Phase 4.6 wet-ink's max-blend doesn't
-        // accumulate, so the size-fudge would leak into stroke alpha
-        // without this split (BLOCKER B).
+        // slider isn't silently capped at 75% on the first stamp of a
+        // non-Pencil stroke. Premul-over stamp accumulation in the same
+        // stroke still saturates toward fully opaque (the accepted
+        // pre-Phase-4.6 behaviour); the split prevents the size-fudge
+        // from being mistaken for an alpha-fudge.
         private func computePressure(for touch: UITouch) -> (size: CGFloat, alpha: CGFloat) {
             let settings = brushSettings
             if touch.type == .pencil {
@@ -1719,29 +1662,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 flushEraserSubStroke(view: view)
             }
 
-            // Wet-ink stroke begin (Phase 4.6). Brush-family tools route
-            // stamps into wetInkTexture from touchesBegan onward; the
-            // accumulated wet-ink commits onto the active layer's tile
-            // grid at touchesEnded with the stroke's per-stroke opacity.
-            // No before-snapshot capture here — the layer is unchanged
-            // during the stroke (wet-ink writes only to private scratch),
-            // so dispatchStroke's existing capture at touchesEnded
-            // already records the pre-stroke layer state.
-            if currentTool.usesWetInk,
-               layers[selectedLayerIndex].tileGrid != nil,
-               let renderer = renderer {
-                _ = renderer.ensureWetInkTexture()
-                renderer.clearWetInkTexture()
-                #if DEBUG
-                // TEMPORARY: verify the clear actually zeroed wet-ink before
-                // the first stamp lands. Sample the texture's center.
-                renderer.verifyWetInkClearedSync()
-                #endif
-                wetInkCommittedPointCount = 0
-                wetInkStrokeBbox = nil
-                flushWetInkSubStroke()
-            }
-
             // Real-time blur stroke: snapshot the layer + open a renderer
             // session here so subsequent touchesMoved can deposit blurred
             // stamps under the user's finger instead of waiting for
@@ -1772,7 +1692,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
-            // Cache the selection mask for the wet-ink preview. Rasterised
+            // Cache the selection mask for the stroke preview. Rasterised
             // once here and reused for every preview frame for the duration
             // of the drag — selection geometry is immutable mid-stroke
             // because the canvas owns the touch. Pairs with the cleanup in
@@ -2339,14 +2259,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 if currentTool == .eraser {
                     flushEraserSubStroke(view: view)
                 }
-                // Wet-ink substroke flush (Phase 4.6). Per-frame deposit
-                // of newly-arrived points into wetInkTexture. The live
-                // overlay in draw(in:) reads wet-ink every frame so the
-                // user sees the stroke as it's drawn; the final commit
-                // onto the tile grid happens at touchesEnded.
-                if currentTool.usesWetInk {
-                    flushWetInkSubStroke()
-                }
                 // Real-time blur stroke (experiment/blur-brush-realtime):
                 // peel off the new points and dispatch them through the
                 // active blur session. No-op when the session never
@@ -2408,62 +2320,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 selectionPath: selPath,
                 stampIndexBase: stampIndexBase,
                 completion: onDone
-            )
-        }
-
-        // Per-frame wet-ink substroke flush (Phase 4.6). Same shape as
-        // flushEraserSubStroke: peel off points past
-        // `wetInkCommittedPointCount`, append to wetInkTexture via
-        // `appendStrokeStampsToWetInk`. Also unions each new stamp's
-        // footprint into `wetInkStrokeBbox` so commitWetInkToLayer
-        // has a stroke-bounded bbox at touchesEnded.
-        //
-        // No completion callback: wet-ink substroke writes only to the
-        // private wet-ink scratch — nothing downstream waits on it
-        // (the live frame overlay reads wet-ink on every draw(in:)
-        // tick, which sequences naturally behind these writes via
-        // Metal queue ordering).
-        private func flushWetInkSubStroke() {
-            guard let stroke = currentStroke,
-                  stroke.tool.usesWetInk,
-                  stroke.points.count > wetInkCommittedPointCount,
-                  let renderer = renderer else {
-                return
-            }
-            let documentSize = MainActor.assumeIsolated {
-                canvasState?.documentSize ?? .zero
-            }
-            let selPath = MainActor.assumeIsolated { canvasState?.selectionPath }
-            let stampIndexBase = wetInkCommittedPointCount
-            let newPoints = Array(stroke.points[wetInkCommittedPointCount..<stroke.points.count])
-            wetInkCommittedPointCount = stroke.points.count
-
-            // Accumulate stroke bbox in canvas-pixel coords. Per-stamp
-            // bbox = stamp center ± (brush size / 2). The bbox doesn't
-            // need to be tile-aligned here — commitWetInkToLayer derives
-            // its tile-aligned clear region internally from the raw
-            // bbox via `atlasRegion(coveringTiles:tileSize:)`.
-            let radius = max(1, CGFloat(stroke.settings.size) * 0.5)
-            for point in newPoints {
-                let stampRect = CGRect(
-                    x: point.location.x - radius,
-                    y: point.location.y - radius,
-                    width: radius * 2,
-                    height: radius * 2
-                )
-                if let existing = wetInkStrokeBbox {
-                    wetInkStrokeBbox = existing.union(stampRect)
-                } else {
-                    wetInkStrokeBbox = stampRect
-                }
-            }
-
-            renderer.appendStrokeStampsToWetInk(
-                stroke,
-                newPoints: newPoints,
-                screenSize: documentSize,
-                selectionPath: selPath,
-                stampIndexBase: stampIndexBase
             )
         }
 
@@ -3019,52 +2875,12 @@ struct MetalCanvasView: UIViewRepresentable {
                 // PR 3: pass the active selection path so the GPU clips the
                 // stroke. nil = no selection = no clipping.
                 let strokeSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
-                // Capture wet-ink dispatch inputs here (touchesEnded). The
-                // strokeOpacity comes from `brushSettings.opacity` read at
-                // this moment so the user's current opacity slider value
-                // takes effect — opacity changes mid-stroke land in the
-                // commit, matching Procreate/PS behavior.
-                let wetInkStrokeOpacity = Float(brushSettings.opacity)
-                let wetInkBbox = wetInkStrokeBbox ?? .zero
                 #if DEBUG
-                CanvasStrokeDiagnostics.log("stroke commit begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) strokeSettingsAtBegin{\(CanvasStrokeDiagnostics.format(stroke.settings))} slidersAtCommit{\(CanvasStrokeDiagnostics.format(brushSettings))} wetInkBbox={\(CanvasStrokeDiagnostics.format(wetInkBbox))}")
-                // Probe B: synchronously sample wet-ink at the bbox centre
-                // (guaranteed inside the disc footprint union) AFTER all
-                // stamp cmdbufs are committed and BEFORE the commit fires.
-                // Reads the actual alpha that the per-stamp deposit wrote
-                // into the texture.
-                if stroke.tool.usesWetInk, !wetInkBbox.isNull, !wetInkBbox.isEmpty {
-                    let probeBX = Int(wetInkBbox.midX) - 8
-                    let probeBY = Int(wetInkBbox.midY) - 8
-                    renderer.logWetInkPixelSync(originX: probeBX, originY: probeBY, label: "post-stamps stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id))")
-                }
+                CanvasStrokeDiagnostics.log("stroke commit begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) strokeSettingsAtBegin{\(CanvasStrokeDiagnostics.format(stroke.settings))} slidersAtCommit{\(CanvasStrokeDiagnostics.format(brushSettings))}")
                 #endif
                 let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
                     if stroke.tool == .blur {
                         renderer.renderBlurStroke(stroke, tileGrid: tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
-                    } else if stroke.tool.usesWetInk {
-                        // Wet-ink commit: composite the accumulated wet-ink
-                        // scratch onto the active layer's tile grid at the
-                        // stroke's per-stroke opacity.
-                        //
-                        // No post-commit `clearWetInkTexture()` — that
-                        // earlier shape introduced a Metal-queue ordering
-                        // race (Phase 4.6 follow-up audit). The clear
-                        // committed via `DispatchQueue.main.async` could
-                        // be deferred past the next stroke's touchesBegan,
-                        // causing the new stroke's initial stamps to be
-                        // wiped and prior-stroke residue to bleed into
-                        // the new stroke. The next wet-ink stroke's
-                        // touchesBegan clears wet-ink via the
-                        // ensure/clear/reset/flush sequence, which is
-                        // sufficient given the residue contract on
-                        // `wetInkTexture`.
-                        renderer.commitWetInkToLayer(
-                            tileGrid: tileGrid,
-                            bbox: wetInkBbox,
-                            opacity: wetInkStrokeOpacity,
-                            completion: completion
-                        )
                     } else {
                         renderer.renderStroke(stroke, tileGrid: tileGrid, screenSize: documentSize, selectionPath: strokeSelectionPath, completion: completion)
                     }
@@ -3120,16 +2936,8 @@ struct MetalCanvasView: UIViewRepresentable {
             lastPoint = nil
             resetShapeToolState()
             marqueeStartScreen = nil
-            // Reset wet-ink session state for the next stroke. The
-            // commit completion above already called `clearWetInkTexture`
-            // for usesWetInk strokes — this resets the coordinator-side
-            // accumulators. Safe to unconditionally reset (no-op for
-            // non-wet-ink tools).
-            wetInkCommittedPointCount = 0
-            wetInkStrokeBbox = nil
             // Free the cached preview selection mask. The committed stroke
-            // dispatched above rasterises its own mask internally; the
-            // preview cache only existed for the wet-ink trail.
+            // dispatched above rasterises its own mask internally.
             renderer?.endPreviewMask()
             resetSnapToLineState()
             // Hide stamp cursor on lift.
@@ -3180,17 +2988,6 @@ struct MetalCanvasView: UIViewRepresentable {
             blurStrokeLayerIndex = nil
             blurStrokeLayerId = nil
             blurCommittedPointCount = 0
-
-            // Wet-ink cancel (Phase 4.6): clear the wet-ink scratch, reset
-            // the coordinator-side accumulators. No layer rollback needed —
-            // wet-ink writes only to the private scratch during the stroke,
-            // so the layer was never mutated.
-            if currentTool.usesWetInk {
-                renderer?.clearWetInkTexture()
-                print("Wet-ink cancelled — discarded wet-ink scratch (layer unchanged)")
-            }
-            wetInkCommittedPointCount = 0
-            wetInkStrokeBbox = nil
 
             currentStroke = nil
             lastPoint = nil

@@ -34,11 +34,11 @@ struct BrushSizeRail: View {
     /// BrushSettings (the canvas) pass `$canvasState.brushSettings.hardness`
     /// to surface the new control.
     var hardness: Binding<CGFloat>? = nil
-    /// Optional binding for the tertiary opacity track (Phase 4.6
-    /// follow-up — wet-ink shipped, opacity is now meaningful). Wired
-    /// through `commitWetInkToLayer` at stroke commit. The slider sits
-    /// to the right of the hardness track when both are present;
-    /// callers pass `$canvasState.brushSettings.opacity`.
+    /// Optional binding for the tertiary opacity track. Brush-family
+    /// tools' fragment shaders multiply stamp alpha by this value at
+    /// stroke commit. The slider sits to the right of the hardness
+    /// track when both are present; callers pass
+    /// `$canvasState.brushSettings.opacity`.
     var opacity: Binding<CGFloat>? = nil
     /// Matches the range surfaced in `BrushSettingsView` (1...200) so the
     /// rail and the full panel agree on bounds.

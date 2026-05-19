@@ -93,13 +93,12 @@ struct BrushSettingsView: View {
                 }
             }
 
-            // Opacity slider (Phase 4.6 — wet-ink architecture). Bound to
-            // `BrushSettings.opacity`; routed through commitWetInkToLayer at
-            // stroke commit for brush-family tools. Read at touchesEnded so
-            // mid-stroke slider changes take effect at commit. Eraser/blur/
-            // smudge/shapes ignore opacity at the renderer level — the slider
-            // stays visible for consistency with Size / Hardness / Spacing
-            // (also "universal" properties that don't apply to every tool).
+            // Opacity slider. Bound to `BrushSettings.opacity`. Brush-family
+            // tools multiply stamp alpha by this value in their fragment
+            // shaders. Eraser/blur/smudge/shapes ignore opacity at the
+            // renderer level — the slider stays visible for consistency
+            // with Size / Hardness / Spacing (also "universal" properties
+            // that don't apply to every tool).
             Section("Opacity") {
                 HStack {
                     Text("Opacity")

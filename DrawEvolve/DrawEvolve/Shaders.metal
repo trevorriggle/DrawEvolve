@@ -48,11 +48,11 @@ struct BrushUniforms {
                             // selection mask sampling, procedural grain seeds,
                             // and canvas-sized texture lookups keep producing
                             // the same layer-space values they did pre-tiling.
-    float pressureAlpha;    // ALPHA pressure (Phase 4.6 BLOCKER B). Fragment
-                            // shaders multiply `alpha *= opacity * pressureAlpha`
+    float pressureAlpha;    // ALPHA pressure (BLOCKER B). Fragment shaders
+                            // multiply `alpha *= opacity * pressureAlpha`
                             // here instead of `* pressure` so the size-fudge
                             // value 0.75 used for non-Pencil input doesn't
-                            // leak into stroke alpha under wet-ink's max-blend.
+                            // silently cap the first stamp's alpha at 75%.
                             // Pencil: equal to `pressure`. Finger/mouse: 1.0.
                             // `pressure` is still the SIZE knob (vertex
                             // shader's `pointSize = size * pressure`).
@@ -797,43 +797,6 @@ fragment float4 textureDisplayShader(VertexOut in [[stage_in]],
     // Apply layer opacity to alpha channel
     color.a *= opacity;
     return color;
-}
-
-// MARK: - Wet-ink composite (Phase 4.6)
-//
-// Wet-ink uses a single canvas-sized scratch texture. Brush-family
-// stamps deposit into the wet-ink texture during a stroke (max-blend
-// across overlapping stamps per pixel — see the `*WetInkPipelineState`
-// family, whose RGB blend uses `sourceAlpha` as the source factor with
-// `.max` op). That means the texture's RGB channel is already
-// premultiplied with the stamp's per-pixel alpha — RGB / alpha at any
-// pixel equals the brush colour. We therefore scale BOTH rgb and alpha
-// by `strokeOpacity` here so the premultiplied relationship is
-// preserved, and let the pipeline's standard
-// `(.one, .oneMinusSourceAlpha)` premultiplied-over blend deposit the
-// scaled result onto the target.
-//
-// Using `textureDisplayShader` here would be wrong: it only scales the
-// alpha channel, leaving RGB premultiplied with the un-scaled alpha —
-// the resulting pixel reads over-bright when strokeOpacity < 1.
-fragment float4 wetInkCompositeShader(VertexOut in [[stage_in]],
-                                       texture2d<float> wetInk [[texture(0)]],
-                                       constant float &strokeOpacity [[buffer(0)]]) {
-    constexpr sampler s(mag_filter::linear, min_filter::linear);
-    float4 c = wetInk.sample(s, in.texCoord);
-    // Bug 1 falsification fix: if the per-stamp deposit somehow leaves
-    // wet-ink alpha at 0 inside a stamped disc (despite the math
-    // predicting alpha = 1), the commit's premul-over blend reads
-    // src.a = 0, (1 - src.a) = 1, and underlying destination colour
-    // leaks through additively — the visible "cyan/yellow on overlap"
-    // bug. As a probe-level falsification, derive the output alpha
-    // from max(sampled alpha, max RGB channel) so any non-zero colour
-    // content produces a non-zero output alpha. If this restores
-    // correct over-blend behaviour, root cause is wet-ink alpha = 0
-    // at sample time and a proper fix targets the per-stamp deposit.
-    float maxRGB = max(c.r, max(c.g, c.b));
-    float outAlpha = max(c.a, maxRGB) * strokeOpacity;
-    return float4(c.rgb * strokeOpacity, outAlpha);
 }
 
 // MARK: - Gaussian Blur (Effects)

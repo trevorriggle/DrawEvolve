@@ -115,25 +115,6 @@ enum DrawingTool {
         }
     }
 
-    /// True for brush-family stamp tools that route through the wet-ink
-    /// scratch buffer (Phase 4.6). Each stamp deposits into wetInkTexture
-    /// at full per-stamp alpha with max-blend; touchesEnded commits the
-    /// wet-ink onto the active layer's tile grid with the stroke's
-    /// per-stroke opacity. Decouples per-stroke opacity from per-stamp
-    /// blend math so overlapping stamps within one stroke don't
-    /// accumulate toward fully opaque at low stroke opacity.
-    ///
-    /// Eraser intentionally NOT included: destination-out blend has a
-    /// different composition path. Shape tools route separately. Pose
-    /// tools and selection tools don't paint.
-    var usesWetInk: Bool {
-        switch self {
-        case .brush, .pencil, .inkPen, .marker, .airbrush, .charcoal:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 /// Brush settings
@@ -321,10 +302,10 @@ struct BrushStroke {
         // ALPHA pressure — drives `uniforms.pressureAlpha` → fragment
         // shader `alpha *= opacity * pressureAlpha`. Reflects "press
         // harder = darker stamp." Decoupled from `pressure` so the
-        // finger-fudge size scale (0.75) doesn't also cap stroke alpha at
-        // 75% under wet-ink's max-blend (Phase 4.6 BLOCKER B). Pencil
-        // returns the same value for both fields; finger returns 1.0 here
-        // and 0.75 for size.
+        // finger-fudge size scale (0.75) doesn't also silently cap the
+        // first stamp's alpha at 75% on non-Pencil input. Pencil
+        // returns the same value for both fields; finger returns 1.0
+        // here and 0.75 for size.
         let pressureAlpha: CGFloat
         let inputType: InputType
         // Raw UITouch.force / maximumPossibleForce captured at the
