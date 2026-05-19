@@ -399,6 +399,11 @@ struct MetalCanvasView: UIViewRepresentable {
         // release. Locking the pressure at touchdown makes preview and
         // commit identical for the whole stroke.
         private var shapeStartPressure: CGFloat?
+        // Companion alpha-pressure captured at shape touchdown. Diverges
+        // from `shapeStartPressure` for non-Pencil input (size 0.75, alpha
+        // 1.0) so shape strokes don't inherit the size-fudge's alpha-
+        // capping side effect. See `computePressure(for:)`.
+        private var shapeStartPressureAlpha: CGFloat?
         // Two-finger perfect-shape constraint.
         // `shapePrimaryTouchID` is the touch that opened the shape stroke;
         // any additional touches that land while the shape is in progress
@@ -556,6 +561,9 @@ struct MetalCanvasView: UIViewRepresentable {
         private var snapToLineAnchorScreen: CGPoint?
         private var snapLatestDoc: CGPoint = .zero
         private var snapLatestPressure: CGFloat = 1.0
+        // Companion alpha-pressure for snap-to-line. Same rationale as
+        // `shapeStartPressureAlpha`.
+        private var snapLatestPressureAlpha: CGFloat = 1.0
         private var snapLatestTimestamp: TimeInterval = 0
         private static let snapToLineHoldDuration: TimeInterval = 0.6
         private static let snapToLineMovementThreshold: CGFloat = 2.0   // screen pts
@@ -1113,10 +1121,22 @@ struct MetalCanvasView: UIViewRepresentable {
         //   - Pencil + pressureSensitivity off → 1.0 (no variation).
         //   - Finger (or any non-pencil type)   → fixed 0.75 so finger and Pencil widths
         //     feel comparable at the same brush size.
-        private func computePressure(for touch: UITouch) -> CGFloat {
+        // Returns (size, alpha). The two fields drive separate uniforms:
+        // `uniforms.pressure` (vertex shader pointSize) and
+        // `uniforms.pressureAlpha` (fragment shader alpha multiply). For
+        // Pencil they're equal — pressing harder both grows and darkens
+        // the stamp. For non-Pencil input we keep `size = 0.75` so finger
+        // strokes feel size-comparable to Pencil (the original rationale
+        // for the 0.75 fudge), but `alpha = 1.0` so the user's opacity
+        // slider isn't silently capped at 75% — pre-Phase-4.6 premul-over
+        // accumulation masked that capping by saturating dense strokes
+        // back toward fully opaque; Phase 4.6 wet-ink's max-blend doesn't
+        // accumulate, so the size-fudge would leak into stroke alpha
+        // without this split (BLOCKER B).
+        private func computePressure(for touch: UITouch) -> (size: CGFloat, alpha: CGFloat) {
             let settings = brushSettings
             if touch.type == .pencil {
-                guard settings.pressureSensitivity else { return 1.0 }
+                guard settings.pressureSensitivity else { return (1.0, 1.0) }
                 // Apple Pencil firmware has been observed to occasionally
                 // return NaN for `touch.force` under heavy pressure or palm
                 // rejection. Swift's `max(0, NaN)` returns NaN (NaN
@@ -1129,17 +1149,20 @@ struct MetalCanvasView: UIViewRepresentable {
                 guard touch.maximumPossibleForce.isFinite,
                       touch.maximumPossibleForce > 0,
                       touch.force.isFinite else {
-                    return 1.0
+                    return (1.0, 1.0)
                 }
                 let raw = max(0, min(1, touch.force / touch.maximumPossibleForce))
-                guard raw.isFinite else { return 1.0 }
+                guard raw.isFinite else { return (1.0, 1.0) }
                 let lo = settings.minPressureSize
                 let hi = settings.maxPressureSize
                 let result = lo + raw * (hi - lo)
-                return result.isFinite ? result : 1.0
+                let safe = result.isFinite ? result : 1.0
+                return (safe, safe)
             } else {
-                // Fingers have no reliable pressure on iPad. Use a fixed mid-range value.
-                return 0.75
+                // Fingers have no reliable pressure on iPad. 0.75 keeps
+                // finger strokes size-comparable to Pencil at the same
+                // brush size; alpha 1.0 honours the opacity slider.
+                return (0.75, 1.0)
             }
         }
 
@@ -1198,7 +1221,7 @@ struct MetalCanvasView: UIViewRepresentable {
             let screenLocation = touch.location(in: view)
             let location = canvasState?.screenToDocument(screenLocation) ?? screenLocation
 
-            let pressure = computePressure(for: touch)
+            let (pressure, pressureAlpha) = computePressure(for: touch)
             let timestamp = touch.timestamp
 
             // One-time coordinate-pipeline diagnostic for bug 1.1 (stroke offset).
@@ -1270,6 +1293,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 smudgePendingTouchdown = BrushStroke.StrokePoint(
                     location: location,
                     pressure: pressure,
+                    pressureAlpha: pressureAlpha,
                     timestamp: timestamp
                 )
                 isSmudgeStrokeActive = true
@@ -1597,6 +1621,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Lock the touchdown pressure for the duration of the
                 // drag; preview and commit both read it.
                 shapeStartPressure = pressure
+                shapeStartPressureAlpha = pressureAlpha
                 // Track the primary touch ID so a second finger landing
                 // mid-drag can be routed into the perfect-shape
                 // constraint path instead of starting a competing stroke.
@@ -1609,6 +1634,7 @@ struct MetalCanvasView: UIViewRepresentable {
             let point = BrushStroke.StrokePoint(
                 location: location,
                 pressure: pressure,
+                pressureAlpha: pressureAlpha,
                 timestamp: timestamp
             )
 
@@ -1717,6 +1743,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 snapToLineAnchorScreen = screenLocation
                 snapLatestDoc = location
                 snapLatestPressure = pressure
+                snapLatestPressureAlpha = pressureAlpha
                 snapLatestTimestamp = timestamp
                 isSnappedToLine = false
                 armStationaryTimer()
@@ -1832,7 +1859,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 for sample in samples {
                     let sampleScreen = sample.location(in: view)
                     let sampleLoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
-                    let samplePressure = computePressure(for: sample)
+                    let (samplePressure, samplePressureAlpha) = computePressure(for: sample)
                     let sampleTimestamp = sample.timestamp
 
                     if let last = lastPoint {
@@ -1850,9 +1877,14 @@ struct MetalCanvasView: UIViewRepresentable {
                                 let safePrev = prevPressure.isFinite ? prevPressure : samplePressure
                                 let safeSample = samplePressure.isFinite ? samplePressure : 1.0
                                 let interpPressure = (1 - t) * safePrev + t * safeSample
+                                let prevPressureAlpha = batch.last?.pressureAlpha ?? samplePressureAlpha
+                                let safePrevAlpha = prevPressureAlpha.isFinite ? prevPressureAlpha : samplePressureAlpha
+                                let safeSampleAlpha = samplePressureAlpha.isFinite ? samplePressureAlpha : 1.0
+                                let interpPressureAlpha = (1 - t) * safePrevAlpha + t * safeSampleAlpha
                                 batch.append(BrushStroke.StrokePoint(
                                     location: interpLocation,
                                     pressure: interpPressure.isFinite ? interpPressure : 1.0,
+                                    pressureAlpha: interpPressureAlpha.isFinite ? interpPressureAlpha : 1.0,
                                     timestamp: sampleTimestamp
                                 ))
                             }
@@ -2025,7 +2057,9 @@ struct MetalCanvasView: UIViewRepresentable {
             if isShapeTool, let startPoint = shapeStartPoint {
                 // Pressure is locked at touchdown (see shapeStartPressure
                 // doc) so preview width stays stable and matches commit.
-                let endPressure = shapeStartPressure ?? computePressure(for: touch)
+                let touchdownPressure = computePressure(for: touch)
+                let endPressure = shapeStartPressure ?? touchdownPressure.size
+                let endPressureAlpha = shapeStartPressureAlpha ?? touchdownPressure.alpha
                 let constrainPerfect = !shapeConstraintTouchIDs.isEmpty
                 // Rectangle and circle should be SCREEN-axis-aligned regardless
                 // of canvas rotation/zoom/pan. We generate their path in
@@ -2047,6 +2081,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         to: endScreen,
                         tool: currentTool,
                         pressure: endPressure,
+                        pressureAlpha: endPressureAlpha,
                         timestamp: touch.timestamp,
                         constrainPerfect: constrainPerfect
                     )
@@ -2054,6 +2089,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         BrushStroke.StrokePoint(
                             location: canvasState.screenToDocument(sp.location),
                             pressure: sp.pressure,
+                            pressureAlpha: sp.pressureAlpha,
                             timestamp: sp.timestamp
                         )
                     }
@@ -2063,6 +2099,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         to: latestLocation,
                         tool: currentTool,
                         pressure: endPressure,
+                        pressureAlpha: endPressureAlpha,
                         timestamp: touch.timestamp,
                         constrainPerfect: constrainPerfect
                     )
@@ -2090,7 +2127,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     let lastSampleScreen = lastSample.location(in: view)
                     let lastSampleDoc = canvasState?.screenToDocument(lastSampleScreen) ?? lastSampleScreen
                     snapLatestDoc = lastSampleDoc
-                    snapLatestPressure = computePressure(for: lastSample)
+                    let snapSamplePressure = computePressure(for: lastSample)
+                    snapLatestPressure = snapSamplePressure.size
+                    snapLatestPressureAlpha = snapSamplePressure.alpha
                     snapLatestTimestamp = lastSample.timestamp
 
                     if isSnappedToLine, let start = snapToLineStartDoc {
@@ -2118,7 +2157,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 for sample in samples {
                     let sampleScreen = sample.location(in: view)
                     let sampleLoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
-                    let samplePressure = computePressure(for: sample)
+                    let (samplePressure, samplePressureAlpha) = computePressure(for: sample)
                     let sampleTimestamp = sample.timestamp
 
                     if let last = lastPoint {
@@ -2154,9 +2193,17 @@ struct MetalCanvasView: UIViewRepresentable {
                                     ? (1 - t) * safePrev + t * safeSample
                                     : safeSample
 
+                                let previousPressureAlpha = stroke.points.last?.pressureAlpha ?? samplePressureAlpha
+                                let safePrevAlpha = previousPressureAlpha.isFinite ? previousPressureAlpha : samplePressureAlpha
+                                let safeSampleAlpha = samplePressureAlpha.isFinite ? samplePressureAlpha : 1.0
+                                let interpPressureAlpha = (lastTimestamp > 0)
+                                    ? (1 - t) * safePrevAlpha + t * safeSampleAlpha
+                                    : safeSampleAlpha
+
                                 stroke.points.append(BrushStroke.StrokePoint(
                                     location: interpLocation,
                                     pressure: interpPressure.isFinite ? interpPressure : 1.0,
+                                    pressureAlpha: interpPressureAlpha.isFinite ? interpPressureAlpha : 1.0,
                                     timestamp: sampleTimestamp
                                 ))
                             }
@@ -3258,6 +3305,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     result.append(BrushStroke.StrokePoint(
                         location: CGPoint(x: W - p.location.x, y: p.location.y),
                         pressure: p.pressure,
+                        pressureAlpha: p.pressureAlpha,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3267,6 +3315,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     result.append(BrushStroke.StrokePoint(
                         location: CGPoint(x: p.location.x, y: H - p.location.y),
                         pressure: p.pressure,
+                        pressureAlpha: p.pressureAlpha,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3276,6 +3325,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     result.append(BrushStroke.StrokePoint(
                         location: CGPoint(x: W - p.location.x, y: H - p.location.y),
                         pressure: p.pressure,
+                        pressureAlpha: p.pressureAlpha,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3323,6 +3373,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     result.append(BrushStroke.StrokePoint(
                         location: CGPoint(x: rotatedX, y: rotatedY),
                         pressure: p.pressure,
+                        pressureAlpha: p.pressureAlpha,
                         timestamp: p.timestamp
                     ))
                 }
@@ -3409,6 +3460,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 from: start,
                 to: snappedTarget,
                 pressure: snapLatestPressure,
+                pressureAlpha: snapLatestPressureAlpha,
                 timestamp: snapLatestTimestamp
             )
             let docSize = MainActor.assumeIsolated {
@@ -3452,6 +3504,7 @@ struct MetalCanvasView: UIViewRepresentable {
             shapeStartPoint = nil
             shapeStartScreen = nil
             shapeStartPressure = nil
+            shapeStartPressureAlpha = nil
             shapePrimaryTouchID = nil
             shapeConstraintTouchIDs.removeAll()
         }
@@ -3465,6 +3518,7 @@ struct MetalCanvasView: UIViewRepresentable {
             to end: CGPoint,
             tool: DrawingTool,
             pressure: CGFloat,
+            pressureAlpha: CGFloat,
             timestamp: TimeInterval,
             constrainPerfect: Bool = false
         ) -> [BrushStroke.StrokePoint] {
@@ -3473,11 +3527,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 : end
             switch tool {
             case .line:
-                return generateLinePoints(from: start, to: constrainedEnd, pressure: pressure, timestamp: timestamp)
+                return generateLinePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp)
             case .rectangle:
-                return generateRectanglePoints(from: start, to: constrainedEnd, pressure: pressure, timestamp: timestamp)
+                return generateRectanglePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp)
             case .circle:
-                return generateCirclePoints(from: start, to: constrainedEnd, pressure: pressure, timestamp: timestamp)
+                return generateCirclePoints(from: start, to: constrainedEnd, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp)
             default:
                 return []
             }
@@ -3518,6 +3572,7 @@ struct MetalCanvasView: UIViewRepresentable {
             from start: CGPoint,
             to end: CGPoint,
             pressure: CGFloat,
+            pressureAlpha: CGFloat,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             let distance = hypot(end.x - start.x, end.y - start.y)
@@ -3534,6 +3589,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 points.append(BrushStroke.StrokePoint(
                     location: location,
                     pressure: pressure,
+                    pressureAlpha: pressureAlpha,
                     timestamp: timestamp
                 ))
             }
@@ -3544,6 +3600,7 @@ struct MetalCanvasView: UIViewRepresentable {
             from start: CGPoint,
             to end: CGPoint,
             pressure: CGFloat,
+            pressureAlpha: CGFloat,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             let spacing = brushSettings.size * brushSettings.spacing
@@ -3551,17 +3608,17 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Top edge (start to top-right)
             let topRight = CGPoint(x: end.x, y: start.y)
-            points.append(contentsOf: generateLineSegment(from: start, to: topRight, spacing: spacing, pressure: pressure, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: start, to: topRight, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
 
             // Right edge (top-right to end)
-            points.append(contentsOf: generateLineSegment(from: topRight, to: end, spacing: spacing, pressure: pressure, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: topRight, to: end, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
 
             // Bottom edge (end to bottom-left)
             let bottomLeft = CGPoint(x: start.x, y: end.y)
-            points.append(contentsOf: generateLineSegment(from: end, to: bottomLeft, spacing: spacing, pressure: pressure, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: end, to: bottomLeft, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
 
             // Left edge (bottom-left back to start)
-            points.append(contentsOf: generateLineSegment(from: bottomLeft, to: start, spacing: spacing, pressure: pressure, timestamp: timestamp))
+            points.append(contentsOf: generateLineSegment(from: bottomLeft, to: start, spacing: spacing, pressure: pressure, pressureAlpha: pressureAlpha, timestamp: timestamp))
 
             return points
         }
@@ -3570,6 +3627,7 @@ struct MetalCanvasView: UIViewRepresentable {
             from start: CGPoint,
             to end: CGPoint,
             pressure: CGFloat,
+            pressureAlpha: CGFloat,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             // Calculate center point and radii for ellipse
@@ -3607,6 +3665,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 points.append(BrushStroke.StrokePoint(
                     location: location,
                     pressure: pressure,
+                    pressureAlpha: pressureAlpha,
                     timestamp: timestamp
                 ))
             }
@@ -3618,6 +3677,7 @@ struct MetalCanvasView: UIViewRepresentable {
             to end: CGPoint,
             spacing: CGFloat,
             pressure: CGFloat,
+            pressureAlpha: CGFloat,
             timestamp: TimeInterval
         ) -> [BrushStroke.StrokePoint] {
             let distance = hypot(end.x - start.x, end.y - start.y)
@@ -3633,6 +3693,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 points.append(BrushStroke.StrokePoint(
                     location: location,
                     pressure: pressure,
+                    pressureAlpha: pressureAlpha,
                     timestamp: timestamp
                 ))
             }

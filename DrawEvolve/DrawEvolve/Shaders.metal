@@ -48,6 +48,16 @@ struct BrushUniforms {
                             // selection mask sampling, procedural grain seeds,
                             // and canvas-sized texture lookups keep producing
                             // the same layer-space values they did pre-tiling.
+    float pressureAlpha;    // ALPHA pressure (Phase 4.6 BLOCKER B). Fragment
+                            // shaders multiply `alpha *= opacity * pressureAlpha`
+                            // here instead of `* pressure` so the size-fudge
+                            // value 0.75 used for non-Pencil input doesn't
+                            // leak into stroke alpha under wet-ink's max-blend.
+                            // Pencil: equal to `pressure`. Finger/mouse: 1.0.
+                            // `pressure` is still the SIZE knob (vertex
+                            // shader's `pointSize = size * pressure`).
+                            // Trailing position preserves C-ABI prefix for
+                            // shaders that don't reference this field.
 };
 
 // Perceptual hardness remap. Earlier this used `sqrt(h)` so slider 0.5
@@ -450,7 +460,7 @@ fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
     }
 
     // Apply opacity and pressure, then clip to selection.
-    alpha *= uniforms.opacity * uniforms.pressure;
+    alpha *= uniforms.opacity * uniforms.pressureAlpha;
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
@@ -474,7 +484,7 @@ fragment float4 eraserFragmentShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
 
-    alpha *= uniforms.opacity * uniforms.pressure;
+    alpha *= uniforms.opacity * uniforms.pressureAlpha;
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     // Return transparent black with alpha for erasing
@@ -539,7 +549,9 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     // Pressure curve: opacity-dominant. Cube the pressure (was square)
     // so light strokes are noticeably lighter — pencil sketches build
     // up density through repeated light strokes, not heavy single ones.
-    float pressureOpacity = uniforms.pressure * uniforms.pressure * uniforms.pressure;
+    // Reads `pressureAlpha` (not `pressure`) so non-Pencil input doesn't
+    // permanently cap pencil at 0.75³ ≈ 0.42 alpha — see BrushUniforms.
+    float pressureOpacity = uniforms.pressureAlpha * uniforms.pressureAlpha * uniforms.pressureAlpha;
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -590,7 +602,7 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     // Pressure modulates opacity. Light pressure → translucent stroke,
     // hard pressure → near-solid. Markers should be ~40% per stamp by
     // default so overlaps darken visibly without immediately saturating.
-    alpha *= uniforms.opacity * uniforms.pressure;
+    alpha *= uniforms.opacity * uniforms.pressureAlpha;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
@@ -624,8 +636,10 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     alpha *= grain;
 
     // Pressure modulates opacity, not size. Square keeps light pressure
-    // genuinely faint so the airbrush "feathers in" as you press.
-    float pressureOpacity = uniforms.pressure * uniforms.pressure;
+    // genuinely faint so the airbrush "feathers in" as you press. Reads
+    // `pressureAlpha` so non-Pencil input doesn't cap airbrush at 0.75²
+    // ≈ 0.56 alpha — see BrushUniforms.
+    float pressureOpacity = uniforms.pressureAlpha * uniforms.pressureAlpha;
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -684,7 +698,7 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
 
     // Pressure: moderate. Even light strokes leave visible deposit
     // (charcoal is sticky), so floor at 0.6.
-    float pressureOpacity = mix(0.6, 1.0, uniforms.pressure);
+    float pressureOpacity = mix(0.6, 1.0, uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -923,7 +937,7 @@ fragment float4 stampBlurDepositShader(VertexOut in [[stage_in]],
         float edge = 1.0 - softness;
         alpha = smoothstep(1.0, edge, dist);
     }
-    alpha *= uniforms.opacity * uniforms.pressure * blurStrength;
+    alpha *= uniforms.opacity * uniforms.pressureAlpha * blurStrength;
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     if (alpha <= 0.0) {
@@ -1069,7 +1083,7 @@ fragment float4 smudgeDepositShader(VertexOut in [[stage_in]],
         float edge = 1.0 - softness;
         alpha = smoothstep(1.0, edge, dist);
     }
-    alpha *= uniforms.opacity * uniforms.pressure;
+    alpha *= uniforms.opacity * uniforms.pressureAlpha;
     // Selection clip on deposit: outside the selection, alpha → 0 and the
     // discard below short-circuits the patch sample. Pairs with the
     // pickup-side mask in smudgePatchUpdateShader.

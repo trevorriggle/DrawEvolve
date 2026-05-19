@@ -1113,6 +1113,11 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressure))
             }()
             uniforms.pressure = Float(safePressure)
+            let safePressureAlpha: CGFloat = {
+                guard point.pressureAlpha.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressureAlpha))
+            }()
+            uniforms.pressureAlpha = Float(safePressureAlpha)
 
             var position = positions[index]
             encoder.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
@@ -1456,6 +1461,11 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressure))
             }()
             uniforms.pressure = Float(safePressure)
+            let safePressureAlpha: CGFloat = {
+                guard point.pressureAlpha.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressureAlpha))
+            }()
+            uniforms.pressureAlpha = Float(safePressureAlpha)
 
             // Copy position to avoid overlapping access
             var position = positions[index]
@@ -1563,6 +1573,14 @@ class CanvasRenderer: NSObject {
         var pressure: Float
         var grainDensity: Float
         var tileOrigin: SIMD2<Float>
+        // Trailing field (Phase 4.6 BLOCKER B fix). Drives fragment-side
+        // alpha multiply (`alpha *= opacity * pressureAlpha`); decoupled
+        // from `pressure` so the finger/mouse size-fudge 0.75 doesn't cap
+        // wet-ink stroke alpha at 75%. Pencil sets it equal to `pressure`;
+        // finger/mouse sets it to 1.0. Trailing position preserves the
+        // C-ABI prefix for shaders that don't reference this field (the
+        // ink pen, e.g.).
+        var pressureAlpha: Float
 
         init(color: UIColor,
              size: Float,
@@ -1579,6 +1597,7 @@ class CanvasRenderer: NSObject {
             self.pressure = 1.0
             self.grainDensity = grainDensity
             self.tileOrigin = tileOrigin
+            self.pressureAlpha = 1.0
         }
     }
 
@@ -3178,6 +3197,11 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressure))
             }()
             uniforms.pressure = Float(safePressure)
+            let safePressureAlpha: CGFloat = {
+                guard point.pressureAlpha.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressureAlpha))
+            }()
+            uniforms.pressureAlpha = Float(safePressureAlpha)
 
             // Copy position to avoid overlapping access
             var position = positions[index]
@@ -5628,6 +5652,11 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressure))
             }()
             uniforms.pressure = Float(safePressure)
+            let safePressureAlpha: CGFloat = {
+                guard point.pressureAlpha.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressureAlpha))
+            }()
+            uniforms.pressureAlpha = Float(safePressureAlpha)
 
             // Pass 1: horizontal Gaussian, scissored.
             runGaussianPass(
@@ -5905,6 +5934,11 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressure))
             }()
             uniforms.pressure = Float(safePressure)
+            let safePressureAlpha: CGFloat = {
+                guard point.pressureAlpha.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressureAlpha))
+            }()
+            uniforms.pressureAlpha = Float(safePressureAlpha)
 
             runGaussianPass(
                 commandBuffer: commandBuffer,
@@ -6222,6 +6256,10 @@ class CanvasRenderer: NSObject {
                 guard stamp.pressure.isFinite else { return 1.0 }
                 return Float(max(0, min(1, stamp.pressure)))
             }()
+            let safePressureAlpha: Float = {
+                guard stamp.pressureAlpha.isFinite else { return 1.0 }
+                return Float(max(0, min(1, stamp.pressureAlpha)))
+            }()
 
             let isFirstStamp = (smudgeStampIndex == 0)
             // Pickup weight: first stamp is full-replace (initialise patch
@@ -6286,6 +6324,7 @@ class CanvasRenderer: NSObject {
                         depositEncoder.setFragmentTexture(selectionMask, index: 2)
 
                         brushUniforms.pressure = safePressure
+                        brushUniforms.pressureAlpha = safePressureAlpha
 
                         var stampPosition = stampCenter
                         depositEncoder.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)

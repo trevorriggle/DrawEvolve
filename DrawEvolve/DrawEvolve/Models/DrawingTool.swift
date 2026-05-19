@@ -280,7 +280,36 @@ struct BrushStroke {
 
     struct StrokePoint {
         let location: CGPoint
+        // SIZE pressure — drives `uniforms.pressure` → vertex shader
+        // `pointSize = size * pressure`. Reflects "press harder = bigger
+        // stamp." For Pencil this varies with applied force; for finger /
+        // mouse / simulator it's the fixed 0.75 size-fudge so finger
+        // strokes feel size-comparable to Pencil at the same brush size.
         let pressure: CGFloat
+        // ALPHA pressure — drives `uniforms.pressureAlpha` → fragment
+        // shader `alpha *= opacity * pressureAlpha`. Reflects "press
+        // harder = darker stamp." Decoupled from `pressure` so the
+        // finger-fudge size scale (0.75) doesn't also cap stroke alpha at
+        // 75% under wet-ink's max-blend (Phase 4.6 BLOCKER B). Pencil
+        // returns the same value for both fields; finger returns 1.0 here
+        // and 0.75 for size.
+        let pressureAlpha: CGFloat
         let timestamp: TimeInterval
+
+        // Back-compat init: callers that don't differentiate (shape /
+        // symmetry / mirror copy sites that just propagate an existing
+        // point's pressure value) pass only `pressure` and `pressureAlpha`
+        // defaults to mirror it. Touch handlers that originate pressure
+        // from `computePressure(for:)` pass both explicitly because the
+        // tuple's two fields diverge for non-Pencil input.
+        init(location: CGPoint,
+             pressure: CGFloat,
+             pressureAlpha: CGFloat? = nil,
+             timestamp: TimeInterval) {
+            self.location = location
+            self.pressure = pressure
+            self.pressureAlpha = pressureAlpha ?? pressure
+            self.timestamp = timestamp
+        }
     }
 }
