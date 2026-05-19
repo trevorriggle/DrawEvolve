@@ -57,7 +57,7 @@ enum CanvasStrokeDiagnostics {
     }
 
     static func format(_ settings: BrushSettings) -> String {
-        "size=\(format(settings.size)) opacity=\(format(settings.opacity)) hardness=\(format(settings.hardness)) spacing=\(format(settings.spacing)) grain=\(format(settings.grainDensity)) \(format(settings.color))"
+        "size=\(format(settings.size)) opacity=\(format(settings.opacity)) hardness=\(format(settings.hardness)) spacing=\(format(settings.spacing)) grain=\(format(settings.grainDensity)) pressureSens=\(settings.pressureSensitivity) \(format(settings.color))"
     }
 
     static func ranges(for points: [BrushStroke.StrokePoint]) -> String {
@@ -78,7 +78,7 @@ enum CanvasStrokeDiagnostics {
     }
 
     static func stampSource(_ point: BrushStroke.StrokePoint) -> String {
-        "input=\(point.inputType.diagnosticName) loc=\(format(point.location)) sourcePressure=\(format(point.pressure)) sourcePressureAlpha=\(format(point.pressureAlpha))"
+        "input=\(point.inputType.diagnosticName) loc=\(format(point.location)) sourcePressure=\(format(point.pressure)) sourcePressureAlpha=\(format(point.pressureAlpha)) rawForce=\(format(point.rawTouchForce)) rawMaxForce=\(format(point.rawTouchMaxForce))"
     }
 
     static func uniforms(size: Float, opacity: Float, hardness: Float, pressure: Float, pressureAlpha: Float, color: SIMD4<Float>) -> String {

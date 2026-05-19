@@ -327,6 +327,13 @@ struct BrushStroke {
         // and 0.75 for size.
         let pressureAlpha: CGFloat
         let inputType: InputType
+        // Raw UITouch.force / maximumPossibleForce captured at the
+        // sample site. Diagnostic-only: lets the per-stamp log
+        // distinguish "Apple fed us variable force" from "our pressure
+        // pipeline corrupted a constant input." 0/0 for derived points
+        // (mirrors, shape-generated stamps, snap-line stamps).
+        let rawTouchForce: CGFloat
+        let rawTouchMaxForce: CGFloat
         let timestamp: TimeInterval
 
         // Back-compat init: callers that don't differentiate (shape /
@@ -339,11 +346,15 @@ struct BrushStroke {
              pressure: CGFloat,
              pressureAlpha: CGFloat? = nil,
              inputType: InputType = .unknown,
+             rawTouchForce: CGFloat = 0,
+             rawTouchMaxForce: CGFloat = 0,
              timestamp: TimeInterval) {
             self.location = location
             self.pressure = pressure
             self.pressureAlpha = pressureAlpha ?? pressure
             self.inputType = inputType
+            self.rawTouchForce = rawTouchForce
+            self.rawTouchMaxForce = rawTouchMaxForce
             self.timestamp = timestamp
         }
     }
