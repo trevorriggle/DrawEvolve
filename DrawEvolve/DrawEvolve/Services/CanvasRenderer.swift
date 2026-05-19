@@ -960,6 +960,148 @@ class CanvasRenderer: NSObject {
         wetInkTexture = nil
     }
 
+    #if DEBUG
+    /// TEMPORARY DIAGNOSTIC: synchronously read back a small region of
+    /// `wetInkTexture` and log whether it contains any non-zero pixels.
+    /// Called from MetalCanvasView's touchesBegan immediately after
+    /// `clearWetInkTexture()` to verify the render-pass clear actually
+    /// zeroed the texture before the new stroke's first stamps land.
+    ///
+    /// If non-zero values are reported here, the render-pass clear in
+    /// `clearTexture` is unreliable on this device (probable TBDR
+    /// elision of a no-draw pass) and the fix is to replace it with a
+    /// blit-encoder clear that's unconditionally executed. If zeros are
+    /// reported, the clear is fine and the residue is entering through
+    /// some other path.
+    ///
+    /// Blit-copies a `regionW × regionH` square from a configurable
+    /// canvas-space origin into a shared MTLBuffer, waits for GPU
+    /// completion, and scans the CPU-readable buffer.
+    func verifyWetInkClearedSync(sampleOriginX: Int? = nil, sampleOriginY: Int? = nil) {
+        guard let wetInk = wetInkTexture else {
+            CanvasStrokeDiagnostics.log("verifyWetInkCleared SKIP texture=nil")
+            return
+        }
+
+        let regionW = 16
+        let regionH = 16
+        let bytesPerRow = regionW * 4
+        let bytesPerImage = bytesPerRow * regionH
+
+        let originX = sampleOriginX ?? max(0, min(wetInk.width  - regionW, wetInk.width  / 2 - regionW / 2))
+        let originY = sampleOriginY ?? max(0, min(wetInk.height - regionH, wetInk.height / 2 - regionH / 2))
+
+        guard let buf = device.makeBuffer(length: bytesPerImage, options: .storageModeShared),
+              let cmdBuf = commandQueue.makeCommandBuffer(),
+              let blit = cmdBuf.makeBlitCommandEncoder() else {
+            CanvasStrokeDiagnostics.log("verifyWetInkCleared SKIP alloc-failed")
+            return
+        }
+
+        blit.copy(
+            from: wetInk,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: originX, y: originY, z: 0),
+            sourceSize: MTLSize(width: regionW, height: regionH, depth: 1),
+            to: buf,
+            destinationOffset: 0,
+            destinationBytesPerRow: bytesPerRow,
+            destinationBytesPerImage: bytesPerImage
+        )
+        blit.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        let ptr = buf.contents().bindMemory(to: UInt8.self, capacity: bytesPerImage)
+        var nonZeroCount = 0
+        var maxB: UInt8 = 0
+        var maxG: UInt8 = 0
+        var maxR: UInt8 = 0
+        var maxA: UInt8 = 0
+        var firstNonZeroIdx = -1
+        for i in 0..<(bytesPerImage / 4) {
+            // bgra8Unorm byte order: B, G, R, A
+            let b = ptr[i * 4 + 0]
+            let g = ptr[i * 4 + 1]
+            let r = ptr[i * 4 + 2]
+            let a = ptr[i * 4 + 3]
+            if b != 0 || g != 0 || r != 0 || a != 0 {
+                nonZeroCount += 1
+                if firstNonZeroIdx < 0 { firstNonZeroIdx = i }
+                if b > maxB { maxB = b }
+                if g > maxG { maxG = g }
+                if r > maxR { maxR = r }
+                if a > maxA { maxA = a }
+            }
+        }
+
+        if nonZeroCount == 0 {
+            CanvasStrokeDiagnostics.log("verifyWetInkCleared region=(\(originX),\(originY),\(regionW)x\(regionH)) ALL_ZERO ✓")
+        } else {
+            let firstX = originX + (firstNonZeroIdx % regionW)
+            let firstY = originY + (firstNonZeroIdx / regionW)
+            let firstB = ptr[firstNonZeroIdx * 4 + 0]
+            let firstG = ptr[firstNonZeroIdx * 4 + 1]
+            let firstR = ptr[firstNonZeroIdx * 4 + 2]
+            let firstA = ptr[firstNonZeroIdx * 4 + 3]
+            CanvasStrokeDiagnostics.log("verifyWetInkCleared region=(\(originX),\(originY),\(regionW)x\(regionH)) NON_ZERO count=\(nonZeroCount)/\(regionW * regionH) firstAt=(\(firstX),\(firstY))=rgba(\(firstR),\(firstG),\(firstB),\(firstA)) max=rgba(\(maxR),\(maxG),\(maxB),\(maxA))")
+        }
+    }
+
+    /// TEMPORARY DIAGNOSTIC (probe B): synchronously read a single
+    /// pixel from `wetInkTexture` and log its raw RGBA bytes. Used at
+    /// touchesEnded — after all stamp cmdbufs have been committed —
+    /// to verify what the per-stamp deposit actually wrote into the
+    /// alpha channel at a known stamp-covered location. Blit-copies a
+    /// 16×16 region; logs the byte values at the region's centre pixel.
+    func logWetInkPixelSync(originX: Int, originY: Int, label: String) {
+        guard let wetInk = wetInkTexture else {
+            CanvasStrokeDiagnostics.log("logWetInkPixel SKIP label=\(label) texture=nil")
+            return
+        }
+
+        let regionW = 16
+        let regionH = 16
+        let bytesPerRow = regionW * 4
+        let bytesPerImage = bytesPerRow * regionH
+
+        let ox = max(0, min(wetInk.width  - regionW, originX))
+        let oy = max(0, min(wetInk.height - regionH, originY))
+
+        guard let buf = device.makeBuffer(length: bytesPerImage, options: .storageModeShared),
+              let cmdBuf = commandQueue.makeCommandBuffer(),
+              let blit = cmdBuf.makeBlitCommandEncoder() else {
+            CanvasStrokeDiagnostics.log("logWetInkPixel SKIP label=\(label) alloc-failed")
+            return
+        }
+
+        blit.copy(
+            from: wetInk,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: ox, y: oy, z: 0),
+            sourceSize: MTLSize(width: regionW, height: regionH, depth: 1),
+            to: buf,
+            destinationOffset: 0,
+            destinationBytesPerRow: bytesPerRow,
+            destinationBytesPerImage: bytesPerImage
+        )
+        blit.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        let ptr = buf.contents().bindMemory(to: UInt8.self, capacity: bytesPerImage)
+        // Centre pixel of the 16×16 region.
+        let cIdx = 8 * regionW + 8
+        let cb = ptr[cIdx * 4 + 0]
+        let cg = ptr[cIdx * 4 + 1]
+        let cr = ptr[cIdx * 4 + 2]
+        let ca = ptr[cIdx * 4 + 3]
+        CanvasStrokeDiagnostics.log("logWetInkPixel label=\(label) at=(\(ox + 8),\(oy + 8)) rgba=(\(cr),\(cg),\(cb),\(ca))")
+    }
+    #endif
+
     /// Composite wet-ink × `strokeOpacity` onto the active layer's tile
     /// grid. Applies the Source A+B clean canonical pattern:
     ///   1. Clear bbox-tile-aligned atlas region.
@@ -1085,6 +1227,44 @@ class CanvasRenderer: NSObject {
 
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
+
+        #if DEBUG
+        // Probe C: copy a 16×16 region of the atlas at bbox-centre into a
+        // shared buffer, IMMEDIATELY after the render pass writes and
+        // BEFORE the blit-back to tiles. Logs the centre pixel's RGBA on
+        // command-buffer completion. Captures what the commit's render
+        // produced before any downstream operation can mutate it.
+        let probeCRegionW = 16
+        let probeCRegionH = 16
+        let probeCBytesPerRow = probeCRegionW * 4
+        let probeCBytesPerImage = probeCBytesPerRow * probeCRegionH
+        let probeCOriginX = max(0, min(atlasW - probeCRegionW, Int(bbox.midX) - probeCRegionW / 2))
+        let probeCOriginY = max(0, min(atlasH - probeCRegionH, Int(bbox.midY) - probeCRegionH / 2))
+        if let probeCBuf = device.makeBuffer(length: probeCBytesPerImage, options: .storageModeShared),
+           let probeCBlit = commandBuffer.makeBlitCommandEncoder() {
+            probeCBlit.copy(
+                from: atlas,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: probeCOriginX, y: probeCOriginY, z: 0),
+                sourceSize: MTLSize(width: probeCRegionW, height: probeCRegionH, depth: 1),
+                to: probeCBuf,
+                destinationOffset: 0,
+                destinationBytesPerRow: probeCBytesPerRow,
+                destinationBytesPerImage: probeCBytesPerImage
+            )
+            probeCBlit.endEncoding()
+            commandBuffer.addCompletedHandler { _ in
+                let ptr = probeCBuf.contents().bindMemory(to: UInt8.self, capacity: probeCBytesPerImage)
+                let cIdx = (probeCRegionH / 2) * probeCRegionW + (probeCRegionW / 2)
+                let cb = ptr[cIdx * 4 + 0]
+                let cg = ptr[cIdx * 4 + 1]
+                let cr = ptr[cIdx * 4 + 2]
+                let ca = ptr[cIdx * 4 + 3]
+                CanvasStrokeDiagnostics.log("verifyAtlasPostRender at=(\(probeCOriginX + probeCRegionW / 2),\(probeCOriginY + probeCRegionH / 2)) rgba=(\(cr),\(cg),\(cb),\(ca))")
+            }
+        }
+        #endif
 
         // Blit atlas → tile grid for the bbox tiles.
         if !bboxKeys.isEmpty {

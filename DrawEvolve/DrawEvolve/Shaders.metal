@@ -821,7 +821,19 @@ fragment float4 wetInkCompositeShader(VertexOut in [[stage_in]],
                                        constant float &strokeOpacity [[buffer(0)]]) {
     constexpr sampler s(mag_filter::linear, min_filter::linear);
     float4 c = wetInk.sample(s, in.texCoord);
-    return c * strokeOpacity;
+    // Bug 1 falsification fix: if the per-stamp deposit somehow leaves
+    // wet-ink alpha at 0 inside a stamped disc (despite the math
+    // predicting alpha = 1), the commit's premul-over blend reads
+    // src.a = 0, (1 - src.a) = 1, and underlying destination colour
+    // leaks through additively — the visible "cyan/yellow on overlap"
+    // bug. As a probe-level falsification, derive the output alpha
+    // from max(sampled alpha, max RGB channel) so any non-zero colour
+    // content produces a non-zero output alpha. If this restores
+    // correct over-blend behaviour, root cause is wet-ink alpha = 0
+    // at sample time and a proper fix targets the per-stamp deposit.
+    float maxRGB = max(c.r, max(c.g, c.b));
+    float outAlpha = max(c.a, maxRGB) * strokeOpacity;
+    return float4(c.rgb * strokeOpacity, outAlpha);
 }
 
 // MARK: - Gaussian Blur (Effects)

@@ -1732,6 +1732,11 @@ struct MetalCanvasView: UIViewRepresentable {
                let renderer = renderer {
                 _ = renderer.ensureWetInkTexture()
                 renderer.clearWetInkTexture()
+                #if DEBUG
+                // TEMPORARY: verify the clear actually zeroed wet-ink before
+                // the first stamp lands. Sample the texture's center.
+                renderer.verifyWetInkClearedSync()
+                #endif
                 wetInkCommittedPointCount = 0
                 wetInkStrokeBbox = nil
                 flushWetInkSubStroke()
@@ -3023,6 +3028,16 @@ struct MetalCanvasView: UIViewRepresentable {
                 let wetInkBbox = wetInkStrokeBbox ?? .zero
                 #if DEBUG
                 CanvasStrokeDiagnostics.log("stroke commit begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) strokeSettingsAtBegin{\(CanvasStrokeDiagnostics.format(stroke.settings))} slidersAtCommit{\(CanvasStrokeDiagnostics.format(brushSettings))} wetInkBbox={\(CanvasStrokeDiagnostics.format(wetInkBbox))}")
+                // Probe B: synchronously sample wet-ink at the bbox centre
+                // (guaranteed inside the disc footprint union) AFTER all
+                // stamp cmdbufs are committed and BEFORE the commit fires.
+                // Reads the actual alpha that the per-stamp deposit wrote
+                // into the texture.
+                if stroke.tool.usesWetInk, !wetInkBbox.isNull, !wetInkBbox.isEmpty {
+                    let probeBX = Int(wetInkBbox.midX) - 8
+                    let probeBY = Int(wetInkBbox.midY) - 8
+                    renderer.logWetInkPixelSync(originX: probeBX, originY: probeBY, label: "post-stamps stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id))")
+                }
                 #endif
                 let dispatchStroke: (@escaping () -> Void) -> Void = { completion in
                     if stroke.tool == .blur {
