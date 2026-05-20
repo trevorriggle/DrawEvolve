@@ -110,13 +110,22 @@ struct BrushSettingsView: View {
             }
 
             Section("Shape") {
-                HStack {
-                    Text("Hardness")
-                    Spacer()
-                    Text(String(format: "%.0f%%", settings.hardness * 100))
-                        .foregroundColor(.primary)
+                // Hardness is only surfaced for tools whose fragment
+                // shader actually reads `uniforms.hardness` — brush,
+                // eraser, charcoal. InkPen, marker, airbrush have fixed
+                // disc profiles, and pencil floors its hardness at 0.85
+                // (the slider would be effectively a no-op). Hiding the
+                // control for those tools avoids a slider that silently
+                // does nothing. See `DrawingTool.usesHardness`.
+                if activeTool?.usesHardness ?? true {
+                    HStack {
+                        Text("Hardness")
+                        Spacer()
+                        Text(String(format: "%.0f%%", settings.hardness * 100))
+                            .foregroundColor(.primary)
+                    }
+                    Slider(value: $settings.hardness, in: 0...1)
                 }
-                Slider(value: $settings.hardness, in: 0...1)
 
                 HStack {
                     Text("Spacing")

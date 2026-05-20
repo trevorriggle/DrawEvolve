@@ -799,7 +799,12 @@ struct DrawingCanvasView: View {
                     if phoneBrushSizeRailVisible {
                         BrushSizeRailHorizontal(
                             size: $canvasState.brushSettings.size,
-                            hardness: $canvasState.brushSettings.hardness,
+                            // Hide hardness track for tools whose shader
+                            // ignores the uniform (inkPen, marker,
+                            // airbrush) or floors it (pencil). The rail
+                            // already treats a nil binding as "no
+                            // hardness track."
+                            hardness: canvasState.currentTool.usesHardness ? $canvasState.brushSettings.hardness : nil,
                             opacity: $canvasState.brushSettings.opacity,
                             screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
                         )
@@ -2078,7 +2083,9 @@ struct DrawingCanvasView: View {
                     if !isToolbarCollapsed {
                         BrushSizeRail(
                             size: $canvasState.brushSettings.size,
-                            hardness: $canvasState.brushSettings.hardness,
+                            // See horizontal-rail comment above — hide
+                            // the hardness track for tools that don't use it.
+                            hardness: canvasState.currentTool.usesHardness ? $canvasState.brushSettings.hardness : nil,
                             opacity: $canvasState.brushSettings.opacity,
                             screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
                         )

@@ -382,6 +382,51 @@ struct MetalCanvasView: UIViewRepresentable {
 
         private var renderer: CanvasRenderer?
 
+        #if DEBUG
+        // Wet-ink Phase A: one-shot guard for the strokeScratch sanity probe.
+        // See WET_INK_DESIGN.md §4 + CanvasRenderer.runStrokeScratchPhaseAProbe.
+        private var wetInkPhaseAProbeRun = false
+        // Wet-ink Phase A.5: one-shot guard for the shader-equivalence probe.
+        // See WET_INK_DESIGN.md §2.10 + CanvasRenderer.runShaderEquivalencePhaseA5Probe.
+        private var wetInkPhaseA5ProbeRun = false
+        // Wet-ink Phase B: one-shot guard for the max-blend deposit probe.
+        // See WET_INK_DESIGN.md §2.10 + CanvasRenderer.runMaxBlendDepositPhaseBProbe.
+        private var wetInkPhaseBProbeRun = false
+        // Wet-ink Phase C: one-shot guard for the commit pipeline probe.
+        // See WET_INK_DESIGN.md §2.10 + CanvasRenderer.runCommitPipelinePhaseCProbe.
+        private var wetInkPhaseCProbeRun = false
+        // Wet-ink Phase D: one-shot guard for the opacity-scaling probe.
+        // See WET_INK_DESIGN.md §2.10 + CanvasRenderer.runOpacityScalingPhaseDProbe.
+        private var wetInkPhaseDProbeRun = false
+        #endif
+
+        // Wet-ink live state. Tool-agnostic — currently routes .brush and
+        // .eraser through the wet-ink lifecycle. Phase E extends to the
+        // remaining additive tools and shape tools.
+        //
+        // Capture BEFORE snapshot at touchesBegan, flush new stamps per
+        // touchesMoved batch via the renderer's deposit pipeline (picked
+        // by tool: premul-additive for brush family, eraser-alpha-only
+        // for eraser), commit at touchesEnded and capture the AFTER
+        // snapshot in the completion to record HistoryAction.stroke.
+        private var wetInkActive: Bool = false
+        private var wetInkBeforeSnapshot: CanvasRenderer.LayerSnapshot?
+        private var wetInkLayerIndex: Int?
+        private var wetInkLayerId: UUID?
+        private var wetInkCommittedPointCount: Int = 0
+
+        // Tools that route through the wet-ink lifecycle. Brush, eraser,
+        // and the 5 additive variants (Phase E). Shape tools (line, rect,
+        // circle) stay on OLD renderStroke until Phase H.
+        private func isWetInkTool(_ tool: DrawingTool) -> Bool {
+            switch tool {
+            case .brush, .eraser, .pencil, .inkPen, .marker, .airbrush, .charcoal:
+                return true
+            default:
+                return false
+            }
+        }
+
         private var currentStroke: BrushStroke?
         private var lastPoint: CGPoint?
         private var lastTimestamp: TimeInterval = 0
@@ -722,6 +767,54 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("MetalCanvasView.draw: Shared renderer with canvas state")
                     print("  - Screen size: \(view.bounds.size)")
                     print("  - Canvas size: \(renderer.canvasSize)")
+
+                    #if DEBUG
+                    // Wet-ink Phase A sanity probe. One-shot, runs once per
+                    // process lifetime after the first updateCanvasSize.
+                    // Writes pass/fail + raw bytes to
+                    // Documents/wetink_phase_a.log for offline review.
+                    // See WET_INK_DESIGN.md §4 for the contract.
+                    if !wetInkPhaseAProbeRun {
+                        wetInkPhaseAProbeRun = true
+                        renderer.runStrokeScratchPhaseAProbe()
+                    }
+                    // Wet-ink Phase A.5 shader-equivalence probe. Runs once
+                    // immediately after Phase A so both probes share the
+                    // same first-frame init window. Writes to
+                    // Documents/wetink_phase_a5.log. See WET_INK_DESIGN.md
+                    // §2.10 Phase A.5.
+                    if !wetInkPhaseA5ProbeRun {
+                        wetInkPhaseA5ProbeRun = true
+                        renderer.runShaderEquivalencePhaseA5Probe()
+                    }
+                    // Wet-ink Phase B max-blend deposit probe. Runs once
+                    // after A.5, proves .max/.max into strokeScratch behaves
+                    // as the within-stroke no-accumulation rule requires.
+                    // Writes to Documents/wetink_phase_b.log. See
+                    // WET_INK_DESIGN.md §2.10 Phase B.
+                    if !wetInkPhaseBProbeRun {
+                        wetInkPhaseBProbeRun = true
+                        renderer.runMaxBlendDepositPhaseBProbe()
+                    }
+                    // Wet-ink Phase C commit pipeline probe. Proves color B
+                    // (full opacity) committed over color A produces exact
+                    // B at the overlap pixel. Writes to
+                    // Documents/wetink_phase_c.log. See WET_INK_DESIGN.md
+                    // §2.10 Phase C.
+                    if !wetInkPhaseCProbeRun {
+                        wetInkPhaseCProbeRun = true
+                        renderer.runCommitPipelinePhaseCProbe()
+                    }
+                    // Wet-ink Phase D opacity-scaling probe. Headline test:
+                    // proves saturation-toward-1.0 bug is fixed and partial
+                    // opacity behaves linearly. Writes
+                    // Documents/wetink_phase_d.log. See WET_INK_DESIGN.md
+                    // §2.10 Phase D.
+                    if !wetInkPhaseDProbeRun {
+                        wetInkPhaseDProbeRun = true
+                        renderer.runOpacityScalingPhaseDProbe()
+                    }
+                    #endif
                 }
             }
 
@@ -863,6 +956,16 @@ struct MetalCanvasView: UIViewRepresentable {
                     sourceTexture = preview
                 } else if let grid = layer.tileGrid {
                     renderer?.encodeLayerTileCompositeOntoIntermediate(grid, on: commandBuffer)
+                    // Wet-ink live preview: if a wet-ink stroke is active
+                    // on THIS layer, composite strokeScratch on top of the
+                    // tile-composited intermediate via the same commit
+                    // pipeline used at touchesEnded. The preview matches
+                    // the eventual commit bit-for-bit; the user sees the
+                    // in-progress stroke composited correctly with
+                    // within-stroke max-cap behavior already applied.
+                    if renderer?.activeWetInkLayerId == layer.id {
+                        renderer?.encodeWetInkPreviewCompositeOntoIntermediate(on: commandBuffer)
+                    }
                     sourceTexture = renderer?.tileDisplayIntermediate
                 } else {
                     // Phase 4.5e: layer.texture is gone. No tileGrid means
@@ -1008,8 +1111,16 @@ struct MetalCanvasView: UIViewRepresentable {
             // into the active layer texture in `touchesMoved`, and the every-
             // frame layer composite picks up the cuts — there's no separate
             // preview to draw on the drawable.
+            // Skip every wet-ink tool: brush, eraser, and the 5 additive
+            // variants (pencil/inkPen/marker/airbrush/charcoal). Their
+            // strokes are already visible via the scratch-over-intermediate
+            // composite encoded earlier in the per-layer loop; running
+            // renderStrokePreview on top would double-deposit.
+            // Shape tools (line/rect/circle) still need the preview path
+            // until Phase H lands.
             if let stroke = currentStroke, !stroke.points.isEmpty,
-               stroke.tool != .blur, stroke.tool != .eraser {
+               stroke.tool != .blur,
+               !isWetInkTool(stroke.tool) {
                 renderer?.renderStrokePreview(
                     stroke,
                     to: overlayEnc,
@@ -1648,13 +1759,46 @@ struct MetalCanvasView: UIViewRepresentable {
             }
             #endif
 
-            // Tier-1.5 eraser real-time commit. Capture the pre-stroke
-            // snapshot here (not in touchesEnded — by the time the user
-            // lifts, the layer is already mutated by mid-stroke writes
-            // and a fresh capture would be the post-stroke state). Then
-            // immediately flush the initial stamps so the very first dot
-            // shows up on the layer without waiting for the next move.
-            if currentTool == .eraser,
+            // Wet-ink real-time session. Routes every wet-ink-enabled
+            // tool (brush, eraser, pencil, inkPen, marker, airbrush,
+            // charcoal) through the unified lifecycle: deposit stamps
+            // into strokeScratch via .max/.max (no within-stroke
+            // accumulation), commit at touchesEnded (premul-over for
+            // additive, dest-out for eraser). Shape tools (line, rect,
+            // circle) stay on OLD renderStroke until Phase H.
+            //
+            // If beginWetInkStroke fails, wetInkActive stays false and
+            // the OLD per-tool fallback blocks below take over.
+            if isWetInkTool(currentTool),
+               let tileGrid = layers[selectedLayerIndex].tileGrid,
+               let renderer = renderer {
+                let wetInkSelectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+                let wetInkDocSize = MainActor.assumeIsolated {
+                    canvasState?.documentSize ?? view.bounds.size
+                }
+                wetInkBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
+                wetInkLayerIndex = selectedLayerIndex
+                wetInkLayerId = layers[selectedLayerIndex].id
+                wetInkCommittedPointCount = 0
+                wetInkActive = renderer.beginWetInkStroke(
+                    strokeID: currentStroke?.id ?? UUID(),
+                    tool: currentTool,
+                    settings: brushSettings,
+                    layerId: layers[selectedLayerIndex].id,
+                    tileGrid: tileGrid,
+                    selectionPath: wetInkSelectionPath,
+                    documentSize: wetInkDocSize
+                )
+                if wetInkActive {
+                    flushWetInkSession()
+                }
+            }
+
+            // Tier-1.5 eraser real-time commit — OLD path, retained as
+            // fallback when wet-ink failed to begin. Skipped when
+            // wetInkActive is true (eraser now flows through wet-ink).
+            if !wetInkActive,
+               currentTool == .eraser,
                let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
                 eraserBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
@@ -2256,8 +2400,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 // (points appended this batch) into the layer texture so the
                 // erase shows up live as the user drags, instead of waiting
                 // for touchesEnded.
+                // Eraser real-time. Prefer the wet-ink path when active;
+                // fall back to the OLD per-stamp commit otherwise.
                 if currentTool == .eraser {
-                    flushEraserSubStroke(view: view)
+                    if wetInkActive {
+                        flushWetInkSession()
+                    } else {
+                        flushEraserSubStroke(view: view)
+                    }
                 }
                 // Real-time blur stroke (experiment/blur-brush-realtime):
                 // peel off the new points and dispatch them through the
@@ -2267,6 +2417,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 // still runs in that case.
                 if currentTool == .blur {
                     flushBlurSubStroke()
+                }
+                // Wet-ink real-time deposit for brush + additive variants
+                // (pencil, inkPen, marker, airbrush, charcoal). Eraser is
+                // handled in its own branch above. No-op when wetInkActive
+                // is false (begin failed); OLD renderStroke fallback runs
+                // at touchesEnded in that case.
+                if currentTool == .brush ||
+                   currentTool == .pencil ||
+                   currentTool == .inkPen ||
+                   currentTool == .marker ||
+                   currentTool == .airbrush ||
+                   currentTool == .charcoal {
+                    flushWetInkSession()
                 }
 
                 // Print every 10th point to avoid spam
@@ -2339,6 +2502,25 @@ struct MetalCanvasView: UIViewRepresentable {
             let stampIndexBase = blurCommittedPointCount
             blurCommittedPointCount = stroke.points.count
             renderer.appendBlurStrokeStamps(newPoints, stampIndexBase: stampIndexBase)
+        }
+
+        /// Wet-ink brush real-time deposit. Mirrors `flushBlurSubStroke`:
+        /// slices off `[committedCount..<count]` from currentStroke.points
+        /// and hands them to the renderer for deposit into strokeScratch.
+        /// No-op when the session isn't active or no new points have
+        /// arrived since the last call.
+        private func flushWetInkSession() {
+            guard wetInkActive,
+                  let stroke = currentStroke,
+                  isWetInkTool(stroke.tool),
+                  let renderer = renderer,
+                  stroke.points.count > wetInkCommittedPointCount else {
+                return
+            }
+            let newPoints = Array(stroke.points[wetInkCommittedPointCount..<stroke.points.count])
+            let stampIndexBase = wetInkCommittedPointCount
+            wetInkCommittedPointCount = stroke.points.count
+            renderer.flushWetInkSubStroke(stamps: newPoints, stampIndexBase: stampIndexBase)
         }
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
@@ -2716,13 +2898,11 @@ struct MetalCanvasView: UIViewRepresentable {
             // Ensure textures are initialized before committing
             ensureLayerTextures()
 
-            // Tier-1.5 eraser real-time commit fast path: the layer texture
-            // was already mutated incrementally during touchesMoved. Final
-            // flush of any straggler points, capture the after-snapshot,
-            // record history with the touchesBegan-captured before-snapshot,
-            // and bail before the standard brush commit path runs (which
-            // would re-render the entire stroke and double-erase).
-            if stroke.tool == .eraser {
+            // Tier-1.5 eraser real-time commit fast path — OLD path.
+            // Skipped when wetInkActive is true (the wet-ink eraser
+            // commit branch below handles it). Retained as fallback for
+            // the rare case beginWetInkStroke failed in touchesBegan.
+            if !wetInkActive, stroke.tool == .eraser {
                 guard selectedLayerIndex < layers.count,
                       let capturedTileGrid = layers[selectedLayerIndex].tileGrid,
                       let renderer = renderer else {
@@ -2823,6 +3003,82 @@ struct MetalCanvasView: UIViewRepresentable {
                             beforeSnapshot: before,
                             afterSnapshot: after
                         ))
+                    }
+                    DispatchQueue.global(qos: .utility).async {
+                        if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
+                            DispatchQueue.main.async {
+                                guard let self = self,
+                                      strokeLayerIndex < self.layers.count else { return }
+                                self.layers[strokeLayerIndex].updateThumbnail(thumbnail)
+                            }
+                        }
+                    }
+                }
+
+                currentStroke = nil
+                lastPoint = nil
+                resetShapeToolState()
+                renderer.endPreviewMask()
+                resetSnapToLineState()
+                if let cs = canvasState {
+                    MainActor.assumeIsolated {
+                        cs.stampCursorCenter = nil
+                        cs.stampCursorDiameter = 0
+                    }
+                }
+                return
+            }
+
+            // Wet-ink real-time finalisation (Phase D-integration onward).
+            // Routes .brush AND .eraser. Stamps were deposited into
+            // strokeScratch during touchesMoved; touchesEnded runs the
+            // commit pass (scratch → atlas via the tool's commit blend:
+            // premul-over for brush, dest-out for eraser → blit-back
+            // into tile grid) and uses the completion to capture the
+            // AFTER snapshot for undo. Skips the deferred dispatchStroke
+            // path below.
+            if wetInkActive,
+               isWetInkTool(stroke.tool),
+               layer.tileGrid != nil,
+               let renderer = renderer {
+                flushWetInkSession()  // tail flush of any straggler points
+                let beforeSnapshot = wetInkBeforeSnapshot
+                let strokeLayerIndex = wetInkLayerIndex ?? selectedLayerIndex
+                let strokeLayerId = wetInkLayerId ?? layer.id
+                guard let capturedTileGrid = layers[strokeLayerIndex].tileGrid else {
+                    wetInkActive = false
+                    wetInkBeforeSnapshot = nil
+                    wetInkLayerIndex = nil
+                    wetInkLayerId = nil
+                    wetInkCommittedPointCount = 0
+                    renderer.cancelWetInkStroke()
+                    return
+                }
+                let capturedCanvasState = canvasState
+                wetInkActive = false
+                wetInkBeforeSnapshot = nil
+                wetInkLayerIndex = nil
+                wetInkLayerId = nil
+                wetInkCommittedPointCount = 0
+
+                renderer.commitWetInkStroke { [weak self] in
+                    let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
+                    if let before = beforeSnapshot,
+                       let after = afterSnapshot,
+                       let cs = capturedCanvasState {
+                        cs.historyManager.record(.stroke(
+                            layerId: strokeLayerId,
+                            beforeSnapshot: before,
+                            afterSnapshot: after
+                        ))
+                    }
+                    // Mark drawing dirty so the 30s autosave timer picks
+                    // up the change. Mirrors the bumpLayerMutation that
+                    // the OLD dispatchStroke path runs below.
+                    if let canvasState = capturedCanvasState {
+                        DispatchQueue.main.async {
+                            canvasState.bumpLayerMutation()
+                        }
                     }
                     DispatchQueue.global(qos: .utility).async {
                         if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -2952,13 +3208,14 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
-            // Tier-1.5 eraser: the layer texture was mutated mid-stroke, so
-            // a system-cancel needs to roll the layer back to its pre-stroke
-            // state. Brush doesn't need this — its preview path doesn't
-            // touch the layer, so its layer is already in the pre-stroke
-            // state and the standard "discard currentStroke" cleanup below
-            // is sufficient.
-            if currentTool == .eraser,
+            // Tier-1.5 eraser OLD path: the layer texture was mutated
+            // mid-stroke, so a system-cancel needs to roll the layer back
+            // to its pre-stroke state. Skipped when wetInkActive is true
+            // (the wet-ink eraser path defers all layer mutation to
+            // touchesEnded; the wet-ink cleanup block below handles the
+            // cancel and clears scratch on next begin).
+            if !wetInkActive,
+               currentTool == .eraser,
                let beforeSnapshot = eraserBeforeSnapshot,
                selectedLayerIndex < layers.count,
                let tileGrid = layers[selectedLayerIndex].tileGrid,
@@ -2988,6 +3245,27 @@ struct MetalCanvasView: UIViewRepresentable {
             blurStrokeLayerIndex = nil
             blurStrokeLayerId = nil
             blurCommittedPointCount = 0
+
+            // Wet-ink brush cancellation. Restore the before-snapshot if
+            // any tiles were mutated by a partial commit (none should be,
+            // since commit only runs at touchesEnded, but defensively
+            // restore anyway). Scratch stays dirty until next begin.
+            if wetInkActive,
+               let beforeSnapshot = wetInkBeforeSnapshot,
+               let li = wetInkLayerIndex, li < layers.count,
+               let tileGrid = layers[li].tileGrid,
+               let renderer = renderer {
+                renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
+                renderer.cancelWetInkStroke()
+                print("Wet-ink brush cancelled — restored layer to pre-stroke snapshot")
+            } else if let renderer = renderer {
+                renderer.cancelWetInkStroke()
+            }
+            wetInkActive = false
+            wetInkBeforeSnapshot = nil
+            wetInkLayerIndex = nil
+            wetInkLayerId = nil
+            wetInkCommittedPointCount = 0
 
             currentStroke = nil
             lastPoint = nil

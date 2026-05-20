@@ -86,6 +86,25 @@ enum DrawingTool {
         }
     }
 
+    /// Whether the active tool's fragment shader actually reads
+    /// `uniforms.hardness`. UI hides the hardness slider for tools that
+    /// ignore it — surfaces honest control to the user instead of an
+    /// inert slider that does nothing.
+    ///
+    /// Brush + eraser + charcoal use hardness directly. Pencil USES the
+    /// uniform but floors it at 0.85 (so the slider is effectively a
+    /// no-op across most of its range — we hide it to avoid lying
+    /// about responsiveness). InkPen, marker, airbrush have fixed disc
+    /// profiles and ignore the uniform entirely.
+    var usesHardness: Bool {
+        switch self {
+        case .brush, .eraser, .charcoal:
+            return true
+        default:
+            return false
+        }
+    }
+
     var name: String {
         switch self {
         case .brush: return "Brush"
@@ -235,7 +254,14 @@ struct BrushSettings: Codable {
             s.spacing = 0.05
         case .airbrush:
             s.size = 65           // big mist
-            s.opacity = 0.08      // very light per-stamp
+            s.opacity = 0.4       // per-stamp cap. Was 0.08 pre-wet-ink (density built
+                                  // through hundreds of overlapping stamps via .sourceAlpha
+                                  // accumulation). Under wet-ink's .max/.max deposit, the
+                                  // per-stroke cap = slider × per-stamp opacity, and 0.08
+                                  // left most of the airbrush disc visually invisible
+                                  // (quartic falloff × 0.08 ≈ 0 across most of the stamp).
+                                  // 0.4 gives the falloff enough alpha to show through
+                                  // while keeping airbrush distinctly softer than brush.
             s.hardness = 0.0      // soft falloff (shader uses quadratic anyway)
             s.spacing = 0.02      // tight overlap for density build
         case .charcoal:

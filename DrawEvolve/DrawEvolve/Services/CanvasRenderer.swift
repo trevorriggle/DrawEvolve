@@ -162,6 +162,45 @@ class CanvasRenderer: NSObject {
     private var markerPipelineState: MTLRenderPipelineState?
     private var airbrushPipelineState: MTLRenderPipelineState?
     private var charcoalPipelineState: MTLRenderPipelineState?
+    // Wet-ink premultiplied variants (Phase A.5 onward). Each pairs with a
+    // *Premul fragment shader that emits (rgb * finalAlpha, finalAlpha).
+    // sourceRGBBlendFactor is .one (not .sourceAlpha) so the blend math
+    // matches the OLD shader+pipeline framebuffer pixel-for-pixel; same alpha
+    // factors. Phase A.5 proves byte-exact equivalence; Phase B+ uses these
+    // for the wet-ink deposit pass.
+    private var brushPremulPipelineState: MTLRenderPipelineState?
+    private var pencilPremulPipelineState: MTLRenderPipelineState?
+    private var inkPenPremulPipelineState: MTLRenderPipelineState?
+    private var markerPremulPipelineState: MTLRenderPipelineState?
+    private var airbrushPremulPipelineState: MTLRenderPipelineState?
+    private var charcoalPremulPipelineState: MTLRenderPipelineState?
+    // Wet-ink deposit pipelines (Phase B onward). Same premul shaders as
+    // the *Premul* pipelines above, but blend is .max/.max with source &
+    // dest factors both .one — so within-stroke overlapping stamps cap
+    // at the strongest single-stamp value at each pixel (and don't
+    // accumulate). Phase B wires brush; Phase E extends to the rest.
+    private var brushScratchDepositPipelineState: MTLRenderPipelineState?
+    // Eraser deposit into scratch — reuses the existing eraserFragmentShader
+    // (which already emits `(0, 0, 0, alpha)`) with .max/.max blend.
+    // Premul vs non-premul doesn't matter for eraser since RGB stays zero.
+    private var eraserScratchDepositPipelineState: MTLRenderPipelineState?
+    // Wet-ink deposit pipelines for the additive brush variants (Phase E).
+    // Each pairs the variant's premul fragment shader with the standard
+    // .max/.max within-stroke deposit blend. Commit step is shared with
+    // brush (premul-over via wetInkCommitPipelineState).
+    private var pencilScratchDepositPipelineState: MTLRenderPipelineState?
+    private var inkPenScratchDepositPipelineState: MTLRenderPipelineState?
+    private var markerScratchDepositPipelineState: MTLRenderPipelineState?
+    private var airbrushScratchDepositPipelineState: MTLRenderPipelineState?
+    private var charcoalScratchDepositPipelineState: MTLRenderPipelineState?
+    // Wet-ink commit pipeline (Phase C onward). Reads `strokeScratch` (full-
+    // canvas quad), writes to `canvasStagingAtlas` with premul-over blend —
+    // standard alpha-over compositing of the pre-baked, premultiplied stroke
+    // into the layer. See `wetInkCommitShader` in Shaders.metal.
+    private var wetInkCommitPipelineState: MTLRenderPipelineState?
+    // Eraser variant of the commit: reads scratch.a, emits (0,0,0,a),
+    // pipeline blends dest-out. See `wetInkEraserCommitShader`.
+    private var wetInkEraserCommitPipelineState: MTLRenderPipelineState?
     private var compositePipelineState: MTLRenderPipelineState?
     private var textureDisplayPipelineState: MTLRenderPipelineState?
     private var textureDisplayWithTransformPipelineState: MTLRenderPipelineState? // For zoom/pan
@@ -325,6 +364,12 @@ class CanvasRenderer: NSObject {
               let markerFragment = library.makeFunction(name: "markerFragmentShader"),
               let airbrushFragment = library.makeFunction(name: "airbrushFragmentShader"),
               let charcoalFragment = library.makeFunction(name: "charcoalFragmentShader"),
+              let brushFragmentPremul = library.makeFunction(name: "brushFragmentShaderPremul"),
+              let pencilFragmentPremul = library.makeFunction(name: "pencilFragmentShaderPremul"),
+              let inkPenFragmentPremul = library.makeFunction(name: "inkPenFragmentShaderPremul"),
+              let markerFragmentPremul = library.makeFunction(name: "markerFragmentShaderPremul"),
+              let airbrushFragmentPremul = library.makeFunction(name: "airbrushFragmentShaderPremul"),
+              let charcoalFragmentPremul = library.makeFunction(name: "charcoalFragmentShaderPremul"),
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
               let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
               let quadVertexForRect = library.makeFunction(name: "quadVertexShaderForRect"),
@@ -336,7 +381,9 @@ class CanvasRenderer: NSObject {
               let smudgePatchUpdateFragment = library.makeFunction(name: "smudgePatchUpdateShader"),
               let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader"),
               let compositeTileVertex = library.makeFunction(name: "compositeTileVertexShader"),
-              let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader") else {
+              let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader"),
+              let wetInkCommitFragment = library.makeFunction(name: "wetInkCommitShader"),
+              let wetInkEraserCommitFragment = library.makeFunction(name: "wetInkEraserCommitShader") else {
             print("Failed to load shader functions")
             return
         }
@@ -391,6 +438,96 @@ class CanvasRenderer: NSObject {
         let markerDescriptor = makeBrushVariantDescriptor(markerFragment)
         let airbrushDescriptor = makeBrushVariantDescriptor(airbrushFragment)
         let charcoalDescriptor = makeBrushVariantDescriptor(charcoalFragment)
+
+        // Wet-ink premul variants (Phase A.5 onward). Same as makeBrushVariantDescriptor
+        // but swaps sourceRGBBlendFactor from .sourceAlpha to .one — paired with shaders
+        // that emit premultiplied output. Framebuffer math equivalent to OLD; proven
+        // byte-exact by runShaderEquivalencePhaseA5Probe.
+        func makeBrushPremulVariantDescriptor(_ fragment: MTLFunction) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = brushVertex
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = brushDescriptor.colorAttachments[0].pixelFormat
+            d.colorAttachments[0].isBlendingEnabled = true
+            d.colorAttachments[0].sourceRGBBlendFactor = .one   // <-- the only delta vs OLD
+            d.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            d.colorAttachments[0].rgbBlendOperation = .add
+            d.colorAttachments[0].sourceAlphaBlendFactor = .one
+            d.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            d.colorAttachments[0].alphaBlendOperation = .add
+            return d
+        }
+        let brushPremulDescriptor = makeBrushPremulVariantDescriptor(brushFragmentPremul)
+        let pencilPremulDescriptor = makeBrushPremulVariantDescriptor(pencilFragmentPremul)
+        let inkPenPremulDescriptor = makeBrushPremulVariantDescriptor(inkPenFragmentPremul)
+        let markerPremulDescriptor = makeBrushPremulVariantDescriptor(markerFragmentPremul)
+        let airbrushPremulDescriptor = makeBrushPremulVariantDescriptor(airbrushFragmentPremul)
+        let charcoalPremulDescriptor = makeBrushPremulVariantDescriptor(charcoalFragmentPremul)
+
+        // Wet-ink deposit variants (Phase B onward). Premul-output fragment
+        // with .max/.max blend, both source and dest factors .one. Equivalent
+        // to "the channel-wise maximum of any stamp deposited at this pixel
+        // within the stroke" — commutative, idempotent, no within-stroke
+        // accumulation. See §2.2 of WET_INK_DESIGN.md.
+        func makeWetInkDepositVariantDescriptor(_ fragment: MTLFunction) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = brushVertex
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = brushDescriptor.colorAttachments[0].pixelFormat
+            d.colorAttachments[0].isBlendingEnabled = true
+            d.colorAttachments[0].sourceRGBBlendFactor = .one
+            d.colorAttachments[0].destinationRGBBlendFactor = .one
+            d.colorAttachments[0].rgbBlendOperation = .max
+            d.colorAttachments[0].sourceAlphaBlendFactor = .one
+            d.colorAttachments[0].destinationAlphaBlendFactor = .one
+            d.colorAttachments[0].alphaBlendOperation = .max
+            return d
+        }
+        let brushScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(brushFragmentPremul)
+        // Eraser deposit reuses the unchanged `eraserFragment` (emits
+        // (0, 0, 0, alpha)) with the same .max/.max blend as brush deposit.
+        // RGB stays at 0 in scratch; only the alpha channel carries the
+        // eraser's footprint into the commit step.
+        let eraserScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(eraserFragment)
+        // Phase E: deposit descriptors for the additive brush variants.
+        // Each uses its premul fragment + the shared .max/.max blend.
+        let pencilScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(pencilFragmentPremul)
+        let inkPenScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(inkPenFragmentPremul)
+        let markerScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(markerFragmentPremul)
+        let airbrushScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(airbrushFragmentPremul)
+        let charcoalScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(charcoalFragmentPremul)
+
+        // Wet-ink commit pipeline (Phase C). Full-canvas quad reading
+        // strokeScratch, premul-over into the atlas. Sample factors mirror
+        // the existing `textureDisplayDescriptor` (which also reads a
+        // premultiplied texture and composites alpha-over).
+        let wetInkCommitDescriptor = MTLRenderPipelineDescriptor()
+        wetInkCommitDescriptor.vertexFunction = quadVertex
+        wetInkCommitDescriptor.fragmentFunction = wetInkCommitFragment
+        wetInkCommitDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        wetInkCommitDescriptor.colorAttachments[0].isBlendingEnabled = true
+        wetInkCommitDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        wetInkCommitDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        wetInkCommitDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        wetInkCommitDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        wetInkCommitDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        wetInkCommitDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
+        // Eraser commit pipeline — dest-out blend. dst.rgb = dst.rgb *
+        // (1 - srcA), dst.a = dst.a * (1 - srcA). Reads scratch via
+        // wetInkEraserCommitShader (which masks RGB to zero). Math
+        // verified in §2.5 of WET_INK_DESIGN.md.
+        let wetInkEraserCommitDescriptor = MTLRenderPipelineDescriptor()
+        wetInkEraserCommitDescriptor.vertexFunction = quadVertex
+        wetInkEraserCommitDescriptor.fragmentFunction = wetInkEraserCommitFragment
+        wetInkEraserCommitDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        wetInkEraserCommitDescriptor.colorAttachments[0].isBlendingEnabled = true
+        wetInkEraserCommitDescriptor.colorAttachments[0].sourceRGBBlendFactor = .zero
+        wetInkEraserCommitDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        wetInkEraserCommitDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        wetInkEraserCommitDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .zero
+        wetInkEraserCommitDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        wetInkEraserCommitDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
         // Composite pipeline
         let compositeDescriptor = MTLRenderPipelineDescriptor()
@@ -548,6 +685,21 @@ class CanvasRenderer: NSObject {
             markerPipelineState = try device.makeRenderPipelineState(descriptor: markerDescriptor)
             airbrushPipelineState = try device.makeRenderPipelineState(descriptor: airbrushDescriptor)
             charcoalPipelineState = try device.makeRenderPipelineState(descriptor: charcoalDescriptor)
+            brushPremulPipelineState = try device.makeRenderPipelineState(descriptor: brushPremulDescriptor)
+            pencilPremulPipelineState = try device.makeRenderPipelineState(descriptor: pencilPremulDescriptor)
+            inkPenPremulPipelineState = try device.makeRenderPipelineState(descriptor: inkPenPremulDescriptor)
+            markerPremulPipelineState = try device.makeRenderPipelineState(descriptor: markerPremulDescriptor)
+            airbrushPremulPipelineState = try device.makeRenderPipelineState(descriptor: airbrushPremulDescriptor)
+            charcoalPremulPipelineState = try device.makeRenderPipelineState(descriptor: charcoalPremulDescriptor)
+            brushScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: brushScratchDepositDescriptor)
+            eraserScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: eraserScratchDepositDescriptor)
+            pencilScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: pencilScratchDepositDescriptor)
+            inkPenScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: inkPenScratchDepositDescriptor)
+            markerScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: markerScratchDepositDescriptor)
+            airbrushScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: airbrushScratchDepositDescriptor)
+            charcoalScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: charcoalScratchDepositDescriptor)
+            wetInkCommitPipelineState = try device.makeRenderPipelineState(descriptor: wetInkCommitDescriptor)
+            wetInkEraserCommitPipelineState = try device.makeRenderPipelineState(descriptor: wetInkEraserCommitDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
@@ -864,6 +1016,1567 @@ class CanvasRenderer: NSObject {
         }
         tileDisplayIntermediate = tex
         return tex
+    }
+
+    // MARK: - Wet-ink stroke composition (Phase A: scratch alloc + clear + probe)
+    //
+    // §2.1 of WET_INK_DESIGN.md. `strokeScratch` is the canvas-sized
+    // `.private` `.bgra8Unorm` surface every stamp tool will deposit into
+    // (Phase B+); the commit pass at touchesEnded reads it and composites
+    // into `canvasStagingAtlas` with the tool's commit blend (premul-over
+    // for additive tools, dest-out for eraser). Premultiplied content
+    // throughout — same format as tiles, atlas, and tileDisplayIntermediate.
+    //
+    // Memory: 16 MB at 2048² (the universal cap in updateCanvasSize). One
+    // allocation, reused across strokes, reallocated on canvasSize change.
+    //
+    // Cleared via blit from `atlasZeroBuffer` — never via
+    // `loadAction = .clear`. The codebase already avoids `.clear` (it was
+    // empirically diagnosed as fragile on Apple Silicon TBDR during the
+    // prior wet-ink arc, and this renderer's `clearCanvasStagingAtlasRegion`
+    // already uses the blit-from-zero pattern for the same reason).
+
+    private var strokeScratch: MTLTexture?
+
+    /// Return the canvas-sized `.private` MTLTexture used as the wet-ink
+    /// scratch. Lazy-allocated on first call; reallocated if canvasSize
+    /// changed since the last call. Returns nil only on Metal allocation
+    /// failure or zero/negative canvasSize.
+    private func ensureStrokeScratch() -> MTLTexture? {
+        let targetW = Int(canvasSize.width)
+        let targetH = Int(canvasSize.height)
+        guard targetW > 0, targetH > 0 else { return nil }
+
+        if let existing = strokeScratch,
+           existing.width == targetW,
+           existing.height == targetH {
+            return existing
+        }
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: targetW, height: targetH,
+            mipmapped: false
+        )
+        desc.storageMode = .private
+        desc.usage = [.renderTarget, .shaderRead]
+        guard let tex = device.makeTexture(descriptor: desc) else {
+            return nil
+        }
+        strokeScratch = tex
+        return tex
+    }
+
+    /// Clear `strokeScratch` to (0, 0, 0, 0) by blit-copying from
+    /// `atlasZeroBuffer` over the full scratch area. Encoded onto the
+    /// caller's command buffer. Mirrors the existing
+    /// `clearCanvasStagingAtlasRegion` pattern (same zero-buffer source,
+    /// same blit primitive) but covers the entire scratch — wet-ink begins
+    /// every stroke with a known-clean surface.
+    ///
+    /// Metal serialises encoders within a command buffer in submission
+    /// order, so a subsequent render encoder on the same buffer with
+    /// `loadAction = .load` reads the cleared scratch.
+    ///
+    /// Silently no-ops on allocation failure (renderer is degraded but
+    /// not broken — the next stroke will retry).
+    private func clearStrokeScratch(on commandBuffer: MTLCommandBuffer) {
+        guard let scratch = ensureStrokeScratch(),
+              let zeros = ensureAtlasZeroBuffer() else { return }
+        let w = scratch.width
+        let h = scratch.height
+        let bytesPerRow = w * 4
+        let bytesPerImage = bytesPerRow * h
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        blit.copy(
+            from: zeros,
+            sourceOffset: 0,
+            sourceBytesPerRow: bytesPerRow,
+            sourceBytesPerImage: bytesPerImage,
+            sourceSize: MTLSize(width: w, height: h, depth: 1),
+            to: scratch,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+    }
+
+    #if DEBUG
+    /// Phase A sanity probe. NOT a correctness gate — Phase A.5 is the
+    /// shader equivalence gate. This probe proves three things:
+    ///
+    ///   1. `strokeScratch` allocates at the current canvasSize.
+    ///   2. `clearStrokeScratch` actually zeros it (corner pixel reads as
+    ///      (0, 0, 0, 0) after the blit).
+    ///   3. The scratch texture is render-target-capable: rendering one
+    ///      brush stamp with the OLD (unmodified) `brushPipelineState`
+    ///      produces non-zero output near the stamp center, within ±1 of
+    ///      the predicted (0.5, 0.25, 0.75, 1.0) bgra8Unorm byte values
+    ///      `(0xBF, 0x40, 0x80, 0xFF)`.
+    ///
+    /// Phase A does NOT yet modify shaders, blend modes, or any tool
+    /// path — only the texture plumbing. Pass/fail is logged both to
+    /// stdout (via the existing `print` channel) and to
+    /// `Documents/wetink_phase_a.log` so a device run's results can be
+    /// retrieved without a Xcode console attached. The log is
+    /// append-only across runs.
+    func runStrokeScratchPhaseAProbe() {
+        let docsDir = FileManager.default.urls(for: .documentDirectory,
+                                                in: .userDomainMask).first
+        let logURL = docsDir?.appendingPathComponent("wetink_phase_a.log")
+
+        func appendLog(_ text: String) {
+            print("🧪 WETINK-A \(text)")
+            guard let logURL = logURL else { return }
+            let line = text + "\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        appendLog("=== Phase A probe @ \(stamp) ===")
+        appendLog("canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+
+        guard let scratch = ensureStrokeScratch() else {
+            appendLog("FAIL: ensureStrokeScratch returned nil")
+            appendLog("=== Phase A probe complete FAIL ===")
+            return
+        }
+        appendLog("strokeScratch alloc OK: \(scratch.width)×\(scratch.height) pixelFormat=\(scratch.pixelFormat.rawValue) storage=\(scratch.storageMode.rawValue) usage=\(scratch.usage.rawValue)")
+
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            appendLog("FAIL: ensureCanvasStagingAtlas returned nil (needed for CPU readback)")
+            appendLog("=== Phase A probe complete FAIL ===")
+            return
+        }
+
+        guard let cb = commandQueue.makeCommandBuffer() else {
+            appendLog("FAIL: makeCommandBuffer returned nil")
+            appendLog("=== Phase A probe complete FAIL ===")
+            return
+        }
+
+        clearStrokeScratch(on: cb)
+
+        let stampCenterX = Int(canvasSize.width / 2)
+        let stampCenterY = Int(canvasSize.height / 2)
+        appendLog("stamp center planned at (\(stampCenterX), \(stampCenterY))")
+
+        guard let pipeline = brushPipelineState else {
+            appendLog("FAIL: brushPipelineState is nil")
+            cb.commit()
+            cb.waitUntilCompleted()
+            appendLog("=== Phase A probe complete FAIL ===")
+            return
+        }
+
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = scratch
+        renderPassDescriptor.colorAttachments[0].loadAction = .load
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+        if let enc = cb.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
+            enc.setRenderPipelineState(pipeline)
+            enc.setFragmentTexture(noMaskTexture, index: 2)
+
+            var uniforms = BrushUniforms(
+                color: UIColor(red: 0.5, green: 0.25, blue: 0.75, alpha: 1.0),
+                size: 40,
+                opacity: 1.0,
+                hardness: 1.0,
+                tileOrigin: SIMD2<Float>(0, 0),
+                grainDensity: 0.5
+            )
+            uniforms.pressure = 1.0
+            uniforms.pressureAlpha = 1.0
+
+            var stampPosition = SIMD2<Float>(Float(stampCenterX), Float(stampCenterY))
+            var viewportCopy = SIMD2<Float>(Float(scratch.width), Float(scratch.height))
+
+            enc.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            enc.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+            enc.endEncoding()
+            appendLog("stamp encoded with OLD brushPipelineState: size=40 opacity=1.0 hardness=1.0 pressureAlpha=1.0 color=(R=0.5, G=0.25, B=0.75, A=1.0)")
+        } else {
+            appendLog("FAIL: makeRenderCommandEncoder for stamp encoding returned nil")
+        }
+
+        if let blit = cb.makeBlitCommandEncoder() {
+            blit.copy(
+                from: scratch,
+                sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: scratch.width, height: scratch.height, depth: 1),
+                to: atlas,
+                destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.endEncoding()
+        } else {
+            appendLog("FAIL: makeBlitCommandEncoder for scratch→atlas readback path returned nil")
+        }
+
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        // Corner pixel — must be (0, 0, 0, 0) after clearStrokeScratch.
+        var cornerBytes = [UInt8](repeating: 0xFF, count: 4)   // sentinel
+        let cornerRegion = MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                     size: MTLSize(width: 1, height: 1, depth: 1))
+        atlas.getBytes(&cornerBytes, bytesPerRow: 4, from: cornerRegion, mipmapLevel: 0)
+        let cornerOK = cornerBytes == [0, 0, 0, 0]
+        appendLog(String(format: "corner(0,0) bgra hex=(%02X, %02X, %02X, %02X) → \(cornerOK ? "PASS (cleared)" : "FAIL (not cleared)")",
+                         cornerBytes[0], cornerBytes[1], cornerBytes[2], cornerBytes[3]))
+
+        // 5×5 block around the stamp center.
+        let blockSize = 5
+        let halfBlock = blockSize / 2
+        var stampBlock = [UInt8](repeating: 0, count: blockSize * blockSize * 4)
+        let originX = max(0, stampCenterX - halfBlock)
+        let originY = max(0, stampCenterY - halfBlock)
+        let stampRegion = MTLRegion(
+            origin: MTLOrigin(x: originX, y: originY, z: 0),
+            size: MTLSize(width: blockSize, height: blockSize, depth: 1)
+        )
+        atlas.getBytes(&stampBlock, bytesPerRow: blockSize * 4, from: stampRegion, mipmapLevel: 0)
+
+        let centerByteOffset = (halfBlock * blockSize + halfBlock) * 4
+        let centerB = stampBlock[centerByteOffset + 0]
+        let centerG = stampBlock[centerByteOffset + 1]
+        let centerR = stampBlock[centerByteOffset + 2]
+        let centerA = stampBlock[centerByteOffset + 3]
+        let centerFloatR = Float(centerR) / 255.0
+        let centerFloatG = Float(centerG) / 255.0
+        let centerFloatB = Float(centerB) / 255.0
+        let centerFloatA = Float(centerA) / 255.0
+
+        // OLD brush shader at center: alpha=1.0, output=(R=0.5, G=0.25, B=0.75, A=1.0)
+        // bgra8Unorm bytes: B=round(0.75*255)=191=0xBF, G=64=0x40, R=128=0x80, A=255=0xFF.
+        let predictedB: UInt8 = 191
+        let predictedG: UInt8 = 64
+        let predictedR: UInt8 = 128
+        let predictedA: UInt8 = 255
+        let tolerance: Int = 1
+        func near(_ a: UInt8, _ b: UInt8) -> Bool { abs(Int(a) - Int(b)) <= tolerance }
+        let centerOK = near(centerB, predictedB) &&
+                       near(centerG, predictedG) &&
+                       near(centerR, predictedR) &&
+                       near(centerA, predictedA)
+
+        appendLog(String(format: "center(\(originX + halfBlock),\(originY + halfBlock)) bgra hex=(%02X, %02X, %02X, %02X)",
+                         centerB, centerG, centerR, centerA))
+        appendLog(String(format: "center RGBA float=(%.4f, %.4f, %.4f, %.4f)",
+                         centerFloatR, centerFloatG, centerFloatB, centerFloatA))
+        appendLog(String(format: "center predicted bgra=(%02X, %02X, %02X, %02X) tol=±\(tolerance) → \(centerOK ? "PASS" : "FAIL")",
+                         predictedB, predictedG, predictedR, predictedA))
+
+        // Full 5×5 hex dump for the log (small, cheap, useful when something's off).
+        var dump = "5×5 block hex (BGRA per pixel, row-major):"
+        for row in 0..<blockSize {
+            var rowStr = "\n  row \(row):"
+            for col in 0..<blockSize {
+                let off = (row * blockSize + col) * 4
+                rowStr += String(format: " %02X%02X%02X%02X",
+                                 stampBlock[off + 0],
+                                 stampBlock[off + 1],
+                                 stampBlock[off + 2],
+                                 stampBlock[off + 3])
+            }
+            dump += rowStr
+        }
+        appendLog(dump)
+
+        let overall = cornerOK && centerOK
+        appendLog("=== Phase A probe complete \(overall ? "PASS" : "FAIL") ===")
+        appendLog("log path: \(logURL?.path ?? "<no docs dir>")")
+    }
+
+    /// Phase A.5 shader-equivalence pre-flight. For each of the 6
+    /// additive-family tools (brush, pencil, inkPen, marker, airbrush,
+    /// charcoal), render one stamp via the OLD shader+pipeline pair
+    /// (non-premultiplied output + `.sourceAlpha`/`.oneMinusSourceAlpha`
+    /// RGB blend), then render the same stamp via the NEW shader+pipeline
+    /// pair (premultiplied output + `.one`/`.oneMinusSourceAlpha` RGB
+    /// blend). Sample the stamp-center pixel from both, compare
+    /// byte-exact. Run at slider opacity 1.0 AND 0.5 per tool.
+    ///
+    /// 12 readbacks total. Writes results to
+    /// `Documents/wetink_phase_a5.log`. PASS = OLD bytes == NEW bytes
+    /// channel-for-channel. Failure means the premul math diverged at
+    /// some level (shader body, blend factors, or my translation of the
+    /// math from §2.2 of the design doc). Phase B must NOT proceed
+    /// without all 6 tools × 2 opacities passing.
+    ///
+    /// This is intentionally exhaustive at the shader level: Phase A
+    /// only proved the scratch plumbing works; A.5 is what proves the
+    /// shader change is safe. See WET_INK_DESIGN.md §2.10 Phase A.5.
+    func runShaderEquivalencePhaseA5Probe() {
+        let docsDir = FileManager.default.urls(for: .documentDirectory,
+                                                in: .userDomainMask).first
+        let logURL = docsDir?.appendingPathComponent("wetink_phase_a5.log")
+
+        func appendLog(_ text: String) {
+            print("🧪 WETINK-A5 \(text)")
+            guard let logURL = logURL else { return }
+            let line = text + "\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        appendLog("=== Phase A.5 shader-equivalence probe @ \(stamp) ===")
+        appendLog("canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            appendLog("FAIL: ensureCanvasStagingAtlas returned nil")
+            appendLog("=== Phase A.5 probe complete FAIL (setup) ===")
+            return
+        }
+
+        let stampCenterX = Int(canvasSize.width / 2)
+        let stampCenterY = Int(canvasSize.height / 2)
+        appendLog("stamp center planned at (\(stampCenterX), \(stampCenterY)); test uniforms: size=40, hardness=1.0, pressureAlpha=1.0, color=(R=0.5, G=0.25, B=0.75, A=1.0)")
+
+        // Test matrix: (toolName, OLD pipeline, NEW pipeline).
+        let testTools: [(String, MTLRenderPipelineState?, MTLRenderPipelineState?)] = [
+            ("brush",    brushPipelineState,    brushPremulPipelineState),
+            ("pencil",   pencilPipelineState,   pencilPremulPipelineState),
+            ("inkPen",   inkPenPipelineState,   inkPenPremulPipelineState),
+            ("marker",   markerPipelineState,   markerPremulPipelineState),
+            ("airbrush", airbrushPipelineState, airbrushPremulPipelineState),
+            ("charcoal", charcoalPipelineState, charcoalPremulPipelineState),
+        ]
+        let testOpacities: [Float] = [1.0, 0.5]
+
+        // Helper closure — render one stamp at the canvas center using the
+        // given pipeline + opacity on a freshly-cleared atlas, then return
+        // the 4-byte BGRA at the stamp center. nil if any GPU step failed.
+        func renderOneStampAndReadCenter(pipeline: MTLRenderPipelineState,
+                                         opacity: Float) -> [UInt8]? {
+            guard let cb = commandQueue.makeCommandBuffer() else { return nil }
+
+            // Clear full atlas via blit-from-zero (same pattern as
+            // strokeScratch clear; matches §2.4 of design doc).
+            let fullAtlasRegion = MTLRegion(
+                origin: MTLOrigin(x: 0, y: 0, z: 0),
+                size: MTLSize(width: atlas.width, height: atlas.height, depth: 1)
+            )
+            clearCanvasStagingAtlasRegion(fullAtlasRegion, on: cb)
+
+            let renderPassDescriptor = MTLRenderPassDescriptor()
+            renderPassDescriptor.colorAttachments[0].texture = atlas
+            renderPassDescriptor.colorAttachments[0].loadAction = .load
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return nil }
+            enc.setRenderPipelineState(pipeline)
+            enc.setFragmentTexture(noMaskTexture, index: 2)
+
+            var uniforms = BrushUniforms(
+                color: UIColor(red: 0.5, green: 0.25, blue: 0.75, alpha: 1.0),
+                size: 40,
+                opacity: opacity,
+                hardness: 1.0,
+                tileOrigin: SIMD2<Float>(0, 0),
+                grainDensity: 0.5
+            )
+            uniforms.pressure = 1.0
+            uniforms.pressureAlpha = 1.0
+
+            var stampPosition = SIMD2<Float>(Float(stampCenterX), Float(stampCenterY))
+            var viewportCopy = SIMD2<Float>(Float(atlas.width), Float(atlas.height))
+
+            enc.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            enc.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+            enc.endEncoding()
+
+            cb.commit()
+            cb.waitUntilCompleted()
+
+            var bytes = [UInt8](repeating: 0xFF, count: 4)
+            let region = MTLRegion(
+                origin: MTLOrigin(x: stampCenterX, y: stampCenterY, z: 0),
+                size: MTLSize(width: 1, height: 1, depth: 1)
+            )
+            atlas.getBytes(&bytes, bytesPerRow: 4, from: region, mipmapLevel: 0)
+            return bytes
+        }
+
+        var totalTests = 0
+        var passingTests = 0
+
+        for (toolName, oldPipelineOpt, newPipelineOpt) in testTools {
+            guard let oldPipeline = oldPipelineOpt,
+                  let newPipeline = newPipelineOpt else {
+                appendLog("\(toolName): SKIP (pipeline unavailable — OLD=\(oldPipelineOpt != nil) NEW=\(newPipelineOpt != nil))")
+                continue
+            }
+
+            for opacity in testOpacities {
+                totalTests += 1
+
+                guard let oldBytes = renderOneStampAndReadCenter(pipeline: oldPipeline, opacity: opacity) else {
+                    appendLog("\(toolName) opacity=\(opacity): FAIL (OLD render returned nil)")
+                    continue
+                }
+                guard let newBytes = renderOneStampAndReadCenter(pipeline: newPipeline, opacity: opacity) else {
+                    appendLog("\(toolName) opacity=\(opacity): FAIL (NEW render returned nil)")
+                    continue
+                }
+
+                let pass = (oldBytes == newBytes)
+                if pass { passingTests += 1 }
+
+                let oldHex = String(format: "%02X%02X%02X%02X",
+                                    oldBytes[0], oldBytes[1], oldBytes[2], oldBytes[3])
+                let newHex = String(format: "%02X%02X%02X%02X",
+                                    newBytes[0], newBytes[1], newBytes[2], newBytes[3])
+                let oldFloat = String(format: "(%.4f, %.4f, %.4f, %.4f)",
+                                      Float(oldBytes[2]) / 255.0,
+                                      Float(oldBytes[1]) / 255.0,
+                                      Float(oldBytes[0]) / 255.0,
+                                      Float(oldBytes[3]) / 255.0)
+                let newFloat = String(format: "(%.4f, %.4f, %.4f, %.4f)",
+                                      Float(newBytes[2]) / 255.0,
+                                      Float(newBytes[1]) / 255.0,
+                                      Float(newBytes[0]) / 255.0,
+                                      Float(newBytes[3]) / 255.0)
+
+                appendLog("\(toolName) opacity=\(opacity): OLD bgra=\(oldHex) RGBA=\(oldFloat) | NEW bgra=\(newHex) RGBA=\(newFloat) → \(pass ? "PASS" : "FAIL")")
+            }
+        }
+
+        appendLog("=== Phase A.5 probe complete: \(passingTests)/\(totalTests) PASS ===")
+        appendLog("log path: \(logURL?.path ?? "<no docs dir>")")
+    }
+
+    /// Phase B max-blend deposit probe. Proves that brush stamps depositing
+    /// into `strokeScratch` via the wet-ink `.max/.max` blend cap at the
+    /// strongest single-stamp value per pixel — i.e. within-stroke
+    /// overlapping stamps do NOT accumulate alpha.
+    ///
+    /// Test plan (5 cases, single sample point at canvas center):
+    ///   1. baseline_0.5  — single stamp at opacity=0.5 → bytes_at_0.5
+    ///   2. baseline_0.7  — single stamp at opacity=0.7 → bytes_at_0.7
+    ///   3. double_0.5    — TWO stamps at opacity=0.5, same position →
+    ///                       expect bytes == bytes_at_0.5 (no accumulation)
+    ///   4. mixed_low_first  — stamps at 0.3 then 0.7 →
+    ///                          expect bytes == bytes_at_0.7
+    ///   5. mixed_high_first — stamps at 0.7 then 0.3 →
+    ///                          expect bytes == bytes_at_0.7 (commutativity)
+    ///
+    /// Sample target is `strokeScratch` (not the atlas) — the deposit pass
+    /// writes there directly. CPU readback path: blit scratch → atlas →
+    /// `getBytes` (atlas is `.shared`).
+    ///
+    /// Stamps render with the wet-ink deposit pipeline (premul shader +
+    /// `.max/.max` blend). Hardness=1.0 at canvas center so brush takes
+    /// its explicit `if (hardness >= 0.99)` branch → alpha=1.0 before
+    /// opacity multiplication. No ambiguity.
+    ///
+    /// Writes to `Documents/wetink_phase_b.log`.
+    func runMaxBlendDepositPhaseBProbe() {
+        let docsDir = FileManager.default.urls(for: .documentDirectory,
+                                                in: .userDomainMask).first
+        let logURL = docsDir?.appendingPathComponent("wetink_phase_b.log")
+
+        func appendLog(_ text: String) {
+            print("🧪 WETINK-B \(text)")
+            guard let logURL = logURL else { return }
+            let line = text + "\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        appendLog("=== Phase B max-blend deposit probe @ \(stamp) ===")
+        appendLog("canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+
+        guard let scratch = ensureStrokeScratch() else {
+            appendLog("FAIL: ensureStrokeScratch returned nil")
+            appendLog("=== Phase B probe complete FAIL (setup) ===")
+            return
+        }
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            appendLog("FAIL: ensureCanvasStagingAtlas returned nil")
+            appendLog("=== Phase B probe complete FAIL (setup) ===")
+            return
+        }
+        guard let depositPipeline = brushScratchDepositPipelineState else {
+            appendLog("FAIL: brushScratchDepositPipelineState is nil")
+            appendLog("=== Phase B probe complete FAIL (setup) ===")
+            return
+        }
+
+        let stampCenterX = Int(canvasSize.width / 2)
+        let stampCenterY = Int(canvasSize.height / 2)
+        appendLog("stamp center planned at (\(stampCenterX), \(stampCenterY)); test color=(R=0.5, G=0.25, B=0.75, A=1.0), size=40, hardness=1.0")
+
+        // Render N stamps at the SAME position with the given opacities,
+        // each into a freshly-cleared scratch. After completion, blit
+        // scratch → atlas, read 1 pixel at the stamp center.
+        func renderStampsAndReadCenter(opacities: [Float]) -> [UInt8]? {
+            guard let cb = commandQueue.makeCommandBuffer() else { return nil }
+
+            clearStrokeScratch(on: cb)
+
+            let renderPassDescriptor = MTLRenderPassDescriptor()
+            renderPassDescriptor.colorAttachments[0].texture = scratch
+            renderPassDescriptor.colorAttachments[0].loadAction = .load
+            renderPassDescriptor.colorAttachments[0].storeAction = .store
+
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return nil }
+            enc.setRenderPipelineState(depositPipeline)
+            enc.setFragmentTexture(noMaskTexture, index: 2)
+
+            var stampPosition = SIMD2<Float>(Float(stampCenterX), Float(stampCenterY))
+            var viewportCopy = SIMD2<Float>(Float(scratch.width), Float(scratch.height))
+
+            for opacity in opacities {
+                var uniforms = BrushUniforms(
+                    color: UIColor(red: 0.5, green: 0.25, blue: 0.75, alpha: 1.0),
+                    size: 40,
+                    opacity: opacity,
+                    hardness: 1.0,
+                    tileOrigin: SIMD2<Float>(0, 0),
+                    grainDensity: 0.5
+                )
+                uniforms.pressure = 1.0
+                uniforms.pressureAlpha = 1.0
+
+                enc.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+                enc.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+                enc.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+                enc.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+                enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+            }
+            enc.endEncoding()
+
+            // Blit scratch → atlas for CPU readback (atlas is .shared).
+            // Only the stamp's bounding region needs blitting — a 64×64
+            // square around center is well within the stamp's 40-pixel
+            // size + small slack.
+            guard let blit = cb.makeBlitCommandEncoder() else { return nil }
+            let blitOriginX = max(0, stampCenterX - 32)
+            let blitOriginY = max(0, stampCenterY - 32)
+            let blitW = min(64, scratch.width - blitOriginX)
+            let blitH = min(64, scratch.height - blitOriginY)
+            blit.copy(
+                from: scratch,
+                sourceSlice: 0, sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: blitOriginX, y: blitOriginY, z: 0),
+                sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                to: atlas,
+                destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: blitOriginX, y: blitOriginY, z: 0)
+            )
+            blit.endEncoding()
+
+            cb.commit()
+            cb.waitUntilCompleted()
+
+            var bytes = [UInt8](repeating: 0xFF, count: 4)
+            let region = MTLRegion(
+                origin: MTLOrigin(x: stampCenterX, y: stampCenterY, z: 0),
+                size: MTLSize(width: 1, height: 1, depth: 1)
+            )
+            atlas.getBytes(&bytes, bytesPerRow: 4, from: region, mipmapLevel: 0)
+            return bytes
+        }
+
+        func hex(_ b: [UInt8]) -> String {
+            return String(format: "%02X%02X%02X%02X", b[0], b[1], b[2], b[3])
+        }
+        func channelMax(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+            return [max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+        }
+
+        var totalTests = 0
+        var passingTests = 0
+
+        // Case 1: baseline_0.5
+        totalTests += 1
+        guard let bytes_at_0_5 = renderStampsAndReadCenter(opacities: [0.5]) else {
+            appendLog("FAIL: case 1 (baseline_0.5) render returned nil")
+            return
+        }
+        appendLog("case 1 baseline_0.5: bgra=\(hex(bytes_at_0_5))")
+        passingTests += 1  // baseline always 'passes' — it's the reference
+
+        // Case 2: baseline_0.7
+        totalTests += 1
+        guard let bytes_at_0_7 = renderStampsAndReadCenter(opacities: [0.7]) else {
+            appendLog("FAIL: case 2 (baseline_0.7) render returned nil")
+            return
+        }
+        appendLog("case 2 baseline_0.7: bgra=\(hex(bytes_at_0_7))")
+        passingTests += 1
+
+        // Case 3: double_0.5 — TWO stamps at opacity=0.5, same position.
+        // Expect bytes == bytes_at_0.5 (max-blend with self = identity).
+        totalTests += 1
+        guard let bytes_double_0_5 = renderStampsAndReadCenter(opacities: [0.5, 0.5]) else {
+            appendLog("FAIL: case 3 (double_0.5) render returned nil")
+            return
+        }
+        let case3Pass = (bytes_double_0_5 == bytes_at_0_5)
+        if case3Pass { passingTests += 1 }
+        appendLog("case 3 double_0.5: bgra=\(hex(bytes_double_0_5)) expected=\(hex(bytes_at_0_5)) → \(case3Pass ? "PASS" : "FAIL (accumulation detected — blend is NOT .max)")")
+
+        // Case 4: mixed_low_first — stamp at 0.3 then stamp at 0.7.
+        // Expect bytes == bytes_at_0.7 (.max picks the higher).
+        let bytes_at_0_3_only = renderStampsAndReadCenter(opacities: [0.3])
+        let expectedMixed: [UInt8] = {
+            guard let low = bytes_at_0_3_only else { return bytes_at_0_7 }
+            return channelMax(low, bytes_at_0_7)
+        }()
+        appendLog("ref bytes_at_0_3: \(hex(bytes_at_0_3_only ?? [0,0,0,0])) → channel-max of (0.3, 0.7) = \(hex(expectedMixed))")
+
+        totalTests += 1
+        guard let bytes_mixed_low_first = renderStampsAndReadCenter(opacities: [0.3, 0.7]) else {
+            appendLog("FAIL: case 4 (mixed_low_first) render returned nil")
+            return
+        }
+        let case4Pass = (bytes_mixed_low_first == expectedMixed)
+        if case4Pass { passingTests += 1 }
+        appendLog("case 4 mixed_low_first [0.3, 0.7]: bgra=\(hex(bytes_mixed_low_first)) expected=\(hex(expectedMixed)) → \(case4Pass ? "PASS" : "FAIL")")
+
+        // Case 5: mixed_high_first — reversed order. Same expected result
+        // (max is commutative).
+        totalTests += 1
+        guard let bytes_mixed_high_first = renderStampsAndReadCenter(opacities: [0.7, 0.3]) else {
+            appendLog("FAIL: case 5 (mixed_high_first) render returned nil")
+            return
+        }
+        let case5Pass = (bytes_mixed_high_first == expectedMixed)
+        if case5Pass { passingTests += 1 }
+        appendLog("case 5 mixed_high_first [0.7, 0.3]: bgra=\(hex(bytes_mixed_high_first)) expected=\(hex(expectedMixed)) → \(case5Pass ? "PASS (commutative)" : "FAIL")")
+
+        appendLog("=== Phase B probe complete: \(passingTests)/\(totalTests) PASS ===")
+        appendLog("log path: \(logURL?.path ?? "<no docs dir>")")
+    }
+
+    /// Phase C wet-ink commit pipeline probe. Proves that the commit pass
+    /// — full-canvas quad reading `strokeScratch` and premul-over blending
+    /// into the atlas — produces "color B over color A = exactly color B"
+    /// at full opacity. This is the simplest end-to-end test of the
+    /// scratch → atlas commit step and the foundational acceptance
+    /// criterion of the wet-ink design (§2.5 of WET_INK_DESIGN.md).
+    ///
+    /// Test plan (2 cases, both at slider opacity 1.0):
+    ///   1. A=red, B=blue   → eyedrop overlap → expect blue exactly
+    ///   2. A=blue, B=red   → eyedrop overlap → expect red exactly
+    ///
+    /// Per-case sequence:
+    ///   a. Clear atlas → render A via OLD `brushPipelineState`.
+    ///      Verify atlas[center] == A bytes.
+    ///   b. Clear scratch → render B via `brushScratchDepositPipelineState`.
+    ///      (Don't read scratch yet — leave it set up for commit.)
+    ///   c. Run commit pass: full-canvas quad, source=scratch, target=atlas,
+    ///      premul-over blend (`wetInkCommitPipelineState`).
+    ///   d. Read atlas[center] → expect B bytes exactly.
+    ///
+    /// Writes to `Documents/wetink_phase_c.log`.
+    func runCommitPipelinePhaseCProbe() {
+        let docsDir = FileManager.default.urls(for: .documentDirectory,
+                                                in: .userDomainMask).first
+        let logURL = docsDir?.appendingPathComponent("wetink_phase_c.log")
+
+        func appendLog(_ text: String) {
+            print("🧪 WETINK-C \(text)")
+            guard let logURL = logURL else { return }
+            let line = text + "\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        appendLog("=== Phase C commit pipeline probe @ \(stamp) ===")
+        appendLog("canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+
+        guard let scratch = ensureStrokeScratch() else {
+            appendLog("FAIL: ensureStrokeScratch returned nil")
+            appendLog("=== Phase C probe complete FAIL (setup) ===")
+            return
+        }
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            appendLog("FAIL: ensureCanvasStagingAtlas returned nil")
+            appendLog("=== Phase C probe complete FAIL (setup) ===")
+            return
+        }
+        guard let oldBrush = brushPipelineState else {
+            appendLog("FAIL: brushPipelineState is nil")
+            appendLog("=== Phase C probe complete FAIL (setup) ===")
+            return
+        }
+        guard let depositPipeline = brushScratchDepositPipelineState else {
+            appendLog("FAIL: brushScratchDepositPipelineState is nil")
+            appendLog("=== Phase C probe complete FAIL (setup) ===")
+            return
+        }
+        guard let commitPipeline = wetInkCommitPipelineState else {
+            appendLog("FAIL: wetInkCommitPipelineState is nil")
+            appendLog("=== Phase C probe complete FAIL (setup) ===")
+            return
+        }
+
+        let stampCenterX = Int(canvasSize.width / 2)
+        let stampCenterY = Int(canvasSize.height / 2)
+
+        // Render one stamp into `target` (either atlas or scratch) using
+        // `pipeline` and the given color at full opacity, hardness 1.0.
+        // Clears the target first via blit-from-zero.
+        func renderStamp(into target: MTLTexture,
+                         using pipeline: MTLRenderPipelineState,
+                         color: UIColor) -> Bool {
+            guard let cb = commandQueue.makeCommandBuffer() else { return false }
+
+            // Clear via blit-from-zero (works whether target is atlas or scratch).
+            if let zeros = ensureAtlasZeroBuffer(),
+               let blit = cb.makeBlitCommandEncoder() {
+                blit.copy(
+                    from: zeros,
+                    sourceOffset: 0,
+                    sourceBytesPerRow: target.width * 4,
+                    sourceBytesPerImage: target.width * target.height * 4,
+                    sourceSize: MTLSize(width: target.width, height: target.height, depth: 1),
+                    to: target,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
+                blit.endEncoding()
+            }
+
+            let rp = MTLRenderPassDescriptor()
+            rp.colorAttachments[0].texture = target
+            rp.colorAttachments[0].loadAction = .load
+            rp.colorAttachments[0].storeAction = .store
+
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return false }
+            enc.setRenderPipelineState(pipeline)
+            enc.setFragmentTexture(noMaskTexture, index: 2)
+
+            var uniforms = BrushUniforms(
+                color: color, size: 40, opacity: 1.0, hardness: 1.0,
+                tileOrigin: SIMD2<Float>(0, 0), grainDensity: 0.5
+            )
+            uniforms.pressure = 1.0
+            uniforms.pressureAlpha = 1.0
+
+            var stampPosition = SIMD2<Float>(Float(stampCenterX), Float(stampCenterY))
+            var viewportCopy = SIMD2<Float>(Float(target.width), Float(target.height))
+
+            enc.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            enc.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+            enc.endEncoding()
+
+            cb.commit()
+            cb.waitUntilCompleted()
+            return true
+        }
+
+        // Run the commit pass: full-canvas quad sampling scratch, premul-over
+        // into atlas. atlas is left with `loadAction = .load` so the pre-stroke
+        // content (from the earlier OLD-brush stamp of color A) is preserved
+        // under the blend.
+        func runCommitPass() -> Bool {
+            guard let cb = commandQueue.makeCommandBuffer() else { return false }
+
+            let rp = MTLRenderPassDescriptor()
+            rp.colorAttachments[0].texture = atlas
+            rp.colorAttachments[0].loadAction = .load
+            rp.colorAttachments[0].storeAction = .store
+
+            guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else { return false }
+            enc.setRenderPipelineState(commitPipeline)
+            enc.setFragmentTexture(scratch, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.endEncoding()
+
+            cb.commit()
+            cb.waitUntilCompleted()
+            return true
+        }
+
+        func readCenterBytes(from texture: MTLTexture) -> [UInt8] {
+            // For .private scratch, we can't getBytes directly. The probe
+            // only reads from atlas (which is .shared) — caller is
+            // responsible for ensuring the texture passed here is .shared.
+            var bytes = [UInt8](repeating: 0xFF, count: 4)
+            let region = MTLRegion(
+                origin: MTLOrigin(x: stampCenterX, y: stampCenterY, z: 0),
+                size: MTLSize(width: 1, height: 1, depth: 1)
+            )
+            texture.getBytes(&bytes, bytesPerRow: 4, from: region, mipmapLevel: 0)
+            return bytes
+        }
+
+        func hex(_ b: [UInt8]) -> String {
+            return String(format: "%02X%02X%02X%02X", b[0], b[1], b[2], b[3])
+        }
+
+        struct ColorCase {
+            let name: String
+            let colorA: UIColor
+            let colorB: UIColor
+            let expectedABytes: [UInt8]   // BGRA bytes of a full-opacity stamp of colorA via OLD brush
+            let expectedBBytes: [UInt8]   // BGRA bytes of a full-opacity stamp of colorB after commit
+        }
+
+        // Full-opacity premultiplied bytes for pure red = (R=1, G=0, B=0, A=1)
+        // → bgra8Unorm = (B=0x00, G=0x00, R=0xFF, A=0xFF)
+        let redBytes: [UInt8] = [0x00, 0x00, 0xFF, 0xFF]
+        // Pure blue = (R=0, G=0, B=1, A=1) → bgra8Unorm = (0xFF, 0x00, 0x00, 0xFF)
+        let blueBytes: [UInt8] = [0xFF, 0x00, 0x00, 0xFF]
+
+        let cases: [ColorCase] = [
+            ColorCase(name: "A=red, B=blue",
+                      colorA: UIColor(red: 1, green: 0, blue: 0, alpha: 1),
+                      colorB: UIColor(red: 0, green: 0, blue: 1, alpha: 1),
+                      expectedABytes: redBytes,
+                      expectedBBytes: blueBytes),
+            ColorCase(name: "A=blue, B=red",
+                      colorA: UIColor(red: 0, green: 0, blue: 1, alpha: 1),
+                      colorB: UIColor(red: 1, green: 0, blue: 0, alpha: 1),
+                      expectedABytes: blueBytes,
+                      expectedBBytes: redBytes),
+        ]
+
+        var totalTests = 0
+        var passingTests = 0
+
+        for c in cases {
+            appendLog("--- Case: \(c.name) ---")
+
+            // Step a: render A into atlas via OLD brush pipeline.
+            guard renderStamp(into: atlas, using: oldBrush, color: c.colorA) else {
+                appendLog("FAIL (\(c.name)): render A into atlas failed")
+                continue
+            }
+            let afterABytes = readCenterBytes(from: atlas)
+            let stepAPass = (afterABytes == c.expectedABytes)
+            totalTests += 1
+            if stepAPass { passingTests += 1 }
+            appendLog("step a (A into atlas): bgra=\(hex(afterABytes)) expected=\(hex(c.expectedABytes)) → \(stepAPass ? "PASS" : "FAIL")")
+
+            // Step b: render B into scratch via wet-ink deposit pipeline.
+            // Don't read scratch directly (it's .private).
+            guard renderStamp(into: scratch, using: depositPipeline, color: c.colorB) else {
+                appendLog("FAIL (\(c.name)): render B into scratch failed")
+                continue
+            }
+
+            // Step c: run the commit pass — scratch → atlas, premul-over.
+            // Atlas still holds A from step a (loadAction=.load).
+            guard runCommitPass() else {
+                appendLog("FAIL (\(c.name)): commit pass failed")
+                continue
+            }
+
+            // Step d: read atlas overlap pixel. Expect B exactly.
+            let afterCommitBytes = readCenterBytes(from: atlas)
+            let commitPass = (afterCommitBytes == c.expectedBBytes)
+            totalTests += 1
+            if commitPass { passingTests += 1 }
+            appendLog("step d (after commit): bgra=\(hex(afterCommitBytes)) expected=\(hex(c.expectedBBytes)) → \(commitPass ? "PASS — B overwrites A exactly" : "FAIL — overlap is NOT exact B")")
+        }
+
+        appendLog("=== Phase C probe complete: \(passingTests)/\(totalTests) PASS ===")
+        appendLog("log path: \(logURL?.path ?? "<no docs dir>")")
+    }
+
+    /// Phase D opacity-scaling end-to-end probe. Headline acceptance
+    /// criterion of wet-ink: an N-overlap stroke at slider opacity 0.5
+    /// produces visible alpha ~0.5, NOT saturating toward 1.0 like the
+    /// OLD `.sourceAlpha` per-stamp blend would.
+    ///
+    /// Test plan (4 cases — each predicts BGRA bytes on paper FIRST,
+    /// then verifies through the full wet-ink chain: deposit into
+    /// strokeScratch via `.max/.max`, commit scratch → atlas via
+    /// premul-over). All on canvas-center pixel, hardness=1.0.
+    ///
+    ///   1. Single stamp at opacity=0.5 on blank atlas. Sanity baseline.
+    ///   2. TWO stamps at opacity=0.5 same position on blank atlas.
+    ///      Tests that no-accumulation survives through commit.
+    ///   3. Color B at opacity=0.5 committed over color A at opacity=1.0
+    ///      pre-existing on atlas. Tests premul-over math at a partial
+    ///      opacity boundary.
+    ///   4. TEN stamps at opacity=0.5 same position on blank atlas.
+    ///      Saturation-bug-fixed test. The OLD path saturates toward
+    ///      1.0 (`1 - (1-0.5)^N` → 0.9990 at N=10); wet-ink stays at 0.5.
+    ///
+    /// Writes to `Documents/wetink_phase_d.log`. Predictions written to
+    /// the log BEFORE measurements so the comparison is honest.
+    func runOpacityScalingPhaseDProbe() {
+        let docsDir = FileManager.default.urls(for: .documentDirectory,
+                                                in: .userDomainMask).first
+        let logURL = docsDir?.appendingPathComponent("wetink_phase_d.log")
+
+        func appendLog(_ text: String) {
+            print("🧪 WETINK-D \(text)")
+            guard let logURL = logURL else { return }
+            let line = text + "\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        appendLog("=== Phase D opacity-scaling probe @ \(stamp) ===")
+        appendLog("canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+        appendLog("test color (testColor) = (R=0.5, G=0.25, B=0.75, A=1.0); hardness=1.0; size=40")
+        appendLog("PREDICTIONS (paper math, declared before measurement):")
+        appendLog("  Test 1 single 0.5 on blank: BGRA = 60 20 40 80")
+        appendLog("  Test 2 two 0.5s on blank:   BGRA = 60 20 40 80 (no accumulation)")
+        appendLog("  Test 3 blue 0.5 over red:   BGRA = 80 00 7F FF (±1 on R for rounding)")
+        appendLog("  Test 4 ten 0.5s on blank:   BGRA = 60 20 40 80 (saturation-bug-fixed)")
+
+        guard let scratch = ensureStrokeScratch() else {
+            appendLog("FAIL: ensureStrokeScratch returned nil")
+            appendLog("=== Phase D probe complete FAIL (setup) ===")
+            return
+        }
+        guard let atlas = ensureCanvasStagingAtlas() else {
+            appendLog("FAIL: ensureCanvasStagingAtlas returned nil")
+            appendLog("=== Phase D probe complete FAIL (setup) ===")
+            return
+        }
+        guard let oldBrush = brushPipelineState,
+              let depositPipeline = brushScratchDepositPipelineState,
+              let commitPipeline = wetInkCommitPipelineState else {
+            appendLog("FAIL: required pipeline state is nil")
+            appendLog("=== Phase D probe complete FAIL (setup) ===")
+            return
+        }
+
+        let stampCenterX = Int(canvasSize.width / 2)
+        let stampCenterY = Int(canvasSize.height / 2)
+
+        func clearTexture(_ target: MTLTexture, on cb: MTLCommandBuffer) {
+            guard let zeros = ensureAtlasZeroBuffer(),
+                  let blit = cb.makeBlitCommandEncoder() else { return }
+            blit.copy(
+                from: zeros,
+                sourceOffset: 0,
+                sourceBytesPerRow: target.width * 4,
+                sourceBytesPerImage: target.width * target.height * 4,
+                sourceSize: MTLSize(width: target.width, height: target.height, depth: 1),
+                to: target,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            blit.endEncoding()
+        }
+
+        // Render one stamp at canvas center with given color+opacity via
+        // the given pipeline. Encoder reused across stamps when called in
+        // a loop (caller manages cb / encoder lifecycle).
+        func encodeStamp(_ enc: MTLRenderCommandEncoder,
+                         target: MTLTexture,
+                         color: UIColor,
+                         opacity: Float) {
+            var uniforms = BrushUniforms(
+                color: color, size: 40, opacity: opacity, hardness: 1.0,
+                tileOrigin: SIMD2<Float>(0, 0), grainDensity: 0.5
+            )
+            uniforms.pressure = 1.0
+            uniforms.pressureAlpha = 1.0
+
+            var stampPosition = SIMD2<Float>(Float(stampCenterX), Float(stampCenterY))
+            var viewportCopy = SIMD2<Float>(Float(target.width), Float(target.height))
+
+            enc.setVertexBytes(&stampPosition, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            enc.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+        }
+
+        // Run a full end-to-end test case:
+        //   1. Clear atlas (and optionally pre-paint A via OLD brush).
+        //   2. Clear scratch.
+        //   3. Deposit N stamps of `depositColor` at opacity `depositOpacity`
+        //      via wet-ink deposit pipeline into scratch.
+        //   4. Commit scratch → atlas via premul-over.
+        //   5. Read atlas center.
+        // Returns the BGRA bytes at the stamp center.
+        func runEndToEnd(prePaintColor: UIColor?,
+                         depositColor: UIColor,
+                         depositOpacity: Float,
+                         depositCount: Int) -> [UInt8]? {
+            guard let cb1 = commandQueue.makeCommandBuffer() else { return nil }
+            clearTexture(atlas, on: cb1)
+            clearTexture(scratch, on: cb1)
+            cb1.commit()
+            cb1.waitUntilCompleted()
+
+            // Optional pre-paint of A into atlas (OLD brush path).
+            if let prePaintColor = prePaintColor {
+                guard let cbA = commandQueue.makeCommandBuffer() else { return nil }
+                let rp = MTLRenderPassDescriptor()
+                rp.colorAttachments[0].texture = atlas
+                rp.colorAttachments[0].loadAction = .load
+                rp.colorAttachments[0].storeAction = .store
+                guard let enc = cbA.makeRenderCommandEncoder(descriptor: rp) else { return nil }
+                enc.setRenderPipelineState(oldBrush)
+                enc.setFragmentTexture(noMaskTexture, index: 2)
+                encodeStamp(enc, target: atlas, color: prePaintColor, opacity: 1.0)
+                enc.endEncoding()
+                cbA.commit()
+                cbA.waitUntilCompleted()
+            }
+
+            // Deposit N stamps into scratch on one command buffer.
+            guard let cbB = commandQueue.makeCommandBuffer() else { return nil }
+            let rpScratch = MTLRenderPassDescriptor()
+            rpScratch.colorAttachments[0].texture = scratch
+            rpScratch.colorAttachments[0].loadAction = .load
+            rpScratch.colorAttachments[0].storeAction = .store
+            guard let encScratch = cbB.makeRenderCommandEncoder(descriptor: rpScratch) else { return nil }
+            encScratch.setRenderPipelineState(depositPipeline)
+            encScratch.setFragmentTexture(noMaskTexture, index: 2)
+            for _ in 0..<depositCount {
+                encodeStamp(encScratch, target: scratch, color: depositColor, opacity: depositOpacity)
+            }
+            encScratch.endEncoding()
+            cbB.commit()
+            cbB.waitUntilCompleted()
+
+            // Commit scratch → atlas.
+            guard let cbC = commandQueue.makeCommandBuffer() else { return nil }
+            let rpCommit = MTLRenderPassDescriptor()
+            rpCommit.colorAttachments[0].texture = atlas
+            rpCommit.colorAttachments[0].loadAction = .load
+            rpCommit.colorAttachments[0].storeAction = .store
+            guard let encCommit = cbC.makeRenderCommandEncoder(descriptor: rpCommit) else { return nil }
+            encCommit.setRenderPipelineState(commitPipeline)
+            encCommit.setFragmentTexture(scratch, index: 0)
+            encCommit.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            encCommit.endEncoding()
+            cbC.commit()
+            cbC.waitUntilCompleted()
+
+            // Read atlas center.
+            var bytes = [UInt8](repeating: 0xFF, count: 4)
+            let region = MTLRegion(
+                origin: MTLOrigin(x: stampCenterX, y: stampCenterY, z: 0),
+                size: MTLSize(width: 1, height: 1, depth: 1)
+            )
+            atlas.getBytes(&bytes, bytesPerRow: 4, from: region, mipmapLevel: 0)
+            return bytes
+        }
+
+        func hex(_ b: [UInt8]) -> String {
+            return String(format: "%02X%02X%02X%02X", b[0], b[1], b[2], b[3])
+        }
+
+        // Exact match for tests 1, 2, 4. ±1 tolerance per channel for test 3
+        // (premul-over rounding asymmetry on the R byte).
+        func bytesMatch(_ a: [UInt8], _ b: [UInt8], tolerance: Int = 0) -> Bool {
+            guard a.count == b.count, a.count == 4 else { return false }
+            for i in 0..<4 {
+                if abs(Int(a[i]) - Int(b[i])) > tolerance { return false }
+            }
+            return true
+        }
+
+        let testColor = UIColor(red: 0.5, green: 0.25, blue: 0.75, alpha: 1.0)
+        let red = UIColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0)
+        let blue = UIColor(red: 0.0, green: 0.0, blue: 1.0, alpha: 1.0)
+
+        var totalTests = 0
+        var passingTests = 0
+
+        // --- Test 1 ---
+        totalTests += 1
+        let test1Predicted: [UInt8] = [0x60, 0x20, 0x40, 0x80]
+        guard let test1Actual = runEndToEnd(prePaintColor: nil, depositColor: testColor, depositOpacity: 0.5, depositCount: 1) else {
+            appendLog("Test 1 (single 0.5): FAIL — render returned nil")
+            appendLog("=== Phase D probe complete FAIL ===")
+            return
+        }
+        let test1Pass = bytesMatch(test1Actual, test1Predicted, tolerance: 0)
+        if test1Pass { passingTests += 1 }
+        appendLog("Test 1 single 0.5 on blank: actual=\(hex(test1Actual)) predicted=\(hex(test1Predicted)) → \(test1Pass ? "PASS" : "FAIL")")
+
+        // --- Test 2 ---
+        totalTests += 1
+        let test2Predicted: [UInt8] = [0x60, 0x20, 0x40, 0x80]
+        guard let test2Actual = runEndToEnd(prePaintColor: nil, depositColor: testColor, depositOpacity: 0.5, depositCount: 2) else {
+            appendLog("Test 2 (two 0.5s): FAIL — render returned nil")
+            appendLog("=== Phase D probe complete FAIL ===")
+            return
+        }
+        let test2Pass = bytesMatch(test2Actual, test2Predicted, tolerance: 0)
+        if test2Pass { passingTests += 1 }
+        appendLog("Test 2 two 0.5s on blank:   actual=\(hex(test2Actual)) predicted=\(hex(test2Predicted)) → \(test2Pass ? "PASS — no accumulation through commit" : "FAIL — accumulation detected")")
+
+        // --- Test 3 ---
+        totalTests += 1
+        let test3Predicted: [UInt8] = [0x80, 0x00, 0x7F, 0xFF]
+        guard let test3Actual = runEndToEnd(prePaintColor: red, depositColor: blue, depositOpacity: 0.5, depositCount: 1) else {
+            appendLog("Test 3 (blue 0.5 over red): FAIL — render returned nil")
+            appendLog("=== Phase D probe complete FAIL ===")
+            return
+        }
+        let test3Pass = bytesMatch(test3Actual, test3Predicted, tolerance: 1)
+        if test3Pass { passingTests += 1 }
+        appendLog("Test 3 blue 0.5 over red:   actual=\(hex(test3Actual)) predicted=\(hex(test3Predicted)) tol=±1 → \(test3Pass ? "PASS — premul-over math correct" : "FAIL")")
+
+        // --- Test 4 ---
+        totalTests += 1
+        let test4Predicted: [UInt8] = [0x60, 0x20, 0x40, 0x80]
+        guard let test4Actual = runEndToEnd(prePaintColor: nil, depositColor: testColor, depositOpacity: 0.5, depositCount: 10) else {
+            appendLog("Test 4 (ten 0.5s): FAIL — render returned nil")
+            appendLog("=== Phase D probe complete FAIL ===")
+            return
+        }
+        let test4Pass = bytesMatch(test4Actual, test4Predicted, tolerance: 0)
+        if test4Pass { passingTests += 1 }
+        appendLog("Test 4 ten 0.5s on blank:   actual=\(hex(test4Actual)) predicted=\(hex(test4Predicted)) → \(test4Pass ? "PASS — SATURATION BUG FIXED" : "FAIL — stroke is saturating")")
+
+        appendLog("=== Phase D probe complete: \(passingTests)/\(totalTests) PASS ===")
+        appendLog("log path: \(logURL?.path ?? "<no docs dir>")")
+    }
+    #endif
+
+    // MARK: - Wet-ink stroke lifecycle (live brush path, Phase D-integration)
+    //
+    // Replaces `renderStroke` for `.brush` strokes with a four-step lifecycle
+    // proven byte-exact in Phases A → D:
+    //
+    //   touchesBegan  → beginWetInkStroke      (clears scratch, opens session)
+    //   touchesMoved  → flushWetInkSubStroke   (deposits new stamps into
+    //                                            scratch via .max/.max)
+    //   draw(in:)     → encodeWetInkPreviewCompositeOntoIntermediate
+    //                  (per-frame live preview of scratch over the active
+    //                   layer's intermediate, via the same commit pipeline
+    //                   used at touchesEnded — preview == eventual commit)
+    //   touchesEnded  → commitWetInkStroke     (compose tiles into atlas,
+    //                                            scratch → atlas via
+    //                                            premul-over, blit modified
+    //                                            atlas region back into tiles)
+    //
+    // Other tools (eraser, blur, smudge, pencil, marker, airbrush, charcoal,
+    // shapes) still go through their existing paths in this iteration —
+    // Phase E will extend the wet-ink lifecycle to cover them.
+
+    /// In-progress wet-ink stroke. Nil when no stroke is active.
+    private struct WetInkStrokeSession {
+        let strokeID: UUID
+        let tool: DrawingTool
+        let settings: BrushSettings
+        let layerId: UUID
+        let tileGrid: TileGrid
+        let selectionMask: MTLTexture
+        // Bounding box of every stamp deposited so far in this stroke
+        // (doc-pixel space). Grows on each flush; consumed at commit to
+        // compute which tiles to compose / blit back.
+        var accumulatedBbox: CGRect = .null
+    }
+    private var activeWetInkSession: WetInkStrokeSession?
+
+    /// Layer id of the active wet-ink session, or nil when no stroke is in
+    /// progress. Used by the live-display path (`MetalCanvasView.draw(in:)`)
+    /// to decide which layer's composite needs the scratch overlay.
+    var activeWetInkLayerId: UUID? {
+        return activeWetInkSession?.layerId
+    }
+
+    /// Begin a wet-ink stroke session.
+    ///
+    /// 1. Clears `strokeScratch` synchronously via blit-from-zero.
+    /// 2. Rasterizes the selection mask (or 1×1 no-mask) once for the
+    ///    duration of the stroke.
+    /// 3. Stores session state.
+    ///
+    /// Returns false if scratch or the selection mask can't be set up —
+    /// caller should fall back to the OLD path or skip the stroke.
+    @discardableResult
+    func beginWetInkStroke(strokeID: UUID,
+                           tool: DrawingTool,
+                           settings: BrushSettings,
+                           layerId: UUID,
+                           tileGrid: TileGrid,
+                           selectionPath: [CGPoint]?,
+                           documentSize: CGSize) -> Bool {
+        activeWetInkSession = nil
+
+        guard ensureStrokeScratch() != nil,
+              let cb = commandQueue.makeCommandBuffer() else {
+            print("⚠️ beginWetInkStroke: scratch or command buffer unavailable")
+            return false
+        }
+        clearStrokeScratch(on: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let mask = selectionMaskTexture(for: selectionPath, documentSize: documentSize) ?? noMaskTexture
+        guard let selectionMask = mask else {
+            print("⚠️ beginWetInkStroke: selection mask unavailable")
+            return false
+        }
+
+        activeWetInkSession = WetInkStrokeSession(
+            strokeID: strokeID,
+            tool: tool,
+            settings: settings,
+            layerId: layerId,
+            tileGrid: tileGrid,
+            selectionMask: selectionMask,
+            accumulatedBbox: .null
+        )
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("wetInkBegin stroke=\(CanvasStrokeDiagnostics.shortID(strokeID)) tool=\(tool) settings{\(CanvasStrokeDiagnostics.format(settings))}")
+        #endif
+        return true
+    }
+
+    /// Deposit a batch of stamps into `strokeScratch` via the wet-ink
+    /// deposit pipeline (`.max/.max` blend on premultiplied output). Each
+    /// stamp is drawn as a point sprite; selection clipping is applied by
+    /// the fragment shader. Async commit — the deposit lands on the GPU
+    /// before any subsequent draw of `strokeScratch`.
+    ///
+    /// Slot-acquired via `strokeCommandSlots` to match the back-pressure
+    /// model `renderStroke` uses (cap of 60 in-flight stroke buffers).
+    func flushWetInkSubStroke(stamps: [BrushStroke.StrokePoint], stampIndexBase: Int = 0) {
+        guard !stamps.isEmpty,
+              var session = activeWetInkSession,
+              let scratch = ensureStrokeScratch() else { return }
+
+        // Pick deposit pipeline by tool.
+        //   - Eraser uses its alpha-only deposit shader; commit blends dest-out.
+        //   - Each additive variant uses its premul fragment shader; commit
+        //     blends premul-over.
+        //   - Default (brush + shape tools that fall through) uses the brush
+        //     premul deposit.
+        let depositPipeline: MTLRenderPipelineState?
+        switch session.tool {
+        case .eraser:
+            depositPipeline = eraserScratchDepositPipelineState
+        case .pencil:
+            depositPipeline = pencilScratchDepositPipelineState
+        case .inkPen:
+            depositPipeline = inkPenScratchDepositPipelineState
+        case .marker:
+            depositPipeline = markerScratchDepositPipelineState
+        case .airbrush:
+            depositPipeline = airbrushScratchDepositPipelineState
+        case .charcoal:
+            depositPipeline = charcoalScratchDepositPipelineState
+        default:
+            depositPipeline = brushScratchDepositPipelineState
+        }
+        guard let pipeline = depositPipeline else { return }
+
+        // Update accumulated bbox.
+        let radius = CGFloat(session.settings.size) / 2.0
+        var batchBbox: CGRect = .null
+        for p in stamps {
+            let r = CGRect(x: p.location.x - radius,
+                           y: p.location.y - radius,
+                           width: radius * 2,
+                           height: radius * 2)
+            batchBbox = batchBbox.isNull ? r : batchBbox.union(r)
+        }
+        session.accumulatedBbox = session.accumulatedBbox.isNull
+            ? batchBbox
+            : session.accumulatedBbox.union(batchBbox)
+        activeWetInkSession = session
+
+        strokeCommandSlots.wait()
+        guard let cb = commandQueue.makeCommandBuffer() else {
+            strokeCommandSlots.signal()
+            return
+        }
+
+        let rp = MTLRenderPassDescriptor()
+        rp.colorAttachments[0].texture = scratch
+        rp.colorAttachments[0].loadAction = .load
+        rp.colorAttachments[0].storeAction = .store
+
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: rp) else {
+            strokeCommandSlots.signal()
+            return
+        }
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(session.selectionMask, index: 2)
+
+        var uniforms = BrushUniforms(
+            color: session.settings.color,
+            size: Float(session.settings.size),
+            opacity: Float(session.settings.opacity),
+            hardness: Float(session.settings.hardness),
+            tileOrigin: SIMD2<Float>(0, 0),
+            grainDensity: session.settings.grainDensity
+        )
+        var viewportCopy = SIMD2<Float>(Float(scratch.width), Float(scratch.height))
+
+        for (i, point) in stamps.enumerated() {
+            let safePressure: CGFloat = {
+                guard point.pressure.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressure))
+            }()
+            uniforms.pressure = Float(safePressure)
+            let safePressureAlpha: CGFloat = {
+                guard point.pressureAlpha.isFinite else { return 1.0 }
+                return max(0, min(1, point.pressureAlpha))
+            }()
+            uniforms.pressureAlpha = Float(safePressureAlpha)
+
+            var position = SIMD2<Float>(Float(point.location.x), Float(point.location.y))
+
+            #if DEBUG
+            CanvasStrokeDiagnostics.log("stamp stage=wetInkDeposit stroke=\(CanvasStrokeDiagnostics.shortID(session.strokeID)) idx=\(stampIndexBase + i) tool=\(session.tool) \(CanvasStrokeDiagnostics.stampSource(point)) uniforms{\(CanvasStrokeDiagnostics.uniforms(size: uniforms.size, opacity: uniforms.opacity, hardness: uniforms.hardness, pressure: uniforms.pressure, pressureAlpha: uniforms.pressureAlpha, color: uniforms.color))}")
+            #endif
+
+            enc.setVertexBytes(&position, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 1)
+            enc.setVertexBytes(&viewportCopy, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
+            enc.setFragmentBytes(&uniforms, length: MemoryLayout<BrushUniforms>.stride, index: 0)
+            enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: 1)
+        }
+        enc.endEncoding()
+
+        cb.addCompletedHandler { [weak self] _ in
+            self?.strokeCommandSlots.signal()
+        }
+        cb.commit()
+    }
+
+    /// Commit the in-progress wet-ink stroke to the active layer's tile
+    /// grid. Composes pre-stroke tile state for the accumulated bbox into
+    /// `canvasStagingAtlas`, runs the commit pass (scratch → atlas via
+    /// premul-over), blits modified atlas tiles back into the tile grid.
+    /// Completion fires on main once the GPU pass finishes — that's the
+    /// safe point to take an after-snapshot for undo.
+    ///
+    /// Clears `activeWetInkSession` immediately so the live-preview
+    /// composite path no longer contributes. `strokeScratch` itself is
+    /// left dirty until the next `beginWetInkStroke` (which clears it).
+    func commitWetInkStroke(completion: (() -> Void)? = nil) {
+        guard let session = activeWetInkSession,
+              let scratch = ensureStrokeScratch(),
+              let atlas = ensureCanvasStagingAtlas() else {
+            activeWetInkSession = nil
+            completion?()
+            return
+        }
+        // Pick commit pipeline by tool. Additive tools blend premul-over
+        // onto the layer; eraser blends dest-out (scaling layer pixels by
+        // 1 - scratch.a).
+        let commitPipelineOpt: MTLRenderPipelineState?
+        switch session.tool {
+        case .eraser:
+            commitPipelineOpt = wetInkEraserCommitPipelineState
+        default:
+            commitPipelineOpt = wetInkCommitPipelineState
+        }
+        guard let commitPipeline = commitPipelineOpt else {
+            activeWetInkSession = nil
+            completion?()
+            return
+        }
+
+        let bbox = session.accumulatedBbox
+        let bboxKeys = (bbox.isNull || bbox.isEmpty)
+            ? []
+            : session.tileGrid.tilesIntersecting(bbox)
+        let tileSize = session.tileGrid.tileSize
+        let atlasW = atlas.width
+        let atlasH = atlas.height
+
+        #if DEBUG
+        CanvasStrokeDiagnostics.log("wetInkCommit stroke=\(CanvasStrokeDiagnostics.shortID(session.strokeID)) tool=\(session.tool) bbox={\(CanvasStrokeDiagnostics.format(bbox))} bboxKeys=\(CanvasStrokeDiagnostics.tileSummary(bboxKeys))")
+        #endif
+
+        strokeCommandSlots.wait()
+        guard let cb = commandQueue.makeCommandBuffer() else {
+            strokeCommandSlots.signal()
+            activeWetInkSession = nil
+            completion?()
+            return
+        }
+
+        // Step 1: clear bbox-tile-aligned atlas region (Source B fix —
+        // wipes stale pixels at unallocated bbox tile positions so the
+        // post-commit blit-back doesn't propagate them into freshly-
+        // allocated tiles).
+        if let clearRegion = atlasRegion(coveringTiles: bboxKeys, tileSize: tileSize) {
+            clearCanvasStagingAtlasRegion(clearRegion, on: cb)
+        }
+
+        // Step 2: compose pre-stroke tile state for the bbox into atlas.
+        if !bboxKeys.isEmpty, let composeBlit = cb.makeBlitCommandEncoder() {
+            for key in bboxKeys {
+                guard let tile = session.tileGrid.tile(at: key) else { continue }
+                let dstX = key.x * tileSize
+                let dstY = key.y * tileSize
+                let copyW = min(tileSize, atlasW - dstX)
+                let copyH = min(tileSize, atlasH - dstY)
+                if copyW <= 0 || copyH <= 0 { continue }
+                composeBlit.copy(
+                    from: tile.texture,
+                    sourceSlice: 0, sourceLevel: 0,
+                    sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                    sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                    to: atlas,
+                    destinationSlice: 0, destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                )
+            }
+            composeBlit.endEncoding()
+        }
+
+        // Step 3: commit pass — full-canvas quad reading scratch,
+        // premul-over into atlas. Scratch is zero outside the stroke's
+        // footprint so the blend is a no-op there.
+        let rp = MTLRenderPassDescriptor()
+        rp.colorAttachments[0].texture = atlas
+        rp.colorAttachments[0].loadAction = .load
+        rp.colorAttachments[0].storeAction = .store
+        if let enc = cb.makeRenderCommandEncoder(descriptor: rp) {
+            enc.setRenderPipelineState(commitPipeline)
+            enc.setFragmentTexture(scratch, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.endEncoding()
+        }
+
+        // Step 4: blit modified atlas tiles back into the tile grid.
+        if !bboxKeys.isEmpty {
+            for key in bboxKeys {
+                _ = session.tileGrid.ensureTileWithClearIfNeeded(at: key, onCommandBuffer: cb)
+            }
+            if let blit = cb.makeBlitCommandEncoder() {
+                for key in bboxKeys {
+                    let srcX = key.x * tileSize
+                    let srcY = key.y * tileSize
+                    let blitW = min(tileSize, atlasW - srcX)
+                    let blitH = min(tileSize, atlasH - srcY)
+                    if blitW <= 0 || blitH <= 0 { continue }
+                    session.tileGrid.updateTile(at: key) { tile in
+                        blit.copy(
+                            from: atlas,
+                            sourceSlice: 0, sourceLevel: 0,
+                            sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                            sourceSize: MTLSize(width: blitW, height: blitH, depth: 1),
+                            to: tile.texture,
+                            destinationSlice: 0, destinationLevel: 0,
+                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                        )
+                    }
+                }
+                blit.endEncoding()
+            }
+        }
+
+        cb.addCompletedHandler { [weak self] _ in
+            self?.strokeCommandSlots.signal()
+            if let completion = completion {
+                DispatchQueue.main.async { completion() }
+            }
+        }
+        cb.commit()
+
+        // Tear down session AFTER scheduling the commit so the preview
+        // composite stops contributing immediately. Scratch stays as-is;
+        // the next beginWetInkStroke clears it.
+        activeWetInkSession = nil
+    }
+
+    /// Free the session without committing. For `touchesCancelled`. Scratch
+    /// is left dirty; the next `beginWetInkStroke` clears it.
+    func cancelWetInkStroke() {
+        activeWetInkSession = nil
+    }
+
+    /// True iff there's currently an active wet-ink stroke. The live-display
+    /// path uses this in concert with `activeWetInkLayerId` to decide
+    /// whether to add the scratch composite to the active layer's render.
+    var hasActiveWetInkStroke: Bool {
+        return activeWetInkSession != nil
+    }
+
+    /// Composite `strokeScratch` on top of `tileDisplayIntermediate` using
+    /// the wet-ink commit pipeline (premul-over). Called from the
+    /// `draw(in:)` per-layer composite loop AFTER
+    /// `encodeLayerTileCompositeOntoIntermediate` and BEFORE the layer's
+    /// draw to the drawable. The result is that the user sees the
+    /// in-progress wet-ink stroke composited correctly over the layer's
+    /// committed tile state — bit-exact with the eventual touchesEnded
+    /// commit (modulo the bbox limitation at commit, which is a no-op
+    /// since scratch is zero outside the bbox).
+    func encodeWetInkPreviewCompositeOntoIntermediate(on commandBuffer: MTLCommandBuffer) {
+        guard let session = activeWetInkSession,
+              let intermediate = tileDisplayIntermediate,
+              let scratch = strokeScratch else { return }
+        // Same per-tool pipeline selection as the touchesEnded commit —
+        // ensures the live preview matches the eventual commit.
+        let pipelineOpt: MTLRenderPipelineState?
+        switch session.tool {
+        case .eraser:
+            pipelineOpt = wetInkEraserCommitPipelineState
+        default:
+            pipelineOpt = wetInkCommitPipelineState
+        }
+        guard let pipeline = pipelineOpt else { return }
+        let rp = MTLRenderPassDescriptor()
+        rp.colorAttachments[0].texture = intermediate
+        rp.colorAttachments[0].loadAction = .load
+        rp.colorAttachments[0].storeAction = .store
+        guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rp) else { return }
+        enc.setRenderPipelineState(pipeline)
+        enc.setFragmentTexture(scratch, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        enc.endEncoding()
     }
 
     /// Create a new texture for a layer

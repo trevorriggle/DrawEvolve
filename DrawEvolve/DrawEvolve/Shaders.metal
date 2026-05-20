@@ -533,18 +533,38 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     // The perceptual remap runs BEFORE the floor so the slider's UX
     // matches the other tools; the floor still kicks in for any
     // remapped value below 0.85.
+    //
+    // Disc formula: `1 - smoothstep(hardness, 1, dist)` — matches the
+    // inkPen pattern. Well-defined for all hardness in [0,1] including
+    // hardness=1.0 (smoothstep with equal edges → 0 inside, 1 outside,
+    // so the disc reads as solid then drops to 0 past dist=1). The
+    // previous reversed form `smoothstep(1.0, hardness, dist)` left a
+    // hole at the disc center when hardness=1.0 (MSL behavior with
+    // edge0 == edge1 is implementation-defined; Apple's GPU returns 0
+    // for x ≤ edge0, which created the hole).
     float hardness = max(perceivedHardness(uniforms.hardness), 0.85);
-    float softness = 1.0 - hardness;
-    float edge = 1.0 - softness;
-    float alpha = smoothstep(1.0, edge, dist);
+    float alpha = 1.0 - smoothstep(hardness, 1.0, dist);
 
-    // Paper-tooth grain — DIRECTIONAL hash anchored on (x, y/3) so the
-    // grain reads as horizontal streaks rather than isotropic speckle.
-    // Strength bumped from 0.4 → 0.7 mix so it's actually visible at
-    // default settings. Without this, pencil read as a soft solid disc.
-    float toothGrain = brushHash(float2(layerPos.x, layerPos.y * 0.33));
-    float grain = mix(0.3, 1.0, toothGrain);
-    alpha *= mix(1.0, grain, 0.7);
+    // Paper-tooth grain — 2-octave anisotropic noise designed to look
+    // like graphite catching on paper fibers. Coarse horizontal streaks
+    // dominate (low-frequency x, mid-frequency y quantized to bands);
+    // fine speckle adds detail without overwhelming the streak pattern.
+    // smoothstep contrast pushes the noise toward a binary on/off look
+    // — paper either holds graphite or it doesn't, no half-tone.
+    //
+    // The result reads as broken streaks of pigment across paper grain,
+    // which is the visual fingerprint of a pencil under wet-ink (where
+    // each pixel's max alpha is capped and texture no longer hides
+    // under saturation). Pre-wet-ink this same grain was invisible
+    // because overlap saturated everything to opaque.
+    float coarseStreak = brushHash(float2(floor(layerPos.x * 0.12), floor(layerPos.y * 0.45)));
+    float fineSpeckle = brushHash(float2(layerPos.x * 0.8, layerPos.y * 1.4));
+    float tooth = coarseStreak * 0.7 + fineSpeckle * 0.3;
+    float grain = smoothstep(0.3, 0.7, tooth);
+    // Grain dominates: alpha drops to 20% where paper "shows through,"
+    // stays near 100% where graphite caught. Genuine paper-show-through
+    // gaps make this read as pencil rather than soft brush.
+    alpha *= mix(0.2, 1.0, grain);
 
     // Pressure curve: opacity-dominant. Cube the pressure (was square)
     // so light strokes are noticeably lighter — pencil sketches build
@@ -569,9 +589,11 @@ fragment float4 inkPenFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // Always hard cutoff; antialias only the outermost pixel via a tight
-    // smoothstep so we don't get jaggies on a 4096² canvas.
-    float alpha = 1.0 - smoothstep(0.95, 1.0, dist);
+    // Crisper edge than marker (was 0.95, now 0.98). InkPen's
+    // differentiator vs marker is "even harder edge, no texture,
+    // no pressure variation." Just antialias the very outermost
+    // pixels of the disc to avoid jaggies on a 4096² canvas.
+    float alpha = 1.0 - smoothstep(0.98, 1.0, dist);
 
     // Opacity is locked from the user's brush settings (typically 1.0)
     // — pressure does not modulate opacity. This is the whole point of
@@ -582,26 +604,33 @@ fragment float4 inkPenFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
-// 3. Marker — flat-topped semi-transparent stamps that overlap to deepen.
-// Looks distinctly different from pencil/brush because the EDGE is tight
-// (no soft falloff) but the FILL is partial — like Copic / Tombow markers.
-// Overlapping strokes visibly accumulate via the standard alpha blend.
+// 3. Marker — flat-topped, very crisp edge, subtle felt-tip horizontal
+// streak. Distinct from inkPen (which is even tighter) and brush
+// (which has a soft falloff option). The streak comes from ink wicking
+// along felt fibers along the stroke direction.
 fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
                                       float2 pointCoord [[point_coord]],
                                       constant BrushUniforms &uniforms [[buffer(0)]],
                                       texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // FLAT-TOPPED edge. Almost no falloff inside the disc — alpha is
-    // a hard 1.0 from 0 to 0.9, then a tight smoothstep to 0 between
-    // 0.9 and 1.0. This is the marker fingerprint: rectangular-looking
-    // strokes when the spacing is right, with sharp crisp edges.
-    float alpha = 1.0 - smoothstep(0.88, 1.0, dist);
+    // TIGHTER edge than before (was smoothstep(0.88, 1.0) which had a
+    // visible falloff band). Now the falloff is just enough to
+    // antialias the disc edge — markers should look like crisp flat
+    // discs of color.
+    float alpha = 1.0 - smoothstep(0.97, 1.0, dist);
 
-    // Pressure modulates opacity. Light pressure → translucent stroke,
-    // hard pressure → near-solid. Markers should be ~40% per stamp by
-    // default so overlaps darken visibly without immediately saturating.
+    // Felt-tip streak: very subtle horizontal banding (~8% modulation)
+    // simulating ink wicking through felt fibers along the stroke
+    // axis. Y is quantized to coarse bands so adjacent rows share
+    // values, creating visible streaks rather than per-pixel noise.
+    float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
+    alpha *= streak;
+
+    // Pressure modulates opacity. Markers feel responsive to press
+    // but don't have a wide dynamic range.
     alpha *= uniforms.opacity * uniforms.pressureAlpha;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -623,16 +652,20 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // Quartic falloff (was quadratic). 4th power gives a sharper
-    // concentration at the center and a longer skirt — the visual
-    // hallmark of an airbrush pass vs a soft brush. Pure exp(-dist²)
-    // would be more accurate but the quartic is cheaper and very close.
+    // Quadratic falloff. Was quartic (`falloff⁴`); under wet-ink the
+    // strong concentration left most of the stamp invisible because
+    // `falloff⁴ × per-stamp-opacity` dropped to ~0 by half-radius —
+    // the visible airbrush ended up at ~50% of the size indicator.
+    // Quadratic spreads the visible portion to ~80% of the indicator
+    // while still keeping center-weighted mist character.
     float falloff = 1.0 - clamp(dist, 0.0, 1.0);
-    float alpha = falloff * falloff * falloff * falloff;
+    float alpha = falloff * falloff;
 
-    // Mist grain — bumped from 10% → 25% modulation so the texture
-    // actually reads as airbrush mist, not a perfectly smooth halo.
-    float grain = mix(1.0, brushHash(layerPos * 2.0), 0.25);
+    // Mist grain — bumped to 35% modulation so the airbrush reads as
+    // stippled mist instead of a smooth halo. Combined with the
+    // quadratic falloff above, individual stamps look like sprayed
+    // particles rather than soft gradient dots.
+    float grain = mix(1.0, brushHash(layerPos * 2.0), 0.35);
     alpha *= grain;
 
     // Pressure modulates opacity, not size. Square keeps light pressure
@@ -665,10 +698,12 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
+    // See pencilFragmentShader for the rationale on the disc formula —
+    // `1 - smoothstep(hardness, 1, dist)` avoids the hole-in-the-disc
+    // bug that the reversed `smoothstep(1, edge, dist)` pattern produced
+    // at hardness=1.0 on Apple's GPU.
     float hardness = perceivedHardness(uniforms.hardness);
-    float softness = 1.0 - hardness;
-    float edge = 1.0 - softness;
-    float alpha = smoothstep(1.0, edge, dist);
+    float alpha = 1.0 - smoothstep(hardness, 1.0, dist);
 
     // Heavy three-octave grain — was two-octave. Each octave is the
     // hash() at a different spatial frequency; summing makes the
@@ -688,12 +723,14 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     // At default density 0.9 the strokes are aggressively speckled.
     alpha *= mix(1.0, grain, clamp(uniforms.grainDensity, 0.0, 1.0));
 
-    // EDGE BREAKUP — multiply alpha by additional grain ONLY at the
-    // outer band of the disc, so the stroke's edge breaks up irregularly
-    // like a charcoal stick dragging across paper. The center stays
-    // mostly solid (or as speckled as grainDensity dictates).
-    float edgeBand = smoothstep(0.4, 1.0, dist);
-    float edgeBreakup = mix(1.0, brushHash(layerPos * 2.3 + float2(7.0, 5.0)), edgeBand * 0.6);
+    // EDGE BREAKUP — band starts at dist=0.3 (was 0.4) and the noise
+    // modulation is stronger (0.85 vs 0.6) so the charcoal disc reads
+    // as a chunky broken silhouette, not a clean circle with grain
+    // inside. Under wet-ink each pixel's max alpha is capped, so this
+    // edge irregularity is fully visible (overlapping stamps used to
+    // fill in the gaps with the OLD blend).
+    float edgeBand = smoothstep(0.3, 1.0, dist);
+    float edgeBreakup = mix(1.0, brushHash(layerPos * 2.3 + float2(7.0, 5.0)), edgeBand * 0.85);
     alpha *= edgeBreakup;
 
     // Pressure: moderate. Even light strokes leave visible deposit
@@ -703,6 +740,234 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
+}
+
+// MARK: - Wet-ink premultiplied stamp variants (Phase A.5 onward)
+//
+// Each shader below mirrors its OLD counterpart's body up through alpha
+// computation, then emits PREMULTIPLIED output: (rgb * finalAlpha, finalAlpha)
+// where finalAlpha = alpha * color.a. Paired with a pipeline that uses
+// `sourceRGBBlendFactor = .one` instead of `.sourceAlpha`. Mathematically
+// identical framebuffer result vs. OLD shader+pipeline when blending into
+// the atlas with standard alpha-over:
+//
+//   OLD: (color.rgb, finalA) with (srcA, 1-srcA)
+//        → dst.rgb = color.rgb * finalA + dst.rgb * (1-finalA)
+//   NEW: (color.rgb * finalA, finalA) with (one, 1-srcA)
+//        → dst.rgb = color.rgb * finalA + dst.rgb * (1-finalA)
+//
+// Identical. Phase A.5's probe is what proves this empirically — see
+// `runShaderEquivalencePhaseA5Probe` in CanvasRenderer.
+//
+// These shaders are also what gets used by the wet-ink deposit pass (Phase B+),
+// since the `.max/.max` deposit blend requires premultiplied source for the
+// max-of-RGB-channels to behave correctly across stamps of different alphas.
+
+// 1. Brush — premul.
+fragment float4 brushFragmentShaderPremul(VertexOut in [[stage_in]],
+                                           float2 pointCoord [[point_coord]],
+                                           constant BrushUniforms &uniforms [[buffer(0)]],
+                                           texture2d<float> selectionMask [[texture(2)]]) {
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float hardness = perceivedHardness(uniforms.hardness);
+    float alpha;
+    if (hardness >= 0.99) {
+        alpha = dist < 1.0 ? 1.0 : 0.0;
+    } else {
+        float softness = 1.0 - hardness;
+        float edge = 1.0 - softness;
+        alpha = smoothstep(1.0, edge, dist);
+    }
+
+    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// 2. Pencil — premul. Disc formula matches OLD pencil after fix:
+// `1 - smoothstep(hardness, 1, dist)` (well-defined at hardness=1.0).
+fragment float4 pencilFragmentShaderPremul(VertexOut in [[stage_in]],
+                                            float2 pointCoord [[point_coord]],
+                                            constant BrushUniforms &uniforms [[buffer(0)]],
+                                            texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float hardness = max(perceivedHardness(uniforms.hardness), 0.85);
+    float alpha = 1.0 - smoothstep(hardness, 1.0, dist);
+
+    // See pencilFragmentShader for the rationale on this grain design.
+    float coarseStreak = brushHash(float2(floor(layerPos.x * 0.12), floor(layerPos.y * 0.45)));
+    float fineSpeckle = brushHash(float2(layerPos.x * 0.8, layerPos.y * 1.4));
+    float tooth = coarseStreak * 0.7 + fineSpeckle * 0.3;
+    float grain = smoothstep(0.3, 0.7, tooth);
+    alpha *= mix(0.2, 1.0, grain);
+
+    float pressureOpacity = uniforms.pressureAlpha * uniforms.pressureAlpha * uniforms.pressureAlpha;
+    alpha *= uniforms.opacity * pressureOpacity;
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// 3. Ink pen — premul. Crisper edge than marker (0.98 vs 0.97).
+fragment float4 inkPenFragmentShaderPremul(VertexOut in [[stage_in]],
+                                            float2 pointCoord [[point_coord]],
+                                            constant BrushUniforms &uniforms [[buffer(0)]],
+                                            texture2d<float> selectionMask [[texture(2)]]) {
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float alpha = 1.0 - smoothstep(0.98, 1.0, dist);
+
+    alpha *= uniforms.opacity;
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// 4. Marker — premul. Same identity as OLD: very crisp edge + felt
+// streak. See markerFragmentShader for design rationale.
+fragment float4 markerFragmentShaderPremul(VertexOut in [[stage_in]],
+                                            float2 pointCoord [[point_coord]],
+                                            constant BrushUniforms &uniforms [[buffer(0)]],
+                                            texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float alpha = 1.0 - smoothstep(0.97, 1.0, dist);
+
+    float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
+    alpha *= streak;
+
+    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// 5. Airbrush — premul. Quadratic falloff (size indicator accurate),
+// mist grain at 35% modulation.
+fragment float4 airbrushFragmentShaderPremul(VertexOut in [[stage_in]],
+                                              float2 pointCoord [[point_coord]],
+                                              constant BrushUniforms &uniforms [[buffer(0)]],
+                                              texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float falloff = 1.0 - clamp(dist, 0.0, 1.0);
+    float alpha = falloff * falloff;
+
+    float grain = mix(1.0, brushHash(layerPos * 2.0), 0.35);
+    alpha *= grain;
+
+    float pressureOpacity = uniforms.pressureAlpha * uniforms.pressureAlpha;
+    alpha *= uniforms.opacity * pressureOpacity;
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// 6. Charcoal — premul. Disc formula matches OLD charcoal after fix.
+fragment float4 charcoalFragmentShaderPremul(VertexOut in [[stage_in]],
+                                              float2 pointCoord [[point_coord]],
+                                              constant BrushUniforms &uniforms [[buffer(0)]],
+                                              texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float hardness = perceivedHardness(uniforms.hardness);
+    float alpha = 1.0 - smoothstep(hardness, 1.0, dist);
+
+    float grain1 = brushHash(layerPos * 0.6);
+    float grain2 = brushHash(layerPos * 1.4 + float2(13.0, 7.0));
+    float grain3 = brushHash(layerPos * 3.1 + float2(31.0, 19.0));
+    float grain = grain1 * 0.5 + grain2 * 0.3 + grain3 * 0.2;
+
+    grain = smoothstep(0.25, 0.75, grain);
+
+    alpha *= mix(1.0, grain, clamp(uniforms.grainDensity, 0.0, 1.0));
+
+    // See charcoalFragmentShader for edge-breakup design rationale.
+    float edgeBand = smoothstep(0.3, 1.0, dist);
+    float edgeBreakup = mix(1.0, brushHash(layerPos * 2.3 + float2(7.0, 5.0)), edgeBand * 0.85);
+    alpha *= edgeBreakup;
+
+    float pressureOpacity = mix(0.6, 1.0, uniforms.pressureAlpha);
+    alpha *= uniforms.opacity * pressureOpacity;
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// MARK: - Wet-ink commit (Phase C onward)
+//
+// The commit pass runs once at touchesEnded for additive-family tools (and
+// at touchesMoved-batch boundaries for tools with live writes — eraser,
+// blur, smudge — under their wet-ink integration in Phase F+).
+//
+// Reads `strokeScratch` (canvas-sized, premultiplied), samples 1:1 with the
+// atlas grid, returns the sample. The paired pipeline state (premul-over —
+// `sourceRGBBlendFactor = .one`, `destinationRGBBlendFactor = .oneMinusSourceAlpha`)
+// composites scratch over the pre-stroke atlas contents.
+//
+// Opacity is already baked into scratch (per-stamp shaders multiplied alpha
+// by opacity * pressureAlpha * mask * color.a before emitting premultiplied
+// output). Commit just passes scratch through.
+//
+// Selection clipping is also already baked in via the deposit-time mask
+// sample — commit deliberately does NOT bind the selection mask. One clip,
+// at deposit (§2.2 of WET_INK_DESIGN.md).
+//
+// NEAREST sampler: when this commit pass writes to the atlas, atlas and
+// scratch are the same dimensions and we want bit-exact 1:1 readback.
+// Linear sampling would interpolate adjacent texels at non-integer UVs —
+// not a correctness problem in the typical commit (full-canvas quad, UVs
+// land on texel centers) but NEAREST removes the question entirely.
+fragment float4 wetInkCommitShader(VertexOut in [[stage_in]],
+                                    texture2d<float> scratch [[texture(0)]]) {
+    constexpr sampler s(mag_filter::nearest, min_filter::nearest);
+    return scratch.sample(s, in.texCoord);
+}
+
+// Eraser variant of the wet-ink commit. Reads only the alpha channel of
+// `strokeScratch` (eraser RGB is always 0 — see `eraserFragmentShader`)
+// and returns (0, 0, 0, scratch.a). Paired with a dest-out pipeline
+// (`sourceRGBBlendFactor = .zero`, `destinationRGBBlendFactor =
+// `.oneMinusSourceAlpha`) so the layer's RGB and alpha get scaled by
+// (1 - scratch.a) — the standard dest-out erase op.
+//
+// Within-stroke no-accumulation: the deposit pass already capped scratch.a
+// via .max/.max, so multiple overlapping eraser stamps at 50% opacity
+// leave scratch.a at 0.5 (not 0.75 like the OLD sourceAlpha eraser
+// blend would accumulate to). The commit then dest-outs at exactly 0.5
+// once, instead of repeatedly partially erasing during the stroke.
+fragment float4 wetInkEraserCommitShader(VertexOut in [[stage_in]],
+                                          texture2d<float> scratch [[texture(0)]]) {
+    constexpr sampler s(mag_filter::nearest, min_filter::nearest);
+    float a = scratch.sample(s, in.texCoord).a;
+    return float4(0.0, 0.0, 0.0, a);
 }
 
 // MARK: - Blend Mode Functions
