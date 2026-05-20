@@ -119,8 +119,9 @@ struct TaggedCritique: Codable, Identifiable, Hashable {
     let primaryCategory: CategoryID
     let secondaryCategories: [CategoryID]
     /// 1 (minor refinement) – 5 (needs significant work). Studio Wall
-    /// renders dot brightness ∝ severity; Skill Radar averages by
-    /// category and maps `(5 - avg) / 4` to vertex radius.
+    /// renders dot brightness ∝ severity; Skill Radar maps severity to
+    /// a signed positivity weight (sev 1 → +1.0, 5 → −1.0) and
+    /// accumulates per category as net mastery evidence.
     let severity: Int
 
     var id: String {
@@ -303,42 +304,130 @@ extension EvolutionFeed {
 
     private static var previewTaggedCritiques: [TaggedCritique] {
         let now = Date()
-        // Trend over the last ~60 days for the Studio Wall + Skill
-        // Radar preview. Severity drops over time in `.anatomy` (the
-        // user's current focus that they're improving on) and stays
-        // steady in `.composition` (the existing strength). Two
-        // drawings get multiple critiques to demonstrate the dot-row
-        // stacking pattern.
+        // 21 critiques across ~115 days, oldest-first. Designed to
+        // exercise the Skill Radar's new accumulated-evidence math:
+        //   - composition + value end strongly net-positive (visible fill)
+        //   - anatomy mixed but net-positive (partial fill, recovering)
+        //   - line emerging (small fill)
+        //   - color net-NEGATIVE (collapses to center AND tints axis
+        //     label red — verifies the regression warning renders)
+        //   - perspective / subject_match / general untouched (neutral)
+        //   - count ≥ 20 so `canCompare` triggers and the "Then"
+        //     midpoint polygon draws inside a tighter, less-filled shape.
         func ts(_ daysAgo: Int) -> Date {
             Calendar.current.date(byAdding: .day, value: -daysAgo, to: now) ?? now
         }
         let d1 = UUID(), d2 = UUID(), d3 = UUID(), d4 = UUID()
+        let d5 = UUID(), d6 = UUID(), d7 = UUID(), d8 = UUID()
         return [
+            // Early period — severity high, color & anatomy struggling.
             TaggedCritique(critiqueId: nil, drawingId: d1, drawingTitle: "Self-portrait 1",
-                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(56),
-                           contentExcerpt: "Anatomy reads heavy and the eye placement is off.",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(115),
+                           contentExcerpt: "Anatomy reads heavy; eye placement and jaw are off.",
                            content: nil,
-                           primaryCategory: .anatomy, secondaryCategories: [.value], severity: 4),
-            TaggedCritique(critiqueId: nil, drawingId: d2, drawingTitle: "Still life",
-                           drawingSubject: "still life", thumbnailPath: nil, createdAt: ts(42),
-                           contentExcerpt: "Composition is balanced; values compress in the midtones.",
+                           primaryCategory: .anatomy, secondaryCategories: [.color], severity: 4),
+            TaggedCritique(critiqueId: nil, drawingId: d1, drawingTitle: "Self-portrait 1",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(110),
+                           contentExcerpt: "Color choices clash and skin tones read muddy.",
                            content: nil,
-                           primaryCategory: .composition, secondaryCategories: [.value], severity: 2),
-            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Self-portrait 2",
+                           primaryCategory: .color, secondaryCategories: [.anatomy], severity: 5),
+            TaggedCritique(critiqueId: nil, drawingId: d1, drawingTitle: "Self-portrait 1",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(105),
+                           contentExcerpt: "Proportion drift in the hands; line confidence low.",
+                           content: nil,
+                           primaryCategory: .anatomy, secondaryCategories: [.line], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d2, drawingTitle: "Landscape sketch",
+                           drawingSubject: "landscape", thumbnailPath: nil, createdAt: ts(95),
+                           contentExcerpt: "Values compress in the midtones — sky needs more separation.",
+                           content: nil,
+                           primaryCategory: .value, secondaryCategories: [], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d2, drawingTitle: "Landscape sketch",
+                           drawingSubject: "landscape", thumbnailPath: nil, createdAt: ts(90),
+                           contentExcerpt: "Color temperature shifts feel arbitrary; values fight color.",
+                           content: nil,
+                           primaryCategory: .color, secondaryCategories: [.value], severity: 4),
+            // Mid period — composition starts landing, color still rough.
+            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Still life A",
+                           drawingSubject: "still life", thumbnailPath: nil, createdAt: ts(85),
+                           contentExcerpt: "Composition reads but the focal point is ambiguous.",
+                           content: nil,
+                           primaryCategory: .composition, secondaryCategories: [], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Still life A",
+                           drawingSubject: "still life", thumbnailPath: nil, createdAt: ts(75),
+                           contentExcerpt: "Anatomy of the bottle handles is closer; only minor drift.",
+                           content: nil,
+                           primaryCategory: .anatomy, secondaryCategories: [.composition], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Still life A",
+                           drawingSubject: "still life", thumbnailPath: nil, createdAt: ts(70),
+                           contentExcerpt: "Values are tightening; midtone separation is improving.",
+                           content: nil,
+                           primaryCategory: .value, secondaryCategories: [.line], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d4, drawingTitle: "Self-portrait 2",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(65),
+                           contentExcerpt: "Line weight is more deliberate but still inconsistent.",
+                           content: nil,
+                           primaryCategory: .line, secondaryCategories: [], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d4, drawingTitle: "Self-portrait 2",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(60),
+                           contentExcerpt: "Composition framing is workable; value structure carries it.",
+                           content: nil,
+                           primaryCategory: .composition, secondaryCategories: [.value], severity: 3),
+            TaggedCritique(critiqueId: nil, drawingId: d4, drawingTitle: "Self-portrait 2",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(50),
+                           contentExcerpt: "Eye placement clean; proportion noticeably tighter.",
+                           content: nil,
+                           primaryCategory: .anatomy, secondaryCategories: [], severity: 2),
+            // Late-mid period — recent strengths emerging.
+            TaggedCritique(critiqueId: nil, drawingId: d5, drawingTitle: "Color study",
+                           drawingSubject: "abstract", thumbnailPath: nil, createdAt: ts(45),
+                           contentExcerpt: "Value separation is cleaner; only small midtone smoothing left.",
+                           content: nil,
+                           primaryCategory: .value, secondaryCategories: [.composition], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d5, drawingTitle: "Color study",
+                           drawingSubject: "abstract", thumbnailPath: nil, createdAt: ts(40),
+                           contentExcerpt: "Composition reads cleanly — only minor focal-point refinement.",
+                           content: nil,
+                           primaryCategory: .composition, secondaryCategories: [.line], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d5, drawingTitle: "Color study",
+                           drawingSubject: "abstract", thumbnailPath: nil, createdAt: ts(35),
+                           contentExcerpt: "Line confidence is up; small wobble in the long strokes.",
+                           content: nil,
+                           primaryCategory: .line, secondaryCategories: [], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d6, drawingTitle: "Self-portrait 3",
                            drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(28),
-                           contentExcerpt: "Eye placement has improved — proportion still drifts.",
-                           content: nil,
-                           primaryCategory: .anatomy, secondaryCategories: [], severity: 3),
-            TaggedCritique(critiqueId: nil, drawingId: d3, drawingTitle: "Self-portrait 2",
-                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(27),
-                           contentExcerpt: "Revised version: composition reads better; value contrast widened.",
-                           content: nil,
-                           primaryCategory: .composition, secondaryCategories: [.value], severity: 2),
-            TaggedCritique(critiqueId: nil, drawingId: d4, drawingTitle: "Self-portrait 3",
-                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(7),
-                           contentExcerpt: "Eye placement is clean; proportion noticeably tighter.",
+                           contentExcerpt: "Anatomy is solid; only minor proportion polish remains.",
                            content: nil,
                            primaryCategory: .anatomy, secondaryCategories: [], severity: 1),
+            TaggedCritique(critiqueId: nil, drawingId: d6, drawingTitle: "Self-portrait 3",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(22),
+                           contentExcerpt: "Value range widened — strong darks, brighter highlights.",
+                           content: nil,
+                           primaryCategory: .value, secondaryCategories: [.composition], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d7, drawingTitle: "Quick gesture",
+                           drawingSubject: "figure", thumbnailPath: nil, createdAt: ts(18),
+                           contentExcerpt: "Composition framing is decisive; balance reads at a glance.",
+                           content: nil,
+                           primaryCategory: .composition, secondaryCategories: [.value], severity: 1),
+            TaggedCritique(critiqueId: nil, drawingId: d7, drawingTitle: "Quick gesture",
+                           drawingSubject: "figure", thumbnailPath: nil, createdAt: ts(14),
+                           contentExcerpt: "Value control is the standout — only the deepest darks need work.",
+                           content: nil,
+                           primaryCategory: .value, secondaryCategories: [], severity: 1),
+            TaggedCritique(critiqueId: nil, drawingId: d8, drawingTitle: "Final piece",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(10),
+                           contentExcerpt: "Composition is clean and unambiguous — focal hierarchy reads.",
+                           content: nil,
+                           primaryCategory: .composition, secondaryCategories: [], severity: 1),
+            TaggedCritique(critiqueId: nil, drawingId: d8, drawingTitle: "Final piece",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(7),
+                           contentExcerpt: "Line economy is excellent; small confidence wobble in long arcs.",
+                           content: nil,
+                           primaryCategory: .line, secondaryCategories: [.value], severity: 2),
+            TaggedCritique(critiqueId: nil, drawingId: d8, drawingTitle: "Final piece",
+                           drawingSubject: "portrait", thumbnailPath: nil, createdAt: ts(3),
+                           contentExcerpt: "Value handling is the standout strength — minimal polish needed.",
+                           content: nil,
+                           primaryCategory: .value, secondaryCategories: [.composition], severity: 1),
         ]
     }
 

@@ -2,17 +2,24 @@
 //  EvolutionSkillRadarView.swift
 //  DrawEvolve
 //
-//  Compact spider chart of critique severity per taxonomy category.
-//  Two polygons overlaid:
-//    - "Then" — averaged over the EARLIEST 5 critiques in the period.
-//      Dashed stroke, no fill.
-//    - "Now" — averaged over the most recent 5 critiques in the period.
+//  Compact spider chart of accumulated skill evidence per taxonomy
+//  category. Two polygons overlaid:
+//    - "Then" — net evidence at the midpoint of the period window.
+//      Dashed stroke, no fill. Only drawn when there's enough data.
+//    - "Now" — net evidence across ALL critiques in the period window.
 //      Solid stroke, accent fill at low opacity.
 //
-//  Distance from center = inverse severity:
-//    severity 1.0 (minor refinement) → vertex at the outer edge
-//    severity 5.0 (significant work) → vertex at the center
-//    no data for a category → vertex at center (skill unknown)
+//  Severity → signed positivity weight per mention:
+//    sev 1 (minor refinement)        → +1.0   strong positive
+//    sev 2 (small issue)             → +0.5   mild positive
+//    sev 3 (moderate)                →  0.0   neutral
+//    sev 4 (significant)             → −0.5   mild regression
+//    sev 5 (foundational problem)    → −1.0   strong regression
+//  Primary tag gets full weight, each secondary half.
+//  Vertex radius: 1 − exp(−max(0, net) / k), saturating asymptotically
+//  toward the outer edge as positive evidence accumulates.
+//  Categories with net evidence < 0 collapse to center AND tint their
+//  axis label red — distinguishes "you're regressing" from "no data."
 //
 //  Drawn with SwiftUI Canvas — no charting library. Eight axes (one per
 //  CategoryID case in our taxonomy: anatomy, composition, value, color,
@@ -35,6 +42,12 @@ struct EvolutionSkillRadarView: View {
         .line, .perspective, .subjectMatch, .general,
     ]
 
+    /// Controls how much net positive evidence is needed before an axis
+    /// approaches the outer edge. Bigger k ⇒ slower fill ⇒ more critiques
+    /// required to look full. Tuned so ~15 sev-1 primary critiques per
+    /// axis (× 8 axes ≈ 120 total) get the polygon near fully-filled.
+    private static let saturationConstant: Double = 2.5
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -53,7 +66,7 @@ struct EvolutionSkillRadarView: View {
             radarBody
 
             if !canCompare {
-                Text("Need at least 10 critiques to compare Then vs Now. Showing current shape only.")
+                Text("Need at least 20 critiques to compare Then vs Now. Showing current shape only.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -95,17 +108,27 @@ struct EvolutionSkillRadarView: View {
                 ctx.stroke(p, with: .color(Color.secondary.opacity(0.15)), lineWidth: 0.5)
             }
 
+            // Accumulated net evidence across the full period window.
+            // Computed once and shared by the "Now" polygon AND the per-axis
+            // label tinting below, so both read the same source of truth.
+            let nowEvidence = netEvidenceByCategory(of: windowed)
+
             // 3. Polygons.
             if canCompare, let then = thenPolygon(center: center, radius: radius) {
                 ctx.stroke(then, with: .color(Color.secondary.opacity(0.55)),
                            style: StrokeStyle(lineWidth: 1.4, dash: [4, 3]))
             }
-            if let now = nowPolygon(center: center, radius: radius) {
+            if !windowed.isEmpty,
+               let now = polygonPath(netEvidenceByCategory: nowEvidence,
+                                     center: center, radius: radius) {
                 ctx.fill(now, with: .color(Color.accentColor.opacity(0.22)))
                 ctx.stroke(now, with: .color(Color.accentColor), lineWidth: 1.8)
             }
 
-            // 4. Axis labels.
+            // 4. Axis labels. Categories whose net evidence has gone
+            // negative (more sev≥4 than sev≤2 in the window) tint red
+            // to surface "you're regressing here" — otherwise a
+            // regressing axis is visually identical to "no data."
             for i in 0..<axisCount {
                 let angle = axisAngle(for: i, of: axisCount)
                 let labelRadius = radius + 16
@@ -113,9 +136,12 @@ struct EvolutionSkillRadarView: View {
                     x: center.x + cos(angle) * labelRadius,
                     y: center.y + sin(angle) * labelRadius
                 )
-                let text = Text(Self.categories[i].displayName)
+                let cat = Self.categories[i]
+                let net = nowEvidence[cat] ?? 0.0
+                let tint: Color = net < 0 ? Color.red.opacity(0.8) : Color.secondary
+                let text = Text(cat.displayName)
                     .font(.caption2.weight(.medium))
-                    .foregroundStyle(Color.secondary)
+                    .foregroundStyle(tint)
                 ctx.draw(text, at: labelPoint, anchor: anchorForAngle(angle))
             }
         }
@@ -142,27 +168,29 @@ struct EvolutionSkillRadarView: View {
         return UnitPoint(x: h, y: v)
     }
 
-    private func vertexPosition(severityAvg: Double, axisIndex: Int, of axisCount: Int,
+    private func vertexPosition(netEvidence: Double, axisIndex: Int, of axisCount: Int,
                                  center: CGPoint, radius: CGFloat) -> CGPoint {
-        // severity 1 → outer edge (skill solid)
-        // severity 5 → center (skill weak / many issues)
-        // severity NaN/no-data → center (no signal)
-        let clamped = max(1.0, min(5.0, severityAvg))
-        let normalized = (5.0 - clamped) / 4.0   // 0 (worst) → 1 (best)
+        // Asymptotic fill: positive evidence pushes outward, saturating
+        // toward the rim as the user accumulates more. Negative net
+        // evidence collapses to center (no negative radius) — the axis
+        // label tints red elsewhere to disambiguate from "no data."
+        let n = max(0.0, netEvidence)
+        let normalized = 1.0 - exp(-n / Self.saturationConstant)
         let angle = axisAngle(for: axisIndex, of: axisCount)
         let r = radius * CGFloat(normalized)
         return CGPoint(x: center.x + cos(angle) * r, y: center.y + sin(angle) * r)
     }
 
-    private func polygonPath(severityByCategory: [CategoryID: Double],
+    private func polygonPath(netEvidenceByCategory: [CategoryID: Double],
                               center: CGPoint, radius: CGFloat) -> Path? {
         let axisCount = Self.categories.count
         var path = Path()
         for (i, cat) in Self.categories.enumerated() {
-            // Categories with no data sit at center → distorts the
-            // polygon. Acceptable; communicates "no signal here yet."
-            let sev = severityByCategory[cat] ?? 5.0
-            let point = vertexPosition(severityAvg: sev, axisIndex: i, of: axisCount,
+            // Missing-category fallback is 0.0 (still collapses to
+            // center, but means "no positive evidence yet" rather than
+            // "severity is maxed" as the old `?? 5.0` implied).
+            let net = netEvidenceByCategory[cat] ?? 0.0
+            let point = vertexPosition(netEvidence: net, axisIndex: i, of: axisCount,
                                         center: center, radius: radius)
             if i == 0 { path.move(to: point) }
             else { path.addLine(to: point) }
@@ -179,44 +207,52 @@ struct EvolutionSkillRadarView: View {
         return critiques.filter { $0.createdAt >= cutoff! }
     }
 
-    /// Need at least 10 critiques in the window for a meaningful
-    /// "Then vs Now" — 5 in each half.
+    /// Need at least 20 critiques in the window before "Then" (midpoint
+    /// snapshot) is a meaningful comparison against "Now."
     private var canCompare: Bool {
-        windowed.count >= 10
+        windowed.count >= 20
     }
 
-    private func averageSeverity(of critiques: [TaggedCritique]) -> [CategoryID: Double] {
-        var sums: [CategoryID: Double] = [:]
-        var counts: [CategoryID: Int] = [:]
+    /// Net positive-evidence weight per category, summed across the
+    /// window. Severity → signed weight (sev 1 → +1.0, 2 → +0.5,
+    /// 3 → 0, 4 → −0.5, 5 → −1.0); primary mentions full weight,
+    /// secondary mentions half weight. Categories never mentioned are
+    /// absent from the result map (callers default missing to 0.0).
+    /// Order-insensitive within `critiques`.
+    private func netEvidenceByCategory(of critiques: [TaggedCritique]) -> [CategoryID: Double] {
+        var net: [CategoryID: Double] = [:]
         for c in critiques {
-            // Primary counts double-weight; secondaries half.
-            sums[c.primaryCategory, default: 0] += Double(c.severity)
-            counts[c.primaryCategory, default: 0] += 1
+            let w = positivityWeight(for: c.severity)
+            net[c.primaryCategory, default: 0] += w
             for sec in c.secondaryCategories where sec != c.primaryCategory {
-                sums[sec, default: 0] += Double(c.severity) * 0.5
-                counts[sec, default: 0] += 1
+                net[sec, default: 0] += w * 0.5
             }
         }
-        var out: [CategoryID: Double] = [:]
-        for (cat, total) in sums {
-            let n = counts[cat] ?? 1
-            out[cat] = total / Double(n)
+        return net
+    }
+
+    private func positivityWeight(for severity: Int) -> Double {
+        switch severity {
+        case 1: return 1.0
+        case 2: return 0.5
+        case 3: return 0.0
+        case 4: return -0.5
+        case 5: return -1.0
+        default: return 0.0   // taxonomy clamps 1...5; defensive
         }
-        return out
     }
 
     private func thenPolygon(center: CGPoint, radius: CGFloat) -> Path? {
-        let earliest = Array(windowed.prefix(5))
-        guard !earliest.isEmpty else { return nil }
-        let avg = averageSeverity(of: earliest)
-        return polygonPath(severityByCategory: avg, center: center, radius: radius)
-    }
-
-    private func nowPolygon(center: CGPoint, radius: CGFloat) -> Path? {
-        let recent = Array(windowed.suffix(5))
-        guard !recent.isEmpty else { return nil }
-        let avg = averageSeverity(of: recent)
-        return polygonPath(severityByCategory: avg, center: center, radius: radius)
+        // Worker promises ascending-by-createdAt (see
+        // cloudflare-worker/lib/evolution-aggregation.js buildTaggedCritiques),
+        // but the contract is informal — defensively re-sort so the
+        // midpoint slice is correct even if upstream ordering shifts.
+        let sorted = windowed.sorted { $0.createdAt < $1.createdAt }
+        let midpoint = sorted.count / 2
+        guard midpoint > 0 else { return nil }
+        let earlier = Array(sorted.prefix(midpoint))
+        let net = netEvidenceByCategory(of: earlier)
+        return polygonPath(netEvidenceByCategory: net, center: center, radius: radius)
     }
 }
 
