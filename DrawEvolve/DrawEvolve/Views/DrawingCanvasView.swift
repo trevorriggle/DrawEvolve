@@ -732,7 +732,7 @@ struct DrawingCanvasView: View {
                 // chain), same hit-testing rule. Editing chrome below
                 // hides via per-subview gates on !isViewingSnapshot.
                 if let viewing = canvasState.viewingSnapshot {
-                    SnapshotCanvasOverlay(viewing: viewing, canvasState: canvasState)
+                    SnapshotCanvasOverlay(viewing: viewing)
                         .allowsHitTesting(true)
                         .ignoresSafeArea()
                     snapshotChip(timestamp: viewing.timestamp)
@@ -1082,7 +1082,7 @@ struct DrawingCanvasView: View {
             // the live Metal canvas underneath. The chrome below this
             // block is per-subview-gated on !isViewingSnapshot.
             if let viewing = canvasState.viewingSnapshot {
-                SnapshotCanvasOverlay(viewing: viewing, canvasState: canvasState)
+                SnapshotCanvasOverlay(viewing: viewing)
                     .allowsHitTesting(true)
                     .ignoresSafeArea()
 
