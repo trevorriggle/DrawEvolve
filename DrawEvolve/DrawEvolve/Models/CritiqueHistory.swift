@@ -145,7 +145,7 @@ struct CritiqueEntry: Codable, Identifiable {
 ///
 /// All paths are storage object keys under the `drawings` bucket, relative
 /// to the bucket root. Use SupabaseManager's signed-URL helper to fetch.
-struct SnapshotPointer: Codable, Equatable {
+struct SnapshotPointer: Codable, Equatable, Hashable {
     let manifestPath: String
     let compositePath: String
     let thumbPath: String

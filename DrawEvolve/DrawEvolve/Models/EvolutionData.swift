@@ -123,6 +123,13 @@ struct TaggedCritique: Codable, Identifiable, Hashable {
     /// a signed positivity weight (sev 1 → +1.0, 5 → −1.0) and
     /// accumulates per category as net mastery evidence.
     let severity: Int
+    /// Drawing version history pointer (phase 1). Non-nil once the
+    /// worker promotes a pending snapshot bundle for this critique;
+    /// nil for pre-VH legacy entries and for entries where promote
+    /// failed (graceful degradation). The Studio Wall column and the
+    /// detail sheet both prefer this over the live drawing thumbnail
+    /// when present, so the user sees the drawing AT critique time.
+    let snapshot: SnapshotPointer?
 
     var id: String {
         critiqueId?.uuidString ?? "\(drawingId.uuidString)-\(createdAt.timeIntervalSince1970)"
@@ -146,6 +153,35 @@ struct TaggedCritique: Codable, Identifiable, Hashable {
         case primaryCategory = "primary_category"
         case secondaryCategories = "secondary_categories"
         case severity
+        case snapshot
+    }
+
+    init(
+        critiqueId: UUID?,
+        drawingId: UUID,
+        drawingTitle: String?,
+        drawingSubject: String?,
+        thumbnailPath: String?,
+        createdAt: Date,
+        contentExcerpt: String,
+        content: String?,
+        primaryCategory: CategoryID,
+        secondaryCategories: [CategoryID],
+        severity: Int,
+        snapshot: SnapshotPointer? = nil
+    ) {
+        self.critiqueId = critiqueId
+        self.drawingId = drawingId
+        self.drawingTitle = drawingTitle
+        self.drawingSubject = drawingSubject
+        self.thumbnailPath = thumbnailPath
+        self.createdAt = createdAt
+        self.contentExcerpt = contentExcerpt
+        self.content = content
+        self.primaryCategory = primaryCategory
+        self.secondaryCategories = secondaryCategories
+        self.severity = severity
+        self.snapshot = snapshot
     }
 }
 

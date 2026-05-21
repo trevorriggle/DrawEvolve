@@ -960,6 +960,12 @@ export function buildTaggedCritiques(critiques, drawingsById) {
         ? c.tags.secondary_categories
         : [],
       severity: c.tags.severity,
+      // Drawing version history — project the snapshot pointer if the
+      // worker promote step wrote one onto the critique entry. Null for
+      // pre-VH legacy entries and for entries where promote failed
+      // (graceful degradation). iOS renders the historical thumbnail
+      // when present and a muted placeholder otherwise.
+      snapshot: c.snapshot ?? null,
     });
   }
   return out;

@@ -184,6 +184,16 @@ private struct CritiqueColumn: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                // Phase 2 temporal cue: when the row carries a snapshot, the
+                // thumbnail above is historical (drawing AT critique time).
+                // The "X ago" copy makes that explicit so the user doesn't
+                // expect it to match the live canvas.
+                if critique.snapshot != nil {
+                    Text("Snapshot · \(Self.relativeFormatter.localizedString(for: critique.createdAt, relativeTo: Date()))")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
                 HStack(spacing: 4) {
                     ForEach(Array(critique.allCategories.enumerated()), id: \.offset) { _, cat in
                         Circle()
@@ -200,7 +210,7 @@ private struct CritiqueColumn: View {
             .opacity(isDimmed ? 0.32 : 1.0)
         }
         .buttonStyle(.plain)
-        .task(id: critique.drawingId) { await loadThumbnail() }
+        .task(id: critique.id) { await loadThumbnail() }
     }
 
     @ViewBuilder
@@ -213,10 +223,17 @@ private struct CritiqueColumn: View {
                     .resizable()
                     .scaledToFill()
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if critique.snapshot != nil {
+                // Snapshot exists but the thumb is still loading.
+                ProgressView()
+                    .controlSize(.small)
             } else {
+                // No snapshot — pre-VH legacy entry or promote-failed.
+                // Muted placeholder per proposal §3.3: one rule covers
+                // all "no historical thumb available" cases.
                 Image(systemName: "photo")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary.opacity(0.6))
             }
         }
         .frame(width: 96, height: 96)
@@ -240,25 +257,34 @@ private struct CritiqueColumn: View {
 
     @MainActor
     private func loadThumbnail() async {
-        let mgr = CloudDrawingStorageManager.shared
-        if let data = mgr.thumbnailData(for: critique.drawingId),
-           let img = UIImage(data: data) {
-            self.thumbnail = img
-            return
-        }
+        // Phase 2: prefer the snapshot thumb (historical) over the live
+        // drawing thumb (current state). When snapshot is nil, render the
+        // muted placeholder — no fallback to live state, per proposal §3.3.
+        guard let snapshot = critique.snapshot else { return }
+        guard let client = SupabaseManager.shared.client else { return }
         do {
-            if let data = try await mgr.loadFullImage(for: critique.drawingId),
-               let img = UIImage(data: data) {
+            let signed = try await client.storage
+                .from("drawings")
+                .createSignedURL(path: snapshot.thumbPath, expiresIn: 3600)
+            let (data, _) = try await URLSession.shared.data(from: signed)
+            if let img = UIImage(data: data) {
                 self.thumbnail = img
             }
         } catch {
-            // Placeholder photo icon already shows; silent fallthrough.
+            // Snapshot exists but fetch failed — keep the placeholder.
+            print("[CritiqueColumn] snapshot thumb fetch failed: \(error.localizedDescription)")
         }
     }
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MMM d"
+        return f
+    }()
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
         return f
     }()
 }
@@ -269,6 +295,7 @@ struct CritiqueDetailSheet: View {
     let critique: TaggedCritique
     @Environment(\.dismiss) private var dismiss
     @State private var thumbnail: UIImage?
+    @State private var showingSnapshotViewer: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -281,6 +308,13 @@ struct CritiqueDetailSheet: View {
                         Text(Self.dateFormatter.string(from: critique.createdAt))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        // Phase 2: temporal cue mirrors the column. Tells
+                        // the user the thumbnail above is historical.
+                        if critique.snapshot != nil {
+                            Text("Snapshot · \(Self.relativeFormatter.localizedString(for: critique.createdAt, relativeTo: Date())) · tap thumbnail to zoom")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                     HStack(spacing: 6) {
                         ForEach(critique.allCategories.indices, id: \.self) { i in
@@ -326,7 +360,16 @@ struct CritiqueDetailSheet: View {
                 }
             }
         }
-        .task(id: critique.drawingId) { await loadThumbnail() }
+        .task(id: critique.id) { await loadThumbnail() }
+        .fullScreenCover(isPresented: $showingSnapshotViewer) {
+            if let snapshot = critique.snapshot {
+                SnapshotViewerView(
+                    snapshot: snapshot,
+                    critiqueTimestamp: critique.createdAt,
+                    onDismiss: { showingSnapshotViewer = false }
+                )
+            }
+        }
     }
 
     @ViewBuilder
@@ -339,14 +382,40 @@ struct CritiqueDetailSheet: View {
                     .resizable()
                     .scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 14))
+                if critique.snapshot != nil {
+                    // Subtle affordance — bottom-trailing magnifier on a
+                    // material chip tells the user this is interactive.
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .padding(8)
+                                .background(.thinMaterial, in: Circle())
+                                .padding(12)
+                        }
+                    }
+                }
+            } else if critique.snapshot != nil {
+                ProgressView()
+                    .controlSize(.large)
             } else {
+                // Same muted-placeholder rule as the column.
                 Image(systemName: "photo")
                     .font(.system(size: 36))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary.opacity(0.6))
             }
         }
         .frame(maxWidth: .infinity)
         .frame(minHeight: 200, idealHeight: 260)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if critique.snapshot != nil {
+                showingSnapshotViewer = true
+            }
+        }
     }
 
     private var displayTitle: String {
@@ -357,21 +426,35 @@ struct CritiqueDetailSheet: View {
 
     @MainActor
     private func loadThumbnail() async {
-        let mgr = CloudDrawingStorageManager.shared
-        if let data = mgr.thumbnailData(for: critique.drawingId),
-           let img = UIImage(data: data) {
-            self.thumbnail = img
+        // Phase 2: same priority as the column — historical (snapshot)
+        // over current (live drawing). For the detail sheet we fetch the
+        // composite (higher res than thumb) because we render it larger
+        // and may hand off to the full-screen viewer.
+        if let snapshot = critique.snapshot {
+            guard let client = SupabaseManager.shared.client else { return }
+            do {
+                let signed = try await client.storage
+                    .from("drawings")
+                    .createSignedURL(path: snapshot.compositePath, expiresIn: 3600)
+                let (data, _) = try await URLSession.shared.data(from: signed)
+                if let img = UIImage(data: data) {
+                    self.thumbnail = img
+                }
+            } catch {
+                print("[CritiqueDetailSheet] snapshot composite fetch failed: \(error.localizedDescription)")
+            }
             return
         }
-        do {
-            if let data = try await mgr.loadFullImage(for: critique.drawingId),
-               let img = UIImage(data: data) {
-                self.thumbnail = img
-            }
-        } catch {
-            // silent
-        }
+        // No snapshot — placeholder stays. Don't fall through to live
+        // drawing fetch; the visual signal "no historical record" matters
+        // more than filling the slot with a misleading current-state image.
     }
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
 
     /// Renders the full critique body with markdown formatting. Falls
     /// back to the single-sentence excerpt when the worker hasn't
