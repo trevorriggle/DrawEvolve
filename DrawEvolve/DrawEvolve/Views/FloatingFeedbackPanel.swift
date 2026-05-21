@@ -40,7 +40,20 @@ struct FloatingFeedbackPanel: View {
     var onActiveEntryChange: ((CritiqueEntry?, _ isLatest: Bool) -> Void)? = nil
     var initialSelectedEntryId: UUID? = nil
 
+    /// True when the canvas underneath is rendering a historical snapshot.
+    /// When this flips on, the panel auto-collapses to its pill so the
+    /// user can see the snapshot. When they re-expand the pill in this
+    /// mode, they get the smaller "compact" frame (history nav + excerpt
+    /// + Read full button) instead of the full 656×625 critique-reader.
+    /// Default false — outside snapshot mode the panel behaves exactly
+    /// as before this change.
+    var isInSnapshotMode: Bool = false
+
     @State private var isExpanded = true
+    /// Sub-state of `isExpanded`. When true (default), the expanded panel
+    /// is the full critique-reader. When false, it's the compact form
+    /// used in snapshot mode. Ignored when collapsed (isExpanded == false).
+    @State private var isFullSize: Bool = true
     @State private var position: CGPoint = .zero
     @State private var dragOffset: CGSize = .zero
     @State private var showHistoryMenu = false
@@ -49,6 +62,11 @@ struct FloatingFeedbackPanel: View {
 
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
     private let expandedSize: CGSize = CGSize(width: 656, height: 625)
+    /// Snapshot-mode compact size — smaller frame for nav + excerpt + a
+    /// "Read full critique" button. Leaves more of the canvas snapshot
+    /// visible while still giving the user a way to flip between
+    /// historical entries.
+    private let compactExpandedSize: CGSize = CGSize(width: 380, height: 340)
     private let historyMenuWidth: CGFloat = 200
 
     /// The actual expanded panel size for the current screen. The fixed
@@ -57,6 +75,12 @@ struct FloatingFeedbackPanel: View {
     /// fully on-screen with room reserved on the left for the history menu
     /// when the user opens it.
     private var actualExpandedSize: CGSize {
+        // Snapshot-mode compact size — smaller frame so the user can see
+        // the canvas snapshot underneath while still navigating between
+        // entries. Bypasses the screen-cap math (it's already small).
+        if !isFullSize && isInSnapshotMode {
+            return compactExpandedSize
+        }
         guard screenSize.width > 0, screenSize.height > 0 else {
             return expandedSize
         }
@@ -101,13 +125,27 @@ struct FloatingFeedbackPanel: View {
             fireActiveEntryChange()
         }
         .onChange(of: isExpanded) { _, newExpanded in
-            // Collapsing the panel (iPad only — iPhone has no pill state)
-            // exits snapshot mode per the approved auto-clear rules.
-            // Expanding re-evaluates against the current selection.
+            // Re-evaluate the active entry on expand so the parent updates
+            // viewingSnapshot to match the currently-selected critique.
+            // Collapse no longer clears the overlay — in snapshot mode,
+            // collapsing means "minimize this so I can see my snapshot,"
+            // not "exit time machine." Exit is via X (isPresented = false,
+            // which the parent observes) or picking the most-recent
+            // entry (fires with isLatest=true → parent clears).
             if newExpanded {
                 fireActiveEntryChange()
-            } else {
-                onActiveEntryChange?(nil, false)
+            }
+        }
+        // Drawing version history phase 2 — auto-collapse to pill when
+        // the canvas enters snapshot mode so the user can actually see
+        // their drawing underneath. Re-expanding from the pill while
+        // still in snapshot mode picks the compact size (handled by the
+        // pill tap action).
+        .onChange(of: isInSnapshotMode) { _, newValue in
+            guard newValue else { return }
+            withAnimation(.spring(response: 0.3)) {
+                isExpanded = false
+                isFullSize = false  // next pill-tap expands to compact
             }
         }
     }
@@ -308,6 +346,73 @@ struct FloatingFeedbackPanel: View {
         .background(Color(uiColor: .systemBackground))
     }
 
+    /// Snapshot-mode compact body — replaces critiqueContent + askEveBar
+    /// when isFullSize is false. Shows just enough context to navigate
+    /// (timestamp + entry index + excerpt) plus a "Read full critique"
+    /// button that flips back to the full-size panel temporarily.
+    @ViewBuilder
+    private var compactCritiqueContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !critiqueHistory.isEmpty && selectedHistoryIndex < critiqueHistory.count {
+                let entry = critiqueHistory[selectedHistoryIndex]
+                HStack {
+                    Image(systemName: "clock")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                    Text(formatTimestamp(entry.timestamp))
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Text("\(selectedHistoryIndex + 1) of \(critiqueHistory.count)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Text({
+                    let body = CritiqueSummary.parse(entry.feedback).body
+                    let limit = 200
+                    return body.count > limit ? String(body.prefix(limit)) + "…" : body
+                }())
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .lineLimit(5)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("No critique selected")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                withAnimation(.spring(response: 0.25)) {
+                    isFullSize = true
+                }
+            } label: {
+                HStack {
+                    Image(systemName: "text.alignleft")
+                        .font(.caption)
+                    Text("Read full critique")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .foregroundStyle(.primary)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(uiColor: .systemBackground))
+    }
+
     // MARK: - iPad body (floating-card / collapsed-pill, byte-preserved)
     //
     // Wholesale-quoted from pre-Phase-4 main. The only structural change
@@ -404,11 +509,16 @@ struct FloatingFeedbackPanel: View {
 
                         Divider()
 
-                        // Feedback content (shared with iPhone phoneBody —
-                        // see `critiqueContent` for the markdown view +
-                        // timestamp header).
-                        critiqueContent
-                        askEveBar
+                        // Feedback content. In snapshot+compact mode we
+                        // render the compact body (nav + excerpt + Read
+                        // full); otherwise the full critique reader
+                        // (shared with phoneBody via critiqueContent).
+                        if !isFullSize && isInSnapshotMode {
+                            compactCritiqueContent
+                        } else {
+                            critiqueContent
+                            askEveBar
+                        }
                     }
                     .frame(width: actualExpandedSize.width, height: actualExpandedSize.height)
                     .background(Color(uiColor: .systemBackground))
@@ -500,9 +610,16 @@ struct FloatingFeedbackPanel: View {
                             .foregroundColor(.white)
                     }
                     .onTapGesture {
-                        // Tap to expand (doesn't interfere with drag)
+                        // Tap to expand (doesn't interfere with drag). In
+                        // snapshot mode the panel expands to the compact
+                        // size (nav + excerpt) so most of the canvas
+                        // snapshot stays visible. Outside snapshot mode it
+                        // expands to the full critique-reader as before.
                         withAnimation(.spring(response: 0.3)) {
-                            // Adjust position so top-left stays in same place
+                            isFullSize = !isInSnapshotMode
+                            // Position-recentering math reads
+                            // actualExpandedSize, which now reflects the
+                            // new isFullSize value we just set.
                             let offsetX = (actualExpandedSize.width - collapsedSize.width) / 2
                             let offsetY = (actualExpandedSize.height - collapsedSize.height) / 2
                             var newX = position.x + offsetX

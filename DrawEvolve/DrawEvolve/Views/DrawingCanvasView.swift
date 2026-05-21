@@ -1777,7 +1777,8 @@ struct DrawingCanvasView: View {
                             timestamp: entry.timestamp
                         )
                     },
-                    initialSelectedEntryId: preselectedCritique?.id
+                    initialSelectedEntryId: preselectedCritique?.id,
+                    isInSnapshotMode: canvasState.viewingSnapshot != nil
                 )
             }
 
