@@ -80,6 +80,16 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// observers see the change via the synchronous `thumbnailData(for:)` API.
     @Published private var thumbnailCache: [UUID: Data] = [:]
 
+    /// In-memory cache of historical snapshot composite JPEGs, keyed by
+    /// the snapshot's compositePath (unique per critique). The phase 2
+    /// canvas-overlay flow needs flipping between historical entries in
+    /// the floating feedback panel to feel instant; first fetch hits the
+    /// network, subsequent reads come from here. Invalidated alongside
+    /// thumbnailCache on user change. NOT disk-persisted — composite
+    /// JPEGs are ~100-300 KB and we'd rather rehydrate on next launch
+    /// than carry stale bytes across sessions.
+    private var snapshotCompositeCache: [String: UIImage] = [:]
+
     /// In-memory backoff schedule for retries: drawing id → next eligible retry time.
     /// Not persisted; a fresh app launch resets backoff (which is the right default —
     /// the network is probably in a different state than when the last attempt failed).
@@ -168,6 +178,7 @@ final class CloudDrawingStorageManager: ObservableObject {
     private func resetForUserChange() {
         drawings.removeAll()
         thumbnailCache.removeAll()
+        snapshotCompositeCache.removeAll()
         nextRetryAt.removeAll()
         for (_, task) in activeUploadTasks { task.cancel() }
         activeUploadTasks.removeAll()
@@ -869,6 +880,7 @@ final class CloudDrawingStorageManager: ObservableObject {
 
         drawings.removeAll()
         thumbnailCache.removeAll()
+        snapshotCompositeCache.removeAll()
         pendingUploadCount = 0
 
         // Wipe contents of the cache subdirs but leave the directories
@@ -894,6 +906,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         let snapshot = drawings
         drawings.removeAll()
         thumbnailCache.removeAll()
+        snapshotCompositeCache.removeAll()
 
         // Wipe local cache contents (but keep the directories).
         for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir, layersDir] {
@@ -936,6 +949,50 @@ final class CloudDrawingStorageManager: ObservableObject {
             return data
         }
         return nil
+    }
+
+    /// Synchronous lookup for the in-memory `Drawing` keyed by id. Used by
+    /// the studio-wall → canvas navigation path (commit 13) to resolve a
+    /// `TaggedCritique.drawingId` to the full Drawing record before
+    /// presenting `DrawingCanvasView`. Returns nil if local state hasn't
+    /// hydrated this drawing yet — caller should refuse the navigation or
+    /// trigger a refresh.
+    func drawing(for id: UUID) -> Drawing? {
+        drawings.first { $0.id == id }
+    }
+
+    /// Synchronous accessor for a previously-fetched snapshot composite.
+    /// Returns nil if the composite hasn't been loaded in this session.
+    /// The phase 2 canvas-overlay flow checks this first to avoid a
+    /// network round-trip when the user flips back to an entry they've
+    /// already viewed.
+    func cachedSnapshotComposite(at path: String) -> UIImage? {
+        snapshotCompositeCache[path]
+    }
+
+    /// Fetch a snapshot composite JPEG by its storage path (typically
+    /// `<user>/<drawing>/snapshots/<sequence>/composite.jpg`). Returns
+    /// the decoded UIImage. Caches the result so flipping between
+    /// historical entries in the floating feedback panel is instant
+    /// after the first load.
+    ///
+    /// Throws `notAuthenticated` if Supabase client isn't available,
+    /// `fetchFailed` if the signed URL fetch returns no bytes, or
+    /// rethrows the underlying URL/Supabase error.
+    func loadSnapshotComposite(at path: String) async throws -> UIImage {
+        if let cached = snapshotCompositeCache[path] { return cached }
+        guard let client = SupabaseManager.shared.client else {
+            throw DrawingStorageError.notAuthenticated
+        }
+        let signed = try await client.storage
+            .from(storageBucketID)
+            .createSignedURL(path: path, expiresIn: signedURLTTLSeconds)
+        let (data, _) = try await URLSession.shared.data(from: signed)
+        guard let image = UIImage(data: data) else {
+            throw DrawingStorageError.fetchFailed
+        }
+        snapshotCompositeCache[path] = image
+        return image
     }
 
     /// Block until the in-flight upload for `id` finishes (success or failure).

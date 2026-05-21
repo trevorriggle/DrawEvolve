@@ -41,6 +41,31 @@ class CanvasStateManager: ObservableObject {
     /// `critiqueHistory` for immediate display; the cloud row is canonical
     /// on the next gallery hydrate.
     @Published var lastCritiqueEntry: CritiqueEntry?
+
+    /// Drawing version history overlay state. Non-nil = the canvas is
+    /// rendering a historical snapshot composite instead of the live
+    /// drawing. Editing is blocked, the editing UI hides, and a small
+    /// "Viewing snapshot from X" chip is shown. Setting to nil restores
+    /// the live canvas and the toolbar.
+    @Published var viewingSnapshot: SnapshotViewingState?
+
+    /// Carries the data needed to render the snapshot overlay. The
+    /// `cacheKey` is the composite path — the composite cache on
+    /// CloudDrawingStorageManager keys off this so flipping between
+    /// historical entries in the floating feedback panel hits the cache
+    /// after the first load.
+    struct SnapshotViewingState: Equatable {
+        let snapshot: SnapshotPointer
+        let timestamp: Date
+        let cacheKey: String
+
+        init(snapshot: SnapshotPointer, timestamp: Date) {
+            self.snapshot = snapshot
+            self.timestamp = timestamp
+            self.cacheKey = snapshot.compositePath
+        }
+    }
+
     @Published var showError = false
     @Published var errorMessage = ""
     @Published var activeSelection: CGRect? = nil // Active selection rectangle
