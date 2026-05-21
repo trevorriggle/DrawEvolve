@@ -41,6 +41,12 @@ struct EvolutionView: View {
     /// compile and run (Evolution still works without it).
     var onUseRecommendation: ((Recommendation) -> Void)? = nil
 
+    /// Drawing version history phase 2 — fires when the user taps a
+    /// critique column in the Studio Wall (inside EvolutionPanelView).
+    /// Bubbles up to the GalleryView shell, which presents
+    /// DrawingCanvasView via .fullScreenCover with the entry pre-selected.
+    var onCritiqueTap: ((TaggedCritique) -> Void)? = nil
+
     var body: some View {
         ZStack(alignment: .top) {
             Group {
@@ -99,7 +105,8 @@ struct EvolutionView: View {
                 onRefresh: {
                     Task { await viewModel.refreshInsights() }
                 },
-                onUseRecommendation: onUseRecommendation
+                onUseRecommendation: onUseRecommendation,
+                onCritiqueTap: onCritiqueTap
             )
         }
     }

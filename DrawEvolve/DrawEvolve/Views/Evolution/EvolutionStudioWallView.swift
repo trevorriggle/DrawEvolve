@@ -25,9 +25,14 @@ import SwiftUI
 
 struct EvolutionStudioWallView: View {
     let critiques: [TaggedCritique]
+    /// Phase 2 (canvas-overlay UX) — fired when the user taps a critique
+    /// column. The parent (GalleryView shell) resolves the Drawing from
+    /// the TaggedCritique.drawingId and presents DrawingCanvasView via
+    /// .fullScreenCover with the matching CritiqueEntry pre-selected.
+    /// Replaces the old CritiqueDetailSheet modal flow.
+    let onCritiqueTap: (TaggedCritique) -> Void
 
     @State private var selectedCategory: CategoryID?
-    @State private var detailCritique: TaggedCritique?
 
     /// Categories actually represented in the data set, by reverse
     /// frequency. We only show chip filters for categories that have
@@ -94,7 +99,7 @@ struct EvolutionStudioWallView: View {
                             CritiqueColumn(
                                 critique: c,
                                 selectedCategory: selectedCategory,
-                                onTap: { detailCritique = c }
+                                onTap: { onCritiqueTap(c) }
                             )
                         }
                     }
@@ -109,9 +114,6 @@ struct EvolutionStudioWallView: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(uiColor: .secondarySystemBackground))
         )
-        .sheet(item: $detailCritique) { c in
-            CritiqueDetailSheet(critique: c)
-        }
     }
 
     private var headerSubtitle: String {
@@ -285,243 +287,6 @@ private struct CritiqueColumn: View {
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
-        return f
-    }()
-}
-
-// MARK: - Detail sheet
-
-struct CritiqueDetailSheet: View {
-    let critique: TaggedCritique
-    @Environment(\.dismiss) private var dismiss
-    @State private var thumbnail: UIImage?
-    @State private var showingSnapshotViewer: Bool = false
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    thumbnailView
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(displayTitle)
-                            .font(.title3.weight(.semibold))
-                        Text(Self.dateFormatter.string(from: critique.createdAt))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        // Phase 2: temporal cue mirrors the column. Tells
-                        // the user the thumbnail above is historical.
-                        if critique.snapshot != nil {
-                            Text("Snapshot · \(Self.relativeFormatter.localizedString(for: critique.createdAt, relativeTo: Date())) · tap thumbnail to zoom")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    HStack(spacing: 6) {
-                        ForEach(critique.allCategories.indices, id: \.self) { i in
-                            let cat = critique.allCategories[i]
-                            Text(cat.displayName)
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    Capsule().fill(EvolutionStudioWallView.color(for: cat).opacity(0.16))
-                                )
-                                .foregroundStyle(EvolutionStudioWallView.color(for: cat))
-                        }
-                    }
-                    Text("Severity")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        ForEach(1...5, id: \.self) { i in
-                            Capsule()
-                                .fill(i <= critique.severity
-                                    ? EvolutionStudioWallView.color(for: critique.primaryCategory)
-                                    : Color.secondary.opacity(0.18))
-                                .frame(width: 24, height: 6)
-                        }
-                        Text("\(critique.severity) / 5")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .padding(.leading, 6)
-                    }
-                    Divider()
-                    Text("Coach said")
-                        .font(.headline)
-                    coachSaidBody
-                }
-                .padding(20)
-            }
-            .navigationTitle("Critique")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .task(id: critique.id) { await loadThumbnail() }
-        .fullScreenCover(isPresented: $showingSnapshotViewer) {
-            if let snapshot = critique.snapshot {
-                SnapshotViewerView(
-                    snapshot: snapshot,
-                    critiqueTimestamp: critique.createdAt,
-                    onDismiss: { showingSnapshotViewer = false }
-                )
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var thumbnailView: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color(uiColor: .tertiarySystemBackground))
-            if let thumbnail {
-                Image(uiImage: thumbnail)
-                    .resizable()
-                    .scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                if critique.snapshot != nil {
-                    // Subtle affordance — bottom-trailing magnifier on a
-                    // material chip tells the user this is interactive.
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .padding(8)
-                                .background(.thinMaterial, in: Circle())
-                                .padding(12)
-                        }
-                    }
-                }
-            } else if critique.snapshot != nil {
-                ProgressView()
-                    .controlSize(.large)
-            } else {
-                // Same muted-placeholder rule as the column.
-                Image(systemName: "photo")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.tertiary.opacity(0.6))
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(minHeight: 200, idealHeight: 260)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if critique.snapshot != nil {
-                showingSnapshotViewer = true
-            }
-        }
-    }
-
-    private var displayTitle: String {
-        if let title = critique.drawingTitle, !title.isEmpty { return title }
-        if let subject = critique.drawingSubject, !subject.isEmpty { return subject.capitalized }
-        return "Untitled drawing"
-    }
-
-    @MainActor
-    private func loadThumbnail() async {
-        // Phase 2: same priority as the column — historical (snapshot)
-        // over current (live drawing). For the detail sheet we fetch the
-        // composite (higher res than thumb) because we render it larger
-        // and may hand off to the full-screen viewer.
-        if let snapshot = critique.snapshot {
-            guard let client = SupabaseManager.shared.client else { return }
-            do {
-                let signed = try await client.storage
-                    .from("drawings")
-                    .createSignedURL(path: snapshot.compositePath, expiresIn: 3600)
-                let (data, _) = try await URLSession.shared.data(from: signed)
-                if let img = UIImage(data: data) {
-                    self.thumbnail = img
-                }
-            } catch {
-                print("[CritiqueDetailSheet] snapshot composite fetch failed: \(error.localizedDescription)")
-            }
-            return
-        }
-        // No snapshot — placeholder stays. Don't fall through to live
-        // drawing fetch; the visual signal "no historical record" matters
-        // more than filling the slot with a misleading current-state image.
-    }
-
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return f
-    }()
-
-    /// Renders the full critique body with markdown formatting. Falls
-    /// back to the single-sentence excerpt when the worker hasn't
-    /// shipped `content` yet (older deploys). Block-level markdown
-    /// (headers, bullet lists) is rendered by manual paragraph
-    /// splitting + per-line styling so SwiftUI's inline-only
-    /// Text(LocalizedStringKey:) can still pick up bold/italic/links
-    /// inside each paragraph. Never truncates: `.fixedSize(vertical:)`
-    /// lets every line breathe to its full height regardless of
-    /// length, fixing the "Coach said" sentence-cut-off report.
-    @ViewBuilder
-    fileprivate var coachSaidBody: some View {
-        let raw = (critique.content?.isEmpty == false) ? critique.content! : critique.contentExcerpt
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(coachSaidLines(raw).enumerated()), id: \.offset) { _, line in
-                coachSaidLine(line)
-            }
-        }
-    }
-
-    private func coachSaidLines(_ text: String) -> [String] {
-        text.replacingOccurrences(of: "\r\n", with: "\n")
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-    }
-
-    @ViewBuilder
-    private func coachSaidLine(_ line: String) -> some View {
-        if line.hasPrefix("### ") {
-            Text(line.dropFirst(4))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else if line.hasPrefix("## ") {
-            Text(line.dropFirst(3))
-                .font(.headline)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 4)
-        } else if line.hasPrefix("# ") {
-            Text(line.dropFirst(2))
-                .font(.title3.weight(.bold))
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
-            let body = String(line.dropFirst(2))
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•").foregroundStyle(.secondary)
-                Text(LocalizedStringKey(body))
-                    .font(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        } else {
-            // Regular paragraph. LocalizedStringKey gives inline
-            // markdown (bold, italic, links, inline code) for free.
-            Text(LocalizedStringKey(line))
-                .font(.body)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .long
-        f.timeStyle = .none
         return f
     }()
 }

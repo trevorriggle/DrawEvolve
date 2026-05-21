@@ -36,6 +36,14 @@ struct EvolutionPanelView: View {
     /// compile (the section just hides when nil).
     var onUseRecommendation: ((Recommendation) -> Void)? = nil
 
+    /// Drawing version history phase 2 — fires when the user taps a
+    /// critique column in the Studio Wall. The shell (GalleryView)
+    /// resolves the Drawing + matching CritiqueEntry and presents
+    /// DrawingCanvasView with the entry pre-selected in the floating
+    /// feedback panel. Optional so callers that don't wire navigation
+    /// still compile (the wall just no-ops on tap).
+    var onCritiqueTap: ((TaggedCritique) -> Void)? = nil
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -61,7 +69,10 @@ struct EvolutionPanelView: View {
                 // visualization of improvement.
                 EvolutionSkillRadarView(critiques: feed.taggedCritiques)
 
-                EvolutionStudioWallView(critiques: feed.taggedCritiques)
+                EvolutionStudioWallView(
+                    critiques: feed.taggedCritiques,
+                    onCritiqueTap: { tagged in onCritiqueTap?(tagged) }
+                )
 
                 StatsStrip(stats: feed.stats)
             }

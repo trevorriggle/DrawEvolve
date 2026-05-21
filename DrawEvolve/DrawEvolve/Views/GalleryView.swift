@@ -100,6 +100,11 @@ struct GalleryView: View {
     @State private var showPromptFirst = false
     @State private var canvasID = UUID()
     @State private var drawingContext = DrawingContext()
+    /// Drawing version history phase 2 — when set alongside canvasDrawing,
+    /// the canvas presents with the floating feedback panel auto-opened
+    /// to this entry. Cleared when the canvas cover dismisses so the
+    /// next gallery → canvas presentation starts fresh.
+    @State private var preselectedCritique: CritiqueEntry?
 
     var body: some View {
         GalleryContent(
@@ -117,6 +122,23 @@ struct GalleryView: View {
                     drawingContext.focus = rec.focusArea
                 }
                 showPromptFirst = true
+            },
+            onOpenCritique: { tagged in
+                // Drawing version history phase 2 — Studio Wall tap.
+                // Resolve the Drawing locally; fall back to most-recent
+                // entry when the matching CritiqueEntry isn't found in
+                // the local cache (Option A — out-of-sync degradation).
+                // Silently no-op if the Drawing itself isn't cached
+                // locally (rare; would need a fresh gallery hydrate).
+                guard let drawing = CloudDrawingStorageManager.shared.drawing(for: tagged.drawingId) else {
+                    return
+                }
+                let entry = drawing.critiqueHistory.first { entry in
+                    if let id = tagged.critiqueId { return entry.id == id }
+                    return entry.timestamp == tagged.createdAt
+                } ?? drawing.critiqueHistory.last
+                preselectedCritique = entry
+                canvasDrawing = drawing
             }
         )
         .fullScreenCover(item: $selectedDrawing) { drawing in
@@ -140,8 +162,21 @@ struct GalleryView: View {
             .id(drawing.id)
         }
         .fullScreenCover(item: $canvasDrawing) { drawing in
-            DrawingCanvasView(context: $drawingContext, existingDrawing: drawing)
-                .id(drawing.id)
+            DrawingCanvasView(
+                context: $drawingContext,
+                existingDrawing: drawing,
+                preselectedCritique: preselectedCritique
+            )
+            .id(drawing.id)
+        }
+        // Drawing version history phase 2 — clear the preselectedCritique
+        // after the canvas cover dismisses so the next gallery → canvas
+        // presentation (regular tap on a drawing card) doesn't re-open
+        // the feedback panel pre-selected to a stale entry. Watching the
+        // optional id instead of the Drawing itself because Drawing
+        // doesn't conform to Equatable.
+        .onChange(of: canvasDrawing?.id) { _, newValue in
+            if newValue == nil { preselectedCritique = nil }
         }
         .fullScreenCover(isPresented: $showPromptFirst) {
             PromptInputView(context: $drawingContext, isPresented: $showPromptFirst)
@@ -191,6 +226,12 @@ private struct GalleryContent: View {
     /// whole point of the file's architectural split — see header). A
     /// closure threads the action without breaking that stability.
     let onApplyRecommendation: (Recommendation) -> Void
+
+    /// Drawing version history phase 2 — closure into the shell for
+    /// Studio Wall taps. Same architectural pattern as
+    /// onApplyRecommendation: the shell owns the cover state, this
+    /// content view just signals the action.
+    let onOpenCritique: (TaggedCritique) -> Void
 
     // State internal to the content view — sheets, alerts, tab
     // selection. Nothing here triggers a cover at the shell level.
@@ -268,7 +309,10 @@ private struct GalleryContent: View {
                     case .prompts:
                         myPromptsView
                     case .evolution:
-                        EvolutionView(onUseRecommendation: onApplyRecommendation)
+                        EvolutionView(
+                            onUseRecommendation: onApplyRecommendation,
+                            onCritiqueTap: onOpenCritique
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
