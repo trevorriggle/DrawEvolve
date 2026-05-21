@@ -1488,6 +1488,120 @@ final class CloudDrawingStorageManager: ObservableObject {
         }
     }
 
+    // MARK: - Snapshot capture (drawing version history)
+
+    /// Uploads a layered drawing bundle to a non-live path under the
+    /// drawing's storage root, used by the snapshot-capture flow at
+    /// critique-submit time. Writes the same artifact shape as a live
+    /// save (manifest + composite + thumb + per-layer PNGs), just under
+    /// `<user>/<drawing>/<pathPrefix>/` instead of `<user>/<drawing>/`.
+    ///
+    /// Direct upload — does not enqueue a PendingUpload. Snapshots don't
+    /// need drawing-save-grade retry vigor: on failure, the caller's
+    /// graceful-degradation path sets the resulting CritiqueEntry's
+    /// snapshot field to nil, and the orphan _pending bundle is GC'd by
+    /// the worker cron in a later phase.
+    ///
+    /// The manifest is uploaded LAST. Its presence at the destination is
+    /// the worker promote step's signal that the bundle is complete; a
+    /// half-uploaded bundle never carries a manifest, so the worker won't
+    /// promote it.
+    public func uploadSnapshotBundle(
+        for drawing: Drawing,
+        payload: LayeredDrawingPayload,
+        pathPrefix: String
+    ) async throws {
+        guard let client = SupabaseManager.shared.client else {
+            throw DrawingStorageError.notAuthenticated
+        }
+        guard let composite = payload.compositeJPEG,
+              let thumb = payload.thumbnailJPEG else {
+            // A snapshot needs both — without them the time-machine view
+            // has nothing to render. Surface as saveFailed rather than
+            // shipping a half-bundle the worker would silently skip.
+            throw DrawingStorageError.saveFailed
+        }
+
+        let userID = drawing.userId
+        let drawingID = drawing.id
+        let bucketID = self.storageBucketID
+        let normalized = normalizeManifestForUpload(
+            payload: payload,
+            drawingID: drawingID,
+            userID: userID
+        )
+
+        // Step 1: per-layer PNGs in parallel.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for (ordinal, png) in normalized.layerPNGs.enumerated() {
+                let cloudPath = layeredLayerStoragePath(
+                    userID: userID,
+                    drawingID: drawingID,
+                    ordinal: ordinal,
+                    pathPrefix: pathPrefix
+                )
+                group.addTask {
+                    try await client.storage
+                        .from(bucketID)
+                        .upload(
+                            path: cloudPath,
+                            file: png,
+                            options: FileOptions(contentType: "image/png", upsert: true)
+                        )
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        // Step 2: composite + thumb in parallel.
+        let compositePath = layeredCompositeStoragePath(
+            userID: userID,
+            drawingID: drawingID,
+            pathPrefix: pathPrefix
+        )
+        let thumbPath = layeredThumbnailStoragePath(
+            userID: userID,
+            drawingID: drawingID,
+            pathPrefix: pathPrefix
+        )
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await client.storage
+                    .from(bucketID)
+                    .upload(
+                        path: compositePath,
+                        file: composite,
+                        options: FileOptions(contentType: "image/jpeg", upsert: true)
+                    )
+            }
+            group.addTask {
+                try await client.storage
+                    .from(bucketID)
+                    .upload(
+                        path: thumbPath,
+                        file: thumb,
+                        options: FileOptions(contentType: "image/jpeg", upsert: true)
+                    )
+            }
+            try await group.waitForAll()
+        }
+
+        // Step 3: manifest LAST — sentinel for the worker promote.
+        let manifestData = try JSONEncoder().encode(normalized.manifest)
+        let manifestPath = layeredManifestStoragePath(
+            userID: userID,
+            drawingID: drawingID,
+            pathPrefix: pathPrefix
+        )
+        try await client.storage
+            .from(bucketID)
+            .upload(
+                path: manifestPath,
+                file: manifestData,
+                options: FileOptions(contentType: "application/json", upsert: true)
+            )
+    }
+
     // MARK: - Layered local cache helpers
 
     /// Build a manifest with deterministic asset names and sha256 hashes from
