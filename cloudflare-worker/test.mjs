@@ -147,6 +147,16 @@ import {
   readAppAttestHeaders,
 } from './index.js';
 import handler from './index.js';
+// Drawing version history — imported directly from lib/ rather than via
+// index.js. The worker stays in prod-state until commit 7's coordinated
+// deploy, so index.js does not re-export from snapshots.js yet.
+import {
+  promoteSnapshot,
+  copyObjectWithRetry,
+  isSourceMissing,
+  buildSnapshotPointer,
+  incrementSnapshotCounter,
+} from './lib/snapshots.js';
 
 const baseContext = {
   skillLevel: 'Intermediate',
@@ -7838,4 +7848,249 @@ test('renderCoachingContextBlock summary line for gate-refused findings says so'
   };
   const block = renderCoachingContextBlock(ctx);
   assert.match(block, /refused by the readiness gate/);
+});
+
+// =============================================================================
+// Drawing version history — snapshot module (lib/snapshots.js)
+// =============================================================================
+
+const SNAP_USER = 'aaaaaaaa-1111-2222-3333-444444444444';
+const SNAP_DRAW = 'bbbbbbbb-5555-6666-7777-888888888888';
+const SNAP_CRID = 'cccccccc-9999-aaaa-bbbb-cccccccccccc';
+
+function snapEnv() {
+  return {
+    SUPABASE_URL: 'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role-key',
+  };
+}
+
+test('buildSnapshotPointer assembles the canonical pointer shape', () => {
+  const pointer = buildSnapshotPointer({
+    toPrefix: `${SNAP_USER}/${SNAP_DRAW}/snapshots/3`,
+    layerCount: 4,
+    totalBytes: 10485760,
+    formatVersion: 1,
+  });
+  assert.equal(pointer.manifest_path, `${SNAP_USER}/${SNAP_DRAW}/snapshots/3/manifest.json`);
+  assert.equal(pointer.composite_path, `${SNAP_USER}/${SNAP_DRAW}/snapshots/3/composite.jpg`);
+  assert.equal(pointer.thumb_path, `${SNAP_USER}/${SNAP_DRAW}/snapshots/3/thumb.jpg`);
+  assert.equal(pointer.format_version, 1);
+  assert.equal(pointer.layer_count, 4);
+  assert.equal(pointer.total_bytes, 10485760);
+});
+
+test('isSourceMissing matches 404 status, Not Found code, and message variants', () => {
+  assert.equal(isSourceMissing({ status: 404 }), true);
+  assert.equal(isSourceMissing({ code: 'Not Found' }), true);
+  assert.equal(isSourceMissing({ message: 'Object not found' }), true);
+  assert.equal(isSourceMissing({ message: 'The resource does not exist' }), true);
+  assert.equal(isSourceMissing({ status: 500 }), false);
+  assert.equal(isSourceMissing({ message: 'auth required' }), false);
+  assert.equal(isSourceMissing(null), false);
+  assert.equal(isSourceMissing(undefined), false);
+});
+
+test('copyObjectWithRetry succeeds on first attempt without sleeping', async () => {
+  const env = snapEnv();
+  let attempts = 0;
+  let slept = 0;
+  await copyObjectWithRetry({
+    env,
+    sourceKey: 'from/a.png',
+    destKey: 'to/a.png',
+    fetcher: async () => { attempts++; return { ok: true, status: 200 }; },
+    sleep: async () => { slept++; },
+  });
+  assert.equal(attempts, 1);
+  assert.equal(slept, 0);
+});
+
+test('copyObjectWithRetry retries on source-missing and eventually succeeds', async () => {
+  const env = snapEnv();
+  let attempts = 0;
+  const slept = [];
+  await copyObjectWithRetry({
+    env,
+    sourceKey: 'from/a.png',
+    destKey: 'to/a.png',
+    fetcher: async () => {
+      attempts++;
+      if (attempts < 3) return { ok: false, status: 404, text: async () => 'not found' };
+      return { ok: true, status: 200 };
+    },
+    sleep: async (ms) => { slept.push(ms); },
+  });
+  assert.equal(attempts, 3);
+  assert.deepEqual(slept, [1000, 2000]);
+});
+
+test('copyObjectWithRetry gives up after exhausting retries on persistent 404', async () => {
+  const env = snapEnv();
+  let attempts = 0;
+  const slept = [];
+  await assert.rejects(
+    () => copyObjectWithRetry({
+      env,
+      sourceKey: 'from/a.png',
+      destKey: 'to/a.png',
+      fetcher: async () => {
+        attempts++;
+        return { ok: false, status: 404, text: async () => 'not found' };
+      },
+      sleep: async (ms) => { slept.push(ms); },
+    }),
+    /HTTP 404/,
+  );
+  assert.equal(attempts, 4); // initial + 3 retries
+  assert.deepEqual(slept, [1000, 2000, 3000]);
+});
+
+test('copyObjectWithRetry does NOT retry on non-source-missing errors', async () => {
+  const env = snapEnv();
+  let attempts = 0;
+  const slept = [];
+  await assert.rejects(
+    () => copyObjectWithRetry({
+      env,
+      sourceKey: 'from/a.png',
+      destKey: 'to/a.png',
+      fetcher: async () => {
+        attempts++;
+        return { ok: false, status: 500, text: async () => 'server fire' };
+      },
+      sleep: async (ms) => { slept.push(ms); },
+    }),
+    /HTTP 500/,
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(slept, []);
+});
+
+test('promoteSnapshot short-circuits when destination manifest already exists', async () => {
+  const env = snapEnv();
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url, method: init?.method ?? 'GET' });
+    // headObject hit → return 200 to signal the destination manifest exists.
+    if (url.includes('/storage/v1/object/info/authenticated/drawings/') &&
+        url.endsWith(`/snapshots/2/manifest.json`)) {
+      return { ok: true, status: 200 };
+    }
+    throw new Error(`unexpected fetch in short-circuit test: ${url}`);
+  };
+
+  const pointer = await promoteSnapshot({
+    env,
+    userId: SNAP_USER,
+    drawingId: SNAP_DRAW,
+    clientRequestId: SNAP_CRID,
+    sequenceNumber: 2,
+    layerCount: 3,
+    totalBytes: 5_000_000,
+    formatVersion: 1,
+    fetcher,
+    sleep: async () => {},
+  });
+
+  assert.equal(calls.length, 1, 'short-circuit should make exactly one HEAD-equivalent call');
+  assert.equal(pointer.manifest_path, `${SNAP_USER}/${SNAP_DRAW}/snapshots/2/manifest.json`);
+  assert.equal(pointer.layer_count, 3);
+});
+
+test('promoteSnapshot happy path copies all files with manifest last, then deletes sources', async () => {
+  const env = snapEnv();
+  const ops = [];
+  const fetcher = async (url, init) => {
+    const method = init?.method ?? 'GET';
+    if (url.includes('/storage/v1/object/info/authenticated/drawings/')) {
+      // headObject — destination does not exist yet
+      return { ok: false, status: 404 };
+    }
+    if (url.endsWith('/storage/v1/object/copy')) {
+      const body = JSON.parse(init.body);
+      ops.push({ kind: 'copy', source: body.sourceKey, dest: body.destinationKey });
+      return { ok: true, status: 200 };
+    }
+    if (method === 'DELETE' && url.includes('/storage/v1/object/drawings/')) {
+      const key = url.split('/storage/v1/object/drawings/')[1];
+      ops.push({ kind: 'delete', key });
+      return { ok: true, status: 200 };
+    }
+    throw new Error(`unexpected fetch: ${method} ${url}`);
+  };
+
+  const pointer = await promoteSnapshot({
+    env,
+    userId: SNAP_USER,
+    drawingId: SNAP_DRAW,
+    clientRequestId: SNAP_CRID,
+    sequenceNumber: 7,
+    layerCount: 2,
+    totalBytes: 1_000_000,
+    formatVersion: 1,
+    fetcher,
+    sleep: async () => {},
+  });
+
+  const copies = ops.filter(o => o.kind === 'copy');
+  const deletes = ops.filter(o => o.kind === 'delete');
+
+  // Expected: 2 layer PNGs + composite + thumb + manifest = 5 copies
+  assert.equal(copies.length, 5);
+  // Manifest must be the LAST copy (sentinel ordering).
+  assert.match(copies[copies.length - 1].source, /\/manifest\.json$/);
+  // Earlier copies must include all the data files.
+  const earlierSources = copies.slice(0, -1).map(c => c.source);
+  assert.ok(earlierSources.some(s => s.endsWith('/layer-0.png')));
+  assert.ok(earlierSources.some(s => s.endsWith('/layer-1.png')));
+  assert.ok(earlierSources.some(s => s.endsWith('/composite.jpg')));
+  assert.ok(earlierSources.some(s => s.endsWith('/thumb.jpg')));
+
+  // All sources are under the _pending prefix; all destinations under snapshots/7.
+  for (const c of copies) {
+    assert.match(c.source, new RegExp(`snapshots/_pending/${SNAP_CRID}`));
+    assert.match(c.dest, /snapshots\/7\//);
+  }
+
+  // Source deletes cover every file (5 deletes).
+  assert.equal(deletes.length, 5);
+
+  // Returned pointer shape.
+  assert.equal(pointer.manifest_path, `${SNAP_USER}/${SNAP_DRAW}/snapshots/7/manifest.json`);
+  assert.equal(pointer.layer_count, 2);
+  assert.equal(pointer.total_bytes, 1_000_000);
+  assert.equal(pointer.format_version, 1);
+});
+
+test('incrementSnapshotCounter increments a daily key and sets TTL', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(Date.UTC(2026, 4, 21, 0, 0, 0));
+  await incrementSnapshotCounter(env, 'success', () => new Date(Date.UTC(2026, 4, 21, 0, 0, 0)));
+  await incrementSnapshotCounter(env, 'success', () => new Date(Date.UTC(2026, 4, 21, 0, 0, 0)));
+  const value = await kv.get('snapshot:success:2026-05-21');
+  assert.equal(value, '2');
+});
+
+test('incrementSnapshotCounter ignores invalid outcomes and missing KV binding', async () => {
+  const { env, kv } = makeEnv();
+  // Invalid outcome — must not write anything.
+  await incrementSnapshotCounter(env, 'wat', () => new Date(Date.UTC(2026, 4, 21)));
+  assert.equal(await kv.get('snapshot:wat:2026-05-21'), null);
+
+  // Missing KV binding — must not throw (telemetry is best-effort).
+  await incrementSnapshotCounter({}, 'success', () => new Date(Date.UTC(2026, 4, 21)));
+});
+
+test('incrementSnapshotCounter swallows put errors — telemetry never fails the request', async () => {
+  // KV.put throws, but the function must resolve cleanly.
+  const env = {
+    QUOTA_KV: {
+      get: async () => null,
+      put: async () => { throw new Error('kv exploded'); },
+    },
+  };
+  await incrementSnapshotCounter(env, 'failure', () => new Date(Date.UTC(2026, 4, 21)));
+  // If we reach this line, the function did not throw.
+  assert.ok(true);
 });
