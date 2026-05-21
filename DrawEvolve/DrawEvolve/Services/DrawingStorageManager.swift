@@ -1703,24 +1703,25 @@ final class CloudDrawingStorageManager: ObservableObject {
         "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString).jpg"
     }
 
-    private func layeredRootStoragePath(userID: UUID, drawingID: UUID) -> String {
-        "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString)"
+    private func layeredRootStoragePath(userID: UUID, drawingID: UUID, pathPrefix: String = "") -> String {
+        let base = "\(userID.lowercaseUUIDString)/\(drawingID.lowercaseUUIDString)"
+        return pathPrefix.isEmpty ? base : "\(base)/\(pathPrefix)"
     }
 
-    private func layeredManifestStoragePath(userID: UUID, drawingID: UUID) -> String {
-        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.manifest)"
+    private func layeredManifestStoragePath(userID: UUID, drawingID: UUID, pathPrefix: String = "") -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID, pathPrefix: pathPrefix))/\(LayeredDrawingFilenames.manifest)"
     }
 
-    private func layeredCompositeStoragePath(userID: UUID, drawingID: UUID) -> String {
-        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.composite)"
+    private func layeredCompositeStoragePath(userID: UUID, drawingID: UUID, pathPrefix: String = "") -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID, pathPrefix: pathPrefix))/\(LayeredDrawingFilenames.composite)"
     }
 
-    private func layeredThumbnailStoragePath(userID: UUID, drawingID: UUID) -> String {
-        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.thumbnail)"
+    private func layeredThumbnailStoragePath(userID: UUID, drawingID: UUID, pathPrefix: String = "") -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID, pathPrefix: pathPrefix))/\(LayeredDrawingFilenames.thumbnail)"
     }
 
-    private func layeredLayerStoragePath(userID: UUID, drawingID: UUID, ordinal: Int) -> String {
-        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID))/\(LayeredDrawingFilenames.layer(ordinal: ordinal))"
+    private func layeredLayerStoragePath(userID: UUID, drawingID: UUID, ordinal: Int, pathPrefix: String = "") -> String {
+        "\(layeredRootStoragePath(userID: userID, drawingID: drawingID, pathPrefix: pathPrefix))/\(LayeredDrawingFilenames.layer(ordinal: ordinal))"
     }
 
     private func localLayersDir(forDrawingID id: UUID) -> URL {
