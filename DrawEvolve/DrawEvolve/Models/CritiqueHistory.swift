@@ -36,6 +36,12 @@ struct CritiqueEntry: Codable, Identifiable {
     let tags: CritiqueTags?
     let presetId: String?
 
+    // Drawing version history. Populated by the Worker when the snapshot
+    // capture path promotes a pending bundle to snapshots/<sequence>/.
+    // Nil for entries that pre-date the feature, and for entries where
+    // promote failed (graceful degradation — see proposal §2.5).
+    let snapshot: SnapshotPointer?
+
     struct PromptConfigSnapshot: Codable, Equatable {
         let tier: String
         let includeHistoryCount: Int
@@ -52,7 +58,8 @@ struct CritiqueEntry: Codable, Identifiable {
         promptTokenCount: Int? = nil,
         completionTokenCount: Int? = nil,
         tags: CritiqueTags? = nil,
-        presetId: String? = nil
+        presetId: String? = nil,
+        snapshot: SnapshotPointer? = nil
     ) {
         self.id = id
         self.feedback = feedback
@@ -64,6 +71,7 @@ struct CritiqueEntry: Codable, Identifiable {
         self.completionTokenCount = completionTokenCount
         self.tags = tags
         self.presetId = presetId
+        self.snapshot = snapshot
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -79,6 +87,7 @@ struct CritiqueEntry: Codable, Identifiable {
         case completionTokenCount = "completion_token_count"
         case tags
         case presetId = "preset_id"
+        case snapshot
     }
 
     init(from decoder: Decoder) throws {
@@ -108,6 +117,7 @@ struct CritiqueEntry: Codable, Identifiable {
         self.completionTokenCount = try container.decodeIfPresent(Int.self, forKey: .completionTokenCount)
         self.tags = try container.decodeIfPresent(CritiqueTags.self, forKey: .tags)
         self.presetId = try container.decodeIfPresent(String.self, forKey: .presetId)
+        self.snapshot = try container.decodeIfPresent(SnapshotPointer.self, forKey: .snapshot)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -124,6 +134,32 @@ struct CritiqueEntry: Codable, Identifiable {
         try container.encodeIfPresent(completionTokenCount, forKey: .completionTokenCount)
         try container.encodeIfPresent(tags, forKey: .tags)
         try container.encodeIfPresent(presetId, forKey: .presetId)
+        try container.encodeIfPresent(snapshot, forKey: .snapshot)
+    }
+}
+
+/// Pointer to a promoted snapshot bundle, written by the Worker into the
+/// `snapshot` field of a CritiqueEntry. iOS reads this to (a) render a
+/// thumbnail next to the critique row and (b) hydrate the time-machine
+/// viewer when the row is tapped.
+///
+/// All paths are storage object keys under the `drawings` bucket, relative
+/// to the bucket root. Use SupabaseManager's signed-URL helper to fetch.
+struct SnapshotPointer: Codable, Equatable {
+    let manifestPath: String
+    let compositePath: String
+    let thumbPath: String
+    let formatVersion: Int
+    let layerCount: Int
+    let totalBytes: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case manifestPath  = "manifest_path"
+        case compositePath = "composite_path"
+        case thumbPath     = "thumb_path"
+        case formatVersion = "format_version"
+        case layerCount    = "layer_count"
+        case totalBytes    = "total_bytes"
     }
 }
 
