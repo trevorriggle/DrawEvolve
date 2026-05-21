@@ -57,6 +57,7 @@ import {
 } from '../middleware/idempotency.js';
 import { classifyCritique } from '../lib/classifier.js';
 import { jsonResponse, unauthorized } from '../lib/http.js';
+import { promoteSnapshot, incrementSnapshotCounter } from '../lib/snapshots.js';
 
 // =============================================================================
 // Phase 5b — request validation
@@ -440,6 +441,8 @@ export const REQUEST_STATUS = Object.freeze({
   INTERNAL_ERROR:     'internal_error',
   IDEMPOTENT_REPLAY:  'idempotent_replay',
   PERSISTENCE_ORPHAN: 'persistence_orphan',
+  SNAPSHOT_PROMOTED:  'snapshot_promoted',
+  SNAPSHOT_FAILED:    'snapshot_failed',
 });
 
 /**
@@ -731,6 +734,38 @@ export async function handleFeedback(request, env, ctx) {
       }
     }
 
+    // Drawing version history — optional snapshot upload metadata. iOS sends
+    // all three together when a pending bundle was uploaded in parallel; the
+    // Worker uses them post-OpenAI to promote that bundle to
+    // snapshots/<sequence>/. Absent fields = "don't promote" — covers
+    // TestFlight old builds and legacy non-layered drawings. Validate only
+    // when present; never 400 on absence. Per-field 400 on present-but-
+    // malformed so a malformed iOS payload doesn't silently degrade.
+    if (body.layer_count !== undefined &&
+        (!Number.isInteger(body.layer_count) || body.layer_count < 0)) {
+      ctx.waitUntil(logRequest({
+        env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+      }));
+      return jsonResponse({ error: 'layer_count must be a non-negative integer.' }, 400);
+    }
+    if (body.total_bytes !== undefined &&
+        (!Number.isInteger(body.total_bytes) || body.total_bytes < 0)) {
+      ctx.waitUntil(logRequest({
+        env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+      }));
+      return jsonResponse({ error: 'total_bytes must be a non-negative integer.' }, 400);
+    }
+    if (body.format_version !== undefined &&
+        (!Number.isInteger(body.format_version) || body.format_version < 1)) {
+      ctx.waitUntil(logRequest({
+        env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+      }));
+      return jsonResponse({ error: 'format_version must be a positive integer.' }, 400);
+    }
+    const snapshotLayerCount    = Number.isInteger(body.layer_count)    ? body.layer_count    : null;
+    const snapshotTotalBytes    = Number.isInteger(body.total_bytes)    ? body.total_bytes    : null;
+    const snapshotFormatVersion = Number.isInteger(body.format_version) ? body.format_version : null;
+
     const { tier, promptPreferences } = getUserTier(payload);
 
     // Phase 5c — rate limits. Run before the ownership query so we don't
@@ -943,6 +978,53 @@ export async function handleFeedback(request, env, ctx) {
     // future analytics queries gate on schema generation.
     entry.tags = await classifyCritique({ feedback, env });
 
+    // Drawing version history — promote the pending snapshot bundle iOS
+    // uploaded in parallel. Only fires when all three optional fields are
+    // present in the request body. On promote failure, entry.snapshot
+    // stays null and the user still gets their critique (graceful
+    // degradation). Telemetry: structured log + KV daily counter (the
+    // counter is fire-and-forget; failures don't affect the request).
+    let snapshotStatus = null;
+    if (
+      snapshotLayerCount !== null &&
+      snapshotTotalBytes !== null &&
+      snapshotFormatVersion !== null
+    ) {
+      const promoteStartedAt = Date.now();
+      try {
+        entry.snapshot = await promoteSnapshot({
+          env,
+          userId,
+          drawingId: drawingIdLower,
+          clientRequestId,
+          sequenceNumber: entry.sequence_number,
+          layerCount: snapshotLayerCount,
+          totalBytes: snapshotTotalBytes,
+          formatVersion: snapshotFormatVersion,
+        });
+        console.log('[snapshot.promote] success', {
+          user_id: userId,
+          drawing_id: drawingIdLower,
+          sequence_number: entry.sequence_number,
+          layer_count: snapshotLayerCount,
+          duration_ms: Date.now() - promoteStartedAt,
+        });
+        ctx.waitUntil(incrementSnapshotCounter(env, 'success'));
+        snapshotStatus = REQUEST_STATUS.SNAPSHOT_PROMOTED;
+      } catch (err) {
+        entry.snapshot = null;
+        console.error('[snapshot.promote] failure', {
+          user_id: userId,
+          drawing_id: drawingIdLower,
+          sequence_number: entry.sequence_number,
+          error_message: err?.message,
+          duration_ms: Date.now() - promoteStartedAt,
+        });
+        ctx.waitUntil(incrementSnapshotCounter(env, 'failure'));
+        snapshotStatus = REQUEST_STATUS.SNAPSHOT_FAILED;
+      }
+    }
+
     let persisted = true;
     try {
       await persistCritique({ env, drawingId: drawingIdLower, entry });
@@ -1007,12 +1089,18 @@ export async function handleFeedback(request, env, ctx) {
     );
 
     // Phase 5e — terminal log. Tokens populated in both branches because
-    // OpenAI delivered; status differs based on whether the row write stuck.
+    // OpenAI delivered. Status precedence (most-to-least severe):
+    //   PERSISTENCE_ORPHAN > SNAPSHOT_FAILED > SNAPSHOT_PROMOTED > SUCCESS
+    // PERSISTENCE_ORPHAN wins because the row write is the load-bearing
+    // step — if it failed, the snapshot pointer (if any) doesn't matter.
     const promptTokens = data.usage?.prompt_tokens ?? null;
     const completionTokens = data.usage?.completion_tokens ?? null;
+    const terminalStatus = !persisted
+      ? REQUEST_STATUS.PERSISTENCE_ORPHAN
+      : (snapshotStatus ?? REQUEST_STATUS.SUCCESS);
     ctx.waitUntil(logRequest({
       env,
-      status: persisted ? REQUEST_STATUS.SUCCESS : REQUEST_STATUS.PERSISTENCE_ORPHAN,
+      status: terminalStatus,
       userId,
       drawingId: drawingIdLower,
       ipHash,

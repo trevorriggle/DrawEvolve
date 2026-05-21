@@ -24,9 +24,10 @@
 // and the caller in routes/feedback.js sets snapshot: null on the entry
 // (graceful degradation).
 //
-// Worker does not touch storage today; this module is the first to do so.
-// fetcher is dependency-injected so tests can stub without monkey-patching
-// globalThis.fetch.
+// This module is the only place in the worker that touches Supabase
+// Storage directly (everything else flows through Postgres via the
+// service-role REST API). fetcher is dependency-injected so tests can
+// stub without monkey-patching globalThis.fetch.
 
 const BUCKET_ID = 'drawings';
 const RETRY_BACKOFF_MS = [1000, 2000, 3000];

@@ -1523,22 +1523,81 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
-        // client_request_id moves from OpenAIManager-internal to caller-owned
-        // so it can double as the pending-snapshot folder key once the
-        // parallel-upload orchestration lands in commit 7. Until then, this
-        // path keeps producing the same shape of request (fresh UUID per
-        // call, snapshotMetadata: nil so the Worker skips promote).
+        // client_request_id doubles as the pending-snapshot folder key —
+        // the Worker uses the same id to promote the bundle after OpenAI
+        // returns. Fresh per call so retries don't collide.
         let clientRequestId = UUID().uuidString.lowercased()
 
-        do {
-            let response = try await OpenAIManager.shared.requestFeedback(
-                image: image,
-                context: context,
-                drawingId: drawingId,
-                clientRequestId: clientRequestId,
-                snapshotMetadata: nil,
-                compositionFindings: compositionFindings
+        // Drawing version history — assemble the in-memory snapshot bundle
+        // and its metadata. exportLayeredPayload returns nil for legacy
+        // non-layered drawings (or when every layer readback failed); in
+        // that case we skip the snapshot path entirely and the Worker
+        // proceeds without promoting (entry.snapshot stays nil).
+        let snapshotPayload = exportLayeredPayload(drawingID: drawingId)
+        let snapshotMetadata: SnapshotUploadMetadata? = snapshotPayload.map { payload in
+            // totalBytes excludes the manifest JSON (small, only known after
+            // encode — see proposal §1.4). The Worker uses this as a rough
+            // storage-tracking number, not a correctness check.
+            let bytes = payload.layerPNGs.reduce(0) { $0 + $1.count }
+                + (payload.compositeJPEG?.count ?? 0)
+                + (payload.thumbnailJPEG?.count ?? 0)
+            return SnapshotUploadMetadata(
+                layerCount: payload.manifest.layers.count,
+                totalBytes: Int64(bytes),
+                formatVersion: payload.manifest.formatVersion
             )
+        }
+
+        do {
+            let response: OpenAIManager.FeedbackResponse
+            if let payload = snapshotPayload,
+               let metadata = snapshotMetadata,
+               let userID = AuthManager.shared.currentUserID {
+                // Parallel: upload + critique POST. async let is structured
+                // concurrency — both children are awaited (or cancelled)
+                // before this function returns. Upload is best-effort; if it
+                // fails, the Worker's promote step retries the source read
+                // a few times, then sets snapshot: nil on the entry.
+                async let uploadResult: Void = CloudDrawingStorageManager.shared.uploadSnapshotBundle(
+                    userID: userID,
+                    drawingID: drawingId,
+                    payload: payload,
+                    pathPrefix: "snapshots/_pending/\(clientRequestId)"
+                )
+                async let feedbackResult = OpenAIManager.shared.requestFeedback(
+                    image: image,
+                    context: context,
+                    drawingId: drawingId,
+                    clientRequestId: clientRequestId,
+                    snapshotMetadata: metadata,
+                    compositionFindings: compositionFindings
+                )
+
+                // Critique is required — throws propagate, which cancels the
+                // upload child task automatically.
+                response = try await feedbackResult
+
+                // Upload best-effort — log on failure, don't fail user flow.
+                do {
+                    try await uploadResult
+                } catch {
+                    print("[snapshot] upload failed for \(clientRequestId): \(error.localizedDescription)")
+                }
+            } else {
+                // Legacy non-layered drawing, no layers, or unauthenticated
+                // (the Worker requires auth anyway, so this is mostly
+                // belt-and-suspenders). Same critique flow, just no snapshot
+                // metadata in the body — Worker skips promote.
+                response = try await OpenAIManager.shared.requestFeedback(
+                    image: image,
+                    context: context,
+                    drawingId: drawingId,
+                    clientRequestId: clientRequestId,
+                    snapshotMetadata: nil,
+                    compositionFindings: compositionFindings
+                )
+            }
+
             feedback = response.feedback
             lastCritiqueEntry = response.critiqueEntry
         } catch {

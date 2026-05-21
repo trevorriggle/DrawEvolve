@@ -1507,7 +1507,8 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// half-uploaded bundle never carries a manifest, so the worker won't
     /// promote it.
     public func uploadSnapshotBundle(
-        for drawing: Drawing,
+        userID: UUID,
+        drawingID: UUID,
         payload: LayeredDrawingPayload,
         pathPrefix: String
     ) async throws {
@@ -1522,8 +1523,6 @@ final class CloudDrawingStorageManager: ObservableObject {
             throw DrawingStorageError.saveFailed
         }
 
-        let userID = drawing.userId
-        let drawingID = drawing.id
         let bucketID = self.storageBucketID
         let normalized = normalizeManifestForUpload(
             payload: payload,
