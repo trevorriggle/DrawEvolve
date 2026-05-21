@@ -23,10 +23,53 @@ struct DrawingCanvasView: View {
     /// user can browse straight through this view's existing sheet
     /// stack without making the canvas a transient destination.
     var openGalleryOnAppear: Bool = false
+    /// When non-nil, the floating feedback panel opens on first appear
+    /// with this critique entry pre-selected. Used by the studio-wall
+    /// → canvas navigation path (commit 13) so tapping a critique row
+    /// lands the user inside the drawing's canvas already looking at
+    /// the right entry. Default nil (no preselection) covers all
+    /// existing call sites unchanged.
+    var preselectedCritique: CritiqueEntry? = nil
 
     // Canvas state
     @StateObject private var canvasState = CanvasStateManager()
     @State private var showFeedback = false
+
+    // MARK: - Drawing version history phase 2 (canvas-overlay UX)
+
+    /// True when the canvas is rendering a historical snapshot composite
+    /// instead of the live drawing. Set by the FloatingFeedbackPanel
+    /// onActiveEntryChange callback when the user selects an older
+    /// critique. Drives both the SnapshotCanvasOverlay placement and the
+    /// per-subview hiding of the editing UI.
+    private var isViewingSnapshot: Bool { canvasState.viewingSnapshot != nil }
+
+    /// Top-leading chip rendered when the canvas is showing a historical
+    /// snapshot. Tappable anywhere to clear (per approved decision — no
+    /// separate X). Appears above the snapshot overlay; same coordinate
+    /// space as the editing chrome it temporarily replaces.
+    @ViewBuilder
+    private func snapshotChip(timestamp: Date) -> some View {
+        Button {
+            canvasState.viewingSnapshot = nil
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.caption.weight(.semibold))
+                Text("Viewing snapshot from \(timestamp, format: .dateTime.month().day().hour().minute())")
+                    .font(.subheadline.weight(.medium))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.thinMaterial, in: Capsule())
+            .foregroundStyle(.primary)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 12)
+        .padding(.leading, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityHint("Tap to return to the live drawing")
+    }
     /// iPhone-only — surfaces the 6 brush variants (pencil/brush/inkPen/
     /// marker/airbrush/charcoal) in a sheet, since the flat iPhone tool
     /// grid has no room for the iPad's long-press popover. Triggered by
@@ -578,6 +621,39 @@ struct DrawingCanvasView: View {
             if openGalleryOnAppear && !showGallery {
                 showGallery = true
             }
+            // Studio-wall navigation (commit 13) sets preselectedCritique
+            // to a specific entry; auto-open the floating feedback panel
+            // so the user lands inside the canvas already looking at the
+            // right critique. The panel's own initialSelectedEntryId
+            // param drives the entry selection.
+            if preselectedCritique != nil {
+                showFeedback = true
+            }
+        }
+        // Phase 2 snapshot mode — dismiss any open modal sheets when
+        // entering snapshot mode so they don't float over the historical
+        // composite. Sheets aren't hidden by ZStack conditionals; we have
+        // to flip the underlying state bindings explicitly.
+        .onChange(of: canvasState.viewingSnapshot) { _, newValue in
+            guard newValue != nil else { return }
+            showColorPicker = false
+            showLayerPanel = false
+            showBrushSettings = false
+            showSymmetrySettings = false
+            showEyeTestPanel = false
+            showPhoneBrushPicker = false
+            showPhonePosePicker = false
+            showPhoneTypePicker = false
+            showPhoneEffectsPicker = false
+        }
+        // Phase 2 snapshot mode — dismissing the feedback panel exits
+        // snapshot mode immediately (per approved auto-clear rules).
+        // Covers both the explicit X dismiss and the iPhone drag-down
+        // half-sheet dismiss paths.
+        .onChange(of: showFeedback) { _, newValue in
+            if !newValue {
+                canvasState.viewingSnapshot = nil
+            }
         }
         .preferredColorScheme(colorSchemeValue)
     }
@@ -651,6 +727,17 @@ struct DrawingCanvasView: View {
                 .overlay { tapToMarkCaptureOverlay }
                 .overlay(alignment: .top) { tapToMarkBanner }
 
+                // Phase 2 snapshot overlay — iPhone parity with padBody.
+                // Same placement (above MetalCanvasView + its .overlay {}
+                // chain), same hit-testing rule. Editing chrome below
+                // hides via per-subview gates on !isViewingSnapshot.
+                if let viewing = canvasState.viewingSnapshot {
+                    SnapshotCanvasOverlay(viewing: viewing, canvasState: canvasState)
+                        .allowsHitTesting(true)
+                        .ignoresSafeArea()
+                    snapshotChip(timestamp: viewing.timestamp)
+                }
+
                 // Selection overlays — parity with padBody. Without these
                 // iPhone users got no rubber-band preview while dragging
                 // a rectangle/lasso selection and no marching ants on the
@@ -660,7 +747,7 @@ struct DrawingCanvasView: View {
                 // mounted in the iPhone ZStack. Same z-ordering as padBody:
                 // selection overlays under symmetry/pose.
 
-                if let previewRect = canvasState.previewSelection {
+                if !isViewingSnapshot, let previewRect = canvasState.previewSelection {
                     let screenPreviewRect = canvasState.documentRectToScreen(previewRect)
                     Rectangle()
                         .path(in: screenPreviewRect)
@@ -669,7 +756,7 @@ struct DrawingCanvasView: View {
                         .ignoresSafeArea()
                 }
 
-                if let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
+                if !isViewingSnapshot, let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
                     let screenPreviewPath = canvasState.documentPathToScreen(previewPath)
                     Path { p in
                         p.move(to: screenPreviewPath[0])
@@ -690,7 +777,8 @@ struct DrawingCanvasView: View {
                 // for the duration of the transform so the chasing ants
                 // don't read as visual noise (and so we don't restroke
                 // a large polygon every frame).
-                if let selection = canvasState.activeSelection,
+                if !isViewingSnapshot,
+                   let selection = canvasState.activeSelection,
                    !canvasState.isTransformingSelection {
                     let screenSelection = canvasState.documentRectToScreen(selection)
                     MarchingAntsRectangle(rect: screenSelection)
@@ -698,7 +786,8 @@ struct DrawingCanvasView: View {
                         .ignoresSafeArea()
                 }
 
-                if let path = canvasState.selectionPath,
+                if !isViewingSnapshot,
+                   let path = canvasState.selectionPath,
                    !canvasState.isTransformingSelection {
                     let screenPath = canvasState.documentPathToScreen(path)
                     MarchingAntsPath(path: screenPath)
@@ -709,8 +798,10 @@ struct DrawingCanvasView: View {
                 // Free-transform handles for the active floating selection.
                 // Hit-tests scoped to the handles themselves; the rest of
                 // the overlay frame falls through to MTKView.
-                TransformHandlesOverlay(canvasState: canvasState)
-                    .ignoresSafeArea()
+                if !isViewingSnapshot {
+                    TransformHandlesOverlay(canvasState: canvasState)
+                        .ignoresSafeArea()
+                }
 
                 // Symmetry mirror guides. Used to live in padBody only;
                 // the iPhone Phase 2 split deliberately omitted it but
@@ -718,42 +809,52 @@ struct DrawingCanvasView: View {
                 // Drop it in here with the same wiring — geometry math
                 // is universal (reads from shared canvasState), the
                 // overlay just needed to be in the iPhone ZStack.
-                SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
-                    .ignoresSafeArea()
+                if !isViewingSnapshot {
+                    SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
+                        .ignoresSafeArea()
+                }
 
                 // Pose skeleton(s). PoseOverlayView gates per-joint
                 // dragging to `DeviceIdiom.isPad` internally (21 joints
                 // at thumb scale isn't manageable), but whole-skeleton
                 // transforms via PoseTransformHandlesView work on both.
-                PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
-                    .ignoresSafeArea()
-                PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
-                    .ignoresSafeArea()
+                if !isViewingSnapshot {
+                    PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
+                        .ignoresSafeArea()
+                    PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
+                        .ignoresSafeArea()
+                }
 
                 // Floating chip per active skeleton (Replace / Commit /
                 // Hide / Lock / Discard). Was iPad-only; without it
                 // iPhone users had no way to hide a placed skeleton.
-                PoseSkeletonChipsOverlay(
-                    poseManager: poseOverlayManager,
-                    canvasState: canvasState,
-                    onRequestReplace: { kind in poseDetectionRequest = kind },
-                    onRequestManualPlace: { kind in
-                        poseOverlayManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
-                    }
-                )
-                .ignoresSafeArea()
+                if !isViewingSnapshot {
+                    PoseSkeletonChipsOverlay(
+                        poseManager: poseOverlayManager,
+                        canvasState: canvasState,
+                        onRequestReplace: { kind in poseDetectionRequest = kind },
+                        onRequestManualPlace: { kind in
+                            poseOverlayManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
+                        }
+                    )
+                    .ignoresSafeArea()
+                }
 
                 // Low-confidence detection banner. Top of canvas,
                 // 5s auto-dismiss.
-                PoseLowConfidenceBanner(poseManager: poseOverlayManager)
-                    .ignoresSafeArea()
+                if !isViewingSnapshot {
+                    PoseLowConfidenceBanner(poseManager: poseOverlayManager)
+                        .ignoresSafeArea()
+                }
 
                 // Type-on-path live overlays — parity with padBody.
                 // PathStartHandle gates internally on floatingText.path,
                 // so all three are safe to mount unconditionally.
-                pathStartHandleOverlay
-                textOnPathPreviewOverlay
-                textOnPathCirclePreviewOverlay
+                if !isViewingSnapshot {
+                    pathStartHandleOverlay
+                    textOnPathPreviewOverlay
+                    textOnPathCirclePreviewOverlay
+                }
 
                 // Caret + invisible UITextView host. `.ignoresSafeArea()`
                 // is REQUIRED on iPhone — both views position via
@@ -770,56 +871,73 @@ struct DrawingCanvasView: View {
                 // caret/host drift made the iPhone text tool feel "off."
                 // padBody doesn't need this because padBody is a bare
                 // ZStack at the top level (no NavigationStack chrome).
-                TextEntryOverlay(canvasState: canvasState)
-                    .ignoresSafeArea()
-                FloatingTextCaretIndicator(canvasState: canvasState)
-                    .ignoresSafeArea()
+                if !isViewingSnapshot {
+                    TextEntryOverlay(canvasState: canvasState)
+                        .ignoresSafeArea()
+                    FloatingTextCaretIndicator(canvasState: canvasState)
+                        .ignoresSafeArea()
+                }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Phase 2 — hide nav bar items in snapshot mode alongside
+                // the rest of the iPhone chrome. ToolbarItem accepts a
+                // builder; an empty conditional renders nothing.
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: { showGallery = true }) {
-                        Image(systemName: "photo.on.rectangle")
+                    if !isViewingSnapshot {
+                        Button(action: { showGallery = true }) {
+                            Image(systemName: "photo.on.rectangle")
+                        }
+                        .accessibilityLabel("Gallery")
                     }
-                    .accessibilityLabel("Gallery")
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showSettings = true }) {
-                        Image(systemName: "gearshape")
+                    if !isViewingSnapshot {
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape")
+                        }
+                        .accessibilityLabel("Settings")
                     }
-                    .accessibilityLabel("Settings")
                 }
                 // Beta Notice + How It Works moved into SettingsView
                 // (see infoSection there). Their iPhone toolbar icons
                 // were removed to declutter the nav bar.
             }
             .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 8) {
-                    phoneSelectionContextBar
-                    if phoneBrushSizeRailVisible {
-                        BrushSizeRailHorizontal(
-                            size: $canvasState.brushSettings.size,
-                            // Hide hardness track for tools whose shader
-                            // ignores the uniform (inkPen, marker,
-                            // airbrush) or floors it (pencil). The rail
-                            // already treats a nil binding as "no
-                            // hardness track."
-                            hardness: canvasState.currentTool.usesHardness ? $canvasState.brushSettings.hardness : nil,
-                            opacity: $canvasState.brushSettings.opacity,
-                            screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
-                        )
-                            .padding(.horizontal, 16)
-                            .transition(.opacity)
+                // Phase 2 — entire iPhone bottom toolbar (selection bar,
+                // brush rail, action row, tool panel) hides in snapshot
+                // mode. EmptyView leaves the bottom safe area visually
+                // empty while the canvas overlay is up.
+                if isViewingSnapshot {
+                    EmptyView()
+                } else {
+                    VStack(spacing: 8) {
+                        phoneSelectionContextBar
+                        if phoneBrushSizeRailVisible {
+                            BrushSizeRailHorizontal(
+                                size: $canvasState.brushSettings.size,
+                                // Hide hardness track for tools whose shader
+                                // ignores the uniform (inkPen, marker,
+                                // airbrush) or floors it (pencil). The rail
+                                // already treats a nil binding as "no
+                                // hardness track."
+                                hardness: canvasState.currentTool.usesHardness ? $canvasState.brushSettings.hardness : nil,
+                                opacity: $canvasState.brushSettings.opacity,
+                                screenDiameter: { canvasState.stampScreenDiameter(forBrushSize: $0) }
+                            )
+                                .padding(.horizontal, 16)
+                                .transition(.opacity)
+                        }
+                        phoneActionRow
+                        if isToolPanelExpanded {
+                            phoneToolPanel
+                        }
                     }
-                    phoneActionRow
-                    if isToolPanelExpanded {
-                        phoneToolPanel
-                    }
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+                    .background(.regularMaterial)
+                    .animation(.easeInOut(duration: 0.18), value: phoneBrushSizeRailVisible)
                 }
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-                .background(.regularMaterial)
-                .animation(.easeInOut(duration: 0.18), value: phoneBrushSizeRailVisible)
             }
             // iPhone Phase 4: half-sheet for FloatingFeedbackPanel.
             // iPad's path renders the panel inline inside padBody's ZStack
@@ -853,7 +971,25 @@ struct DrawingCanvasView: View {
                             // body so we can't stack two presentations.
                             showFeedback = false
                             openEve(scope: .drawing, critiqueSequence: sequence)
-                        }
+                        },
+                        onActiveEntryChange: { entry, isLatest in
+                            // Same phase 2 snapshot rule as iPad. On
+                            // iPhone the panel is a half-sheet over the
+                            // canvas; collapsing or dismissing it returns
+                            // to the live canvas via .onChange(of:
+                            // showFeedback) on the Group.
+                            guard let entry = entry,
+                                  !isLatest,
+                                  let snapshot = entry.snapshot else {
+                                canvasState.viewingSnapshot = nil
+                                return
+                            }
+                            canvasState.viewingSnapshot = CanvasStateManager.SnapshotViewingState(
+                                snapshot: snapshot,
+                                timestamp: entry.timestamp
+                            )
+                        },
+                        initialSelectedEntryId: preselectedCritique?.id
                     )
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
@@ -938,6 +1074,23 @@ struct DrawingCanvasView: View {
             .overlay { tapToMarkCaptureOverlay }
             .overlay(alignment: .top) { tapToMarkBanner }
 
+            // Phase 2 snapshot overlay — sits above MetalCanvasView and
+            // its attached .overlay { } chain so the historical composite
+            // visually covers the canvas AND the reference / eye-test
+            // overlays. .allowsHitTesting(true) on the overlay catches
+            // every touch so brush/eraser/selection gestures can't reach
+            // the live Metal canvas underneath. The chrome below this
+            // block is per-subview-gated on !isViewingSnapshot.
+            if let viewing = canvasState.viewingSnapshot {
+                SnapshotCanvasOverlay(viewing: viewing, canvasState: canvasState)
+                    .allowsHitTesting(true)
+                    .ignoresSafeArea()
+
+                // Top-leading chip — sits over the overlay, tappable
+                // anywhere to clear (no separate X per approved decision).
+                snapshotChip(timestamp: viewing.timestamp)
+            }
+
             // Selection overlays use the MTKView's full-screen coordinate
             // space (the MTKView ignores safe area at line 70). Without
             // .ignoresSafeArea() on each overlay, SwiftUI lays them out
@@ -948,7 +1101,7 @@ struct DrawingCanvasView: View {
             // needs the same modifier.
 
             // Blue preview stroke while dragging selection
-            if let previewRect = canvasState.previewSelection {
+            if !isViewingSnapshot, let previewRect = canvasState.previewSelection {
                 // Transform preview from document space to screen space
                 let screenPreviewRect = canvasState.documentRectToScreen(previewRect)
                 Rectangle()
@@ -958,7 +1111,7 @@ struct DrawingCanvasView: View {
                     .ignoresSafeArea()
             }
 
-            if let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
+            if !isViewingSnapshot, let previewPath = canvasState.previewLassoPath, !previewPath.isEmpty {
                 // Transform preview path from document space to screen space
                 let screenPreviewPath = canvasState.documentPathToScreen(previewPath)
                 Path { p in
@@ -979,7 +1132,8 @@ struct DrawingCanvasView: View {
             // Hidden during transform — see canvasState.isTransformingSelection;
             // selection is still active, just the animated outline is
             // suppressed while the user moves or scales it.
-            if let selection = canvasState.activeSelection,
+            if !isViewingSnapshot,
+               let selection = canvasState.activeSelection,
                !canvasState.isTransformingSelection {
                 // Transform selection from document space to screen space
                 let screenSelection = canvasState.documentRectToScreen(selection)
@@ -993,7 +1147,7 @@ struct DrawingCanvasView: View {
             // suspenders alongside the isFilling re-entrancy guard in
             // MetalCanvasView.touchesBegan. Indeterminate spinner — fill
             // duration on a 4096² canvas is sub-second on iPad Pro.
-            if canvasState.isFilling {
+            if !isViewingSnapshot, canvasState.isFilling {
                 ZStack {
                     Color.black.opacity(0.25)
                         .ignoresSafeArea()
@@ -1018,47 +1172,52 @@ struct DrawingCanvasView: View {
             // gallery-icon clearance (50pt button + 12pt trailing inset + 10pt
             // gap = 72pt trailing) so it doesn't sit visually-under that
             // always-visible icon column when canvas is rotated.
-            VStack(alignment: .trailing, spacing: 4) {
-                if canvasState.canvasRotation.degrees != 0 {
-                    HStack(spacing: 4) {
-                        Image(systemName: "rotate.right")
-                            .font(.caption2)
-                        Text("\(Int(canvasState.canvasRotation.degrees))°")
-                            .font(.caption)
-                            .fontWeight(.medium)
+            if !isViewingSnapshot {
+                VStack(alignment: .trailing, spacing: 4) {
+                    if canvasState.canvasRotation.degrees != 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "rotate.right")
+                                .font(.caption2)
+                            Text("\(Int(canvasState.canvasRotation.degrees))°")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(8)
+                        .transition(.opacity)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(8)
-                    .transition(.opacity)
                 }
+                .padding(.top, 12)
+                .padding(.trailing, 72)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .allowsHitTesting(false)
             }
-            .padding(.top, 12)
-            .padding(.trailing, 72)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .allowsHitTesting(false)
 
             // Layer indicator — pinned to the bottom center of the screen so
             // it's always visible regardless of which gallery/panels are open.
             // SwiftUI alignment + safe-area padding handles iPad orientation
             // changes automatically (portrait ↔ landscape reflow).
-            HStack(spacing: 4) {
-                Image(systemName: "square.stack.3d.up.fill")
-                    .font(.caption2)
-                Text(canvasState.layers[safe: canvasState.selectedLayerIndex]?.name ?? "Layer")
-                    .font(.caption)
-                    .fontWeight(.medium)
+            if !isViewingSnapshot {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .font(.caption2)
+                    Text(canvasState.layers[safe: canvasState.selectedLayerIndex]?.name ?? "Layer")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial)
+                .cornerRadius(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 12)
+                .allowsHitTesting(false)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(.ultraThinMaterial)
-            .cornerRadius(8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(.bottom, 12)
-            .allowsHitTesting(false)
 
-            if let path = canvasState.selectionPath,
+            if !isViewingSnapshot,
+               let path = canvasState.selectionPath,
                !canvasState.isTransformingSelection {
                 // Transform path from document space to screen space.
                 // Hidden during transform — see iPad activeSelection
@@ -1077,63 +1236,78 @@ struct DrawingCanvasView: View {
             // rotate / zoom / pan with the canvas. allowsHitTesting(false)
             // is baked into the overlay; ignoresSafeArea handled here so
             // the canvas's full-bleed layout matches.
-            SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
-                .ignoresSafeArea()
+            if !isViewingSnapshot {
+                SymmetryGuideOverlay(canvasState: canvasState, symmetry: symmetry)
+                    .ignoresSafeArea()
+            }
 
             // Free-transform handles for the active floating selection
             // (rect/lasso/import). Sits above the marching ants overlays so
             // the handles aren't obscured by the marquee. Hit tests are
             // scoped to the handles themselves; the rest of the overlay's
             // frame is transparent and lets touches fall through to MTKView.
-            TransformHandlesOverlay(canvasState: canvasState)
-                .ignoresSafeArea()
+            if !isViewingSnapshot {
+                TransformHandlesOverlay(canvasState: canvasState)
+                    .ignoresSafeArea()
+            }
 
             // Pose-reference skeleton(s). Sibling to TransformHandlesOverlay
             // (Decision 4 — no Metal layer, no DrawingLayer subtype).
-            PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
-                .ignoresSafeArea()
+            if !isViewingSnapshot {
+                PoseOverlayView(poseManager: poseOverlayManager, canvasState: canvasState)
+                    .ignoresSafeArea()
+            }
 
             // Whole-skeleton transform handles (PR 4). Renders dashed
             // bbox + corner / edge / rotation handles when the
             // skeleton's bbox is armed; auto-deselects after 4s.
             // Above the joint dots in Z so handle hit zones can compete
             // when they overlap with extremity joints.
-            PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
-                .ignoresSafeArea()
+            if !isViewingSnapshot {
+                PoseTransformHandlesView(poseManager: poseOverlayManager, canvasState: canvasState)
+                    .ignoresSafeArea()
+            }
 
             // Floating chip per active skeleton — chevron menu with
             // Replace Photo / Commit / Hide-or-Show / Manually Place /
             // Discard. PR 6.
-            PoseSkeletonChipsOverlay(
-                poseManager: poseOverlayManager,
-                canvasState: canvasState,
-                onRequestReplace: { kind in poseDetectionRequest = kind },
-                onRequestManualPlace: { kind in
-                    poseOverlayManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
-                }
-            )
-            .ignoresSafeArea()
+            if !isViewingSnapshot {
+                PoseSkeletonChipsOverlay(
+                    poseManager: poseOverlayManager,
+                    canvasState: canvasState,
+                    onRequestReplace: { kind in poseDetectionRequest = kind },
+                    onRequestManualPlace: { kind in
+                        poseOverlayManager.placeDefault(kind: kind, canvasSize: canvasState.documentSize)
+                    }
+                )
+                .ignoresSafeArea()
+            }
 
             // Low-confidence banner (top of canvas, 5s auto-dismiss).
             // Slides down on detection-place when joints fall below
             // PoseConfidence.lowThreshold; user can tap X to dismiss.
-            PoseLowConfidenceBanner(poseManager: poseOverlayManager)
-                .ignoresSafeArea()
+            if !isViewingSnapshot {
+                PoseLowConfidenceBanner(poseManager: poseOverlayManager)
+                    .ignoresSafeArea()
+            }
 
-            pathStartHandleOverlay
-            textOnPathPreviewOverlay
-            textOnPathCirclePreviewOverlay
-            typeOnPathModeTogglePill
-            cancelPillOverlay
-            TextEntryOverlay(canvasState: canvasState)
-            FloatingTextCaretIndicator(canvasState: canvasState)
+            if !isViewingSnapshot {
+                pathStartHandleOverlay
+                textOnPathPreviewOverlay
+                textOnPathCirclePreviewOverlay
+                typeOnPathModeTogglePill
+                cancelPillOverlay
+                TextEntryOverlay(canvasState: canvasState)
+                FloatingTextCaretIndicator(canvasState: canvasState)
 
-            blurAdjustmentHUDOverlay
+                blurAdjustmentHUDOverlay
 
-            stampCursorOverlay
+                stampCursorOverlay
+            }
 
             // Delete button for active selection (rect or lasso)
-            if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+            if !isViewingSnapshot,
+               canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {
                     HStack {
                         Spacer()
@@ -1164,8 +1338,12 @@ struct DrawingCanvasView: View {
             // Selection pixels are now rendered in real-time to the texture for fluent animation
             // The duplicate SwiftUI Image overlay is no longer needed
 
-            // Floating toolbar overlay (top layer, left side)
-            VStack(alignment: .leading, spacing: 0) {
+            // Floating toolbar overlay (top layer, left side). Hidden
+            // entirely when the canvas is showing a snapshot (per
+            // approved phase 2 rule — editing UI disappears, not just
+            // disables).
+            if !isViewingSnapshot {
+                VStack(alignment: .leading, spacing: 0) {
                 if !isToolbarCollapsed {
                     VStack(spacing: 0) {
                     ScrollView {
@@ -1567,8 +1745,14 @@ struct DrawingCanvasView: View {
                 .padding(.leading, 8)
                 .padding(.top, isToolbarCollapsed ? 8 : 4)
             }
+            }  // end if !isViewingSnapshot wrapper for floating toolbar
 
-            // Floating feedback panel
+            // Floating feedback panel. Stays visible in snapshot mode —
+            // it's the navigator the user uses to flip between critiques
+            // (and thus snapshots). The two new params wire phase 2:
+            // onActiveEntryChange drives canvasState.viewingSnapshot;
+            // initialSelectedEntryId lets the studio-wall navigation
+            // open this view with a pre-selected entry.
             if showFeedback, canvasState.feedback != nil {
                 FloatingFeedbackPanel(
                     feedback: canvasState.feedback,
@@ -1576,7 +1760,24 @@ struct DrawingCanvasView: View {
                     isPresented: $showFeedback,
                     onAskEve: { sequence in
                         openEve(scope: .drawing, critiqueSequence: sequence)
-                    }
+                    },
+                    onActiveEntryChange: { entry, isLatest in
+                        // Snapshot mode rule: enter iff the user picked
+                        // a HISTORICAL entry that has a snapshot. Most-
+                        // recent entries and pre-VH legacy entries
+                        // (snapshot == nil) leave the live canvas alone.
+                        guard let entry = entry,
+                              !isLatest,
+                              let snapshot = entry.snapshot else {
+                            canvasState.viewingSnapshot = nil
+                            return
+                        }
+                        canvasState.viewingSnapshot = CanvasStateManager.SnapshotViewingState(
+                            snapshot: snapshot,
+                            timestamp: entry.timestamp
+                        )
+                    },
+                    initialSelectedEntryId: preselectedCritique?.id
                 )
             }
 
@@ -1593,7 +1794,8 @@ struct DrawingCanvasView: View {
             // outer VStack/Spacer/HStack/Spacer + bottom-200 positioning
             // is iPad-specific. Same justified-deviation pattern as
             // Phase 4's critiqueContent extraction.
-            if canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+            if !isViewingSnapshot,
+               canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {
                     Spacer()
                     HStack {
@@ -1611,7 +1813,12 @@ struct DrawingCanvasView: View {
             // the gear sits flush below the gallery icon without magic-number
             // padding; only the gear has the move/opacity transition since the
             // gallery icon stays put.
-            VStack {
+            //
+            // Phase 2 — even the "always visible" gallery/Eve/Eye Test
+            // cluster hides in snapshot mode (per "hide the entire
+            // toolbar" rule). Restored when the snapshot clears.
+            if !isViewingSnapshot {
+                VStack {
                 HStack {
                     Spacer()
                     VStack(spacing: 8) {
@@ -1661,13 +1868,15 @@ struct DrawingCanvasView: View {
                     .padding(.trailing, 12)
                 }
                 Spacer()
-            }
+                }
+            }  // end if !isViewingSnapshot wrapper for top-right cluster
 
             // Bottom right - Action buttons (collapses with toolbar). Extracted
             // into a computed property because the inline expression pushed
             // the body past the Swift type-checker's tolerance once the gear
-            // button landed in Phase 6.
-            if !isToolbarCollapsed {
+            // button landed in Phase 6. Hidden entirely in snapshot mode
+            // alongside the rest of the editing chrome.
+            if !isViewingSnapshot, !isToolbarCollapsed {
                 bottomRightActionButtons
             }
 

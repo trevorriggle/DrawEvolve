@@ -8,6 +8,21 @@
 import SwiftUI
 
 struct FloatingFeedbackPanel: View {
+    // MARK: - Drawing version history phase 2
+    //
+    // Two additive, optional params for the canvas-overlay time-machine UX:
+    //
+    // - onActiveEntryChange: fires whenever the panel's "active entry"
+    //   changes — selection change in history menu, auto-jump on new
+    //   critique arrival, panel collapses (nil), panel expands (current),
+    //   or panel appears (current). The second arg is true when the entry
+    //   is the most-recent on the drawing. Parent uses both to decide
+    //   whether to enter / exit snapshot mode.
+    //
+    // - initialSelectedEntryId: when non-nil and present in
+    //   critiqueHistory, the panel opens with that entry pre-selected
+    //   instead of auto-jumping to the most-recent. Used by the studio-
+    //   wall → canvas navigation path (commit 13).
     let feedback: String?
     let critiqueHistory: [CritiqueEntry]
     @Binding var isPresented: Bool
@@ -21,6 +36,9 @@ struct FloatingFeedbackPanel: View {
     /// Carries the critique sequence the user is currently viewing so
     /// the parent knows which one to anchor the conversation on.
     var onAskEve: ((_ critiqueSequence: Int?) -> Void)? = nil
+
+    var onActiveEntryChange: ((CritiqueEntry?, _ isLatest: Bool) -> Void)? = nil
+    var initialSelectedEntryId: UUID? = nil
 
     @State private var isExpanded = true
     @State private var position: CGPoint = .zero
@@ -75,6 +93,39 @@ struct FloatingFeedbackPanel: View {
                 padBody
             }
         }
+        // Drawing version history phase 2 — fire onActiveEntryChange
+        // whenever the panel's active entry changes for any reason.
+        // Body-level placement covers both phoneBody and padBody without
+        // duplicating the modifier in two branches.
+        .onChange(of: selectedHistoryIndex) { _, _ in
+            fireActiveEntryChange()
+        }
+        .onChange(of: isExpanded) { _, newExpanded in
+            // Collapsing the panel (iPad only — iPhone has no pill state)
+            // exits snapshot mode per the approved auto-clear rules.
+            // Expanding re-evaluates against the current selection.
+            if newExpanded {
+                fireActiveEntryChange()
+            } else {
+                onActiveEntryChange?(nil, false)
+            }
+        }
+    }
+
+    /// Snapshot of "what entry is the panel showing right now" delivered
+    /// to the parent via onActiveEntryChange. Pulled out so the
+    /// onAppear / .onChange / button-tap call sites can share the same
+    /// derivation logic.
+    private func fireActiveEntryChange() {
+        guard let callback = onActiveEntryChange else { return }
+        let idx = selectedHistoryIndex
+        guard critiqueHistory.indices.contains(idx) else {
+            callback(nil, false)
+            return
+        }
+        let entry = critiqueHistory[idx]
+        let isLatest = idx == critiqueHistory.count - 1
+        callback(entry, isLatest)
     }
 
     // MARK: - iPhone body (half-sheet content)
@@ -102,13 +153,25 @@ struct FloatingFeedbackPanel: View {
         }
         .background(Color(uiColor: .systemBackground))
         .onAppear {
-            // Pin to the most recent entry when the panel appears.
+            // initialSelectedEntryId (phase 2) — when a caller (studio
+            // wall navigation) opens the panel pre-selected to a specific
+            // entry, honor it. Falls back to the pre-existing auto-jump-
+            // to-most-recent when nil or when the id isn't in the history.
+            //
             // Default @State of 0 mapped to critiqueHistory[0] = the
             // OLDEST critique, so opening the panel always showed
             // stale feedback. iPad's path has the same fix inside
             // padBody's GeometryReader; phoneBody was missing it,
             // hence the iPhone-only bug.
-            selectedHistoryIndex = max(0, critiqueHistory.count - 1)
+            if let id = initialSelectedEntryId,
+               let idx = critiqueHistory.firstIndex(where: { $0.id == id }) {
+                selectedHistoryIndex = idx
+            } else {
+                selectedHistoryIndex = max(0, critiqueHistory.count - 1)
+            }
+            // Initial fire so the parent enters / exits snapshot mode
+            // based on what the panel is currently showing.
+            fireActiveEntryChange()
         }
         .onChange(of: critiqueHistory.count) { _, newCount in
             // When a new critique lands while the panel is already
@@ -522,11 +585,24 @@ struct FloatingFeedbackPanel: View {
                 // Store screen size for reset function
                 screenSize = geometry.size
 
-                // Default to the MOST RECENT entry rather than the oldest
-                // (selectedHistoryIndex = 0 was the previous default, which
-                // mapped to critiqueHistory[0] — the first/oldest critique
-                // — making the panel open on stale feedback every time).
-                selectedHistoryIndex = max(0, critiqueHistory.count - 1)
+                // initialSelectedEntryId (phase 2) — when a caller (studio
+                // wall navigation) opens the panel pre-selected to a
+                // specific entry, honor it. Falls back to the auto-jump-
+                // to-most-recent below when nil or unmatched.
+                if let id = initialSelectedEntryId,
+                   let idx = critiqueHistory.firstIndex(where: { $0.id == id }) {
+                    selectedHistoryIndex = idx
+                } else {
+                    // Default to the MOST RECENT entry rather than the
+                    // oldest (selectedHistoryIndex = 0 was the previous
+                    // default, which mapped to critiqueHistory[0] — the
+                    // first/oldest critique — making the panel open on
+                    // stale feedback every time).
+                    selectedHistoryIndex = max(0, critiqueHistory.count - 1)
+                }
+                // Initial fire — parent reacts based on what the panel
+                // is currently showing.
+                fireActiveEntryChange()
 
                 // Position in top-left corner initially, ensuring it stays on screen
                 let currentWidth = isExpanded ? actualExpandedSize.width : collapsedSize.width
