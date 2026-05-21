@@ -1523,11 +1523,20 @@ class CanvasStateManager: ObservableObject {
             return
         }
 
+        // client_request_id moves from OpenAIManager-internal to caller-owned
+        // so it can double as the pending-snapshot folder key once the
+        // parallel-upload orchestration lands in commit 7. Until then, this
+        // path keeps producing the same shape of request (fresh UUID per
+        // call, snapshotMetadata: nil so the Worker skips promote).
+        let clientRequestId = UUID().uuidString.lowercased()
+
         do {
             let response = try await OpenAIManager.shared.requestFeedback(
                 image: image,
                 context: context,
                 drawingId: drawingId,
+                clientRequestId: clientRequestId,
+                snapshotMetadata: nil,
                 compositionFindings: compositionFindings
             )
             feedback = response.feedback

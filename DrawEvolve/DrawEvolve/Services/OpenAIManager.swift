@@ -51,6 +51,17 @@ enum OpenAIError: LocalizedError {
     }
 }
 
+/// Carried in `requestFeedback` to tell the Worker how to find and
+/// promote the pending snapshot bundle that the caller uploaded in
+/// parallel. "All three together or nothing" — if iOS can't compute any
+/// of these, pass nil and the Worker will skip the promote step
+/// (entry persists with snapshot: null).
+struct SnapshotUploadMetadata {
+    let layerCount: Int
+    let totalBytes: Int64
+    let formatVersion: Int
+}
+
 actor OpenAIManager {
     static let shared = OpenAIManager()
 
@@ -85,7 +96,16 @@ actor OpenAIManager {
     /// Phase 5d: every request includes a fresh lowercase UUID
     /// `client_request_id`. The Worker caches the response under that key
     /// for 1h so retries on flaky networks don't double-charge OpenAI or
-    /// double-write to Postgres.
+    /// double-write to Postgres. The caller generates the UUID and passes
+    /// it in so the same ID can also serve as the pending-snapshot folder
+    /// key for the parallel upload (drawing version history).
+    ///
+    /// `snapshotMetadata` (drawing version history): when non-nil, the
+    /// Worker promotes the pending snapshot bundle the caller uploaded
+    /// in parallel and attaches a pointer to the resulting CritiqueEntry.
+    /// When nil, the Worker skips the promote step entirely — the entry
+    /// persists with snapshot: null. Old iOS builds that don't know
+    /// about snapshots simply pass nil here.
     ///
     /// `compositionFindings` (Eye Test M4): when non-nil, the worker
     /// adds a COMPOSITION ANALYSIS section to the system prompt and
@@ -97,6 +117,8 @@ actor OpenAIManager {
         image: UIImage,
         context: DrawingContext,
         drawingId: UUID,
+        clientRequestId: String,
+        snapshotMetadata: SnapshotUploadMetadata? = nil,
         compositionFindings: CompositionFindingsPayload? = nil
     ) async throws -> FeedbackResponse {
         // Convert image to base64
@@ -131,9 +153,10 @@ actor OpenAIManager {
 
         // Send to OUR backend (not OpenAI directly).
         // drawingId is sent lowercase to match the Phase 3 cloud convention
-        // (auth.uid()::text + storage paths are all lowercase). Phase 5d adds
-        // client_request_id for idempotency — same lowercase convention.
-        let clientRequestId = UUID().uuidString.lowercased()
+        // (auth.uid()::text + storage paths are all lowercase). Phase 5d:
+        // client_request_id is now supplied by the caller (lowercase UUID)
+        // so it can double as the pending-snapshot folder key for the
+        // parallel upload (drawing version history).
 
         // Read the user's selected preset voice. Lives in UserDefaults under
         // the key the My Prompts view writes to via @AppStorage. Default
@@ -182,6 +205,15 @@ actor OpenAIManager {
                 // without composition findings; we don't want a local
                 // serialization bug to block the critique.
             }
+        }
+
+        // Drawing version history. All three fields together or none.
+        // When absent, the Worker skips the promote step (entry persists
+        // with snapshot: null) — same shape as a pre-VH iOS build.
+        if let snapshotMetadata = snapshotMetadata {
+            requestBody["layer_count"]    = snapshotMetadata.layerCount
+            requestBody["total_bytes"]    = snapshotMetadata.totalBytes
+            requestBody["format_version"] = snapshotMetadata.formatVersion
         }
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: requestBody),
