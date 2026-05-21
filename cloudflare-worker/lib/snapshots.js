@@ -223,6 +223,15 @@ async function headObject({ env, key, fetcher = fetch }) {
   if (res.status === 404) return false;
   if (!res.ok) {
     const body = await safeReadText(res);
+    // Supabase storage info endpoint returns HTTP 400 wrapping a
+    // 404-shaped JSON body for "object not found" — observed in
+    // prod on 2026-05-21 with body
+    //   {"statusCode":"404","error":"not_found","message":"Object not found"}
+    // Accept both the clean 404 above and this wrapped form here.
+    // Other non-ok statuses (auth, network, server) still propagate.
+    if (/"statusCode"\s*:\s*"404"|"error"\s*:\s*"not_?found"|Object not found/i.test(body)) {
+      return false;
+    }
     const err = new Error(`headObject HTTP ${res.status}: ${body}`);
     err.status = res.status;
     throw err;
