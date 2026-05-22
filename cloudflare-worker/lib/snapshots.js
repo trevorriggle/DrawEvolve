@@ -174,6 +174,18 @@ async function copyObject({ env, sourceKey, destKey, fetcher = fetch }) {
   });
   if (!res.ok) {
     const body = await safeReadText(res);
+    // Idempotent success: destination already exists. Observed in prod
+    // 2026-05-21 when two critiques on the same drawing fire within a
+    // few seconds — both worker invocations read the same critique_history
+    // length and compute the same sequence_number, both try to promote
+    // to snapshots/<N>/, second one's parallel copies hit the first
+    // one's files. Treating as success points the loser's entry at the
+    // winner's bytes — acceptable degradation (the loser would otherwise
+    // get snapshot:null and a muted placeholder). Real fix would be
+    // atomic sequence assignment in the append_critique RPC; deferred.
+    if (/"statusCode"\s*:\s*"409"|"error"\s*:\s*"Duplicate"|already exists/i.test(body)) {
+      return;
+    }
     const err = new Error(`copyObject HTTP ${res.status}: ${body}`);
     err.status = res.status;
     throw err;
