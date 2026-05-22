@@ -6,6 +6,16 @@
 //
 
 import Foundation
+import UIKit
+
+extension Notification.Name {
+    /// Broadcast when the app receives a `didReceiveMemoryWarning` and
+    /// the cloud storage manager has shed its caches. HistoryManager
+    /// instances listen for this so they can trim their undo stacks
+    /// (uncompressed LayerSnapshot data is the heaviest tenant after
+    /// the live canvas textures).
+    static let drawEvolveMemoryPressure = Notification.Name("DrawEvolve.memoryPressure")
+}
 
 class HistoryManager: ObservableObject {
     @Published private(set) var canUndo = false
@@ -13,7 +23,21 @@ class HistoryManager: ObservableObject {
 
     private var undoStack: [HistoryAction] = []
     private var redoStack: [HistoryAction] = []
-    private let maxHistory = 50 // Limit history to prevent memory issues
+
+    /// History cap sized to the device's physical RAM. A single stroke's
+    /// `LayerSnapshot` is uncompressed BGRA tile data and can reach
+    /// ~80 MB on a 4096²/8-layer/40%-coverage drawing — a flat 50-entry
+    /// cap was costing several GB of resident memory on iPad Pro and
+    /// driving jetsam kills on smaller iPads. Caps are derived once at
+    /// init from `ProcessInfo.physicalMemory`; the buckets are
+    /// conservative on the low end and let high-RAM devices keep the
+    /// old depth.
+    private let maxHistory: Int = {
+        let gb = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        if gb <= 3.0 { return 20 }   // iPad mini 5, iPhone 8, iPad 9th gen
+        if gb <= 6.0 { return 30 }   // iPhone 11/12, iPad Air 4
+        return 50                     // M-series iPads, modern iPhones
+    }()
 
     func record(_ action: HistoryAction) {
         undoStack.append(action)
@@ -25,6 +49,39 @@ class HistoryManager: ObservableObject {
         }
 
         updateState()
+    }
+
+    /// Aggressively trim the undo stack under memory pressure. Called
+    /// from the `didReceiveMemoryWarning` listener. Keeps the most
+    /// recent N entries; older snapshots are released along with their
+    /// `LayerSnapshot` data.
+    func trimToMostRecent(_ keep: Int) {
+        if undoStack.count > keep {
+            undoStack.removeFirst(undoStack.count - keep)
+        }
+        redoStack.removeAll()
+        updateState()
+    }
+
+    private var memoryPressureObserver: NSObjectProtocol?
+
+    init() {
+        memoryPressureObserver = NotificationCenter.default.addObserver(
+            forName: .drawEvolveMemoryPressure,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // Keep just the most recent 10 entries when iOS is yelling.
+            // The user can still undo their last few strokes; older
+            // snapshots are the bulk of the resident weight.
+            self?.trimToMostRecent(10)
+        }
+    }
+
+    deinit {
+        if let observer = memoryPressureObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     func undo() -> HistoryAction? {

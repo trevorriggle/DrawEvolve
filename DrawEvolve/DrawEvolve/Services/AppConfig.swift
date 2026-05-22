@@ -31,11 +31,21 @@ enum AppConfig {
         supabaseURL != nil && supabaseAnonKey != nil
     }
 
-    private static func string(forKey key: String) -> String? {
+    /// Cached Config.plist contents. The plist is read once at first
+    /// access and reused for every subsequent key lookup. The previous
+    /// pattern hit `Bundle.main.path` + `NSDictionary(contentsOfFile:)`
+    /// on every static var access, which during launch happened at
+    /// least twice (URL + anon key) for no reason.
+    private static let cachedDict: NSDictionary? = {
         guard let path = Bundle.main.path(forResource: "Config", ofType: "plist"),
-              let dict = NSDictionary(contentsOfFile: path),
-              let value = dict[key] as? String,
-              !value.isEmpty else {
+              let dict = NSDictionary(contentsOfFile: path) else {
+            return nil
+        }
+        return dict
+    }()
+
+    private static func string(forKey key: String) -> String? {
+        guard let value = cachedDict?[key] as? String, !value.isEmpty else {
             return nil
         }
         return value

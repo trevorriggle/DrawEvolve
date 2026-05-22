@@ -51,6 +51,15 @@ final class TileGrid {
     private let device: MTLDevice
     private var tiles: [TileKey: LayerTile] = [:]
 
+    /// Cached `allocatedKeys()` result. Invalidated to nil on every tile
+    /// insert/drop; rebuilt lazily on next read. The per-frame composite
+    /// loop calls `allocatedKeys()` once per visible layer, and large
+    /// drawings can have hundreds of allocated tiles — re-boxing the
+    /// dictionary keys into a fresh Array on every read was a measurable
+    /// cost on older GPUs. The cache pays the rebuild only when the tile
+    /// set actually changes.
+    private var cachedAllocatedKeys: [TileKey]? = nil
+
     /// Creates an empty tile grid.
     ///
     /// - Parameters:
@@ -94,11 +103,12 @@ final class TileGrid {
     /// Callers that build keys by hand are responsible for their own
     /// bounds checks.
     ///
-    /// - Note: Texture allocation failure is treated as unrecoverable
-    ///   (typically out of GPU memory) and triggers a `fatalError`. The
-    ///   non-optional return type matches the spec and keeps the
-    ///   alloc-on-write path call sites uncluttered.
-    func ensureTile(at key: TileKey) -> LayerTile {
+    /// - Returns: `nil` when `device.makeTexture` fails (out-of-GPU-memory).
+    ///   Callers must handle nil gracefully — the prior `fatalError` path
+    ///   converted OOM into a crash on memory-pressured devices. Now a
+    ///   failed alloc logs via CrashReporter and the caller can skip the
+    ///   tile or surface an error to the user.
+    func ensureTile(at key: TileKey) -> LayerTile? {
         if let existing = tiles[key] {
             return existing
         }
@@ -111,13 +121,18 @@ final class TileGrid {
         descriptor.storageMode = .private
         descriptor.usage = [.shaderRead, .renderTarget]
         guard let texture = device.makeTexture(descriptor: descriptor) else {
-            fatalError("TileGrid: failed to allocate \(tileSize)x\(tileSize) tile texture for key (\(key.x), \(key.y))")
+            CrashReporter.shared.logWarning(
+                "TileGrid: failed to allocate \(tileSize)x\(tileSize) tile texture at (\(key.x), \(key.y)) — likely OOM",
+                context: "TileGrid.ensureTile"
+            )
+            return nil
         }
         let tile = LayerTile(texture: texture,
                              dirtyVersion: 0,
                              nonTransparentBits: 0,
                              wasCleared: false)
         tiles[key] = tile
+        cachedAllocatedKeys = nil
         return tile
     }
 
@@ -155,9 +170,9 @@ final class TileGrid {
     /// This matches Metal's nil-return failure mode and keeps the
     /// signature non-throwing for ergonomics at the call sites.
     func ensureTileWithClearIfNeeded(at key: TileKey,
-                                     onCommandBuffer commandBuffer: MTLCommandBuffer) -> LayerTile {
+                                     onCommandBuffer commandBuffer: MTLCommandBuffer) -> LayerTile? {
         let needsClear = (tiles[key]?.wasCleared ?? false) == false
-        let allocated = ensureTile(at: key)
+        guard let allocated = ensureTile(at: key) else { return nil }
         if needsClear {
             let desc = MTLRenderPassDescriptor()
             desc.colorAttachments[0].texture = allocated.texture
@@ -216,7 +231,9 @@ final class TileGrid {
     /// fully covers a tile. After `dropTile(at: k)`, `tile(at: k)` returns
     /// `nil` until the next `ensureTile(at: k)`.
     func dropTile(at key: TileKey) {
-        tiles.removeValue(forKey: key)
+        if tiles.removeValue(forKey: key) != nil {
+            cachedAllocatedKeys = nil
+        }
     }
 
     /// Returns all tile keys whose pixel rect intersects `docRect`.
@@ -263,7 +280,15 @@ final class TileGrid {
     /// Returns an array (not a lazy sequence) so callers can iterate
     /// without holding a reference to the underlying dictionary; this also
     /// keeps the API simple for v1 per the spec.
+    ///
+    /// Memoized: the array is built once and reused until the next
+    /// `ensureTile` / `dropTile` invalidates it. Callers that hold the
+    /// returned array across mutations get the stale snapshot they
+    /// implicitly wanted (Array is a value type).
     func allocatedKeys() -> [TileKey] {
-        Array(tiles.keys)
+        if let cached = cachedAllocatedKeys { return cached }
+        let built = Array(tiles.keys)
+        cachedAllocatedKeys = built
+        return built
     }
 }

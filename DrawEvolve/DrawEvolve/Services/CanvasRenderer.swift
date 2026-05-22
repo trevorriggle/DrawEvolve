@@ -13,7 +13,17 @@ import CoreText
 
 #if DEBUG
 enum CanvasStrokeDiagnostics {
+    /// Per-stamp / per-frame diagnostic firehose. Burns hundreds of
+    /// stderr writes per stroke on a fast scribble — was nominally
+    /// "DEBUG-only" but the flag was hardcoded to true, so release
+    /// builds paid the cost too. Now defaults to `false` in release
+    /// and `true` in debug; the static var stays settable so a debug
+    /// build can still toggle it from a breakpoint.
+    #if DEBUG
     static var isEnabled = true
+    #else
+    static var isEnabled = false
+    #endif
 
     static func log(_ message: @autoclosure () -> String) {
         guard isEnabled else { return }
@@ -5556,7 +5566,9 @@ class CanvasRenderer: NSObject {
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
 
+        #if DEBUG
         print("✅ Image loaded successfully into tile grid")
+        #endif
     }
 
     // MARK: - Selection Operations
@@ -5587,7 +5599,9 @@ class CanvasRenderer: NSObject {
     }
 
     func clearRect(_ rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) {
+        #if DEBUG
         print("CanvasRenderer: Clearing rect \(rect)")
+        #endif
 
         guard let atlas = ensureCanvasStagingAtlas() else {
             print("ERROR: Failed to ensure canvas staging atlas for clearRect")

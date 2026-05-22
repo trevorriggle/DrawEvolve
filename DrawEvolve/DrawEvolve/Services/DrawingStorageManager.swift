@@ -75,20 +75,71 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// Sync access for gallery cells. ~10-30KB per entry; for very large galleries
     /// (1000s of drawings) this should move to NSCache + lazy loading.
     ///
-    /// `@Published` so SwiftUI re-renders gallery cells when async thumbnail
-    /// downloads complete after the initial fetch. The setter is private —
-    /// observers see the change via the synchronous `thumbnailData(for:)` API.
-    @Published private var thumbnailCache: [UUID: Data] = [:]
+    /// `NSCache`-backed thumbnail store with a 50 MB cost cap. Older
+    /// devices with thousands of drawings were drifting into 50-100 MB
+    /// of resident thumbnail bytes under the old plain-Dictionary; the
+    /// cap bounds it without changing the per-cell read pattern. SwiftUI
+    /// invalidation is driven by `thumbnailCacheVersion` because NSCache
+    /// itself isn't observable — every mutation goes through
+    /// `setThumbnail`/`clearAllThumbnails` which bumps the counter.
+    private let thumbnailCache: NSCache<NSUUID, NSData> = {
+        let cache = NSCache<NSUUID, NSData>()
+        cache.totalCostLimit = 50 * 1024 * 1024
+        cache.countLimit = 5000
+        return cache
+    }()
+
+    /// Bump on every mutation so `@ObservedObject` consumers (GalleryView,
+    /// CritiqueReelRow) re-render after async hydration drops a new
+    /// thumbnail in.
+    @Published private var thumbnailCacheVersion: Int = 0
 
     /// In-memory cache of historical snapshot composite JPEGs, keyed by
     /// the snapshot's compositePath (unique per critique). The phase 2
     /// canvas-overlay flow needs flipping between historical entries in
     /// the floating feedback panel to feel instant; first fetch hits the
-    /// network, subsequent reads come from here. Invalidated alongside
+    /// network, subsequent reads come from here. NSCache with a 200 MB
+    /// cost cap — each entry is a decoded UIImage at full canvas
+    /// resolution (~16 MB at 2048², ~64 MB at 4096²), and the previous
+    /// unbounded Dictionary could pin >1 GB just from a user flipping
+    /// through their snapshot history. Invalidated alongside
     /// thumbnailCache on user change. NOT disk-persisted — composite
     /// JPEGs are ~100-300 KB and we'd rather rehydrate on next launch
     /// than carry stale bytes across sessions.
-    private var snapshotCompositeCache: [String: UIImage] = [:]
+    private let snapshotCompositeCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 200 * 1024 * 1024
+        return cache
+    }()
+
+    /// Helper: read a thumbnail from cache. Bridges NSData → Data.
+    private func cachedThumbnail(for id: UUID) -> Data? {
+        thumbnailCache.object(forKey: id as NSUUID) as Data?
+    }
+
+    /// Helper: write/remove a thumbnail and bump the observability counter.
+    private func setCachedThumbnail(_ data: Data?, for id: UUID) {
+        let key = id as NSUUID
+        if let data {
+            thumbnailCache.setObject(data as NSData, forKey: key, cost: data.count)
+        } else {
+            thumbnailCache.removeObject(forKey: key)
+        }
+        thumbnailCacheVersion &+= 1
+    }
+
+    /// Helper: empty the thumbnail cache and bump the counter.
+    private func clearAllThumbnails() {
+        thumbnailCache.removeAllObjects()
+        thumbnailCacheVersion &+= 1
+    }
+
+    /// Helper: write a snapshot composite with cost = pixel bytes.
+    private func cacheSnapshotComposite(_ image: UIImage, at path: String) {
+        let scale = image.scale
+        let cost = Int(image.size.width * scale * image.size.height * scale * 4)
+        snapshotCompositeCache.setObject(image, forKey: path as NSString, cost: cost)
+    }
 
     /// In-memory backoff schedule for retries: drawing id → next eligible retry time.
     /// Not persisted; a fresh app launch resets backoff (which is the right default —
@@ -124,17 +175,53 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// reload path (loadLayered) will read the same files.
     private var layersDir:     URL { cacheRoot.appendingPathComponent("layers",     isDirectory: true) }
 
+    private var memoryWarningObserver: NSObjectProtocol?
+
     private init() {
         for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir, layersDir] {
             try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         setupAuthObservation()
         setupNetworkObserver()
+        setupMemoryWarningObserver()
         Task { await onLaunchRecovery() }
     }
 
     deinit {
         pathMonitor.cancel()
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    /// Listen for iOS memory-pressure warnings and aggressively shed
+    /// the heaviest in-memory caches. NSCache auto-evicts on warnings
+    /// by default, but explicit `removeAllObjects()` + a notification
+    /// post is the safety net: it gives HistoryManager (which holds
+    /// uncompressed LayerSnapshot tile data) a chance to trim too, and
+    /// it fires a CrashReporter breadcrumb so we can see pressure
+    /// events in the field.
+    private func setupMemoryWarningObserver() {
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleMemoryPressure()
+        }
+    }
+
+    private func handleMemoryPressure() {
+        snapshotCompositeCache.removeAllObjects()
+        // NSCache already auto-evicts thumbnails on cost pressure, but
+        // bump the version so any in-flight gallery cell re-reads after
+        // the eviction.
+        thumbnailCacheVersion &+= 1
+        NotificationCenter.default.post(name: .drawEvolveMemoryPressure, object: nil)
+        CrashReporter.shared.logWarning(
+            "Memory pressure: dropped snapshot composite cache",
+            context: "CloudDrawingStorageManager.handleMemoryPressure"
+        )
     }
 
     // MARK: - Auth + network observation
@@ -177,8 +264,8 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// here because they're not the current user's responsibility to surface.
     private func resetForUserChange() {
         drawings.removeAll()
-        thumbnailCache.removeAll()
-        snapshotCompositeCache.removeAll()
+        clearAllThumbnails()
+        snapshotCompositeCache.removeAllObjects()
         nextRetryAt.removeAll()
         for (_, task) in activeUploadTasks { task.cancel() }
         activeUploadTasks.removeAll()
@@ -211,7 +298,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         guard let activeUserID = currentEffectiveUserID() else {
             // No user at all (signed out, no bypass) — surface empty gallery.
             drawings = []
-            thumbnailCache.removeAll()
+            clearAllThumbnails()
             return
         }
 
@@ -280,30 +367,63 @@ final class CloudDrawingStorageManager: ObservableObject {
 
     private func hydrateThumbnails(for drawings: [Drawing]) async {
         let activeUserID = currentEffectiveUserID()
+
+        // Phase 1: fast local-disk sweep. Sequential is fine; each read
+        // is ~30 KB and finishes in single-digit milliseconds.
+        var missing: [Drawing] = []
         for drawing in drawings {
             let url = thumbnailsDir.appendingPathComponent("\(drawing.id.uuidString).jpg")
             if let data = try? Data(contentsOf: url) {
-                thumbnailCache[drawing.id] = data
-                continue
+                setCachedThumbnail(data, for: drawing.id)
+            } else {
+                missing.append(drawing)
             }
-            // Missing locally — try to pull it from cloud. Skip for bypass user
-            // (no session) or when the drawing belongs to a different user.
-            #if DEBUG
-            if AuthManager.shared.isDebugBypassed { continue }
-            #endif
-            guard drawing.userId == activeUserID,
-                  let client = SupabaseManager.shared.client else { continue }
+        }
 
-            let thumbPath = thumbnailStoragePath(for: drawing)
-            do {
-                let bytes = try await client.storage
-                    .from(storageBucketID)
-                    .download(path: thumbPath)
-                try? bytes.write(to: url)
-                thumbnailCache[drawing.id] = bytes
-            } catch {
-                // Non-fatal — gallery cell will fall back to placeholder.
+        #if DEBUG
+        if AuthManager.shared.isDebugBypassed { return }
+        #endif
+        guard let client = SupabaseManager.shared.client else { return }
+        let bucket = storageBucketID
+        let thumbsDir = thumbnailsDir
+
+        // Phase 2: parallel cloud downloads in chunks of 6. The old
+        // sequential `for await` loop took up to one network RTT per
+        // missing thumbnail; a fresh sign-in with 100+ drawings on
+        // cellular meant 60-120s of empty gallery cells before the
+        // first one filled. Chunking caps concurrency so we don't fan
+        // out to hundreds of simultaneous Supabase storage requests
+        // when the user has a huge gallery.
+        let candidates = missing.filter { $0.userId == activeUserID }
+        let chunkSize = 6
+        var index = 0
+        while index < candidates.count {
+            let end = min(index + chunkSize, candidates.count)
+            await withTaskGroup(of: (UUID, Data?).self) { group in
+                for i in index..<end {
+                    let drawing = candidates[i]
+                    let id = drawing.id
+                    let path = thumbnailStoragePath(for: drawing)
+                    let url = thumbsDir.appendingPathComponent("\(id.uuidString).jpg")
+                    group.addTask {
+                        do {
+                            let bytes = try await client.storage
+                                .from(bucket)
+                                .download(path: path)
+                            try? bytes.write(to: url)
+                            return (id, bytes)
+                        } catch {
+                            return (id, nil)
+                        }
+                    }
+                }
+                for await (id, bytes) in group {
+                    if let bytes {
+                        setCachedThumbnail(bytes, for: id)
+                    }
+                }
             }
+            index = end
         }
     }
 
@@ -812,7 +932,7 @@ final class CloudDrawingStorageManager: ObservableObject {
 
         let drawing = drawings.first(where: { $0.id == id })
         drawings.removeAll { $0.id == id }
-        thumbnailCache[id] = nil
+        setCachedThumbnail(nil, for: id)
 
         // Always wipe local cache + pending entry.
         removeLocalArtifacts(forDrawingID: id)
@@ -879,8 +999,8 @@ final class CloudDrawingStorageManager: ObservableObject {
         nextRetryAt.removeAll()
 
         drawings.removeAll()
-        thumbnailCache.removeAll()
-        snapshotCompositeCache.removeAll()
+        clearAllThumbnails()
+        snapshotCompositeCache.removeAllObjects()
         pendingUploadCount = 0
 
         // Wipe contents of the cache subdirs but leave the directories
@@ -905,8 +1025,8 @@ final class CloudDrawingStorageManager: ObservableObject {
 
         let snapshot = drawings
         drawings.removeAll()
-        thumbnailCache.removeAll()
-        snapshotCompositeCache.removeAll()
+        clearAllThumbnails()
+        snapshotCompositeCache.removeAllObjects()
 
         // Wipe local cache contents (but keep the directories).
         for dir in [metadataDir, thumbnailsDir, imagesDir, pendingDir, layersDir] {
@@ -941,11 +1061,16 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// Synchronous thumbnail accessor for gallery cells. Returns nil while the
     /// thumbnail is still being hydrated; the cell should fall back to a placeholder.
     func thumbnailData(for id: UUID) -> Data? {
-        if let cached = thumbnailCache[id] { return cached }
+        // Touch the version so SwiftUI re-evaluates after a recent
+        // mutation drops a new thumbnail in; the read of `_ =` here is
+        // intentional — we want the @Published dependency for any
+        // ObservedObject consumer that calls into this accessor.
+        _ = thumbnailCacheVersion
+        if let cached = cachedThumbnail(for: id) { return cached }
         // Last-ditch: try disk on the calling thread. Cheap (< 30KB).
         let url = thumbnailsDir.appendingPathComponent("\(id.uuidString).jpg")
         if let data = try? Data(contentsOf: url) {
-            thumbnailCache[id] = data
+            setCachedThumbnail(data, for: id)
             return data
         }
         return nil
@@ -967,7 +1092,7 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// network round-trip when the user flips back to an entry they've
     /// already viewed.
     func cachedSnapshotComposite(at path: String) -> UIImage? {
-        snapshotCompositeCache[path]
+        snapshotCompositeCache.object(forKey: path as NSString)
     }
 
     /// Fetch a snapshot composite JPEG by its storage path (typically
@@ -980,7 +1105,9 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// `fetchFailed` if the signed URL fetch returns no bytes, or
     /// rethrows the underlying URL/Supabase error.
     func loadSnapshotComposite(at path: String) async throws -> UIImage {
-        if let cached = snapshotCompositeCache[path] { return cached }
+        if let cached = snapshotCompositeCache.object(forKey: path as NSString) {
+            return cached
+        }
         guard let client = SupabaseManager.shared.client else {
             throw DrawingStorageError.notAuthenticated
         }
@@ -991,7 +1118,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         guard let image = UIImage(data: data) else {
             throw DrawingStorageError.fetchFailed
         }
-        snapshotCompositeCache[path] = image
+        cacheSnapshotComposite(image, at: path)
         return image
     }
 
@@ -1091,7 +1218,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             if let thumbData = makeThumbnail(from: imageData) {
                 let thumbURL = thumbnailsDir.appendingPathComponent("\(drawing.id.uuidString).jpg")
                 try thumbData.write(to: thumbURL)
-                thumbnailCache[drawing.id] = thumbData
+                setCachedThumbnail(thumbData, for: drawing.id)
             }
         }
         writeMetadataToCache(drawing)
@@ -1108,7 +1235,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         if let thumbData = artifacts.thumbnailJPEG {
             let thumbURL = thumbnailsDir.appendingPathComponent("\(drawing.id.uuidString).jpg")
             try thumbData.write(to: thumbURL)
-            thumbnailCache[drawing.id] = thumbData
+            setCachedThumbnail(thumbData, for: drawing.id)
         }
         writeMetadataToCache(drawing)
     }
@@ -1719,7 +1846,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         guard let jpeg else { return }
         let url = thumbnailsDir.appendingPathComponent("\(drawingID.uuidString).jpg")
         try jpeg.write(to: url)
-        thumbnailCache[drawingID] = jpeg
+        setCachedThumbnail(jpeg, for: drawingID)
     }
 
     private func readLayeredArtifactsLocally(drawingID: UUID, expectedLayerCount: Int) -> LayeredDrawingPayload? {

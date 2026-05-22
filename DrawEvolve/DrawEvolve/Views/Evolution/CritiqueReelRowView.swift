@@ -125,17 +125,14 @@ struct CritiqueReelRowView: View {
             self.thumbnail = img
             return
         }
-        // Cache miss — try the async full-image loader as a fallback.
-        // The view's frame clamps display size, so even if we end up
-        // pulling the larger composite JPEG, the render cost is bounded.
-        do {
-            if let data = try await manager.loadFullImage(for: row.drawingId),
-               let img = UIImage(data: data) {
-                self.thumbnail = img
-            }
-        } catch {
-            // Silent — placeholder photo icon already shows.
-        }
+        // Cache miss — leave the placeholder up. The previous fallback
+        // decoded the FULL-resolution composite image (16-64 MB at canvas
+        // size) just to display an 80×80 tile, which blew memory on older
+        // hardware whenever the thumbnail cache hadn't filled in yet.
+        // The reel view's `task(id:)` re-fires when the drawing id
+        // changes; the gallery's thumbnail hydration will populate the
+        // shared cache eventually, and ContentView re-renders pick up
+        // the new bytes via the manager's observable invalidation.
     }
 
     private func openDrawing() {
