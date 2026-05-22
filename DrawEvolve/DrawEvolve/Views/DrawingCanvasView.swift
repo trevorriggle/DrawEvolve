@@ -1023,7 +1023,18 @@ struct DrawingCanvasView: View {
     // attached here); those modifiers are now lifted to the outer Group
     // wrapper in `body` so both branches share them.
 
-    private var padBody: some View {
+    // Returns AnyView (not `some View`) to type-erase the very deep
+    // generic ZStack body. The Swift runtime type demangler runs out of
+    // stack walking padBody's full TupleView<...> chain on 10-year-old
+    // iPads (1 MB main-thread stack vs 8 MB on the simulator). The
+    // crash signature was 50+ frames of swift::Demangle::__runtime in
+    // the thread-1 backtrace. AnyView is a closed type — the demangler
+    // stops at the boundary instead of recursing into the inner type.
+    // Trade-off: we lose some of SwiftUI's structural diffing across
+    // re-renders inside padBody; perf-wise that's measurable but
+    // strictly better than a guaranteed crash on older hardware.
+    private var padBody: AnyView {
+        AnyView(
         ZStack(alignment: .topLeading) {
             // Main canvas - FULLSCREEN (bottom layer)
             MetalCanvasView(
@@ -1523,6 +1534,7 @@ struct DrawingCanvasView: View {
                 .transition(.scale(scale: 0.95).combined(with: .opacity))
             }
         }
+        )  // close AnyView wrap
         // Note: sheets / alerts / fullScreenCover / onChange / onAppear /
         // preferredColorScheme modifiers used to live here on the ZStack;
         // PR #33 (iPhone Phase 2 / C1) lifted them onto the outer Group
