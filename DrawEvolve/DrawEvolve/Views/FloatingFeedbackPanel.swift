@@ -368,15 +368,16 @@ struct FloatingFeedbackPanel: View {
                         .foregroundColor(.secondary)
                 }
 
-                Text({
-                    let body = CritiqueSummary.parse(entry.feedback).body
-                    let limit = 200
-                    return body.count > limit ? String(body.prefix(limit)) + "…" : body
-                }())
-                .font(.subheadline)
-                .foregroundStyle(.primary)
-                .lineLimit(5)
-                .fixedSize(horizontal: false, vertical: true)
+                // Use the same markdown renderer as the full panel so
+                // bold / italic / links / inline formatting carry over.
+                // Scrolls inside a constrained area when the critique
+                // is longer than the compact frame can show.
+                ScrollView {
+                    FormattedMarkdownView(text: displayedFeedback)
+                        .textSelection(.enabled)
+                        .padding(.vertical, 2)
+                }
+                .frame(maxHeight: 180)
             } else {
                 Text("No critique selected")
                     .font(.subheadline)
@@ -466,6 +467,25 @@ struct FloatingFeedbackPanel: View {
                             Spacer()
 
                             HStack(spacing: 12) {
+                                // Shrink-to-compact button — only shown
+                                // when we're in the full panel inside
+                                // snapshot mode. Goes back to the smaller
+                                // compact form without collapsing all the
+                                // way down to the pill. Outside snapshot
+                                // mode there's no compact form, so this
+                                // button doesn't render.
+                                if isInSnapshotMode && isFullSize {
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.25)) {
+                                            isFullSize = false
+                                        }
+                                    }) {
+                                        Image(systemName: "arrow.down.right.and.arrow.up.left.circle.fill")
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .help("Shrink to compact")
+                                }
+
                                 // Reset position button
                                 Button(action: { resetPosition() }) {
                                     Image(systemName: "arrow.counterclockwise.circle.fill")
