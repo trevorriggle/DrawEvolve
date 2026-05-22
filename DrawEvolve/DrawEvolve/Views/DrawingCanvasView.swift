@@ -1381,6 +1381,294 @@ struct DrawingCanvasView: View {
                         // from the iPhone phoneToolPanel grid. The
                         // tile-mirroring comment on phoneToolPanel is
                         // therefore stale by design for v1.1+.
+                        toolPaletteGrid
+                    }
+
+                    // Pinned bottom — Import/Export above Undo/Redo, both
+                    // above the existing Globe block. These sit OUTSIDE
+                    // the ScrollView so they remain anchored regardless
+                    // of toolbar scroll position. Behavior of each entry
+                    // is unchanged from when they lived inside the grid.
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            // Image import — bifurcated picker. Button
+                            // opens a confirmationDialog with "Import as
+                            // Layer" / "Add as Reference"; each option
+                            // triggers its own PhotosPicker. See the
+                            // modifier chain on body for the dialog +
+                            // pickers + handlers.
+                            Button(action: { showPhotoChoice = true }) {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.system(size: 22))
+                                    .frame(width: 44, height: 44)
+                            }
+
+                            // Download composited image to Photos
+                            ToolButton(
+                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                                isSelected: false
+                            ) {
+                                Task { await downloadToPhotos() }
+                            }
+                            .disabled(isSavingToPhotos)
+                        }
+
+                        HStack(spacing: 8) {
+                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                                canvasState.undo()
+                            }
+                            .disabled(!canvasState.historyManager.canUndo)
+
+                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                                canvasState.redo()
+                            }
+                            .disabled(!canvasState.historyManager.canRedo)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
+
+                    if Self.showGlobeIcon {
+                        Divider()
+                        Button(action: {
+                            // TODO: Wire to social features when implemented.
+                        }) {
+                            Image(systemName: "globe")
+                                .font(.system(size: 44))
+                                .foregroundColor(.primary)
+                                .frame(width: 88, height: 88)
+                        }
+                        .accessibilityLabel("Social")
+                    }
+                    } // end inner VStack(spacing: 0); contents kept at original
+                      // indent to avoid a re-indent churn diff for unrelated lines.
+                    .frame(width: 104) // 2 columns of 44px + padding
+                    .background(Color(uiColor: .systemBackground).opacity(0.95))
+                    .cornerRadius(12)
+                    .shadow(radius: 5)
+                    .padding(.leading, 8)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+
+                // Collapse/Expand button at bottom of toolbar
+                Button(action: {
+                    withAnimation(.spring(response: 0.3)) {
+                        isToolbarCollapsed.toggle()
+                    }
+                }) {
+                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .frame(width: 44, height: 44)
+                        .background(Color(uiColor: .systemBackground).opacity(0.95))
+                        .cornerRadius(8)
+                        .shadow(radius: 5)
+                }
+                .padding(.leading, 8)
+                .padding(.top, isToolbarCollapsed ? 8 : 4)
+            }
+            }  // end if !isViewingSnapshot wrapper for floating toolbar
+
+            // Floating feedback panel. Stays visible in snapshot mode —
+            // it's the navigator the user uses to flip between critiques
+            // (and thus snapshots). The two new params wire phase 2:
+            // onActiveEntryChange drives canvasState.viewingSnapshot;
+            // initialSelectedEntryId lets the studio-wall navigation
+            // open this view with a pre-selected entry.
+            if showFeedback, canvasState.feedback != nil {
+                FloatingFeedbackPanel(
+                    feedback: canvasState.feedback,
+                    critiqueHistory: critiqueHistory,
+                    isPresented: $showFeedback,
+                    onAskEve: { sequence in
+                        openEve(scope: .drawing, critiqueSequence: sequence)
+                    },
+                    onActiveEntryChange: { entry, isLatest in
+                        // Snapshot mode rule: enter iff the user picked
+                        // a HISTORICAL entry that has a snapshot. Most-
+                        // recent entries and pre-VH legacy entries
+                        // (snapshot == nil) leave the live canvas alone.
+                        guard let entry = entry,
+                              !isLatest,
+                              let snapshot = entry.snapshot else {
+                            canvasState.viewingSnapshot = nil
+                            return
+                        }
+                        canvasState.viewingSnapshot = CanvasStateManager.SnapshotViewingState(
+                            snapshot: snapshot,
+                            timestamp: entry.timestamp
+                        )
+                    },
+                    initialSelectedEntryId: preselectedCritique?.id,
+                    isInSnapshotMode: canvasState.viewingSnapshot != nil
+                )
+            }
+
+            // Eve floating panel renders at the END of padBody (below) so
+            // it's the topmost layer in the ZStack — above the action
+            // column, the bottom-right CTAs, and the canvas itself. The
+            // earlier in-stack position let the action column win the
+            // z-fight and let canvas touches pass through to the brush
+            // pipeline. See the `// Eve modal — iPad` block below.
+
+            // Selection actions overlay — iPad positioning. The card
+            // content (caption + Cancel + Delete pills) lives in the
+            // shared `selectionActiveCard` computed property; only the
+            // outer VStack/Spacer/HStack/Spacer + bottom-200 positioning
+            // is iPad-specific. Same justified-deviation pattern as
+            // Phase 4's critiqueContent extraction.
+            if !isViewingSnapshot,
+               canvasState.activeSelection != nil || canvasState.selectionPath != nil {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        selectionActiveCard
+                        .padding(.trailing, 12)
+                        .padding(.bottom, 200) // Position above Save/Feedback buttons
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+
+            // Top right - Gallery button (always visible) + gear icon
+            // (visibility tied to toolbar collapse). The two share a VStack so
+            // the gear sits flush below the gallery icon without magic-number
+            // padding; only the gear has the move/opacity transition since the
+            // gallery icon stays put.
+            //
+            // Phase 2 — even the "always visible" gallery/Eve/Eye Test
+            // cluster hides in snapshot mode (per "hide the entire
+            // toolbar" rule). Restored when the snapshot clears.
+            if !isViewingSnapshot {
+                VStack {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Button(action: { showGallery = true }) {
+                            Image(systemName: "photo.on.rectangle")
+                                .font(.system(size: 32))
+                                .foregroundColor(.accentColor)
+                                .frame(width: 50, height: 50)
+                                .background(Color(uiColor: .systemBackground).opacity(0.95))
+                                .clipShape(Circle())
+                                .shadow(radius: 4)
+                        }
+
+                        // Eve coach — Feature 2, Phase 2A. Sits in the
+                        // always-visible tier alongside Gallery (above
+                        // the collapsible group) so the user can reach
+                        // Eve even when the toolbar's hidden for focus.
+                        // Lower visual weight than Gallery (44×44 with
+                        // .primary monochrome treatment) so it doesn't
+                        // visually compete with the "Get Feedback" CTA.
+                        // iPhone path defers this affordance — iPhone
+                        // users reach Eve via Ask Eve on FloatingFeedback-
+                        // Panel only (per Phase 2A spec).
+                        EveIconButton(action: { openEve(scope: .general) })
+
+                        // Composition / "Eye Test" entry. Sits immediately
+                        // below Eve in the always-visible chrome tier so
+                        // the user can reach it without expanding the
+                        // toolbar. Gated by the `eye_test_panel` remote
+                        // feature flag — when the flag is off, the
+                        // button doesn't mount at all (no flicker, no
+                        // empty-state).
+                        if appFeatureFlags.isEnabled(FeatureFlagName.eyeTestPanel) {
+                            EyeTestIconButton(action: { showEyeTestPanel = true })
+                        }
+
+                        if !isToolbarCollapsed {
+                            settingsGearButton
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                            // Beta Notice + How It Works moved into
+                            // SettingsView (see settingsView.infoSection).
+                            // Their per-canvas icons were removed here
+                            // to declutter the floating chrome.
+                        }
+                    }
+                    .padding(.top, 12)
+                    .padding(.trailing, 12)
+                }
+                Spacer()
+                }
+            }  // end if !isViewingSnapshot wrapper for top-right cluster
+
+            // Bottom right - Action buttons (collapses with toolbar). Extracted
+            // into a computed property because the inline expression pushed
+            // the body past the Swift type-checker's tolerance once the gear
+            // button landed in Phase 6. Hidden entirely in snapshot mode
+            // alongside the rest of the editing chrome.
+            if !isViewingSnapshot, !isToolbarCollapsed {
+                bottomRightActionButtons
+            }
+
+            // Eve modal — iPad. Renders LAST in the padBody ZStack so the
+            // dim backdrop and the panel sit above everything else (canvas,
+            // tool rail, action column, bottom CTAs). The dim layer absorbs
+            // touches via the default hit-testing — without it the user
+            // could keep drawing / switching tools / tapping Get Feedback
+            // while Eve was open, which broke the "focused conversation"
+            // promise. Dismissal is X-button-only by design; tap-outside
+            // was too easy to trigger accidentally and lost in-progress
+            // conversations.
+            //
+            // Width 560 reads well on landscape (~half-screen) and
+            // portrait (~70% of the narrower axis). Height caps at 820
+            // with 80pt of breathing room. Both axes clamp against the
+            // geometry so an unusually small split-screen pane still
+            // fits the panel.
+            if showEve {
+                Color.black
+                    .opacity(0.35)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+
+                GeometryReader { geo in
+                    EveSheetHost(
+                        scope: eveScope,
+                        drawingId: eveScope == .drawing ? currentDrawingID : nil,
+                        critiqueSequence: eveCritiqueSequence,
+                        drawingTitle: eveDrawingTitle,
+                        onClose: {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                                showEve = false
+                            }
+                        }
+                    )
+                    .frame(
+                        width: min(560, geo.size.width - 40),
+                        height: min(820, geo.size.height - 80)
+                    )
+                    .background(Color(uiColor: .systemBackground))
+                    .cornerRadius(16)
+                    .shadow(radius: 12)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
+                .transition(.scale(scale: 0.95).combined(with: .opacity))
+            }
+        }
+        // Note: sheets / alerts / fullScreenCover / onChange / onAppear /
+        // preferredColorScheme modifiers used to live here on the ZStack;
+        // PR #33 (iPhone Phase 2 / C1) lifted them onto the outer Group
+        // wrapper in `body` so phoneBody and padBody share them. Don't
+        // re-add them here — they'd double-fire.
+    }
+
+    // MARK: - Extracted: tool palette grid
+    //
+    // Extracted from padBody to keep DrawingCanvasView's SwiftUI
+    // body tree shallow enough to fit in the iOS 1 MB main-thread
+    // stack. The inline LazyVGrid held 20 sibling tool slots which
+    // the compiler wraps in nested TupleView generics deep enough
+    // to overflow stack on older iPads (any device older than ~2018
+    // hit this on first open of the canvas). Routing the grid
+    // through an opaque `some View` boundary gives SwiftUI's view
+    // resolver a place to break the body-evaluation recursion.
+
+    @ViewBuilder
+    private var toolPaletteGrid: some View {
                         LazyVGrid(columns: [GridItem(.fixed(44)), GridItem(.fixed(44))], spacing: 8) {
                             // Row 1: Brushes (grouped — pencil / brush /
                             // ink pen / marker / airbrush / charcoal),
@@ -1659,278 +1947,6 @@ struct DrawingCanvasView: View {
                         .padding(.top, 12)
                         .padding(.horizontal, 8)
                         .padding(.bottom, 8)
-                    }
-
-                    // Pinned bottom — Import/Export above Undo/Redo, both
-                    // above the existing Globe block. These sit OUTSIDE
-                    // the ScrollView so they remain anchored regardless
-                    // of toolbar scroll position. Behavior of each entry
-                    // is unchanged from when they lived inside the grid.
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            // Image import — bifurcated picker. Button
-                            // opens a confirmationDialog with "Import as
-                            // Layer" / "Add as Reference"; each option
-                            // triggers its own PhotosPicker. See the
-                            // modifier chain on body for the dialog +
-                            // pickers + handlers.
-                            Button(action: { showPhotoChoice = true }) {
-                                Image(systemName: "photo.badge.plus")
-                                    .font(.system(size: 22))
-                                    .frame(width: 44, height: 44)
-                            }
-
-                            // Download composited image to Photos
-                            ToolButton(
-                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
-                                isSelected: false
-                            ) {
-                                Task { await downloadToPhotos() }
-                            }
-                            .disabled(isSavingToPhotos)
-                        }
-
-                        HStack(spacing: 8) {
-                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
-                                canvasState.undo()
-                            }
-                            .disabled(!canvasState.historyManager.canUndo)
-
-                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
-                                canvasState.redo()
-                            }
-                            .disabled(!canvasState.historyManager.canRedo)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 8)
-
-                    if Self.showGlobeIcon {
-                        Divider()
-                        Button(action: {
-                            // TODO: Wire to social features when implemented.
-                        }) {
-                            Image(systemName: "globe")
-                                .font(.system(size: 44))
-                                .foregroundColor(.primary)
-                                .frame(width: 88, height: 88)
-                        }
-                        .accessibilityLabel("Social")
-                    }
-                    } // end inner VStack(spacing: 0); contents kept at original
-                      // indent to avoid a re-indent churn diff for unrelated lines.
-                    .frame(width: 104) // 2 columns of 44px + padding
-                    .background(Color(uiColor: .systemBackground).opacity(0.95))
-                    .cornerRadius(12)
-                    .shadow(radius: 5)
-                    .padding(.leading, 8)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-
-                // Collapse/Expand button at bottom of toolbar
-                Button(action: {
-                    withAnimation(.spring(response: 0.3)) {
-                        isToolbarCollapsed.toggle()
-                    }
-                }) {
-                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(width: 44, height: 44)
-                        .background(Color(uiColor: .systemBackground).opacity(0.95))
-                        .cornerRadius(8)
-                        .shadow(radius: 5)
-                }
-                .padding(.leading, 8)
-                .padding(.top, isToolbarCollapsed ? 8 : 4)
-            }
-            }  // end if !isViewingSnapshot wrapper for floating toolbar
-
-            // Floating feedback panel. Stays visible in snapshot mode —
-            // it's the navigator the user uses to flip between critiques
-            // (and thus snapshots). The two new params wire phase 2:
-            // onActiveEntryChange drives canvasState.viewingSnapshot;
-            // initialSelectedEntryId lets the studio-wall navigation
-            // open this view with a pre-selected entry.
-            if showFeedback, canvasState.feedback != nil {
-                FloatingFeedbackPanel(
-                    feedback: canvasState.feedback,
-                    critiqueHistory: critiqueHistory,
-                    isPresented: $showFeedback,
-                    onAskEve: { sequence in
-                        openEve(scope: .drawing, critiqueSequence: sequence)
-                    },
-                    onActiveEntryChange: { entry, isLatest in
-                        // Snapshot mode rule: enter iff the user picked
-                        // a HISTORICAL entry that has a snapshot. Most-
-                        // recent entries and pre-VH legacy entries
-                        // (snapshot == nil) leave the live canvas alone.
-                        guard let entry = entry,
-                              !isLatest,
-                              let snapshot = entry.snapshot else {
-                            canvasState.viewingSnapshot = nil
-                            return
-                        }
-                        canvasState.viewingSnapshot = CanvasStateManager.SnapshotViewingState(
-                            snapshot: snapshot,
-                            timestamp: entry.timestamp
-                        )
-                    },
-                    initialSelectedEntryId: preselectedCritique?.id,
-                    isInSnapshotMode: canvasState.viewingSnapshot != nil
-                )
-            }
-
-            // Eve floating panel renders at the END of padBody (below) so
-            // it's the topmost layer in the ZStack — above the action
-            // column, the bottom-right CTAs, and the canvas itself. The
-            // earlier in-stack position let the action column win the
-            // z-fight and let canvas touches pass through to the brush
-            // pipeline. See the `// Eve modal — iPad` block below.
-
-            // Selection actions overlay — iPad positioning. The card
-            // content (caption + Cancel + Delete pills) lives in the
-            // shared `selectionActiveCard` computed property; only the
-            // outer VStack/Spacer/HStack/Spacer + bottom-200 positioning
-            // is iPad-specific. Same justified-deviation pattern as
-            // Phase 4's critiqueContent extraction.
-            if !isViewingSnapshot,
-               canvasState.activeSelection != nil || canvasState.selectionPath != nil {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        selectionActiveCard
-                        .padding(.trailing, 12)
-                        .padding(.bottom, 200) // Position above Save/Feedback buttons
-                    }
-                }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
-
-            // Top right - Gallery button (always visible) + gear icon
-            // (visibility tied to toolbar collapse). The two share a VStack so
-            // the gear sits flush below the gallery icon without magic-number
-            // padding; only the gear has the move/opacity transition since the
-            // gallery icon stays put.
-            //
-            // Phase 2 — even the "always visible" gallery/Eve/Eye Test
-            // cluster hides in snapshot mode (per "hide the entire
-            // toolbar" rule). Restored when the snapshot clears.
-            if !isViewingSnapshot {
-                VStack {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 8) {
-                        Button(action: { showGallery = true }) {
-                            Image(systemName: "photo.on.rectangle")
-                                .font(.system(size: 32))
-                                .foregroundColor(.accentColor)
-                                .frame(width: 50, height: 50)
-                                .background(Color(uiColor: .systemBackground).opacity(0.95))
-                                .clipShape(Circle())
-                                .shadow(radius: 4)
-                        }
-
-                        // Eve coach — Feature 2, Phase 2A. Sits in the
-                        // always-visible tier alongside Gallery (above
-                        // the collapsible group) so the user can reach
-                        // Eve even when the toolbar's hidden for focus.
-                        // Lower visual weight than Gallery (44×44 with
-                        // .primary monochrome treatment) so it doesn't
-                        // visually compete with the "Get Feedback" CTA.
-                        // iPhone path defers this affordance — iPhone
-                        // users reach Eve via Ask Eve on FloatingFeedback-
-                        // Panel only (per Phase 2A spec).
-                        EveIconButton(action: { openEve(scope: .general) })
-
-                        // Composition / "Eye Test" entry. Sits immediately
-                        // below Eve in the always-visible chrome tier so
-                        // the user can reach it without expanding the
-                        // toolbar. Gated by the `eye_test_panel` remote
-                        // feature flag — when the flag is off, the
-                        // button doesn't mount at all (no flicker, no
-                        // empty-state).
-                        if appFeatureFlags.isEnabled(FeatureFlagName.eyeTestPanel) {
-                            EyeTestIconButton(action: { showEyeTestPanel = true })
-                        }
-
-                        if !isToolbarCollapsed {
-                            settingsGearButton
-                                .transition(.move(edge: .trailing).combined(with: .opacity))
-                            // Beta Notice + How It Works moved into
-                            // SettingsView (see settingsView.infoSection).
-                            // Their per-canvas icons were removed here
-                            // to declutter the floating chrome.
-                        }
-                    }
-                    .padding(.top, 12)
-                    .padding(.trailing, 12)
-                }
-                Spacer()
-                }
-            }  // end if !isViewingSnapshot wrapper for top-right cluster
-
-            // Bottom right - Action buttons (collapses with toolbar). Extracted
-            // into a computed property because the inline expression pushed
-            // the body past the Swift type-checker's tolerance once the gear
-            // button landed in Phase 6. Hidden entirely in snapshot mode
-            // alongside the rest of the editing chrome.
-            if !isViewingSnapshot, !isToolbarCollapsed {
-                bottomRightActionButtons
-            }
-
-            // Eve modal — iPad. Renders LAST in the padBody ZStack so the
-            // dim backdrop and the panel sit above everything else (canvas,
-            // tool rail, action column, bottom CTAs). The dim layer absorbs
-            // touches via the default hit-testing — without it the user
-            // could keep drawing / switching tools / tapping Get Feedback
-            // while Eve was open, which broke the "focused conversation"
-            // promise. Dismissal is X-button-only by design; tap-outside
-            // was too easy to trigger accidentally and lost in-progress
-            // conversations.
-            //
-            // Width 560 reads well on landscape (~half-screen) and
-            // portrait (~70% of the narrower axis). Height caps at 820
-            // with 80pt of breathing room. Both axes clamp against the
-            // geometry so an unusually small split-screen pane still
-            // fits the panel.
-            if showEve {
-                Color.black
-                    .opacity(0.35)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-
-                GeometryReader { geo in
-                    EveSheetHost(
-                        scope: eveScope,
-                        drawingId: eveScope == .drawing ? currentDrawingID : nil,
-                        critiqueSequence: eveCritiqueSequence,
-                        drawingTitle: eveDrawingTitle,
-                        onClose: {
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
-                                showEve = false
-                            }
-                        }
-                    )
-                    .frame(
-                        width: min(560, geo.size.width - 40),
-                        height: min(820, geo.size.height - 80)
-                    )
-                    .background(Color(uiColor: .systemBackground))
-                    .cornerRadius(16)
-                    .shadow(radius: 12)
-                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                }
-                .transition(.scale(scale: 0.95).combined(with: .opacity))
-            }
-        }
-        // Note: sheets / alerts / fullScreenCover / onChange / onAppear /
-        // preferredColorScheme modifiers used to live here on the ZStack;
-        // PR #33 (iPhone Phase 2 / C1) lifted them onto the outer Group
-        // wrapper in `body` so phoneBody and padBody share them. Don't
-        // re-add them here — they'd double-fire.
     }
 
     // MARK: - Type Bar overlay (Tier 1.4)
