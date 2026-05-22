@@ -28,6 +28,7 @@
 		DE000024 /* DrawingStorageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100024 /* DrawingStorageManager.swift */; };
 		DE000025 /* Drawing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100025 /* Drawing.swift */; };
 		DE000028 /* GalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100028 /* GalleryView.swift */; };
+		DE000142 /* DrawEvolveBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100142 /* DrawEvolveBackground.swift */; };
 		DE000029 /* AnonymousUserManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100029 /* AnonymousUserManager.swift */; };
 		DE000030 /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100030 /* FloatingFeedbackPanel.swift */; };
 		DE000031 /* DrawingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100031 /* DrawingDetailView.swift */; };
@@ -154,6 +155,7 @@
 		DE100024 /* DrawingStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingStorageManager.swift; sourceTree = "<group>"; };
 		DE100025 /* Drawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drawing.swift; sourceTree = "<group>"; };
 		DE100028 /* GalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryView.swift; sourceTree = "<group>"; };
+		DE100142 /* DrawEvolveBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawEvolveBackground.swift; sourceTree = "<group>"; };
 		DE100029 /* AnonymousUserManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnonymousUserManager.swift; sourceTree = "<group>"; };
 		DE100030 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
 		DE100031 /* DrawingDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingDetailView.swift; sourceTree = "<group>"; };
@@ -323,6 +325,7 @@
 				DE100019 /* LayerPanelView.swift */,
 				DE100020 /* BrushSettingsView.swift */,
 				DE100028 /* GalleryView.swift */,
+				DE100142 /* DrawEvolveBackground.swift */,
 				DE100030 /* FloatingFeedbackPanel.swift */,
 				DE100034 /* FormattedMarkdownView.swift */,
 				DE100031 /* DrawingDetailView.swift */,
@@ -631,6 +634,7 @@
 				DE000025 /* Drawing.swift in Sources */,
 				DE000096 /* CritiqueSummary.swift in Sources */,
 				DE000028 /* GalleryView.swift in Sources */,
+				DE000142 /* DrawEvolveBackground.swift in Sources */,
 				DE000029 /* AnonymousUserManager.swift in Sources */,
 				DE000030 /* FloatingFeedbackPanel.swift in Sources */,
 				DE000034 /* FormattedMarkdownView.swift in Sources */,

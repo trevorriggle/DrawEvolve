@@ -15,56 +15,111 @@ struct LaunchHomeView: View {
     let onOpenGallery: () -> Void
 
     @EnvironmentObject private var authManager: AuthManager
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(spacing: 32) {
-            Spacer()
+        ZStack {
+            DrawEvolveBackground()
+                .ignoresSafeArea()
 
-            Image("DrawEvolveLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 320, height: 320)
+            VStack(spacing: 28) {
+                Spacer()
 
-            VStack(spacing: 8) {
-                Text("Welcome to DrawEvolve")
-                    .font(.largeTitle.weight(.bold))
-                    .foregroundStyle(.primary)
-                Text("Draw. Get a critique. Evolve.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
+                Image("DrawEvolveLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 280, height: 280)
+                    .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.12),
+                            radius: 18, x: 0, y: 6)
 
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button(action: onNewCanvas) {
-                    Label("Set up a new canvas", systemImage: "square.and.pencil")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
+                VStack(spacing: 6) {
+                    Text("Welcome to DrawEvolve")
+                        .font(.system(size: 34, weight: .bold, design: .serif))
+                        .foregroundStyle(.primary)
+                    Text("Draw. Get a critique. Evolve.")
+                        .font(.system(.subheadline, design: .serif))
+                        .italic()
+                        .tracking(0.3)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
 
-                Button(action: onOpenGallery) {
-                    Label("Go to gallery", systemImage: "photo.on.rectangle.angled")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
+                Spacer()
+
+                VStack(spacing: 14) {
+                    choiceCard(
+                        title: "Set up a new canvas",
+                        subtitle: "Start fresh with your next drawing",
+                        systemImage: "square.and.pencil",
+                        isPrimary: true,
+                        action: onNewCanvas
+                    )
+
+                    choiceCard(
+                        title: "Go to gallery",
+                        subtitle: "Revisit your work and critiques",
+                        systemImage: "photo.on.rectangle.angled",
+                        isPrimary: false,
+                        action: onOpenGallery
+                    )
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: 520)
+
+                Spacer()
+
+                signedInFooter
+                    .padding(.bottom, 24)
             }
-            .padding(.horizontal, 40)
-            .frame(maxWidth: 480)
-
-            Spacer()
-
-            signedInFooter
-                .padding(.bottom, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+    }
+
+    private func choiceCard(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        isPrimary: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(isPrimary ? Color.accentColor : Color.accentColor.opacity(0.14))
+                        .frame(width: 52, height: 52)
+                    Image(systemName: systemImage)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(isPrimary ? Color.white : Color.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(uiColor: .secondarySystemBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(colorScheme == .dark ? 0.35 : 0.06),
+                    radius: 12, x: 0, y: 4)
+        }
+        .buttonStyle(.plain)
     }
 
     /// Small "Signed in as <email>" line at the bottom of the launch

@@ -45,7 +45,7 @@ struct AuthGateView: View {
 
     var body: some View {
         ZStack {
-            Color(.systemBackground).ignoresSafeArea()
+            DrawEvolveBackground().ignoresSafeArea()
 
             VStack(spacing: 0) {
                 Spacer(minLength: 32)
@@ -91,7 +91,9 @@ struct AuthGateView: View {
                 .frame(height: 90)
 
             Text("Honest, specific feedback on your drawings.")
-                .font(.system(.callout, design: .default))
+                .font(.system(.callout, design: .serif))
+                .italic()
+                .tracking(0.3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)

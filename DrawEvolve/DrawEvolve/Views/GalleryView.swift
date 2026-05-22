@@ -317,6 +317,7 @@ private struct GalleryContent: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .background(DrawEvolveBackground().ignoresSafeArea())
             // No .navigationTitle: the tab strip is the identifier. Toolbar
             // items (Close, +, debug Clear All) remain the only nav-bar
             // content.
@@ -361,6 +362,8 @@ private struct GalleryContent: View {
                     }
                 }
             }
+            .toolbarBackground(Color.drawEvolveBrandTop, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .task {
                 await storageManager.fetchDrawings()
             }
