@@ -1061,16 +1061,26 @@ final class CloudDrawingStorageManager: ObservableObject {
     /// Synchronous thumbnail accessor for gallery cells. Returns nil while the
     /// thumbnail is still being hydrated; the cell should fall back to a placeholder.
     func thumbnailData(for id: UUID) -> Data? {
-        // Touch the version so SwiftUI re-evaluates after a recent
-        // mutation drops a new thumbnail in; the read of `_ =` here is
-        // intentional — we want the @Published dependency for any
-        // ObservedObject consumer that calls into this accessor.
-        _ = thumbnailCacheVersion
+        // SwiftUI observability for this accessor comes from the parent
+        // view's `@ObservedObject storageManager` declaration — any
+        // mutation that bumps `thumbnailCacheVersion` triggers a body
+        // re-eval, and the next call hits the now-populated NSCache.
+        //
+        // DO NOT read `thumbnailCacheVersion` here. Body evaluations
+        // routinely call this accessor; if we both register a
+        // dependency on the version AND mutate it (via the disk-fill
+        // fallback below), SwiftUI re-evaluates the body inside its
+        // own body evaluation. That's a stack-overflow recipe — the
+        // crash signature was `EXC_BAD_ACCESS code=2` on whatever
+        // VStack happened to be deepest when the stack ran out.
         if let cached = cachedThumbnail(for: id) { return cached }
         // Last-ditch: try disk on the calling thread. Cheap (< 30KB).
+        // Write back to NSCache DIRECTLY (no version bump) — this is a
+        // transparent cache fill, not a logical state change. Any view
+        // already in body evaluation sees the data on this same call.
         let url = thumbnailsDir.appendingPathComponent("\(id.uuidString).jpg")
         if let data = try? Data(contentsOf: url) {
-            setCachedThumbnail(data, for: id)
+            thumbnailCache.setObject(data as NSData, forKey: id as NSUUID, cost: data.count)
             return data
         }
         return nil

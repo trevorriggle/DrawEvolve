@@ -61,20 +61,37 @@ final class SupabaseManager {
             self.client = nil
             return
         }
+        // `emitLocalSessionAsInitialSession: true` — opt-in to the next
+        // major's behaviour now. Without this, `client.auth.session`
+        // (called from `AuthManager.bootstrap` at every launch) awaits
+        // a token-refresh round-trip BEFORE emitting the initial
+        // session. On older devices / weak networks that's the 1-2s
+        // SplashView hang we've been measuring. With the flag, the
+        // locally stored session is emitted immediately; the refresh
+        // happens in the background, and if it fails, `authStateChanges`
+        // bounces the user back to AuthGate on the next 401.
+        let authOptions = SupabaseClientOptions.AuthOptions(
+            emitLocalSessionAsInitialSession: true
+        )
         #if DEBUG
         self.client = SupabaseClient(
             supabaseURL: url,
             supabaseKey: key,
             options: SupabaseClientOptions(
+                auth: authOptions,
                 global: SupabaseClientOptions.GlobalOptions(
                     session: makeSimulatorFriendlyURLSession(),
                     logger: DrawEvolveSupabaseLogger()
                 )
             )
         )
-        print("✅ SupabaseManager initialized for \(url.host ?? "unknown host") (HTTP/3 biased off, verbose logging on)")
+        print("✅ SupabaseManager initialized for \(url.host ?? "unknown host") (HTTP/3 biased off, verbose logging on, fast initial session on)")
         #else
-        self.client = SupabaseClient(supabaseURL: url, supabaseKey: key)
+        self.client = SupabaseClient(
+            supabaseURL: url,
+            supabaseKey: key,
+            options: SupabaseClientOptions(auth: authOptions)
+        )
         #endif
     }
 }
