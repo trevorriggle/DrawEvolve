@@ -1342,133 +1342,7 @@ struct DrawingCanvasView: View {
             // entirely when the canvas is showing a snapshot (per
             // approved phase 2 rule — editing UI disappears, not just
             // disables).
-            if !isViewingSnapshot {
-                VStack(alignment: .leading, spacing: 0) {
-                if !isToolbarCollapsed {
-                    VStack(spacing: 0) {
-                    ScrollView {
-                        // Zoom % readout at the top of the toolbar (Apr 16).
-                        // Always visible so the user can see the current zoom
-                        // level without the gallery icon covering it. Tap to
-                        // reset zoom/pan/rotation (matches the recenter button).
-                        Button(action: { canvasState.resetAllTransforms() }) {
-                            Text("\(Int(canvasState.zoomScale * 100))%")
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(.primary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 4)
-                                .background(Color(uiColor: .secondarySystemBackground))
-                                .cornerRadius(6)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.top, 8)
-
-                        // Tool slots — 9 cells, 4 rows of 2 + 1 cell. Six
-                        // grouped (Effects, Sample, Shapes, Select, Text,
-                        // Pose Reference) reveal a long-press popover for
-                        // variant selection; the other three (Brush,
-                        // Eraser, Move) are single-tool slots. The 9th
-                        // cell (Pose Reference) sits in row-5-left,
-                        // pushing the first non-tool middle item (Clear
-                        // / trash) to row-5-right and reflowing the rest
-                        // by one cell. Below the tool slots sit the 10
-                        // non-tool middle items in their pre-refactor
-                        // relative order. Import/Export and Undo/Redo
-                        // are pinned OUTSIDE this ScrollView, just above
-                        // the existing Globe block (see below).
-                        //
-                        // NOTE: this iPad layout intentionally diverges
-                        // from the iPhone phoneToolPanel grid. The
-                        // tile-mirroring comment on phoneToolPanel is
-                        // therefore stale by design for v1.1+.
-                        toolPaletteGrid
-                    }
-
-                    // Pinned bottom — Import/Export above Undo/Redo, both
-                    // above the existing Globe block. These sit OUTSIDE
-                    // the ScrollView so they remain anchored regardless
-                    // of toolbar scroll position. Behavior of each entry
-                    // is unchanged from when they lived inside the grid.
-                    VStack(spacing: 8) {
-                        HStack(spacing: 8) {
-                            // Image import — bifurcated picker. Button
-                            // opens a confirmationDialog with "Import as
-                            // Layer" / "Add as Reference"; each option
-                            // triggers its own PhotosPicker. See the
-                            // modifier chain on body for the dialog +
-                            // pickers + handlers.
-                            Button(action: { showPhotoChoice = true }) {
-                                Image(systemName: "photo.badge.plus")
-                                    .font(.system(size: 22))
-                                    .frame(width: 44, height: 44)
-                            }
-
-                            // Download composited image to Photos
-                            ToolButton(
-                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
-                                isSelected: false
-                            ) {
-                                Task { await downloadToPhotos() }
-                            }
-                            .disabled(isSavingToPhotos)
-                        }
-
-                        HStack(spacing: 8) {
-                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
-                                canvasState.undo()
-                            }
-                            .disabled(!canvasState.historyManager.canUndo)
-
-                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
-                                canvasState.redo()
-                            }
-                            .disabled(!canvasState.historyManager.canRedo)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 8)
-
-                    if Self.showGlobeIcon {
-                        Divider()
-                        Button(action: {
-                            // TODO: Wire to social features when implemented.
-                        }) {
-                            Image(systemName: "globe")
-                                .font(.system(size: 44))
-                                .foregroundColor(.primary)
-                                .frame(width: 88, height: 88)
-                        }
-                        .accessibilityLabel("Social")
-                    }
-                    } // end inner VStack(spacing: 0); contents kept at original
-                      // indent to avoid a re-indent churn diff for unrelated lines.
-                    .frame(width: 104) // 2 columns of 44px + padding
-                    .background(Color(uiColor: .systemBackground).opacity(0.95))
-                    .cornerRadius(12)
-                    .shadow(radius: 5)
-                    .padding(.leading, 8)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-
-                // Collapse/Expand button at bottom of toolbar
-                Button(action: {
-                    withAnimation(.spring(response: 0.3)) {
-                        isToolbarCollapsed.toggle()
-                    }
-                }) {
-                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(width: 44, height: 44)
-                        .background(Color(uiColor: .systemBackground).opacity(0.95))
-                        .cornerRadius(8)
-                        .shadow(radius: 5)
-                }
-                .padding(.leading, 8)
-                .padding(.top, isToolbarCollapsed ? 8 : 4)
-            }
-            }  // end if !isViewingSnapshot wrapper for floating toolbar
+            floatingToolbar
 
             // Floating feedback panel. Stays visible in snapshot mode —
             // it's the navigator the user uses to flip between critiques
@@ -1654,6 +1528,148 @@ struct DrawingCanvasView: View {
         // PR #33 (iPhone Phase 2 / C1) lifted them onto the outer Group
         // wrapper in `body` so phoneBody and padBody share them. Don't
         // re-add them here — they'd double-fire.
+    }
+
+    // MARK: - Extracted: floating toolbar
+    //
+    // The entire iPad-side floating toolbar (the if !isViewingSnapshot
+    // { VStack { ... } } block at the top of padBody). Same rationale
+    // as toolPaletteGrid below: putting the block behind an opaque
+    // `some View` boundary keeps padBody's tree shallow enough to
+    // resolve inside iOS's 1 MB main-thread stack. The LazyVGrid
+    // extraction in e5c9a4f wasn't enough on the oldest iPads —
+    // the wrapping VStacks + ScrollView + sibling blocks still
+    // pushed past the limit.
+
+    @ViewBuilder
+    private var floatingToolbar: some View {
+            if !isViewingSnapshot {
+                VStack(alignment: .leading, spacing: 0) {
+                if !isToolbarCollapsed {
+                    VStack(spacing: 0) {
+                    ScrollView {
+                        // Zoom % readout at the top of the toolbar (Apr 16).
+                        // Always visible so the user can see the current zoom
+                        // level without the gallery icon covering it. Tap to
+                        // reset zoom/pan/rotation (matches the recenter button).
+                        Button(action: { canvasState.resetAllTransforms() }) {
+                            Text("\(Int(canvasState.zoomScale * 100))%")
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                                .background(Color(uiColor: .secondarySystemBackground))
+                                .cornerRadius(6)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.top, 8)
+
+                        // Tool slots — 9 cells, 4 rows of 2 + 1 cell. Six
+                        // grouped (Effects, Sample, Shapes, Select, Text,
+                        // Pose Reference) reveal a long-press popover for
+                        // variant selection; the other three (Brush,
+                        // Eraser, Move) are single-tool slots. The 9th
+                        // cell (Pose Reference) sits in row-5-left,
+                        // pushing the first non-tool middle item (Clear
+                        // / trash) to row-5-right and reflowing the rest
+                        // by one cell. Below the tool slots sit the 10
+                        // non-tool middle items in their pre-refactor
+                        // relative order. Import/Export and Undo/Redo
+                        // are pinned OUTSIDE this ScrollView, just above
+                        // the existing Globe block (see below).
+                        //
+                        // NOTE: this iPad layout intentionally diverges
+                        // from the iPhone phoneToolPanel grid. The
+                        // tile-mirroring comment on phoneToolPanel is
+                        // therefore stale by design for v1.1+.
+                        toolPaletteGrid
+                    }
+
+                    // Pinned bottom — Import/Export above Undo/Redo, both
+                    // above the existing Globe block. These sit OUTSIDE
+                    // the ScrollView so they remain anchored regardless
+                    // of toolbar scroll position. Behavior of each entry
+                    // is unchanged from when they lived inside the grid.
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            // Image import — bifurcated picker. Button
+                            // opens a confirmationDialog with "Import as
+                            // Layer" / "Add as Reference"; each option
+                            // triggers its own PhotosPicker. See the
+                            // modifier chain on body for the dialog +
+                            // pickers + handlers.
+                            Button(action: { showPhotoChoice = true }) {
+                                Image(systemName: "photo.badge.plus")
+                                    .font(.system(size: 22))
+                                    .frame(width: 44, height: 44)
+                            }
+
+                            // Download composited image to Photos
+                            ToolButton(
+                                icon: showPhotoSaveConfirmation ? "checkmark" : "arrow.down.to.line",
+                                isSelected: false
+                            ) {
+                                Task { await downloadToPhotos() }
+                            }
+                            .disabled(isSavingToPhotos)
+                        }
+
+                        HStack(spacing: 8) {
+                            ToolButton(icon: "arrow.uturn.backward", isSelected: false) {
+                                canvasState.undo()
+                            }
+                            .disabled(!canvasState.historyManager.canUndo)
+
+                            ToolButton(icon: "arrow.uturn.forward", isSelected: false) {
+                                canvasState.redo()
+                            }
+                            .disabled(!canvasState.historyManager.canRedo)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
+
+                    if Self.showGlobeIcon {
+                        Divider()
+                        Button(action: {
+                            // TODO: Wire to social features when implemented.
+                        }) {
+                            Image(systemName: "globe")
+                                .font(.system(size: 44))
+                                .foregroundColor(.primary)
+                                .frame(width: 88, height: 88)
+                        }
+                        .accessibilityLabel("Social")
+                    }
+                    } // end inner VStack(spacing: 0); contents kept at original
+                      // indent to avoid a re-indent churn diff for unrelated lines.
+                    .frame(width: 104) // 2 columns of 44px + padding
+                    .background(Color(uiColor: .systemBackground).opacity(0.95))
+                    .cornerRadius(12)
+                    .shadow(radius: 5)
+                    .padding(.leading, 8)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+
+                // Collapse/Expand button at bottom of toolbar
+                Button(action: {
+                    withAnimation(.spring(response: 0.3)) {
+                        isToolbarCollapsed.toggle()
+                    }
+                }) {
+                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .frame(width: 44, height: 44)
+                        .background(Color(uiColor: .systemBackground).opacity(0.95))
+                        .cornerRadius(8)
+                        .shadow(radius: 5)
+                }
+                .padding(.leading, 8)
+                .padding(.top, isToolbarCollapsed ? 8 : 4)
+            }
+            }  // end if !isViewingSnapshot wrapper for floating toolbar
     }
 
     // MARK: - Extracted: tool palette grid
