@@ -459,8 +459,14 @@ fragment float4 brushFragmentShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
 
-    // Apply opacity and pressure, then clip to selection.
-    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+    // Apply opacity, then clip to selection. Pressure drives SIZE only
+    // (vertex shader's `pointSize = size * pressure`) — opacity is NOT
+    // pressure-modulated. Real paint doesn't get more transparent under
+    // light pressure; the user's opacity slider is the authoritative
+    // value. This also fixes the "stroke draws at ~60% opacity sometimes"
+    // bug where average pressure capped per-stamp alpha and wet-ink
+    // saturation prevented overlap recovery.
+    alpha *= uniforms.opacity;
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
@@ -484,7 +490,11 @@ fragment float4 eraserFragmentShader(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
 
-    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+    // Pressure drives SIZE only — opacity slider is authoritative.
+    // Matches brushFragmentShader for consistency: the eraser is the
+    // inverse stamp of brush and shouldn't accidentally soft-erase at
+    // light Pencil pressure.
+    alpha *= uniforms.opacity;
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     // Return transparent black with alpha for erasing
@@ -638,9 +648,10 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
     alpha *= streak;
 
-    // Pressure modulates opacity. Markers feel responsive to press
-    // but don't have a wide dynamic range.
-    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+    // Pressure drives SIZE only — opacity slider is authoritative.
+    // Real markers don't vary opacity meaningfully with pressure; the
+    // ink either makes contact or it doesn't.
+    alpha *= uniforms.opacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
@@ -790,7 +801,8 @@ fragment float4 brushFragmentShaderPremul(VertexOut in [[stage_in]],
         alpha = smoothstep(1.0, edge, dist);
     }
 
-    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+    // Pressure → SIZE only. See brushFragmentShader for rationale.
+    alpha *= uniforms.opacity;
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
     float finalAlpha = alpha * uniforms.color.a;
@@ -861,7 +873,8 @@ fragment float4 markerFragmentShaderPremul(VertexOut in [[stage_in]],
     float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
     alpha *= streak;
 
-    alpha *= uniforms.opacity * uniforms.pressureAlpha;
+    // Pressure → SIZE only. See markerFragmentShader for rationale.
+    alpha *= uniforms.opacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 
