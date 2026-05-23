@@ -4974,6 +4974,11 @@ test('buildEveSystemPrompt with scope=drawing + critique renders all three secti
   // Date line must NOT appear — approved spec is to omit absolute dates.
   assert.ok(!sys.includes('Critique date:'),
     'date line must not be present in the CURRENT CONTEXT block');
+  // A4: when CURRENT CONTEXT renders, the appended visual-confirmation
+  // guardrail must instruct Eve to point the student at the manual
+  // canvas-attach pill instead of claiming to see the drawing.
+  assert.ok(sys.includes('Show Eve my canvas'),
+    'A4: canvas-attach-pill instruction is appended to CURRENT CONTEXT');
 });
 
 test('buildEveSystemPrompt fallbacks: Untitled / "not specified" / "?" when fields are missing', () => {

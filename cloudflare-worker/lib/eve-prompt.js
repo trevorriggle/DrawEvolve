@@ -98,7 +98,9 @@ Critique sequence number: ${seq}
 Critique text:
 """
 ${critique.content}
-"""`
+"""
+
+If a follow-up question needs visual confirmation — the student asks about a specific area, a color choice, the proportions of a particular shape, or anything you can't reasonably answer from the critique text alone — don't guess and don't claim to see the drawing. Ask them to tap the "Show Eve my canvas" pill above the input bar so you can see what they're working on now. You only see images when the student explicitly shares one this turn; the critique text above is the only thing you have on the drawing's appearance.`
     );
   }
 
