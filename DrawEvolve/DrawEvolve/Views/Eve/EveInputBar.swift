@@ -18,7 +18,15 @@ struct EveInputBar: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Single send entry point so the keyboard return key and the corner
+        // button can't drift out of sync. @MainActor on the Task makes the
+        // actor hop into EveConversationManager (also @MainActor) explicit
+        // rather than relying on the surrounding View context to inherit it.
+        let submit: () -> Void = {
+            Task { @MainActor in await manager.sendDraft() }
+        }
+
+        return VStack(spacing: 0) {
             // Inline error chip when the last send failed. Tapping the
             // chip clears the error and re-focuses the input so the user
             // can edit + retry.
@@ -58,9 +66,21 @@ struct EveInputBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .disabled(manager.sendState == .sending || manager.conversation == nil)
                     .submitLabel(.send)
+                    // Return key is the primary send affordance — Christian
+                    // (and likely most users) hit return rather than reach for
+                    // the corner button. `.submitLabel(.send)` was already
+                    // labelling the key correctly, but with no `.onSubmit`
+                    // wired the keypress only inserted a newline. Multi-line
+                    // composition via return is intentionally NOT supported in
+                    // this iteration; if a tester needs it later we'll add a
+                    // shift+return or separate newline affordance as its own
+                    // task. `sendDraft()`'s internal `!trimmed.isEmpty` guard
+                    // keeps an accidental empty-return from firing a no-op
+                    // request.
+                    .onSubmit { submit() }
 
                 Button {
-                    Task { await manager.sendDraft() }
+                    submit()
                 } label: {
                     Group {
                         if manager.sendState == .sending {
@@ -75,8 +95,10 @@ struct EveInputBar: View {
                     }
                     .frame(width: 36, height: 36)
                     .background(sendEnabled ? Color.accentColor : Color.gray.opacity(0.5))
+                    .contentShape(Circle())
                     .clipShape(Circle())
                 }
+                .buttonStyle(.plain)
                 .disabled(!sendEnabled)
                 .accessibilityLabel("Send message")
             }
