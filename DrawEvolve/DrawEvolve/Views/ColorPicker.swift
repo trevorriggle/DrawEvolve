@@ -81,6 +81,31 @@ struct AdvancedColorPicker: View {
     /// checkmark fade on the trailing slot's badge.
     @State private var addCurrentJustSaved: Bool = false
 
+    // MARK: - Simple-mode state (C1, 2026-05-23)
+    //
+    // The picker opens in simple mode (hue ring + brightness only). Tapping
+    // "Advanced" flips this to true and reveals the full HSB/RGB + palette
+    // + recent UI. .sheet/.popover re-instantiate the view on each present,
+    // so @State default-init returns the picker to simple on reopen — no
+    // explicit reset needed.
+    @State private var showAdvanced: Bool = false
+
+    /// Annulus drag gate. Set true on the first .onChanged frame whose
+    /// startLocation falls within [innerRadius, outerRadius] of the ring
+    /// center. Once true, all subsequent locations update hue regardless
+    /// of distance from center. Reset on .onEnded.
+    @State private var ringDragActive: Bool = false
+
+    /// Pre-prepared haptic generator for hue ring drags. Kept as @State
+    /// so it persists across drag ticks; `prepare()` is called on drag
+    /// start and after each fire to keep the taptic engine warm.
+    @State private var hueHaptic = UIImpactFeedbackGenerator(style: .light)
+
+    /// Tracks the last hue value that triggered a haptic tick so we can
+    /// throttle to ~5° (≈ 1/72) of change between fires. -1 = uninitialized
+    /// (next change always fires).
+    @State private var lastHapticHue: Double = -1
+
     // MARK: - Coalescing markers
     //
     // Each `lastSynced*` mirrors the value that `syncStateFromSelectedColor`
@@ -157,11 +182,15 @@ struct AdvancedColorPicker: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
-                activeColorAndInputs
-                sliderSection
-                paletteSection
-                if !paletteManager.recentColors.isEmpty {
-                    recentSection
+                if showAdvanced {
+                    activeColorAndInputs
+                    sliderSection
+                    paletteSection
+                    if !paletteManager.recentColors.isEmpty {
+                        recentSection
+                    }
+                } else {
+                    simplePickerSection
                 }
             }
             .padding()
@@ -293,6 +322,114 @@ struct AdvancedColorPicker: View {
         f.allowsFloats = false
         return f
     }()
+
+    // MARK: - Section: Simple picker (C1, 2026-05-23)
+    //
+    // Default view when the picker opens. Hue ring + brightness slider
+    // only — no swatch, hex, RGB readout, palette, or recents. Saturation
+    // is forced to 1.0 on every interaction in this mode; if the user
+    // wants to desaturate they tap Advanced and use the saturation slider.
+
+    private var simplePickerSection: some View {
+        VStack(spacing: 24) {
+            HueRingView(
+                hue: hue,
+                innerColor: Color(uiColor: selectedColor),
+                onHueChange: { newHue in
+                    hue = newHue
+                    maybeHueHaptic(newHue: newHue)
+                    writeBackFromSimple()
+                },
+                ringDragActive: $ringDragActive,
+                hueHaptic: $hueHaptic
+            )
+            .accessibilityElement()
+            .accessibilityLabel("Hue")
+            .accessibilityValue("\(Int(hue * 360)) degrees")
+            .accessibilityAdjustableAction { direction in
+                let step = 1.0 / 36.0
+                switch direction {
+                case .increment:
+                    hue = (hue + step).truncatingRemainder(dividingBy: 1.0)
+                case .decrement:
+                    hue = (hue - step + 1.0).truncatingRemainder(dividingBy: 1.0)
+                @unknown default:
+                    return
+                }
+                writeBackFromSimple()
+            }
+            .frame(width: 240, height: 240)
+            .padding(.top, 12)
+
+            ColorSlider(value: $brightness, range: 0...1, label: "Brightness") {
+                LinearGradient(
+                    colors: [
+                        .black,
+                        Color(hue: hue, saturation: 1.0, brightness: 1.0)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            }
+            .onChange(of: brightness) { _, _ in
+                // Skip sync-driven echoes; otherwise snap-and-write.
+                if hsbStateMatchesSync { return }
+                writeBackFromSimple()
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { showAdvanced = true }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Advanced")
+                    Image(systemName: "chevron.down")
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Advanced color picker")
+            .accessibilityHint("Reveals HSB and RGB sliders, palette, and recent colors")
+            .padding(.top, 4)
+        }
+    }
+
+    /// Snap saturation to 1.0 and write the resulting color back through
+    /// the binding. Both hue ring drags and brightness slider edits in
+    /// simple mode route through here, so any interaction in simple mode
+    /// produces a fully-saturated color — matching the "saturation locked
+    /// at 100%" rule. selectedColor's .onChange handler will then sync
+    /// state channels (incl. saturation = 1.0) so opening Advanced shows
+    /// the correct state.
+    private func writeBackFromSimple() {
+        saturation = 1.0
+        let newColor = UIColor(hue: hue, saturation: 1.0, brightness: brightness, alpha: alpha)
+        guard newColor != selectedColor else { return }
+        selectedColor = newColor
+    }
+
+    /// Throttled haptic on hue ring drags. Fires once per ~5° of angular
+    /// change (1/72 of the [0,1) hue range), with a wrap-around guard
+    /// so crossing the 0/1 seam still ticks. Uses a pre-prepared
+    /// UIImpactFeedbackGenerator held in @State and re-primes after each
+    /// fire to keep the taptic engine warm for the next tick.
+    private func maybeHueHaptic(newHue: Double) {
+        let step = 1.0 / 72.0
+        if lastHapticHue < 0 {
+            hueHaptic.impactOccurred()
+            hueHaptic.prepare()
+            lastHapticHue = newHue
+            return
+        }
+        let direct = abs(newHue - lastHapticHue)
+        let wrapped = 1.0 - direct
+        let minDelta = min(direct, wrapped)
+        if minDelta >= step {
+            hueHaptic.impactOccurred()
+            hueHaptic.prepare()
+            lastHapticHue = newHue
+        }
+    }
 
     // MARK: - Section: Sliders
 
@@ -440,6 +577,19 @@ struct AdvancedColorPicker: View {
 
     private var paletteHeader: some View {
         HStack(spacing: 12) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { showAdvanced = false }
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "chevron.left")
+                    Text("Simple")
+                }
+                .font(.subheadline.weight(.medium))
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Simple color picker")
+            .accessibilityHint("Returns to hue ring and brightness only")
+
             Button(action: { withAnimation(.easeInOut(duration: 0.15)) { isEditMode.toggle() } }) {
                 Text(isEditMode ? "Done" : "Edit")
                     .font(.subheadline.weight(.medium))
@@ -865,6 +1015,112 @@ struct AdvancedColorPicker: View {
 }
 
 // MARK: - Subviews
+
+/// Custom-drawn hue ring used by the simple picker.
+///
+/// Layout: an outer disc filled with an `AngularGradient` (red at 12,
+/// CW sweep) masked into an annulus by an inner solid-color disc showing
+/// the currently selected color as a preview. A small thumb (white-bordered
+/// pure-hue circle) is positioned on the ring centerline at the current
+/// hue angle.
+///
+/// Hit-testing: drag begins only if the initial touch lies within
+/// [innerRadius, outerRadius] of the ring center; once active, all
+/// subsequent locations update hue regardless of distance from center.
+/// This prevents inner-area taps from rotating hue while still allowing
+/// the finger to drift inside or outside mid-drag.
+private struct HueRingView: View {
+    let hue: Double
+    let innerColor: Color
+    let onHueChange: (Double) -> Void
+    @Binding var ringDragActive: Bool
+    @Binding var hueHaptic: UIImpactFeedbackGenerator
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = min(geo.size.width, geo.size.height)
+            let outerRadius = size / 2.0
+            let strokeWidth: CGFloat = 28
+            let innerRadius = outerRadius - strokeWidth
+            let ringCenterRadius = outerRadius - strokeWidth / 2.0
+            let center = CGPoint(x: size / 2.0, y: size / 2.0)
+
+            // Thumb position: hue * 2π, shifted so 0 = 12 o'clock,
+            // clockwise sweep. atan2 convention uses 0 at 3 o'clock, so
+            // subtract π/2 when projecting.
+            let thumbAngle = hue * 2.0 * .pi - .pi / 2.0
+            let thumbX = center.x + ringCenterRadius * cos(thumbAngle)
+            let thumbY = center.y + ringCenterRadius * sin(thumbAngle)
+
+            ZStack {
+                // Inner preview disc — shows the currently selected color.
+                Circle()
+                    .fill(innerColor)
+                    .frame(width: innerRadius * 2.0, height: innerRadius * 2.0)
+                    .overlay(
+                        Circle().stroke(Color(uiColor: .separator), lineWidth: 1)
+                    )
+
+                // Ring: stroke an AngularGradient with red at 12 o'clock
+                // (startAngle: -90°) sweeping clockwise.
+                Circle()
+                    .strokeBorder(
+                        AngularGradient(
+                            gradient: Gradient(colors: [
+                                .red, .yellow, .green, .cyan, .blue, .purple, .red
+                            ]),
+                            center: .center,
+                            startAngle: .degrees(-90),
+                            endAngle: .degrees(270)
+                        ),
+                        lineWidth: strokeWidth
+                    )
+                    .frame(width: size, height: size)
+
+                // Thumb indicator.
+                Circle()
+                    .fill(Color(hue: hue, saturation: 1.0, brightness: 1.0))
+                    .frame(width: strokeWidth + 8, height: strokeWidth + 8)
+                    .overlay(
+                        Circle().stroke(Color.white, lineWidth: 3)
+                    )
+                    .overlay(
+                        Circle().stroke(Color.black.opacity(0.25), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.2), radius: 2, y: 1)
+                    .position(x: thumbX, y: thumbY)
+            }
+            .frame(width: size, height: size)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !ringDragActive {
+                            let dx0 = value.startLocation.x - center.x
+                            let dy0 = value.startLocation.y - center.y
+                            let r0 = hypot(dx0, dy0)
+                            guard r0 >= innerRadius && r0 <= outerRadius else { return }
+                            ringDragActive = true
+                            hueHaptic.prepare()
+                        }
+                        let dx = value.location.x - center.x
+                        let dy = value.location.y - center.y
+                        // atan2 returns -π…π with 0 at 3 o'clock (+x axis)
+                        // and increases CW because y grows downward in
+                        // SwiftUI coords. Shift by +π/2 so 12 o'clock = 0,
+                        // then normalize into [0, 2π) and divide.
+                        var raw = atan2(dy, dx) + .pi / 2.0
+                        if raw < 0 { raw += 2.0 * .pi }
+                        let newHue = raw / (2.0 * .pi)
+                        onHueChange(newHue)
+                    }
+                    .onEnded { _ in
+                        ringDragActive = false
+                    }
+            )
+        }
+    }
+}
 
 private struct ColorSwatch: View {
     let color: UIColor
