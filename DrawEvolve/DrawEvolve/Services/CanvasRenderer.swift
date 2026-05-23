@@ -493,6 +493,26 @@ class CanvasRenderer: NSObject {
             d.colorAttachments[0].alphaBlendOperation = .max
             return d
         }
+        // Pencil + charcoal need INTRA-stroke opacity buildup so artists
+        // can shade by scribbling. Same premul shaders as the .max/.max
+        // path, but blended with standard premul-over so overlapping
+        // stamps within one stroke darken instead of capping. Commit
+        // pipeline (wetInkCommitDescriptor) doesn't change — scratch is
+        // still composited into the layer the same way.
+        func makeWetInkAlphaBlendDepositVariantDescriptor(_ fragment: MTLFunction) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = brushVertex
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = brushDescriptor.colorAttachments[0].pixelFormat
+            d.colorAttachments[0].isBlendingEnabled = true
+            d.colorAttachments[0].sourceRGBBlendFactor = .one
+            d.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            d.colorAttachments[0].rgbBlendOperation = .add
+            d.colorAttachments[0].sourceAlphaBlendFactor = .one
+            d.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            d.colorAttachments[0].alphaBlendOperation = .add
+            return d
+        }
         let brushScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(brushFragmentPremul)
         // Eraser deposit reuses the unchanged `eraserFragment` (emits
         // (0, 0, 0, alpha)) with the same .max/.max blend as brush deposit.
@@ -501,11 +521,11 @@ class CanvasRenderer: NSObject {
         let eraserScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(eraserFragment)
         // Phase E: deposit descriptors for the additive brush variants.
         // Each uses its premul fragment + the shared .max/.max blend.
-        let pencilScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(pencilFragmentPremul)
+        let pencilScratchDepositDescriptor = makeWetInkAlphaBlendDepositVariantDescriptor(pencilFragmentPremul)
         let inkPenScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(inkPenFragmentPremul)
         let markerScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(markerFragmentPremul)
         let airbrushScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(airbrushFragmentPremul)
-        let charcoalScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(charcoalFragmentPremul)
+        let charcoalScratchDepositDescriptor = makeWetInkAlphaBlendDepositVariantDescriptor(charcoalFragmentPremul)
 
         // Wet-ink commit pipeline (Phase C). Full-canvas quad reading
         // strokeScratch, premul-over into the atlas. Sample factors mirror
