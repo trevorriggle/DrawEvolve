@@ -62,6 +62,16 @@ struct SnapshotUploadMetadata {
     let formatVersion: Int
 }
 
+/// Per-request declaration of where the student is in the drawing
+/// process. Sent on the critique sheet's segmented toggle. The Worker
+/// branches Eve's STAGE_OF_WORK_BLOCK on this value — `in_progress`
+/// prioritizes next-step coaching, `finished` prioritizes polish notes.
+/// Transient and per-request; never persisted on the drawing model.
+enum StageOfWork: String, Codable {
+    case inProgress = "in_progress"
+    case finished
+}
+
 actor OpenAIManager {
     static let shared = OpenAIManager()
 
@@ -118,6 +128,7 @@ actor OpenAIManager {
         context: DrawingContext,
         drawingId: UUID,
         clientRequestId: String,
+        stageOfWork: StageOfWork,
         snapshotMetadata: SnapshotUploadMetadata? = nil,
         compositionFindings: CompositionFindingsPayload? = nil
     ) async throws -> FeedbackResponse {
@@ -168,6 +179,13 @@ actor OpenAIManager {
             "image": base64Image,
             "drawingId": drawingId.uuidString.lowercased(),
             "client_request_id": clientRequestId,
+            // snake_case to match the worker's body validator at
+            // routes/feedback.js — the worker reads body.stage_of_work and
+            // 400s on unrecognized values. Always sent (never omitted) so
+            // newer iOS builds give the worker a predictable contract;
+            // older iOS builds that omit the field fall through to the
+            // worker's inferred-stage STAGE_OF_WORK_BLOCK for back-compat.
+            "stage_of_work": stageOfWork.rawValue,
             "context": [
                 "skillLevel": context.skillLevel,
                 "subject": context.subject,

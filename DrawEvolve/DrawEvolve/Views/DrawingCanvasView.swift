@@ -126,6 +126,13 @@ struct DrawingCanvasView: View {
     @State private var isEditingExisting = false
     @State private var currentDrawingID: UUID?
 
+    // A1-build: critique request confirm sheet. Tapping the Get Feedback
+    // button presents this sheet so the user can declare stage-of-work
+    // before Eve runs. Reset to .inProgress on every open (per the
+    // locked spec — never persisted across sessions or drawings).
+    @State private var showCritiqueRequestSheet = false
+    @State private var selectedStageOfWork: StageOfWork = .inProgress
+
     // MARK: - Auto-save state
     //
     // The first save still routes through saveToGalleryButton's title
@@ -494,6 +501,9 @@ struct DrawingCanvasView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showCritiqueRequestSheet) {
+            critiqueRequestSheet
         }
         .sheet(isPresented: $showEyeTestPanel, onDismiss: { showEyeTestHeatmap = false }) {
             EyeTestPanel(
@@ -1870,7 +1880,7 @@ struct DrawingCanvasView: View {
                                 if canvasState.feedback != nil {
                                     showFeedback.toggle()
                                 } else {
-                                    requestFeedback()
+                                    presentCritiqueRequestSheet()
                                 }
                             }
                             .disabled(canvasState.isEmpty)
@@ -2614,7 +2624,7 @@ struct DrawingCanvasView: View {
     }
 
     private var getFeedbackButton: some View {
-        Button(action: requestFeedback) {
+        Button(action: presentCritiqueRequestSheet) {
             HStack(spacing: 8) {
                 if isRequestingFeedback {
                     ProgressView().tint(.white)
@@ -2634,6 +2644,71 @@ struct DrawingCanvasView: View {
         }
         .disabled(isRequestingFeedback || canvasState.isEmpty)
         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+    }
+
+    // Resets the toggle to .inProgress at the call site (not via
+    // onDismiss) so the next sheet open always starts fresh, per the
+    // locked spec — even after a cancel or a successful send. The
+    // .inProgress default mirrors the "more forgiving failure mode"
+    // reasoning: process advice on a finished drawing is mildly off;
+    // finishing advice on a sketch is what broke for Sophia.
+    private func presentCritiqueRequestSheet() {
+        selectedStageOfWork = .inProgress
+        showCritiqueRequestSheet = true
+    }
+
+    // A1-build: critique request confirm sheet. Hosts the stage-of-work
+    // segmented picker and the Send-to-Eve / Cancel actions. Send closes
+    // the sheet first, then kicks off the existing requestFeedback flow
+    // so the existing in-flight UI (button spinner, FloatingFeedbackPanel
+    // on completion) keeps working unchanged.
+    private var critiqueRequestSheet: some View {
+        VStack(spacing: 20) {
+            VStack(spacing: 6) {
+                Text("Ask Eve for feedback")
+                    .font(.title3.weight(.semibold))
+                Text("How would you describe this drawing right now?")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.top, 24)
+
+            Picker("Stage of work", selection: $selectedStageOfWork) {
+                Text("In progress").tag(StageOfWork.inProgress)
+                Text("Finished").tag(StageOfWork.finished)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 24)
+
+            VStack(spacing: 10) {
+                Button(action: {
+                    showCritiqueRequestSheet = false
+                    requestFeedback()
+                }) {
+                    Text("Send to Eve")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.accentColor)
+                        .cornerRadius(12)
+                }
+
+                Button("Cancel") {
+                    showCritiqueRequestSheet = false
+                }
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .padding(.vertical, 4)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+
+            Spacer(minLength: 0)
+        }
+        .presentationDetents([.height(280)])
+        .presentationDragIndicator(.visible)
     }
 
     // MARK: - Action-button sizing tokens (idiom-branched)
@@ -3872,6 +3947,7 @@ struct DrawingCanvasView: View {
                 await canvasState.requestFeedback(
                     for: context,
                     drawingId: drawingId,
+                    stageOfWork: selectedStageOfWork,
                     compositionFindings: compositionFindings
                 )
             } catch {

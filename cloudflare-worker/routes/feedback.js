@@ -24,6 +24,7 @@ import {
   isValidPresetId,
   DEFAULT_PRESET_ID,
   REGISTRY_MIN_ROWS,
+  VALID_STAGE_OF_WORK,
 } from '../lib/prompt.js';
 import { fetchUserDrawingRegistry } from '../lib/supabase.js';
 import {
@@ -723,6 +724,27 @@ export async function handleFeedback(request, env, ctx) {
       return jsonResponse({ error: 'set_as_default must be a boolean.' }, 400);
     }
 
+    // stage_of_work — declared by the iOS toggle on the critique sheet.
+    // Optional string enum: "in_progress" | "finished". Missing/null falls
+    // back to the inferred-stage STAGE_OF_WORK_BLOCK (back-compat for older
+    // iOS builds that don't send the field). Strict validation on present-
+    // but-malformed so a typo on the client doesn't silently degrade Eve's
+    // prompt. Env kill-switch STAGE_OF_WORK_ENABLED is checked further down
+    // at the assembleSystemPrompt callsite — when off, the declared value
+    // is ignored regardless of what was sent.
+    if (body.stage_of_work !== undefined && body.stage_of_work !== null) {
+      if (typeof body.stage_of_work !== 'string' || !VALID_STAGE_OF_WORK.has(body.stage_of_work)) {
+        ctx.waitUntil(logRequest({
+          env, status: REQUEST_STATUS.VALIDATION_FAILED, userId, drawingId: drawingIdLower, ipHash,
+        }));
+        return jsonResponse({ error: 'invalid_stage_of_work' }, 400);
+      }
+    }
+    const declaredStageOfWork = (typeof body.stage_of_work === 'string'
+      && VALID_STAGE_OF_WORK.has(body.stage_of_work))
+      ? body.stage_of_work
+      : null;
+
     // Eye Test composition findings — sent by iOS when the
     // `eye_test_eve_integration` client-side feature flag is on AND
     // the local analysis produced a result (.ready or .notReady with
@@ -876,10 +898,20 @@ export async function handleFeedback(request, env, ctx) {
     // by buildSystemPrompt as a "PROMPT CUSTOMIZATION" section.
     const customPromptModifier = await selectCustomPromptParameters(resolvedPresetId, userId, env);
     const stageOfWorkEnabled = isStageOfWorkEnabled(env);
+    // Kill-switch precedence: when the env flag is off, the declared stage
+    // is dropped here so neither the system-prompt block nor the Quick Take
+    // wording branches on it. This keeps the env var a true kill-switch —
+    // flipping it off restores the pre-feature prompt regardless of what
+    // the client sends.
+    const effectiveStageOfWork = stageOfWorkEnabled ? declaredStageOfWork : null;
     const config = {
       ...baseConfig,
-      systemPrompt: assembleSystemPrompt(voice, { includeStageOfWork: stageOfWorkEnabled }),
+      systemPrompt: assembleSystemPrompt(voice, {
+        includeStageOfWork: stageOfWorkEnabled,
+        stageOfWork: effectiveStageOfWork,
+      }),
       includeStageOfWork: stageOfWorkEnabled,
+      stageOfWork: effectiveStageOfWork,
       customPromptModifier,
       // Feature 1, Phase 1A — both fields flow into buildCritiqueEntry's
       // prompt_config. includeRegistryCount mirrors the actual number of

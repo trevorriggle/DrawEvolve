@@ -1541,6 +1541,7 @@ class CanvasStateManager: ObservableObject {
     func requestFeedback(
         for context: DrawingContext,
         drawingId: UUID,
+        stageOfWork: StageOfWork,
         compositionFindings: CompositionFindingsPayload? = nil
     ) async {
         guard let image = exportImage() else {
@@ -1594,6 +1595,7 @@ class CanvasStateManager: ObservableObject {
                     context: context,
                     drawingId: drawingId,
                     clientRequestId: clientRequestId,
+                    stageOfWork: stageOfWork,
                     snapshotMetadata: metadata,
                     compositionFindings: compositionFindings
                 )
@@ -1618,6 +1620,7 @@ class CanvasStateManager: ObservableObject {
                     context: context,
                     drawingId: drawingId,
                     clientRequestId: clientRequestId,
+                    stageOfWork: stageOfWork,
                     snapshotMetadata: nil,
                     compositionFindings: compositionFindings
                 )

@@ -61,6 +61,9 @@ import {
   fetchUserDrawingRegistry,
   isCrossDrawingContextEnabled,
   isStageOfWorkEnabled,
+  IN_PROGRESS_STAGE_BLOCK,
+  FINISHED_STAGE_BLOCK,
+  VALID_STAGE_OF_WORK,
   fetchCrossDrawingPreference,
   selectConfig,
   buildSystemPrompt,
@@ -1675,6 +1678,138 @@ test('buildSystemPrompt Quick Take wording swaps with config.includeStageOfWork'
   assert.match(withoutFlag, /first read of the drawing as a whole/);
   assert.ok(!withoutFlag.includes('name the stage you see'),
     'flag-off Quick Take must drop the stage-naming wording');
+});
+
+// =============================================================================
+// stage_of_work declared-stage branching — A1-build
+// =============================================================================
+//
+// Matrix coverage: declared in_progress, declared finished, declared but env-
+// off (kill-switch wins), env-on but undeclared (back-compat for older iOS
+// builds), invalid value (worker rejects 400 — covered by route-level
+// validation; here we assert assembleSystemPrompt treats unrecognized inputs
+// as null and falls through to the inferred-stage block).
+
+test('VALID_STAGE_OF_WORK enumerates exactly in_progress and finished', () => {
+  assert.equal(VALID_STAGE_OF_WORK.size, 2);
+  assert.ok(VALID_STAGE_OF_WORK.has('in_progress'));
+  assert.ok(VALID_STAGE_OF_WORK.has('finished'));
+});
+
+test('assembleSystemPrompt swaps STAGE OF WORK block for declared in_progress', () => {
+  const prompt = assembleSystemPrompt(VOICE_STUDIO_MENTOR, {
+    includeStageOfWork: true,
+    stageOfWork: 'in_progress',
+  });
+
+  assert.match(prompt, /STAGE OF WORK — READ THIS CAREFULLY:/);
+  assert.ok(prompt.includes(IN_PROGRESS_STAGE_BLOCK),
+    'declared in_progress must inject the IN_PROGRESS_STAGE_BLOCK verbatim');
+  assert.ok(!prompt.includes('Infer stage from what you see:'),
+    'inferred-stage taxonomy must be replaced when stage is declared');
+  assert.match(prompt, /marked this drawing as IN PROGRESS/);
+  assert.match(prompt, /Do NOT critique surface polish/);
+});
+
+test('assembleSystemPrompt swaps STAGE OF WORK block for declared finished', () => {
+  const prompt = assembleSystemPrompt(VOICE_STUDIO_MENTOR, {
+    includeStageOfWork: true,
+    stageOfWork: 'finished',
+  });
+
+  assert.match(prompt, /STAGE OF WORK — READ THIS CAREFULLY:/);
+  assert.ok(prompt.includes(FINISHED_STAGE_BLOCK),
+    'declared finished must inject the FINISHED_STAGE_BLOCK verbatim');
+  assert.ok(!prompt.includes('Infer stage from what you see:'),
+    'inferred-stage taxonomy must be replaced when stage is declared');
+  assert.match(prompt, /marked this drawing as FINISHED/);
+  assert.match(prompt, /Do NOT give next-steps coaching/);
+});
+
+test('assembleSystemPrompt falls back to inferred-stage block when env-on but stage undeclared', () => {
+  // Back-compat path: older iOS builds (or any client that omits the field)
+  // still get the inferred-stage block, not the declared variants. Model is
+  // told to name the stage it sees rather than honoring a declaration.
+  const prompt = assembleSystemPrompt(VOICE_STUDIO_MENTOR, {
+    includeStageOfWork: true,
+    stageOfWork: null,
+  });
+
+  assert.match(prompt, /STAGE OF WORK — READ THIS CAREFULLY:/);
+  assert.match(prompt, /Infer stage from what you see:/);
+  assert.ok(!prompt.includes('marked this drawing as IN PROGRESS'));
+  assert.ok(!prompt.includes('marked this drawing as FINISHED'));
+});
+
+test('assembleSystemPrompt kill-switch wins: env-off strips the block even when stage is declared', () => {
+  // Kill-switch precedence — declared values are ignored when the env flag
+  // is off. Matches the feedback handler's effectiveStageOfWork logic.
+  for (const declared of ['in_progress', 'finished', null]) {
+    const prompt = assembleSystemPrompt(VOICE_STUDIO_MENTOR, {
+      includeStageOfWork: false,
+      stageOfWork: declared,
+    });
+
+    assert.ok(!prompt.includes('STAGE OF WORK'),
+      `env-off must strip STAGE OF WORK entirely; declared=${declared}`);
+    assert.ok(!prompt.includes('marked this drawing as IN PROGRESS'),
+      `env-off must drop in_progress declared block; declared=${declared}`);
+    assert.ok(!prompt.includes('marked this drawing as FINISHED'),
+      `env-off must drop finished declared block; declared=${declared}`);
+    // Surrounding sections must survive the strip.
+    assert.match(prompt, /SUBJECT VERIFICATION/);
+    assert.match(prompt, /CLOSING ASIDE/);
+  }
+});
+
+test('assembleSystemPrompt treats unrecognized stageOfWork as null (defense-in-depth past route validation)', () => {
+  // Route-level validation 400s on invalid values, so this code path should
+  // never run in production — but assembleSystemPrompt is exported and used
+  // by tests, the recommendations route, and any future caller. Treating
+  // unknown strings as null keeps the function safe to call without losing
+  // the inferred-stage default.
+  const prompt = assembleSystemPrompt(VOICE_STUDIO_MENTOR, {
+    includeStageOfWork: true,
+    stageOfWork: 'bogus_value',
+  });
+
+  assert.match(prompt, /Infer stage from what you see:/,
+    'unrecognized stageOfWork must fall through to the inferred-stage block');
+  assert.ok(!prompt.includes('marked this drawing as IN PROGRESS'));
+  assert.ok(!prompt.includes('marked this drawing as FINISHED'));
+});
+
+test('buildSystemPrompt Quick Take has a declared-stage variant', () => {
+  const baseCtx = { skillLevel: 'Intermediate', subject: 'portrait', style: 'realism' };
+  const baseCfg = selectConfig('free', null);
+
+  const declared = buildSystemPrompt(
+    { ...baseCfg, includeStageOfWork: true, stageOfWork: 'in_progress' },
+    baseCtx,
+  );
+  const undeclared = buildSystemPrompt(
+    { ...baseCfg, includeStageOfWork: true, stageOfWork: null },
+    baseCtx,
+  );
+  const killed = buildSystemPrompt(
+    { ...baseCfg, includeStageOfWork: false, stageOfWork: 'in_progress' },
+    baseCtx,
+  );
+
+  // Declared: new wording, no stage-naming, no "as a whole" fallback.
+  assert.match(declared, /first read of the drawing given the declared stage/);
+  assert.ok(!declared.includes('name the stage you see'),
+    'declared Quick Take must not ask the model to name the stage visually');
+  assert.ok(!declared.includes('first read of the drawing as a whole'));
+
+  // Undeclared (env-on, back-compat): inferred-stage wording.
+  assert.match(undeclared, /name the stage you see \(block-in, refinement, polish\)/);
+  assert.ok(!undeclared.includes('first read of the drawing given the declared stage'));
+
+  // Kill-switch: pre-feature wording, declared value ignored.
+  assert.match(killed, /first read of the drawing as a whole/);
+  assert.ok(!killed.includes('first read of the drawing given the declared stage'));
+  assert.ok(!killed.includes('name the stage you see'));
 });
 
 test('selectVoice returns the matching voice for each hardcoded preset ID without a DB hit', async () => {

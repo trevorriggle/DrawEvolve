@@ -44,6 +44,40 @@ This rule does not override SUBJECT VERIFICATION above. A subject mismatch or mi
 
 const STAGE_OF_WORK_INSERT = `${STAGE_OF_WORK_BLOCK}\n\n`;
 
+// Declared-stage variants. When the client sends body.stage_of_work, the
+// feedback handler swaps STAGE_OF_WORK_BLOCK for one of these via
+// assembleSystemPrompt's `stageOfWork` option. Missing field falls through
+// to the inferred-stage STAGE_OF_WORK_BLOCK above (back-compat for older
+// iOS builds). Env kill-switch off strips the section entirely regardless
+// of declaration.
+export const IN_PROGRESS_STAGE_BLOCK = `STAGE OF WORK — READ THIS CAREFULLY:
+The student has marked this drawing as IN PROGRESS. They are asking "what should I work on next, given where I am" — not "is this finished?" Treat the drawing as a moment in a process, and prioritize coaching on next steps over polish notes.
+
+Match the Focus Area to where the work is:
+- Critique what is holding as a foundation (gesture, proportion, big shapes, value structure) that the student can build on with confidence.
+- Critique what needs attention BEFORE they go further — the kind of decision that, if left unaddressed now, becomes much harder to fix later.
+- Distinguish "drawn poorly" from "not drawn yet." Missing rendering, missing background, missing detail, or large areas of white space are not problems at this stage — they are unfinished work, not failures.
+- Do NOT critique surface polish, edge sharpening, focal accents, or final-read decisions. The student is not ready for those and the advice will misfire.
+
+If the visual evidence strongly contradicts the declaration — for example, the work clearly looks polished and resolved despite the in-progress mark — you may note the discrepancy briefly in the Quick Take and ask whether finished-stage feedback would be more useful. Default to honoring the declaration.
+
+This rule does not override SUBJECT VERIFICATION above. A subject mismatch or missing canonical feature is still a failure at every stage. Stage governs the Focus Area selection only after SUBJECT VERIFICATION passes.`;
+
+export const FINISHED_STAGE_BLOCK = `STAGE OF WORK — READ THIS CAREFULLY:
+The student has marked this drawing as FINISHED. They are asking for refinement and polish notes on a resolved piece — not coaching on next steps. Treat the drawing as a completed work and critique what is and isn't quite working in the final read.
+
+Match the Focus Area to the finished state:
+- Critique focal hierarchy, edge decisions, value contrast, surface finish — the elements that govern how a finished drawing reads.
+- Polish-level adjustments the student could make in a revision pass: sharpening, accents, knocking back competing detail, last calibration of values.
+- Foundational fixes (gesture, proportion, perspective) are usually too late at this stage. If one is truly load-bearing, name it once and move on — the student is unlikely to redo a finished piece on that scale.
+- Do NOT give next-steps coaching — "consider rendering this area next," "block in the background," "develop this further." The student has declared the drawing done and that advice will misfire.
+
+If the visual evidence strongly contradicts the declaration — for example, the work clearly looks like an early sketch with large unfinished areas despite the finished mark — you may note the discrepancy briefly in the Quick Take and ask whether in-progress feedback would be more useful. Default to honoring the declaration.
+
+This rule does not override SUBJECT VERIFICATION above. A subject mismatch or missing canonical feature is still a failure at every stage. Stage governs the Focus Area selection only after SUBJECT VERIFICATION passes.`;
+
+export const VALID_STAGE_OF_WORK = Object.freeze(new Set(['in_progress', 'finished']));
+
 export const SHARED_SYSTEM_RULES = `CORE RULES:
 - You are looking at a real student drawing sent as an image. Every observation must reference specific visual evidence in THIS drawing. No generic advice, no praise that could apply to any drawing.
 - Be honest. If the drawing has serious foundational problems, name them in the Quick Take. Do not soften your assessment to make the student feel better — empty praise wastes their session and they will lose trust in your eye. If nothing is genuinely working yet, skip the What's Working section entirely. Manufactured praise is worse than none.
@@ -145,11 +179,26 @@ A critique that omits the summary block, uses different delimiters, or wraps the
 // the env-derived flag explicitly; flipping STAGE_OF_WORK_ENABLED to
 // anything other than "true" in wrangler.toml (or the Cloudflare dashboard)
 // strips the block without a code change.
+//
+// `options.stageOfWork` ("in_progress" | "finished" | null) swaps the
+// inferred-stage block for a declared-stage block when the client sent
+// body.stage_of_work. Null/missing keeps the inferred-stage block (back-
+// compat for older iOS builds that don't send the field). Ignored when
+// includeStageOfWork is false — the kill-switch takes precedence.
 export function assembleSystemPrompt(voice, options = {}) {
   const includeStageOfWork = options.includeStageOfWork !== false;
-  const rules = includeStageOfWork
-    ? SHARED_SYSTEM_RULES
-    : SHARED_SYSTEM_RULES.replace(STAGE_OF_WORK_INSERT, '');
+  const stageOfWork = options.stageOfWork ?? null;
+
+  let rules;
+  if (!includeStageOfWork) {
+    rules = SHARED_SYSTEM_RULES.replace(STAGE_OF_WORK_INSERT, '');
+  } else if (stageOfWork === 'in_progress') {
+    rules = SHARED_SYSTEM_RULES.replace(STAGE_OF_WORK_BLOCK, IN_PROGRESS_STAGE_BLOCK);
+  } else if (stageOfWork === 'finished') {
+    rules = SHARED_SYSTEM_RULES.replace(STAGE_OF_WORK_BLOCK, FINISHED_STAGE_BLOCK);
+  } else {
+    rules = SHARED_SYSTEM_RULES;
+  }
   return `${voice}\n\n${rules}`;
 }
 
@@ -171,20 +220,29 @@ export const PRESET_VOICES = Object.freeze({
 // the handler still get the studio_mentor voice via this default.
 export const BASE_SYSTEM_PROMPT = assembleSystemPrompt(VOICE_STUDIO_MENTOR);
 
-const RESPONSE_FORMAT_TEMPLATE = (skillLevel, includeStageOfWork = true) => {
+const RESPONSE_FORMAT_TEMPLATE = (skillLevel, includeStageOfWork = true, stageOfWork = null) => {
   const normalized = skillLevel?.toLowerCase()?.trim();
   const focusAreaInstruction =
     normalized === 'beginner' ? 'give a clear, step-by-step suggestion for what to try'
     : normalized === 'advanced' ? 'pose a question or observation that helps them see it differently'
     : 'provide a concrete technique or exercise to address it';
 
-  // Quick Take body swaps with the STAGE_OF_WORK_ENABLED flag. When stage
-  // framing is on, the model is told to name the stage; when off, falls
-  // back to the prior "first read as a whole" wording so the toggle is
-  // a true kill-switch — flipping it off produces the pre-change prompt.
-  const quickTakeBody = includeStageOfWork
-    ? '1-2 sentences. Your honest first read of where the drawing is in its process — name the stage you see (block-in, refinement, polish) and the most important thing about it. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.'
-    : '1-2 sentences. Your honest first read of the drawing as a whole. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.';
+  // Quick Take body has three variants:
+  // - declared (in_progress / finished): the student told us the stage; the
+  //   model honors the declaration rather than re-naming the stage visually,
+  //   which would create redundancy / contradiction in the Quick Take itself.
+  // - env-on, undeclared (older iOS or missing field): inferred-stage
+  //   wording — model names the stage it sees.
+  // - env-off (kill-switch): pre-change "first read as a whole" wording so
+  //   the kill-switch produces the pre-feature prompt.
+  let quickTakeBody;
+  if (includeStageOfWork && (stageOfWork === 'in_progress' || stageOfWork === 'finished')) {
+    quickTakeBody = '1-2 sentences. Your honest first read of the drawing given the declared stage, and the most important thing for the student to focus on. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.';
+  } else if (includeStageOfWork) {
+    quickTakeBody = '1-2 sentences. Your honest first read of where the drawing is in its process — name the stage you see (block-in, refinement, polish) and the most important thing about it. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.';
+  } else {
+    quickTakeBody = '1-2 sentences. Your honest first read of the drawing as a whole. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.';
+  }
 
   return `RESPONSE FORMAT — follow this structure exactly:
 
@@ -328,11 +386,12 @@ export function renderContextBlock(context) {
 export function buildSystemPrompt(config, context) {
   const skillLevel = context.skillLevel || 'Intermediate';
   const includeStageOfWork = config.includeStageOfWork !== false;
+  const stageOfWork = config.stageOfWork ?? null;
   const sections = [
     config.systemPrompt,
     `SKILL LEVEL CALIBRATION:\n${renderSkillCalibration(skillLevel)}`,
     `CONTEXT (use what's provided, ignore empty fields):\n${renderContextBlock(context)}`,
-    RESPONSE_FORMAT_TEMPLATE(skillLevel, includeStageOfWork),
+    RESPONSE_FORMAT_TEMPLATE(skillLevel, includeStageOfWork, stageOfWork),
   ];
   // Composition findings — from on-device Apple Vision saliency,
   // shipped with the critique request when the user's iOS client
