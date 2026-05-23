@@ -67,6 +67,17 @@ final class CloudDrawingStorageManager: ObservableObject {
     private let fileManager = FileManager.default
     private let storageBucketID = "drawings"
     private let signedURLTTLSeconds = 3600     // 1 hour per Phase 3 spec
+
+    /// D2: minimum interval between proactive orphan sweeps for a given
+    /// user. Sweeping costs one signed-URL gen + one Range-0-0 GET per
+    /// (storage_path, manifest_path) per drawing, so we throttle to keep
+    /// the cost amortized across normal usage. Eve's coaching reads happen
+    /// out-of-band from user-initiated loadFullImage, so the existing lazy
+    /// reconciler can't keep her view clean by itself — but real-time
+    /// sweeping isn't needed either. 24h is the lever; tighten if orphans
+    /// start showing up in Eve's context, loosen if the network cost is
+    /// felt on cellular.
+    private let orphanSweepIntervalSeconds: TimeInterval = 24 * 60 * 60
     private let thumbnailMaxDimension: CGFloat = 512
     private let fullImageJPEGQuality: CGFloat = 0.9
     private let thumbnailJPEGQuality: CGFloat = 0.8
@@ -342,6 +353,14 @@ final class CloudDrawingStorageManager: ObservableObject {
                 writeMetadataToCache(drawing)
             }
             await hydrateThumbnails(for: decoded)
+
+            // D2: kick off proactive orphan reconciliation in the background.
+            // Don't await — the gallery shouldn't wait on N signed-URL probes
+            // before returning. Throttled to once-per-24h-per-user inside
+            // reconcileExistingOrphans.
+            Task { [weak self] in
+                await self?.reconcileExistingOrphans(for: activeUserID)
+            }
         } catch {
             // Surface the underlying DecodingError detail (.keyNotFound, etc.)
             // so future decode bugs are diagnosable from the Xcode console
@@ -1332,6 +1351,159 @@ final class CloudDrawingStorageManager: ObservableObject {
             .eq("id", value: id.uuidString.lowercased())
             .execute()
         print("☁️ Cleared dangling storage_path on \(id)")
+    }
+
+    // MARK: - D2: proactive orphan sweep
+
+    /// Walks the loaded `drawings` list for the given user and reconciles
+    /// any rows whose `storage_path` or `manifest_path` points at a missing
+    /// bucket object. Fires from the end of `fetchDrawings` and is gated by
+    /// a 24h per-user throttle (UserDefaults) so a normal fetch is cheap.
+    ///
+    /// Why this exists beyond the lazy reconciler in `loadFullImage`:
+    ///   - Lazy fires only when a user opens a drawing in the gallery.
+    ///   - Eve's worker-side `fetchCoachingContext` reads `drawings` rows
+    ///     directly. A row whose composite or manifest is missing in the
+    ///     bucket reaches Eve as a coaching dead-end without the user ever
+    ///     having opened it, so the lazy path never gets triggered.
+    ///   - This sweep walks the same rows up-front and reconciles before
+    ///     Eve next reads them.
+    ///
+    /// Cost: 1 signed-URL gen + 1 Range-0-0 GET per non-nil pointer per
+    /// drawing. Parallelism capped at 4 concurrent checks. For 100
+    /// drawings with both pointers set the wall-clock is ~50 network RTTs
+    /// across the 4-wide pipe.
+    private func reconcileExistingOrphans(for userID: UUID) async {
+        #if DEBUG
+        if AuthManager.shared.isDebugBypassed { return }
+        #endif
+        guard SupabaseManager.shared.client != nil else { return }
+
+        let throttleKey = "DrawEvolve.lastOrphanSweepAt.\(userID.uuidString.lowercased())"
+        let last = UserDefaults.standard.double(forKey: throttleKey)
+        let now = Date().timeIntervalSince1970
+        if last > 0, now - last < orphanSweepIntervalSeconds {
+            return
+        }
+
+        let candidates = drawings.filter { $0.userId == userID }
+        guard !candidates.isEmpty else {
+            UserDefaults.standard.set(now, forKey: throttleKey)
+            return
+        }
+
+        print("☁️ orphan sweep: checking \(candidates.count) drawing(s) for user \(userID.uuidString.lowercased())")
+        let chunkSize = 4
+        var index = 0
+        while index < candidates.count {
+            if Task.isCancelled { return }
+            let end = min(index + chunkSize, candidates.count)
+            await withTaskGroup(of: Void.self) { group in
+                for i in index..<end {
+                    let drawing = candidates[i]
+                    group.addTask { [weak self] in
+                        await self?.reconcileSingleDrawingIfOrphan(drawing)
+                    }
+                }
+            }
+            index = end
+        }
+
+        // Persist the success timestamp AFTER the sweep finishes — a
+        // cancelled / failed sweep should not satisfy the throttle, so
+        // the next fetchDrawings still gets a chance to retry.
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: throttleKey)
+        print("☁️ orphan sweep complete for user \(userID.uuidString.lowercased())")
+    }
+
+    /// Per-drawing existence check. Routes through the existing
+    /// `reconcileOrphanStoragePath` for composite orphans and the new
+    /// `reconcileOrphanManifestPath` for layered-manifest orphans.
+    private func reconcileSingleDrawingIfOrphan(_ drawing: Drawing) async {
+        if let storagePath = drawing.storagePath {
+            if await isCloudObjectMissing(path: storagePath) {
+                print("☁️ orphan sweep: storage_path missing for \(drawing.id) — reconciling")
+                await reconcileOrphanStoragePath(for: drawing)
+            }
+        }
+        if let manifestPath = drawing.manifestPath {
+            if await isCloudObjectMissing(path: manifestPath) {
+                print("☁️ orphan sweep: manifest_path missing for \(drawing.id) — reconciling")
+                await reconcileOrphanManifestPath(for: drawing)
+            }
+        }
+    }
+
+    /// Cheapest "does this object exist?" probe Supabase Storage allows:
+    /// a signed URL is GET-signed (HEAD against the same URL returns 400),
+    /// so we do a single-byte ranged GET. Status >= 400 = missing.
+    ///
+    /// Conservative on errors: if signed-URL generation or the network
+    /// itself fails, we return `false` so a downstream reconciler isn't
+    /// triggered on a false positive. The worst case of "object exists
+    /// but we couldn't reach it this minute" is a delayed sweep; the
+    /// worst case of "false positive that nulls the row" is data loss.
+    private func isCloudObjectMissing(path: String) async -> Bool {
+        guard let client = SupabaseManager.shared.client else { return false }
+        do {
+            let signed = try await client.storage
+                .from(storageBucketID)
+                .createSignedURL(path: path, expiresIn: signedURLTTLSeconds)
+            var request = URLRequest(url: signed)
+            request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return http.statusCode >= 400
+        } catch {
+            return false
+        }
+    }
+
+    /// Recover a row whose `manifest_path` points at a missing bucket
+    /// object. Mirror of `reconcileOrphanStoragePath` but for the layered
+    /// half of the storage contract:
+    ///   1. If the full local layered bundle is present (manifest +
+    ///      all per-layer PNGs), re-enqueue a layered upload. Same path
+    ///      strings, so a successful re-upload heals the row without any
+    ///      DB write — manifest_path was correct, the file just wasn't
+    ///      there yet.
+    ///   2. If anything is missing locally, log loudly and leave the row
+    ///      alone. Per the D2 brief: no destructive nulling without a
+    ///      future recovery story. The row stays in place so a later
+    ///      "broken drawing — recover or delete?" UI can surface it; Eve
+    ///      still gets a row reference but `fetchCoachingContext` will
+    ///      degrade gracefully on the next layered fetch.
+    private func reconcileOrphanManifestPath(for drawing: Drawing) async {
+        let id = drawing.id
+        let layerDir = localLayersDir(forDrawingID: id)
+        let manifestURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.manifest)
+        guard let manifestData = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(LayeredDrawingManifest.self, from: manifestData) else {
+            print("☁️ reconcile-manifest \(id): no local manifest — cannot heal. Row left untouched.")
+            return
+        }
+
+        var layerPNGs: [Data] = []
+        for layer in manifest.layers {
+            let url = layerDir.appendingPathComponent(layer.asset)
+            guard let bytes = try? Data(contentsOf: url) else {
+                print("☁️ reconcile-manifest \(id): layer \(layer.ordinal) bytes missing locally — cannot heal. Row left untouched.")
+                return
+            }
+            layerPNGs.append(bytes)
+        }
+
+        let compositeURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.composite)
+        let thumbURL = thumbnailsDir.appendingPathComponent("\(id.uuidString).jpg")
+        let payload = LayeredDrawingPayload(
+            manifest: manifest,
+            layerPNGs: layerPNGs,
+            compositeJPEG: try? Data(contentsOf: compositeURL),
+            thumbnailJPEG: try? Data(contentsOf: thumbURL)
+        )
+
+        print("☁️ reconcile-manifest \(id): local bundle complete — re-enqueuing layered upload")
+        enqueueLayeredUpload(for: drawing, payload: payload, legacy: nil)
     }
 
     // MARK: - Local persistence helpers
