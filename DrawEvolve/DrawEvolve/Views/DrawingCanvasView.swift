@@ -44,15 +44,40 @@ struct DrawingCanvasView: View {
     /// per-subview hiding of the editing UI.
     private var isViewingSnapshot: Bool { canvasState.viewingSnapshot != nil }
 
-    /// Top-leading chip rendered when the canvas is showing a historical
-    /// snapshot. Tappable anywhere to clear (per approved decision — no
-    /// separate X). Appears above the snapshot overlay; same coordinate
-    /// space as the editing chrome it temporarily replaces.
+    /// Top-leading chrome rendered when the canvas is showing a historical
+    /// snapshot. Two-zone toolbar:
+    ///   - LEFT: explicit "Return to canvas" button (chevron + label) that
+    ///           clears `viewingSnapshot`. Tester feedback (C3) — the
+    ///           original chip was a single pill where tapping anywhere
+    ///           exited snapshot mode; users didn't realize the whole pill
+    ///           was tappable, so the exit affordance read as missing.
+    ///   - CENTER: the snapshot timestamp as a static label pill. Not
+    ///             interactive — its job is to confirm what the user is
+    ///             looking at, not to be a tap target.
+    /// No right-side element by design — an empty placeholder for symmetry
+    /// would be a button-that-does-nothing, which is its own UX confusion.
+    /// Asymmetric layout is honest about what each element does.
     @ViewBuilder
     private func snapshotChip(timestamp: Date) -> some View {
-        Button {
-            canvasState.viewingSnapshot = nil
-        } label: {
+        HStack(spacing: 8) {
+            Button {
+                canvasState.viewingSnapshot = nil
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left")
+                        .font(.caption.weight(.semibold))
+                    Text("Return to canvas")
+                        .font(.subheadline.weight(.medium))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.thinMaterial, in: Capsule())
+                .foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Return to canvas")
+            .accessibilityHint("Exits snapshot mode and returns to the live drawing")
+
             HStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.caption.weight(.semibold))
@@ -63,12 +88,12 @@ struct DrawingCanvasView: View {
             .padding(.vertical, 10)
             .background(.thinMaterial, in: Capsule())
             .foregroundStyle(.primary)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Viewing snapshot from \(timestamp.formatted(date: .abbreviated, time: .shortened))")
         }
-        .buttonStyle(.plain)
         .padding(.top, 12)
         .padding(.leading, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .accessibilityHint("Tap to return to the live drawing")
     }
     /// iPhone-only — surfaces the 6 brush variants (pencil/brush/inkPen/
     /// marker/airbrush/charcoal) in a sheet, since the flat iPhone tool
