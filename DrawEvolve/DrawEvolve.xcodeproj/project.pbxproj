@@ -107,6 +107,7 @@
 		DE000110 /* EveInputBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100110 /* EveInputBar.swift */; };
 		DE000111 /* EveConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100111 /* EveConversationView.swift */; };
 		DE000112 /* EveSheetHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100112 /* EveSheetHost.swift */; };
+		DE000123 /* EveConversationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100123 /* EveConversationListView.swift */; };
 		DE000113 /* Recommendation.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100113 /* Recommendation.swift */; };
 		DE000114 /* RecommendationsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100114 /* RecommendationsService.swift */; };
 		DE000115 /* RecommendationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100115 /* RecommendationCard.swift */; };
@@ -233,6 +234,7 @@
 		DE100110 /* EveInputBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveInputBar.swift; sourceTree = "<group>"; };
 		DE100111 /* EveConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversationView.swift; sourceTree = "<group>"; };
 		DE100112 /* EveSheetHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveSheetHost.swift; sourceTree = "<group>"; };
+		DE100123 /* EveConversationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversationListView.swift; sourceTree = "<group>"; };
 		DE100113 /* Recommendation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recommendation.swift; sourceTree = "<group>"; };
 		DE100114 /* RecommendationsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationsService.swift; sourceTree = "<group>"; };
 		DE100115 /* RecommendationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationCard.swift; sourceTree = "<group>"; };
@@ -520,6 +522,7 @@
 				DE100110 /* EveInputBar.swift */,
 				DE100111 /* EveConversationView.swift */,
 				DE100112 /* EveSheetHost.swift */,
+				DE100123 /* EveConversationListView.swift */,
 			);
 			path = Eve;
 			sourceTree = "<group>";
@@ -711,6 +714,7 @@
 				DE000110 /* EveInputBar.swift in Sources */,
 				DE000111 /* EveConversationView.swift in Sources */,
 				DE000112 /* EveSheetHost.swift in Sources */,
+				DE000123 /* EveConversationListView.swift in Sources */,
 				DE000113 /* Recommendation.swift in Sources */,
 				DE000114 /* RecommendationsService.swift in Sources */,
 				DE000115 /* RecommendationCard.swift in Sources */,
