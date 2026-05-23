@@ -71,6 +71,15 @@ final class CloudDrawingStorageManager: ObservableObject {
     private let fullImageJPEGQuality: CGFloat = 0.9
     private let thumbnailJPEGQuality: CGFloat = 0.8
 
+    /// Hard ceiling on per-drawing upload retries. Pending entries past
+    /// this attempt count get dropped (no row upsert, drawing stays in
+    /// local cache only). At ~60s max backoff per attempt this is roughly
+    /// 32 minutes of compressed retries; spread across launches +
+    /// NWPathMonitor recoveries it's days-to-weeks of real-world retries
+    /// before we give up. The bound exists so a permanently-broken
+    /// pending entry doesn't sit on disk forever and log on every launch.
+    private let uploadGiveUpAttempts = 32
+
     /// In-memory thumbnail cache keyed by drawing id, populated by fetchDrawings().
     /// Sync access for gallery cells. ~10-30KB per entry; for very large galleries
     /// (1000s of drawings) this should move to NSCache + lazy loading.
@@ -1192,7 +1201,21 @@ final class CloudDrawingStorageManager: ObservableObject {
             let signed = try await client.storage
                 .from(storageBucketID)
                 .createSignedURL(path: storagePath, expiresIn: signedURLTTLSeconds)
-            let (data, _) = try await URLSession.shared.data(from: signed)
+            let (data, response) = try await URLSession.shared.data(from: signed)
+
+            // Phase 3.1 (orphan reconciliation): URLSession does NOT throw on
+            // 4xx, so a missing-in-bucket file returns the error body as
+            // `data` and the call "succeeds." Detect the missing-object case
+            // here and either re-enqueue the upload (local bytes still
+            // present) or clear storage_path so future fetches stop hitting
+            // a 404. Without this branch, the gallery would cache the 4xx
+            // body and try to render it as an image.
+            if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+                print("☁️ loadFullImage \(id): signed URL returned \(http.statusCode) — reconciling orphan")
+                await reconcileOrphanStoragePath(for: drawing)
+                return nil
+            }
+
             // Cache to whichever directory matches the drawing's representation.
             let cacheURL = drawing.isLayered ? layeredCompositeURL : url
             try? fileManager.createDirectory(
@@ -1205,6 +1228,110 @@ final class CloudDrawingStorageManager: ObservableObject {
             print("☁️ loadFullImage failed for \(id): \(error.localizedDescription)")
             return nil
         }
+    }
+
+    /// Phase 3.1 — reconcile a row whose `storage_path` points at a file
+    /// that doesn't exist in the bucket. Called from the loadFullImage
+    /// failure path when a signed-URL fetch returns 4xx. Two recovery
+    /// paths:
+    ///   1. Local cache still has the bytes → re-enqueue an upload.
+    ///      Same path string, so a successful re-upload heals the row
+    ///      without any DB write (storage_path was correct, the file
+    ///      just wasn't there yet).
+    ///   2. No local bytes, but the drawing has a manifest_path →
+    ///      clear storage_path on the row. The layered manifest is
+    ///      still the source of truth; the dangling composite pointer
+    ///      gets nulled so consumers (worker, gallery) stop trying to
+    ///      use it. Migration 0010 dropped NOT NULL specifically so
+    ///      this null state is well-formed.
+    ///   3. No local bytes AND no manifest → the drawing has no
+    ///      recoverable data anywhere. Log but do NOT auto-delete; the
+    ///      user might have backups elsewhere. A future "this drawing
+    ///      is broken — recover or delete?" UI takes over from here.
+    private func reconcileOrphanStoragePath(for drawing: Drawing) async {
+        let id = drawing.id
+        let localImage = imagesDir.appendingPathComponent("\(id.uuidString).jpg")
+        let layeredComposite = layeredLocalCompositePath(forDrawingID: id)
+
+        let hasLocalFlat = fileManager.fileExists(atPath: localImage.path)
+        let hasLocalLayered = fileManager.fileExists(atPath: layeredComposite.path)
+
+        if hasLocalFlat || hasLocalLayered {
+            print("☁️ reconcile \(id): local bytes present, re-enqueuing upload")
+            enqueueUpload(for: drawing)
+            return
+        }
+
+        if drawing.manifestPath != nil {
+            print("☁️ reconcile \(id): no local composite, but manifest_path is set — clearing dangling storage_path on the row")
+            do {
+                try await clearStoragePath(id: id)
+            } catch {
+                print("☁️ reconcile \(id): clearStoragePath failed: \(error.localizedDescription)")
+            }
+            return
+        }
+
+        print("☁️ reconcile \(id): no local bytes AND no manifest — drawing has no recoverable data. Row left untouched; surface to user via future broken-drawing UI.")
+    }
+
+    /// Returns the on-disk path where a layered drawing's composite JPEG
+    /// would live after a successful layered save. Filename mirrors the
+    /// cloud-side `LayeredDrawingFilenames.composite`.
+    private func layeredLocalCompositePath(forDrawingID id: UUID) -> URL {
+        localLayersDir(forDrawingID: id)
+            .appendingPathComponent(LayeredDrawingFilenames.composite)
+    }
+
+    /// PATCH `drawings.storage_path = null` for a specific drawing.
+    /// Same shape as renameDrawing — direct PostgREST PATCH, no upload
+    /// queue, touches only storage_path + updated_at so it CANNOT
+    /// clobber critique_history (Worker is sole writer per CLAUDE.md).
+    /// Also clears the in-memory + on-disk Drawing record so subsequent
+    /// loadFullImage calls don't re-hit the dangling path.
+    @MainActor
+    private func clearStoragePath(id: UUID) async throws {
+        guard let index = drawings.firstIndex(where: { $0.id == id }) else {
+            throw DrawingStorageError.drawingNotFound
+        }
+        guard let client = SupabaseManager.shared.client else {
+            throw DrawingStorageError.saveFailed
+        }
+
+        var drawing = drawings[index]
+        drawing.storagePath = nil
+        drawing.updatedAt = Date()
+        try persistLocally(drawing: drawing, imageData: nil)
+        drawings[index] = drawing
+
+        struct StoragePathPatch: Encodable {
+            let storage_path: String?
+            let updated_at: String
+
+            func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                // Encode storage_path explicitly as null so PostgREST
+                // clears the column rather than omitting it.
+                try container.encode(storage_path, forKey: .storage_path)
+                try container.encode(updated_at, forKey: .updated_at)
+            }
+            enum CodingKeys: String, CodingKey {
+                case storage_path
+                case updated_at
+            }
+        }
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let patch = StoragePathPatch(
+            storage_path: nil,
+            updated_at: isoFormatter.string(from: drawing.updatedAt)
+        )
+        try await client
+            .from("drawings")
+            .update(patch)
+            .eq("id", value: id.uuidString.lowercased())
+            .execute()
+        print("☁️ Cleared dangling storage_path on \(id)")
     }
 
     // MARK: - Local persistence helpers
@@ -1449,8 +1576,15 @@ final class CloudDrawingStorageManager: ObservableObject {
             pendingUploadCount = countPendingEntriesForCurrentUser()
             print("☁️ Uploaded \(drawing.id) '\(drawing.title)'")
         } catch {
-            print("☁️ Upload failed for \(drawing.id) — keeping pending: \(error.localizedDescription)")
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
+            if attempts >= uploadGiveUpAttempts {
+                print("☁️ ⚠️ Giving up on flat upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
+                removePendingEntry(id: id)
+                activeUploadTasks[id] = nil
+                pendingUploadCount = countPendingEntriesForCurrentUser()
+                return
+            }
+            print("☁️ Upload failed for \(drawing.id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — keeping pending: \(error.localizedDescription)")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
@@ -1594,11 +1728,18 @@ final class CloudDrawingStorageManager: ObservableObject {
                             return "composite"
                         }
                     } else {
-                        // No local composite to upload; mark the step done so
-                        // the pipeline can advance — the manifest's composite
-                        // pointer will end up dangling but the row is still
-                        // valid (composite is optional per §5.5).
-                        entry.uploadedComposite = true
+                        // No local composite to upload. Do NOT mark
+                        // uploadedComposite = true — that flag means "bytes
+                        // landed in the bucket at compositePath this run."
+                        // Marking it true here would produce a row whose
+                        // storage_path points at a file that doesn't exist
+                        // (see commit 18ba2b4e blame note).
+                        //
+                        // Leaving the flag false signals to the row-upsert
+                        // step (Step 4 below) that storage_path must be
+                        // cleared in the payload. Layers + manifest still
+                        // upload, so the drawing remains loadable; we just
+                        // can't advertise a composite via storage_path.
                     }
                 }
                 if entry.uploadedThumb != true, let thumbPath = entry.thumbPath {
@@ -1615,7 +1756,10 @@ final class CloudDrawingStorageManager: ObservableObject {
                             return "thumb"
                         }
                     } else {
-                        entry.uploadedThumb = true
+                        // Missing local thumb bytes: do NOT mark uploaded.
+                        // Same reasoning as the composite branch above —
+                        // a flag of "true" without bytes in the bucket
+                        // would produce a dangling pointer downstream.
                     }
                 }
                 for try await step in group {
@@ -1645,10 +1789,23 @@ final class CloudDrawingStorageManager: ObservableObject {
             // Step 4: row upsert. Same omit-critique-history payload as the
             // flat path; the new manifest_path / format_version / layer_count
             // / total_bytes columns get included automatically.
+            //
+            // If the composite upload was skipped this run (missing local
+            // bytes), clear storage_path in the payload so the row doesn't
+            // claim a file exists at compositePath. DrawingUpsertPayload
+            // uses encodeIfPresent for storagePath — nil means the column
+            // is omitted, which leaves it unchanged on UPDATE and writes
+            // NULL on INSERT (migration 0010 dropped the NOT NULL). Layers
+            // + manifest are the source of truth per §5.5; the row stays
+            // loadable without a composite.
             if entry.rowUpserted != true {
+                var drawingForRow = drawing
+                if entry.uploadedComposite != true {
+                    drawingForRow.storagePath = nil
+                }
                 try await client
                     .from("drawings")
-                    .upsert(DrawingUpsertPayload(drawing: drawing))
+                    .upsert(DrawingUpsertPayload(drawing: drawingForRow))
                     .execute()
                 entry.rowUpserted = true
                 updatePendingEntry(entry)
@@ -1675,8 +1832,15 @@ final class CloudDrawingStorageManager: ObservableObject {
         } catch {
             // Persist whatever we got done so the next retry resumes correctly.
             updatePendingEntry(entry)
-            print("☁️ Layered upload failed for \(drawing.id) — keeping pending: \(error.localizedDescription)")
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
+            if attempts >= uploadGiveUpAttempts {
+                print("☁️ ⚠️ Giving up on layered upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
+                removePendingEntry(id: id)
+                activeUploadTasks[id] = nil
+                pendingUploadCount = countPendingEntriesForCurrentUser()
+                return
+            }
+            print("☁️ Layered upload failed for \(drawing.id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — keeping pending: \(error.localizedDescription)")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
