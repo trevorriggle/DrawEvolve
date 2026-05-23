@@ -1537,9 +1537,24 @@ final class CloudDrawingStorageManager: ObservableObject {
         let imageURL = imagesDir.appendingPathComponent("\(id.uuidString).jpg")
         let thumbURL = thumbnailsDir.appendingPathComponent("\(id.uuidString).jpg")
         guard let imageData = try? Data(contentsOf: imageURL) else {
-            // No local image bytes — nothing to upload. Drop the pending entry.
-            removePendingEntry(id: id)
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            // Local image bytes missing at upload time. The pre-D1 behavior
+            // was to silently drop the pending entry — but that produced a
+            // save the user thought had landed while no row + no file ever
+            // reached the cloud. Treat as a retryable failure so a transient
+            // I/O hiccup (mid-write file, briefly evicted disk-cache entry)
+            // gets another pass. Surface a visible error and drop only after
+            // hitting the give-up ceiling.
+            let attempts = (incrementPendingAttempts(id: id) ?? 1)
+            if attempts >= uploadGiveUpAttempts {
+                print("☁️ ❌ PERMANENT: flat upload \(id) has no local image bytes after \(attempts) attempts — dropping pending entry. Drawing remains in local cache; cloud row NOT written.")
+                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
+                removePendingEntry(id: id)
+                activeUploadTasks[id] = nil
+                pendingUploadCount = countPendingEntriesForCurrentUser()
+                return
+            }
+            print("☁️ Flat upload missing local image bytes for \(id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — scheduling retry")
+            scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
             return
         }
@@ -1578,7 +1593,8 @@ final class CloudDrawingStorageManager: ObservableObject {
         } catch {
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
             if attempts >= uploadGiveUpAttempts {
-                print("☁️ ⚠️ Giving up on flat upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
+                print("☁️ ❌ PERMANENT: giving up on flat upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
+                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
                 removePendingEntry(id: id)
                 activeUploadTasks[id] = nil
                 pendingUploadCount = countPendingEntriesForCurrentUser()
@@ -1667,10 +1683,22 @@ final class CloudDrawingStorageManager: ObservableObject {
         let layerDir = localLayersDir(forDrawingID: id)
         let manifestURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.manifest)
         guard let manifestData = try? Data(contentsOf: manifestURL) else {
-            // Local manifest missing — we can't upload without it. Drop the
-            // pending entry so the queue doesn't spin forever.
-            removePendingEntry(id: id)
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            // Local manifest missing — we can't upload without it. The
+            // pre-D1 path silently dropped the pending entry, which left the
+            // user's local cache intact but produced zero cloud presence for
+            // the save. Treat as retryable (transient I/O) and only give up
+            // after the same ceiling that bounds the rest of the pipeline.
+            let attempts = (incrementPendingAttempts(id: id) ?? 1)
+            if attempts >= uploadGiveUpAttempts {
+                print("☁️ ❌ PERMANENT: layered upload \(id) has no local manifest after \(attempts) attempts — dropping pending entry. Drawing remains in local cache; cloud row NOT written.")
+                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
+                removePendingEntry(id: id)
+                activeUploadTasks[id] = nil
+                pendingUploadCount = countPendingEntriesForCurrentUser()
+                return
+            }
+            print("☁️ Layered upload missing local manifest for \(id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — scheduling retry")
+            scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
             return
         }
@@ -1728,18 +1756,21 @@ final class CloudDrawingStorageManager: ObservableObject {
                             return "composite"
                         }
                     } else {
-                        // No local composite to upload. Do NOT mark
-                        // uploadedComposite = true — that flag means "bytes
-                        // landed in the bucket at compositePath this run."
-                        // Marking it true here would produce a row whose
-                        // storage_path points at a file that doesn't exist
-                        // (see commit 18ba2b4e blame note).
+                        // entry.compositePath was set at enqueue, meaning we
+                        // committed to uploading a composite for this save.
+                        // The local bytes are gone now — that's the orphan
+                        // case D1 closes. The pre-D1 branch silently left
+                        // uploadedComposite=false and let Step 4 null out
+                        // storage_path; we'd then ship a row whose intent
+                        // disagrees with what's actually in the bucket.
                         //
-                        // Leaving the flag false signals to the row-upsert
-                        // step (Step 4 below) that storage_path must be
-                        // cleared in the payload. Layers + manifest still
-                        // upload, so the drawing remains loadable; we just
-                        // can't advertise a composite via storage_path.
+                        // ONLINELAYERSTORE.md §5.5 keeps composite optional,
+                        // so a drawing genuinely saved WITHOUT a composite
+                        // has entry.compositePath == nil and never reaches
+                        // this branch. Throwing here is the "we promised a
+                        // composite and the bytes vanished" path — treat as
+                        // transient and let the outer catch retry.
+                        throw DrawingStorageError.saveFailed
                     }
                 }
                 if entry.uploadedThumb != true, let thumbPath = entry.thumbPath {
@@ -1756,10 +1787,13 @@ final class CloudDrawingStorageManager: ObservableObject {
                             return "thumb"
                         }
                     } else {
-                        // Missing local thumb bytes: do NOT mark uploaded.
-                        // Same reasoning as the composite branch above —
-                        // a flag of "true" without bytes in the bucket
-                        // would produce a dangling pointer downstream.
+                        // entry.thumbPath was set at enqueue, so we committed
+                        // to uploading a thumb. Missing local bytes here is
+                        // the same "promised, then vanished" shape as the
+                        // composite branch above — treat as transient and
+                        // retry rather than silently shipping a row whose
+                        // gallery placeholder will hit 404 forever.
+                        throw DrawingStorageError.saveFailed
                     }
                 }
                 for try await step in group {
@@ -1790,14 +1824,17 @@ final class CloudDrawingStorageManager: ObservableObject {
             // flat path; the new manifest_path / format_version / layer_count
             // / total_bytes columns get included automatically.
             //
-            // If the composite upload was skipped this run (missing local
-            // bytes), clear storage_path in the payload so the row doesn't
-            // claim a file exists at compositePath. DrawingUpsertPayload
-            // uses encodeIfPresent for storagePath — nil means the column
-            // is omitted, which leaves it unchanged on UPDATE and writes
-            // NULL on INSERT (migration 0010 dropped the NOT NULL). Layers
-            // + manifest are the source of truth per §5.5; the row stays
-            // loadable without a composite.
+            // Post-D1: reaching this step with uploadedComposite != true
+            // means entry.compositePath was nil at enqueue (drawing was
+            // saved WITHOUT a composite, which §5.5 explicitly allows).
+            // The "promised composite, bytes vanished" case throws in
+            // Step 2 and never reaches here. Either way, we clear
+            // storage_path so the row doesn't claim a file that wasn't
+            // uploaded. DrawingUpsertPayload uses encodeIfPresent for
+            // storagePath — nil means the column is omitted, which leaves
+            // it unchanged on UPDATE and writes NULL on INSERT (migration
+            // 0010 dropped the NOT NULL). Layers + manifest are the source
+            // of truth per §5.5; the row stays loadable without a composite.
             if entry.rowUpserted != true {
                 var drawingForRow = drawing
                 if entry.uploadedComposite != true {
@@ -1834,7 +1871,8 @@ final class CloudDrawingStorageManager: ObservableObject {
             updatePendingEntry(entry)
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
             if attempts >= uploadGiveUpAttempts {
-                print("☁️ ⚠️ Giving up on layered upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
+                print("☁️ ❌ PERMANENT: giving up on layered upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
+                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
                 removePendingEntry(id: id)
                 activeUploadTasks[id] = nil
                 pendingUploadCount = countPendingEntriesForCurrentUser()
