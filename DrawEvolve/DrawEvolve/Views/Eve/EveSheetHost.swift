@@ -30,6 +30,7 @@ struct EveSheetHost: View {
         drawingId: UUID? = nil,
         critiqueSequence: Int? = nil,
         drawingTitle: String? = nil,
+        captureCanvas: (() -> Data?)? = nil,
         onClose: @escaping () -> Void,
     ) {
         _manager = StateObject(wrappedValue: EveConversationManager(
@@ -37,6 +38,7 @@ struct EveSheetHost: View {
             drawingId: drawingId,
             critiqueSequence: critiqueSequence,
             drawingTitle: drawingTitle,
+            captureCanvas: captureCanvas,
         ))
         self.onClose = onClose
     }

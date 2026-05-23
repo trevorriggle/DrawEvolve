@@ -34,6 +34,29 @@ final class EveConversationManager: ObservableObject {
     /// draft within the same manager lifetime.
     @Published var draft: String = ""
 
+    /// Optional JPEG-encoded canvas snapshot to attach to the next send.
+    /// Only ever non-nil when `canAttachCanvas` is true — the
+    /// canvas-launched Eve sheet exposes the attach affordance, every
+    /// other entry point hides it. Cleared on successful send. Retained
+    /// on failure so the user can retry the same shot.
+    @Published private(set) var pendingCanvasImage: Data?
+
+    /// Computed convenience for the UI — "should I show the chip?"
+    var hasAttachedCanvas: Bool { pendingCanvasImage != nil }
+
+    /// Drives whether the "+ Show Eve my canvas" pill renders. Derived
+    /// from whether the caller passed a `captureCanvas` closure — every
+    /// canvas-launched entry point provides one, everything else (home,
+    /// gallery, critique panel) doesn't. Belt-and-suspenders against
+    /// the pill leaking onto entry points that have no canvas to share.
+    var canAttachCanvas: Bool { captureCanvas != nil }
+
+    /// Closure that produces a JPEG-encoded snapshot of the current
+    /// canvas. Owned by this manager so the pill UI doesn't have to
+    /// know anything about MetalCanvasView / CanvasRenderer. nil for
+    /// non-canvas-launched entries — the pill won't render.
+    private let captureCanvas: (() -> Data?)?
+
     /// True when the input bar has non-whitespace text the user hasn't
     /// sent yet. Gates iPhone's interactive (swipe-down) sheet dismissal
     /// so an in-progress message isn't lost to an accidental swipe — the
@@ -73,11 +96,13 @@ final class EveConversationManager: ObservableObject {
         drawingId: UUID? = nil,
         critiqueSequence: Int? = nil,
         drawingTitle: String? = nil,
+        captureCanvas: (() -> Data?)? = nil,
     ) {
         self.scope = scope
         self.scopeDrawingId = drawingId
         self.scopeCritiqueSequence = critiqueSequence
         self.initialDrawingTitle = drawingTitle
+        self.captureCanvas = captureCanvas
     }
 
     /// Idempotent bootstrap. Call from .task on the sheet. Subsequent
@@ -115,16 +140,28 @@ final class EveConversationManager: ObservableObject {
         guard sendState != .sending else { return }
         guard let convo = conversation else { return }
 
+        // Snapshot the canvas attachment (if any) into a local so the
+        // request body sees the bytes that were present at send-tap time,
+        // even if the user re-taps "Show Eve my canvas" mid-flight.
+        let canvasSnapshot = pendingCanvasImage
+        let canvasBase64 = canvasSnapshot?.base64EncodedString()
+
         // Optimistic UI: render the user's message immediately as a
         // pending row so the bubble appears the instant they tap send.
         // The pending row carries a synthetic UUID; the real row (with
-        // its server-assigned id) replaces it on the response.
+        // its server-assigned id) replaces it on the response. When a
+        // canvas was attached we mirror the worker's persisted format so
+        // the in-flight bubble matches what the canonical row will look
+        // like on next conversation hydrate.
         let pendingId = UUID()
+        let pendingContent = canvasBase64 != nil
+            ? "[canvas attached this turn]\n\n\(trimmed)"
+            : trimmed
         let pending = EveMessage(
             id: pendingId,
             conversationId: convo.id,
             role: .user,
-            content: trimmed,
+            content: pendingContent,
             createdAt: Date(),
             promptTokenCount: nil,
             completionTokenCount: nil,
@@ -139,6 +176,7 @@ final class EveConversationManager: ObservableObject {
             let response = try await EveService.shared.sendMessage(
                 conversationId: convo.id,
                 content: trimmed,
+                canvasImageBase64: canvasBase64,
             )
             // Replace the pending row with the canonical user row (if
             // the server returned one — on idempotent replay it may be
@@ -154,11 +192,18 @@ final class EveConversationManager: ObservableObject {
             messages.append(response.assistantMessage)
             self.conversation = response.conversation
             self.sendState = .idle
+            // Successful send → drop the staged canvas. Each canvas
+            // share is one-turn by design (per ship spec); the user
+            // can re-tap "Show Eve my canvas" if they want to attach
+            // the (now-updated) state again.
+            self.pendingCanvasImage = nil
         } catch let err as EveServiceError {
             // Failed send: leave the user's bubble in place (with a
             // visual error indicator at the bubble level) so they
             // don't lose what they typed, and restore the draft to
-            // the input bar so they can edit and retry.
+            // the input bar so they can edit and retry. The canvas
+            // attachment also stays in place — the user shouldn't lose
+            // their shot just because OpenAI burped.
             messages.removeAll { $0.id == pendingId }
             draft = trimmed
             sendState = .failed(message: err.errorDescription ?? "Eve couldn't reply just now.")
@@ -175,5 +220,34 @@ final class EveConversationManager: ObservableObject {
         if case .failed = sendState {
             sendState = .idle
         }
+    }
+
+    // =============================================================================
+    // Canvas attachment
+    // =============================================================================
+
+    /// Invoke the canvas-capture closure and stage the result as the
+    /// next-send attachment. No-op when the manager wasn't constructed
+    /// with a `captureCanvas` closure (defensive — the pill is gated
+    /// upstream by `canAttachCanvas` so it shouldn't render in that
+    /// case). Returns false when the closure was missing or returned
+    /// nil (export failed) so the UI can surface a transient error.
+    @discardableResult
+    func captureAndAttachCanvas() -> Bool {
+        guard let captureCanvas else {
+            assertionFailure("captureAndAttachCanvas called without a captureCanvas closure")
+            return false
+        }
+        guard let data = captureCanvas(), !data.isEmpty else {
+            return false
+        }
+        pendingCanvasImage = data
+        return true
+    }
+
+    /// Drop the staged attachment without sending. Called from the chip's
+    /// remove button.
+    func clearAttachedCanvas() {
+        pendingCanvasImage = nil
     }
 }

@@ -20,6 +20,7 @@ import {
   EVE_PERSONA_VERSION,
   EVE_PRODUCT_CONTEXT,
   EVE_PRODUCT_CONTEXT_VERSION,
+  EVE_CANVAS_BLOCK_VERSION,
   buildEveSystemPrompt,
   buildEveMessages,
   renderCoachingContextBlock,
@@ -5058,6 +5059,130 @@ test('buildEveMessages tolerates non-array history without throwing', () => {
   // Defensive: should produce [system, user] without blowing up.
   assert.equal(messages.length, 2);
   assert.equal(messages[1].content, 'q');
+});
+
+// ---- Canvas-attach turn ----------------------------------------------------
+//
+// Per-turn override: when the student attaches their in-progress canvas,
+// the system prompt gets the CURRENT CANVAS block (relaxing the
+// "haven't seen the drawings" guardrail for this turn only, defending
+// Eve persona against critique-register drift), AND the user message
+// becomes multimodal (text + image_url). History stays text-only on
+// subsequent turns — past images are not replayed.
+
+test('buildEveSystemPrompt with attachedCanvas=true includes CURRENT CANVAS block', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'general',
+    critique: null,
+    attachedCanvas: true,
+  });
+  assert.ok(sys.includes('CURRENT CANVAS'),
+    'CURRENT CANVAS block header must be present');
+  assert.ok(sys.includes('FOR THIS TURN ONLY'),
+    'per-turn override scoping must be explicit');
+  assert.ok(sys.includes('not a critique'),
+    'must defend against critique-register drift');
+  assert.ok(sys.includes('No numbered lists'),
+    'must explicitly forbid critique-shaped output');
+});
+
+test('buildEveSystemPrompt omits CURRENT CANVAS block when attachedCanvas is falsy', () => {
+  const noFlag = buildEveSystemPrompt({ scope: 'general', critique: null });
+  const explicitFalse = buildEveSystemPrompt({
+    scope: 'general', critique: null, attachedCanvas: false,
+  });
+  const nullVal = buildEveSystemPrompt({
+    scope: 'general', critique: null, attachedCanvas: null,
+  });
+  assert.ok(!noFlag.includes('CURRENT CANVAS'),
+    'no block when flag omitted');
+  assert.ok(!explicitFalse.includes('CURRENT CANVAS'),
+    'no block when flag false');
+  assert.ok(!nullVal.includes('CURRENT CANVAS'),
+    'no block when flag null (only strict true triggers the block)');
+});
+
+test('buildEveSystemPrompt renders CURRENT CONTEXT before CURRENT CANVAS when both apply', () => {
+  // Critique anchor + canvas attached: both blocks present, order matters.
+  // CURRENT CANVAS sits LAST so the per-turn override is freshest in
+  // model recall.
+  const sys = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: {
+      drawing_title: 'Forest at Dusk',
+      drawing_subject: 'landscape',
+      sequence_number: 2,
+      content: 'Sample critique markdown.',
+    },
+    attachedCanvas: true,
+  });
+  const currentContextIdx = sys.indexOf('CURRENT CONTEXT:');
+  const currentCanvasIdx = sys.indexOf('CURRENT CANVAS');
+  assert.ok(currentContextIdx >= 0, 'CURRENT CONTEXT must be present');
+  assert.ok(currentCanvasIdx >= 0, 'CURRENT CANVAS must be present');
+  assert.ok(currentContextIdx < currentCanvasIdx,
+    'CURRENT CANVAS must come after CURRENT CONTEXT');
+});
+
+test('buildEveMessages with attachedImageB64 produces multimodal user content', () => {
+  const messages = buildEveMessages({
+    systemPrompt: 'S',
+    history: [],
+    userTurn: 'what should I work on next?',
+    attachedImageB64: 'FAKEBASE64==',
+  });
+  // [system, multimodal-user]
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].role, 'user');
+  assert.ok(Array.isArray(messages[1].content),
+    'user content must be an array when image attached');
+  assert.equal(messages[1].content.length, 2);
+  assert.equal(messages[1].content[0].type, 'text');
+  assert.equal(messages[1].content[0].text, 'what should I work on next?');
+  assert.equal(messages[1].content[1].type, 'image_url');
+  assert.equal(messages[1].content[1].image_url.url,
+    'data:image/jpeg;base64,FAKEBASE64==');
+});
+
+test('buildEveMessages without attachedImageB64 keeps text-only user content', () => {
+  // Regression guard against accidental wrapping when no image present.
+  const messages = buildEveMessages({
+    systemPrompt: 'S',
+    history: [],
+    userTurn: 'plain text question',
+  });
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1].role, 'user');
+  assert.equal(typeof messages[1].content, 'string',
+    'user content stays a string when no image attached');
+});
+
+test('buildEveMessages history rows stay text-only even when current turn has image', () => {
+  // Past turns are replayed as text — no re-attaching old images. The
+  // CURRENT CANVAS block + multimodal content apply ONLY to the new
+  // user turn.
+  const messages = buildEveMessages({
+    systemPrompt: 'S',
+    history: [
+      { role: 'user', content: '[canvas attached this turn]\n\nfirst' },
+      { role: 'assistant', content: 'reply 1' },
+    ],
+    userTurn: 'follow-up with new canvas',
+    attachedImageB64: 'NEWB64==',
+  });
+  // [system, history-user, history-assistant, multimodal-user]
+  assert.equal(messages.length, 4);
+  assert.equal(typeof messages[1].content, 'string',
+    'history user row stays text-only');
+  assert.equal(typeof messages[2].content, 'string',
+    'history assistant row stays text-only');
+  assert.ok(Array.isArray(messages[3].content),
+    'only the new user turn gets multimodal content');
+});
+
+test('EVE_CANVAS_BLOCK_VERSION is an integer >= 1', () => {
+  assert.ok(Number.isInteger(EVE_CANVAS_BLOCK_VERSION) && EVE_CANVAS_BLOCK_VERSION >= 1,
+    'canvas block version must follow the same monotonic-integer convention as persona/product');
 });
 
 // ---- Eve rate-limit machinery ----------------------------------------------

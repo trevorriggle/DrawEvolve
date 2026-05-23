@@ -72,6 +72,19 @@ const VALID_SCOPES = new Set(['drawing', 'evolution', 'general']);
 // so this is the only user-controllable input that flows into the prompt.
 const MAX_MESSAGE_CONTENT_BYTES = 8 * 1024;
 
+// Cap on the base64-encoded canvas image attached to an Eve send. 5 MB
+// of base64 ≈ 3.75 MB of JPEG bytes — enough headroom for a 2K-3K canvas
+// at quality 0.8, way more than enough at 1024². The hard ceiling stops
+// a malicious / buggy client from blowing up the worker request size
+// budget and burning vision tokens unbounded.
+const MAX_CANVAS_IMAGE_BASE64_BYTES = 5 * 1024 * 1024;
+
+// Loose base64 shape check. Doesn't decode — that's wasted work in a
+// worker — but ensures the field looks like base64 before we splice it
+// into a data URL that goes to OpenAI. Padding chars optional because
+// some clients strip them.
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
 function isValidUuid(s) {
   return typeof s === 'string' && UUID_RE.test(s);
 }
@@ -424,6 +437,29 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     return jsonResponse({ error: 'client_request_id must be a lowercase UUID' }, 400);
   }
 
+  // Optional canvas attachment. iOS only sends this from the
+  // canvas-launched Eve sheet (gated client-side) but we still validate
+  // server-side — the field is user-controllable input. JPEG-only by
+  // assumption; matches the critique flow's encoding contract.
+  let canvasImageB64 = null;
+  if (body.canvas_image_base64 !== undefined && body.canvas_image_base64 !== null) {
+    if (typeof body.canvas_image_base64 !== 'string') {
+      return jsonResponse({ error: 'canvas_image_base64 must be a string' }, 400);
+    }
+    if (body.canvas_image_base64.length === 0) {
+      return jsonResponse({ error: 'canvas_image_base64 must not be empty' }, 400);
+    }
+    if (body.canvas_image_base64.length > MAX_CANVAS_IMAGE_BASE64_BYTES) {
+      return jsonResponse({
+        error: `canvas_image_base64 exceeds ${MAX_CANVAS_IMAGE_BASE64_BYTES} bytes`,
+      }, 400);
+    }
+    if (!BASE64_RE.test(body.canvas_image_base64)) {
+      return jsonResponse({ error: 'canvas_image_base64 is not valid base64' }, 400);
+    }
+    canvasImageB64 = body.canvas_image_base64;
+  }
+
   // Conversation ownership + scope discovery.
   let conversation;
   try {
@@ -486,6 +522,15 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
   // Insert the user message FIRST. If OpenAI fails, the user's question
   // still persists and they see their own bubble in the thread.
   //
+  // When a canvas was attached, prefix the persisted content with a
+  // `[canvas attached this turn]` marker. Two reasons:
+  //   1. The image itself is ephemeral — we never store bytes — but a
+  //      later reader of the conversation needs to see WHY Eve was
+  //      talking about specifics of the drawing in her reply.
+  //   2. On replay to OpenAI (subsequent turns), Eve sees the marker
+  //      in history and can recall "the student showed me their canvas
+  //      earlier" without forcing another vision-token spend.
+  //
   // `client_request_id` is intentionally OMITTED on the user row — only
   // the assistant row carries it. The unique index
   // conversation_messages_idempotency_idx scopes by (conversation_id,
@@ -494,13 +539,16 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
   // insert. findMessageByClientRequestId only looks for assistant rows
   // anyway (the replay shape is "did we already produce an answer for
   // this logical send?"), so the user-row mirror added nothing.
+  const persistedUserContent = canvasImageB64
+    ? `[canvas attached this turn]\n\n${content}`
+    : content;
   let userMessage;
   try {
     userMessage = await appendMessage({
       env,
       conversationId,
       role: 'user',
-      content,
+      content: persistedUserContent,
     });
   } catch (err) {
     console.error('[eve] append user message failed', err?.message);
@@ -568,17 +616,20 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     drawingCount: coachingContext?.drawings?.length ?? 0,
     summaryCount: coachingContext?.summaries?.length ?? 0,
     scope: conversation.scope,
+    canvasAttached: canvasImageB64 !== null,
   });
 
   const systemPrompt = buildEveSystemPrompt({
     scope: conversation.scope,
     critique,
     coachingContext,
+    attachedCanvas: canvasImageB64 !== null,
   });
   const messages = buildEveMessages({
     systemPrompt,
     history: historyWithoutCurrent,
     userTurn: content,
+    attachedImageB64: canvasImageB64 ?? undefined,
   });
 
   // OpenAI call.

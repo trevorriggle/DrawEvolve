@@ -1006,6 +1006,14 @@ struct DrawingCanvasView: View {
                     drawingId: eveScope == .drawing ? currentDrawingID : nil,
                     critiqueSequence: eveCritiqueSequence,
                     drawingTitle: eveDrawingTitle,
+                    captureCanvas: { [canvasState] in
+                        // Mirrors the critique flow's encoding path
+                        // (CanvasStateManager.requestFeedback). The
+                        // manager invokes this lazily on pill-tap; if
+                        // export fails it just returns nil and the UI
+                        // shows a transient retry hint.
+                        canvasState.exportImage()?.jpegData(compressionQuality: 0.8)
+                    },
                     onClose: { showEve = false }
                 )
                 .presentationDetents([.large])
@@ -1516,6 +1524,9 @@ struct DrawingCanvasView: View {
                         drawingId: eveScope == .drawing ? currentDrawingID : nil,
                         critiqueSequence: eveCritiqueSequence,
                         drawingTitle: eveDrawingTitle,
+                        captureCanvas: { [canvasState] in
+                            canvasState.exportImage()?.jpegData(compressionQuality: 0.8)
+                        },
                         onClose: {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
                                 showEve = false

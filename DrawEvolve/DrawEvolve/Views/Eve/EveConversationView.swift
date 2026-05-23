@@ -29,6 +29,16 @@ struct EveConversationView: View {
 
             messageList
 
+            // Canvas-attach affordance — pill above the input bar. Only
+            // renders on managers constructed from the canvas view
+            // (canAttachCanvas == true). Two visual states: idle pill
+            // ("+ Show Eve my canvas") and attached chip ("📎 Canvas
+            // attached" with X). Tapping idle captures the canvas via
+            // the manager's captureCanvas closure.
+            if manager.canAttachCanvas {
+                EveCanvasAttachRow(manager: manager)
+            }
+
             EveInputBar(manager: manager)
         }
         .background(Color(uiColor: .systemBackground))
@@ -260,6 +270,97 @@ struct EveConversationView: View {
             } else if let last = visibleMessages.last {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
+        }
+    }
+}
+
+// =============================================================================
+// EveCanvasAttachRow — "+ Show Eve my canvas" pill / "Canvas attached" chip
+// =============================================================================
+//
+// Sits between the message list and the input bar when the manager was
+// constructed by the canvas-view entry point. Two visual states driven
+// by manager.hasAttachedCanvas:
+//   - idle:     tappable pill "+ Show Eve my canvas"
+//   - attached: chip "📎 Canvas attached" with an X to clear
+//
+// On tap (idle), calls manager.captureAndAttachCanvas() which invokes
+// the canvas-capture closure the manager was constructed with. Failure
+// flashes a brief inline message; the user can tap the pill again to
+// retry. Disabled while a send is in flight so the user can't change
+// the attachment mid-request.
+
+private struct EveCanvasAttachRow: View {
+    @ObservedObject var manager: EveConversationManager
+    @State private var captureFailedFlash = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if manager.hasAttachedCanvas {
+                attachedChip
+            } else {
+                idlePill
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    private var idlePill: some View {
+        Button {
+            let ok = manager.captureAndAttachCanvas()
+            if !ok { flashFailure() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "plus.circle.fill")
+                    .imageScale(.small)
+                Text(captureFailedFlash ? "Couldn't capture canvas — try again" : "Show Eve my canvas")
+                    .font(.subheadline.weight(.medium))
+            }
+            .foregroundColor(captureFailedFlash ? .orange : .accentColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                Capsule().fill(Color(uiColor: .secondarySystemBackground))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(manager.sendState == .sending)
+        .accessibilityLabel("Show Eve my current canvas")
+    }
+
+    private var attachedChip: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "paperclip")
+                .imageScale(.small)
+                .foregroundColor(.accentColor)
+            Text("Canvas attached")
+                .font(.subheadline.weight(.medium))
+                .foregroundColor(.primary)
+            Button {
+                manager.clearAttachedCanvas()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .imageScale(.small)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove canvas attachment")
+            .disabled(manager.sendState == .sending)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            Capsule().fill(Color.accentColor.opacity(0.12))
+        )
+    }
+
+    private func flashFailure() {
+        captureFailedFlash = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            captureFailedFlash = false
         }
     }
 }

@@ -1,7 +1,6 @@
 // Eve system-prompt + OpenAI-messages assembly.
 //
-// The system prompt has four load-bearing sections in fixed order
-// (Phase 2A.1 added section 3):
+// The system prompt has five load-bearing sections in fixed order:
 //   1. EVE_PERSONA — who Eve is, what she's not (the critique voices)
 //   2. EVE_PRODUCT_CONTEXT — what the app can and cannot do
 //   3. COACHING CONTEXT block — preloaded portfolio data (drawings +
@@ -13,9 +12,15 @@
 //      the coach has already read. INCLUDES the full critique body —
 //      this is the conversation anchor and needs full nuance for
 //      follow-up questions.
+//   5. CURRENT CANVAS block — only when the student attached their live
+//      canvas this turn. Sits last so the per-turn override of the
+//      "you haven't seen the drawings" rule is the freshest instruction
+//      in model recall. Also defends Eve persona against slipping into
+//      critique register just because an image is attached.
 //
 // COACHING CONTEXT sits BEFORE CURRENT CONTEXT so the current critique
-// stays the freshest thing in the model's recall.
+// stays the freshest thing in the model's recall. CURRENT CANVAS sits
+// after both for the same reason.
 //
 // The date line is intentionally omitted from CURRENT CONTEXT — relative
 // recency doesn't sharpen the coaching, and the absolute ISO date in a
@@ -27,6 +32,12 @@ import { EVE_PRODUCT_CONTEXT, EVE_PRODUCT_CONTEXT_VERSION } from './eve-product-
 
 export { EVE_PERSONA, EVE_PERSONA_VERSION };
 export { EVE_PRODUCT_CONTEXT, EVE_PRODUCT_CONTEXT_VERSION };
+
+// Bumped when the CURRENT CANVAS block copy changes. Not persisted on
+// the message row today (assistant rows only track persona + product
+// context versions), but exported for future telemetry if Eve quality
+// dips correlate to canvas-attached turns specifically.
+export const EVE_CANVAS_BLOCK_VERSION = 1;
 
 /**
  * Returns the full system prompt Eve sees on every turn of a conversation.
@@ -61,7 +72,7 @@ export { EVE_PRODUCT_CONTEXT, EVE_PRODUCT_CONTEXT_VERSION };
  * hydrated), the CURRENT CONTEXT block is omitted; COACHING CONTEXT
  * remains.
  */
-export function buildEveSystemPrompt({ scope, critique, coachingContext } = {}) {
+export function buildEveSystemPrompt({ scope, critique, coachingContext, attachedCanvas } = {}) {
   const sections = [EVE_PERSONA, EVE_PRODUCT_CONTEXT];
 
   const coachingBlock = renderCoachingContextBlock(coachingContext);
@@ -91,8 +102,39 @@ ${critique.content}
     );
   }
 
+  if (attachedCanvas === true) {
+    sections.push(CURRENT_CANVAS_BLOCK);
+  }
+
   return sections.join('\n\n');
 }
+
+// =============================================================================
+// CURRENT CANVAS block (per-turn override)
+// =============================================================================
+//
+// Spliced ONLY when the student attaches their in-progress canvas this turn.
+// Three load-bearing jobs:
+//   1. Override the "you haven't seen the actual drawings" guardrail from
+//      the coaching block — but tightly scoped to "this turn only" so Eve
+//      doesn't start claiming to have seen other drawings later.
+//   2. Defend Eve persona against the model's instinct to switch into
+//      critique register when it sees an image. The whole point of the
+//      Ask-Eve surface is that it's NOT the formal critique flow.
+//   3. Keep the response focused on what the student actually typed,
+//      not a free-form tour of everything Eve sees.
+//
+// Sits after CURRENT CONTEXT so the override is the freshest instruction
+// in model recall. Keep this terse — every line is fighting against a
+// strong "you saw an image, perform critique" default.
+
+const CURRENT_CANVAS_BLOCK =
+`CURRENT CANVAS (just for this turn — the student attached their in-progress canvas):
+You can see what they're working on right now. The "you haven't seen the actual drawings" rule from above is overridden FOR THIS TURN ONLY — you may speak to what you see on the canvas they just shared.
+
+Stay in your normal voice. This is not a critique request. You're glancing over their shoulder, not delivering an assessment. No numbered lists, no category headers, no "here are three things to fix" structure. Conversational length, conversational shape. React the way a coach who happens to be nearby would: one observation, maybe a question back, the casual register of mid-session help.
+
+The student typed something specific to go with this canvas. Focus on what they actually asked. Don't volunteer a tour of everything you notice — they didn't ask for a full read-out.`;
 
 // =============================================================================
 // COACHING CONTEXT renderer
@@ -240,8 +282,19 @@ function renderCompositionSummaryLine(findings) {
  * role enum is already in the schema so 2C can add them without a
  * migration. Non-string content / missing fields are silently dropped
  * so a malformed row never breaks the request path.
+ *
+ * When `attachedImageB64` is provided, the new user turn becomes a
+ * multimodal content array (text part + image_url part). History
+ * entries stay text-only — past-turn images are not re-attached on
+ * subsequent turns. Eve's persisted history shows a `[canvas attached
+ * this turn]` marker on the user row instead, which is enough for her
+ * to recall "the student showed me something earlier" without
+ * replaying expensive vision tokens.
+ *
+ * Image detail level is left unset, matching the critique flow's
+ * default ('auto') — OpenAI picks resolution based on image size.
  */
-export function buildEveMessages({ systemPrompt, history, userTurn }) {
+export function buildEveMessages({ systemPrompt, history, userTurn, attachedImageB64 } = {}) {
   const messages = [{ role: 'system', content: systemPrompt }];
 
   for (const m of Array.isArray(history) ? history : []) {
@@ -253,7 +306,17 @@ export function buildEveMessages({ systemPrompt, history, userTurn }) {
   }
 
   if (typeof userTurn === 'string' && userTurn.length > 0) {
-    messages.push({ role: 'user', content: userTurn });
+    if (typeof attachedImageB64 === 'string' && attachedImageB64.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: userTurn },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${attachedImageB64}` } },
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: userTurn });
+    }
   }
   return messages;
 }

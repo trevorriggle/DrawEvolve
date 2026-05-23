@@ -182,6 +182,7 @@ export {
   EVE_PERSONA_VERSION,
   EVE_PRODUCT_CONTEXT,
   EVE_PRODUCT_CONTEXT_VERSION,
+  EVE_CANVAS_BLOCK_VERSION,
   buildEveSystemPrompt,
   buildEveMessages,
   renderCoachingContextBlock,

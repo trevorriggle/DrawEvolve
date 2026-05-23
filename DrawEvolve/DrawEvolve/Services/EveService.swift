@@ -146,15 +146,26 @@ actor EveService {
     /// UUID twice returns the same assistant row without re-charging
     /// OpenAI. The caller should generate a fresh UUID per logical send
     /// (not per retry).
+    ///
+    /// `canvasImageBase64`: optional JPEG bytes (base64-encoded) of the
+    /// student's in-progress canvas, only ever sent from the
+    /// canvas-launched Eve sheet. The worker treats it as an ephemeral
+    /// per-turn attachment — never persisted as bytes, but the user-row
+    /// content gets prefixed with a `[canvas attached this turn]` marker
+    /// for audit + future-turn recall.
     func sendMessage(
         conversationId: UUID,
         content: String,
-        clientRequestId: UUID = UUID()
+        clientRequestId: UUID = UUID(),
+        canvasImageBase64: String? = nil
     ) async throws -> EveSendMessageResponse {
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "content": content,
             "client_request_id": clientRequestId.uuidString.lowercased(),
         ]
+        if let canvasImageBase64, !canvasImageBase64.isEmpty {
+            body["canvas_image_base64"] = canvasImageBase64
+        }
         return try await send(
             method: "POST",
             path: "/v1/eve/conversations/\(conversationId.uuidString.lowercased())/messages",
