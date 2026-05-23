@@ -82,50 +82,106 @@ final class EveConversationManager: ObservableObject {
     // Bootstrap
     // =============================================================================
 
-    /// Construct with an explicit scope. The manager will either
-    /// create a fresh conversation (most common) or hydrate an existing
-    /// one when an `existingConversationId` is supplied (used by 2B's
-    /// list view; in 2A every entry creates a new conversation per spec).
-    let scope: EveScope
-    let scopeDrawingId: UUID?
-    let scopeCritiqueSequence: Int?
-    let initialDrawingTitle: String?
+    /// Construct with an explicit scope (to create a fresh conversation)
+    /// or an `existingConversationId` (to hydrate one the user is
+    /// resuming from the conversation list). When both are supplied,
+    /// `existingConversationId` wins — the hydrated conversation's
+    /// persisted scope is authoritative and overwrites the passed values
+    /// on `start()`.
+    ///
+    /// These four are `@Published` rather than `let` because the resume
+    /// path overwrites them post-hydrate from the fetched conversation;
+    /// SwiftUI consumers (EveContextChip, scope-switched UI in
+    /// EveConversationView) auto-refresh when they change.
+    @Published private(set) var scope: EveScope
+    @Published private(set) var scopeDrawingId: UUID?
+    @Published private(set) var scopeCritiqueSequence: Int?
+    @Published private(set) var initialDrawingTitle: String?
+
+    /// When non-nil, `start()` hydrates this conversation instead of
+    /// creating a new one. Set once at init and not mutated thereafter.
+    private let existingConversationId: UUID?
 
     init(
-        scope: EveScope,
+        scope: EveScope? = nil,
         drawingId: UUID? = nil,
         critiqueSequence: Int? = nil,
         drawingTitle: String? = nil,
         captureCanvas: (() -> Data?)? = nil,
+        existingConversationId: UUID? = nil,
     ) {
-        self.scope = scope
+        // One of {scope, existingConversationId} must be provided. Debug
+        // assertion alerts the programmer; release falls back to `.general`
+        // so a misuse doesn't crash a TestFlight user.
+        assert(
+            scope != nil || existingConversationId != nil,
+            "EveConversationManager requires either `scope` (create) or `existingConversationId` (resume)"
+        )
+        self.scope = scope ?? .general
         self.scopeDrawingId = drawingId
         self.scopeCritiqueSequence = critiqueSequence
         self.initialDrawingTitle = drawingTitle
         self.captureCanvas = captureCanvas
+        self.existingConversationId = existingConversationId
     }
 
     /// Idempotent bootstrap. Call from .task on the sheet. Subsequent
     /// calls (e.g. if the view re-attaches) short-circuit when the
     /// conversation is already loaded.
+    ///
+    /// Branches on `existingConversationId`:
+    /// - non-nil → hydrate the persisted conversation + its message
+    ///   history via `EveService.getConversation(id:)`. The fetched
+    ///   conversation's scope/drawing/critique overwrite whatever was
+    ///   passed at init time (the persisted values are the truth).
+    /// - nil → create a fresh conversation server-side via
+    ///   `EveService.createConversation`, seeded with the init scope.
     func start() async {
         if loadState == .ready { return }
         loadState = .loading
         do {
-            let convo = try await EveService.shared.createConversation(
-                scope: scope,
-                drawingId: scopeDrawingId,
-                critiqueSequence: scopeCritiqueSequence,
-            )
-            self.conversation = convo
-            self.messages = []
+            if let existingId = existingConversationId {
+                let (convo, history) = try await EveService.shared.getConversation(id: existingId)
+                self.conversation = convo
+                self.messages = history
+                // Hydrated conversation is authoritative — overwrite the
+                // scope quartet so the context chip + scope-switched UI
+                // render the resumed conversation's real scope, not
+                // whatever placeholder the caller passed (often nothing
+                // when resuming from the conversation list).
+                self.scope = convo.scope
+                self.scopeDrawingId = convo.scopeDrawingId
+                self.scopeCritiqueSequence = convo.scopeCritiqueSequence
+                // initialDrawingTitle is left as-passed. The worker's
+                // list endpoint doesn't carry drawing titles, so resume
+                // from the list arrives with nil here; the chip's nil
+                // fallback handles it.
+            } else {
+                let convo = try await EveService.shared.createConversation(
+                    scope: scope,
+                    drawingId: scopeDrawingId,
+                    critiqueSequence: scopeCritiqueSequence,
+                )
+                self.conversation = convo
+                self.messages = []
+            }
             self.loadState = .ready
         } catch let err as EveServiceError {
-            self.loadState = .failed(message: err.errorDescription
-                ?? "Couldn't start a conversation with Eve.")
+            self.loadState = .failed(message: err.errorDescription ?? defaultFailureCopy)
         } catch {
-            self.loadState = .failed(message: "Couldn't start a conversation with Eve.")
+            self.loadState = .failed(message: defaultFailureCopy)
         }
+    }
+
+    /// Copy differs by branch: a hydrate failure is "couldn't load that
+    /// conversation" (the row exists, we just can't reach it), while a
+    /// create failure is "couldn't start a conversation" (the row never
+    /// got persisted). Either error path falls through to this if the
+    /// service didn't supply a localized description.
+    private var defaultFailureCopy: String {
+        existingConversationId == nil
+            ? "Couldn't start a conversation with Eve."
+            : "Couldn't load that conversation."
     }
 
     // =============================================================================
