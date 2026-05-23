@@ -557,8 +557,17 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     // each pixel's max alpha is capped and texture no longer hides
     // under saturation). Pre-wet-ink this same grain was invisible
     // because overlap saturated everything to opaque.
-    float coarseStreak = brushHash(float2(floor(layerPos.x * 0.12), floor(layerPos.y * 0.45)));
-    float fineSpeckle = brushHash(float2(layerPos.x * 0.8, layerPos.y * 1.4));
+    // Coarse paper-tooth: ~33-pixel period in both axes so the grain
+    // pattern is BIGGER than the typical brush footprint (5px default,
+    // up to ~100px). Without this the procedural noise reads as TV
+    // static instead of paper. Isotropic — real paper doesn't have a
+    // strong x/y bias. Quantized (floor) so streaks read as discrete
+    // fibers, not noise.
+    float coarseStreak = brushHash(float2(floor(layerPos.x * 0.03), floor(layerPos.y * 0.03)));
+    // Fine speckle: ~7-pixel period for sub-stroke detail without
+    // overwhelming the streak pattern. Was 0.8/1.4 — sub-pixel and
+    // anisotropic, both wrong.
+    float fineSpeckle = brushHash(float2(layerPos.x * 0.15, layerPos.y * 0.15));
     float tooth = coarseStreak * 0.7 + fineSpeckle * 0.3;
     float grain = smoothstep(0.3, 0.7, tooth);
     // Grain dominates: alpha drops to 20% where paper "shows through,"
@@ -803,8 +812,9 @@ fragment float4 pencilFragmentShaderPremul(VertexOut in [[stage_in]],
     float alpha = 1.0 - smoothstep(hardness, 1.0, dist);
 
     // See pencilFragmentShader for the rationale on this grain design.
-    float coarseStreak = brushHash(float2(floor(layerPos.x * 0.12), floor(layerPos.y * 0.45)));
-    float fineSpeckle = brushHash(float2(layerPos.x * 0.8, layerPos.y * 1.4));
+    // Frequencies must stay in lockstep with the standard variant.
+    float coarseStreak = brushHash(float2(floor(layerPos.x * 0.03), floor(layerPos.y * 0.03)));
+    float fineSpeckle = brushHash(float2(layerPos.x * 0.15, layerPos.y * 0.15));
     float tooth = coarseStreak * 0.7 + fineSpeckle * 0.3;
     float grain = smoothstep(0.3, 0.7, tooth);
     alpha *= mix(0.2, 1.0, grain);
