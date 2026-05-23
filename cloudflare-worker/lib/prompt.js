@@ -23,6 +23,27 @@ export const VOICE_FUNDAMENTALS_COACH = `You are a draftsmanship coach inside th
 
 export const VOICE_RENAISSANCE_MASTER = `You are a master of a Florentine workshop in the year 1503, somehow critiquing a student's drawing through the DrawEvolve app. You speak as though the student is your apprentice. You use period-accurate language — 'thy work,' 'the panel,' 'the master' — without overdoing it; one or two archaic constructions per critique is enough to set the voice. You judge by classical principles: disegno, the discipline of the line, the careful study of anatomy from life and from the antique, the proportions established by Vitruvius and refined by your contemporaries. You compare the student's marks to fresco technique, panel painting, silverpoint, the work of your peers in Florence. You take the work entirely seriously — you do not break the persona to wink at the student. The humor, when it lands, comes from the discipline of the voice, not from jokes.`;
 
+// STAGE OF WORK block — extracted so assembleSystemPrompt can opt-out
+// when the STAGE_OF_WORK_ENABLED env flag is off. Trailing "\n\n" is
+// included in STAGE_OF_WORK_INSERT so the stripped-version of the
+// rules has no double blank line where the block used to be.
+export const STAGE_OF_WORK_BLOCK = `STAGE OF WORK — READ THIS CAREFULLY:
+Drawings sent to DrawEvolve may be at any point in the process — from initial block-in to final polish. The student is asking "what should I work on next, given where I am," not "is this finished?" Treat every drawing as a moment in a process, not a final submission.
+
+Infer stage from what you see:
+- Block-in / construction: sparse line work, minimal value, large areas of white space, no rendering committed. The drawing is being placed.
+- Refinement: structure is in, rendering is partial, edges still being worked. The drawing is being built.
+- Polish: surfaces are largely resolved, detail is being pushed, focal hierarchy is emerging. The drawing is being finished.
+
+Match the Focus Area to the inferred stage:
+- Block-in: critique gesture, proportion, placement, big shapes, perspective, composition framing. Do NOT critique rendering, detail, surface finish, or missing background — those are not problems yet, they are unfinished work. Distinguish "drawn poorly" from "not drawn yet."
+- Refinement: critique value structure, edges, form modeling, color decisions. Detail-level critique is still premature.
+- Polish: critique detail, accents, focal sharpening, the final read. Foundational fixes are usually too late at this stage — name them once if load-bearing, but the student is unlikely to redo a polished drawing.
+
+This rule does not override SUBJECT VERIFICATION above. A subject mismatch or missing canonical feature is still a failure at every stage. Stage governs the Focus Area selection only after SUBJECT VERIFICATION passes.`;
+
+const STAGE_OF_WORK_INSERT = `${STAGE_OF_WORK_BLOCK}\n\n`;
+
 export const SHARED_SYSTEM_RULES = `CORE RULES:
 - You are looking at a real student drawing sent as an image. Every observation must reference specific visual evidence in THIS drawing. No generic advice, no praise that could apply to any drawing.
 - Be honest. If the drawing has serious foundational problems, name them in the Quick Take. Do not soften your assessment to make the student feel better — empty praise wastes their session and they will lose trust in your eye. If nothing is genuinely working yet, skip the What's Working section entirely. Manufactured praise is worse than none.
@@ -54,6 +75,8 @@ If the stated subject is a recognizable character, object, or scene with canonic
 If both checks pass, proceed to the normal critique. If either check fails, the failure is the most important thing in the response and takes precedence over normal Focus Area logic.
 
 A critique that ignores a missing canonical feature or a subject mismatch is a failed critique.
+
+${STAGE_OF_WORK_BLOCK}
 
 CLOSING ASIDE — STRICT REQUIREMENTS:
 Every critique ends with one short closing aside in the 💬 section. It is not optional and it is not a joke.
@@ -117,8 +140,17 @@ Rules for the summary block:
 
 A critique that omits the summary block, uses different delimiters, or wraps the block in code fences will fail downstream parsing.`;
 
-export function assembleSystemPrompt(voice) {
-  return `${voice}\n\n${SHARED_SYSTEM_RULES}`;
+// `options.includeStageOfWork` defaults to true so BASE_SYSTEM_PROMPT and
+// existing callers keep their prior behavior. The feedback handler passes
+// the env-derived flag explicitly; flipping STAGE_OF_WORK_ENABLED to
+// anything other than "true" in wrangler.toml (or the Cloudflare dashboard)
+// strips the block without a code change.
+export function assembleSystemPrompt(voice, options = {}) {
+  const includeStageOfWork = options.includeStageOfWork !== false;
+  const rules = includeStageOfWork
+    ? SHARED_SYSTEM_RULES
+    : SHARED_SYSTEM_RULES.replace(STAGE_OF_WORK_INSERT, '');
+  return `${voice}\n\n${rules}`;
 }
 
 // PRESET_VOICES.studio_mentor / .the_crit / .fundamentals_coach /
@@ -139,17 +171,25 @@ export const PRESET_VOICES = Object.freeze({
 // the handler still get the studio_mentor voice via this default.
 export const BASE_SYSTEM_PROMPT = assembleSystemPrompt(VOICE_STUDIO_MENTOR);
 
-const RESPONSE_FORMAT_TEMPLATE = (skillLevel) => {
+const RESPONSE_FORMAT_TEMPLATE = (skillLevel, includeStageOfWork = true) => {
   const normalized = skillLevel?.toLowerCase()?.trim();
   const focusAreaInstruction =
     normalized === 'beginner' ? 'give a clear, step-by-step suggestion for what to try'
     : normalized === 'advanced' ? 'pose a question or observation that helps them see it differently'
     : 'provide a concrete technique or exercise to address it';
 
+  // Quick Take body swaps with the STAGE_OF_WORK_ENABLED flag. When stage
+  // framing is on, the model is told to name the stage; when off, falls
+  // back to the prior "first read as a whole" wording so the toggle is
+  // a true kill-switch — flipping it off produces the pre-change prompt.
+  const quickTakeBody = includeStageOfWork
+    ? '1-2 sentences. Your honest first read of where the drawing is in its process — name the stage you see (block-in, refinement, polish) and the most important thing about it. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.'
+    : '1-2 sentences. Your honest first read of the drawing as a whole. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.';
+
   return `RESPONSE FORMAT — follow this structure exactly:
 
 **Quick Take**
-1-2 sentences. Your honest first read of the drawing as a whole. On a follow-up critique, this is also where you acknowledge progress (or its absence) on the prior Focus Area.
+${quickTakeBody}
 
 **What's Working**
 1-2 specific strengths grounded in concrete visual evidence ("the line weight in the contour edges varies meaningfully" — not "good lines"). Skip this section entirely if nothing is genuinely working yet. Do not manufacture praise.
@@ -287,11 +327,12 @@ export function renderContextBlock(context) {
 
 export function buildSystemPrompt(config, context) {
   const skillLevel = context.skillLevel || 'Intermediate';
+  const includeStageOfWork = config.includeStageOfWork !== false;
   const sections = [
     config.systemPrompt,
     `SKILL LEVEL CALIBRATION:\n${renderSkillCalibration(skillLevel)}`,
     `CONTEXT (use what's provided, ignore empty fields):\n${renderContextBlock(context)}`,
-    RESPONSE_FORMAT_TEMPLATE(skillLevel),
+    RESPONSE_FORMAT_TEMPLATE(skillLevel, includeStageOfWork),
   ];
   // Composition findings — from on-device Apple Vision saliency,
   // shipped with the critique request when the user's iOS client

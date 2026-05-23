@@ -257,6 +257,15 @@ export function isCrossDrawingContextEnabled(env) {
   return env?.CROSS_DRAWING_CONTEXT_ENABLED === 'true';
 }
 
+// STAGE_OF_WORK_ENABLED kill-switch. Same fail-closed shape as
+// isCrossDrawingContextEnabled: only the literal string "true" enables.
+// Default in wrangler.toml is "true"; a deploy that drops or mistypes
+// the value silently disables the stage-aware prompt block. Re-enable
+// without a redeploy by editing the env var in the Cloudflare dashboard.
+export function isStageOfWorkEnabled(env) {
+  return env?.STAGE_OF_WORK_ENABLED === 'true';
+}
+
 /**
  * Fetches the per-user cross_drawing_context_enabled flag. Returns:
  *   - the boolean from user_preferences when the row exists,
@@ -866,9 +875,11 @@ export async function handleFeedback(request, env, ctx) {
     // legacy custom_prompts rows that still use freeform body. Rendered
     // by buildSystemPrompt as a "PROMPT CUSTOMIZATION" section.
     const customPromptModifier = await selectCustomPromptParameters(resolvedPresetId, userId, env);
+    const stageOfWorkEnabled = isStageOfWorkEnabled(env);
     const config = {
       ...baseConfig,
-      systemPrompt: assembleSystemPrompt(voice),
+      systemPrompt: assembleSystemPrompt(voice, { includeStageOfWork: stageOfWorkEnabled }),
+      includeStageOfWork: stageOfWorkEnabled,
       customPromptModifier,
       // Feature 1, Phase 1A — both fields flow into buildCritiqueEntry's
       // prompt_config. includeRegistryCount mirrors the actual number of

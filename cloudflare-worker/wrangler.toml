@@ -92,6 +92,18 @@ APP_ATTEST_REQUIRED = "false"              # "true" | "false"
 # (migration 0011, default true). Settings UI ships in a later iOS PR.
 CROSS_DRAWING_CONTEXT_ENABLED = "true"     # "true" | "false"
 
+# Stage-of-work prompt block kill-switch. When "true", the critique
+# system prompt includes the STAGE OF WORK block (telling the critic to
+# infer block-in / refinement / polish stage from the image and match
+# the Focus Area to the inferred stage) and the Quick Take template
+# instructs the critic to name the stage. When "false" or unset, both
+# revert to the pre-2026-05-22 wording (no stage framing, "first read
+# of the drawing as a whole"). Same fail-closed shape as
+# CROSS_DRAWING_CONTEXT_ENABLED: only the literal string "true" enables.
+# Flip in the Cloudflare dashboard for a no-redeploy kill-switch if the
+# new wording produces regressions in beta.
+STAGE_OF_WORK_ENABLED = "true"             # "true" | "false"
+
 # Feature 2, Phase 2A — Eve conversational coach rate limits.
 # Eve sends share the global DAILY_SPEND_CAP and PER_USER_DAILY_TOKEN_CAP
 # with the critique flow (one wallet, two paths). The per-minute and

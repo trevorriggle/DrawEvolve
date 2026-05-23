@@ -60,6 +60,7 @@ import {
   formatRelativeTime,
   fetchUserDrawingRegistry,
   isCrossDrawingContextEnabled,
+  isStageOfWorkEnabled,
   fetchCrossDrawingPreference,
   selectConfig,
   buildSystemPrompt,
@@ -1633,6 +1634,47 @@ test('BASE_SYSTEM_PROMPT equals assembleSystemPrompt(VOICE_STUDIO_MENTOR)', () =
   // BASE_SYSTEM_PROMPT is preserved as the studio-mentor-assembled value
   // for test stability and as the default in selectConfig presets.
   assert.equal(BASE_SYSTEM_PROMPT, assembleSystemPrompt(VOICE_STUDIO_MENTOR));
+});
+
+test('assembleSystemPrompt includes STAGE OF WORK block by default and strips it when includeStageOfWork=false', () => {
+  const withBlock = assembleSystemPrompt(VOICE_STUDIO_MENTOR);
+  const withoutBlock = assembleSystemPrompt(VOICE_STUDIO_MENTOR, { includeStageOfWork: false });
+
+  assert.match(withBlock, /STAGE OF WORK — READ THIS CAREFULLY:/, 'default-on path includes the block');
+  assert.ok(!withoutBlock.includes('STAGE OF WORK'), 'opt-out path strips the block entirely');
+
+  // Surrounding sections must still be present on both paths — the strip
+  // must not collateral-damage SUBJECT VERIFICATION or CLOSING ASIDE.
+  for (const prompt of [withBlock, withoutBlock]) {
+    assert.match(prompt, /SUBJECT VERIFICATION/);
+    assert.match(prompt, /CLOSING ASIDE/);
+    assert.match(prompt, /ITERATIVE COACHING/);
+  }
+});
+
+test('isStageOfWorkEnabled returns true only for literal "true"', () => {
+  assert.equal(isStageOfWorkEnabled({ STAGE_OF_WORK_ENABLED: 'true' }), true);
+  assert.equal(isStageOfWorkEnabled({ STAGE_OF_WORK_ENABLED: 'false' }), false);
+  assert.equal(isStageOfWorkEnabled({ STAGE_OF_WORK_ENABLED: '1' }), false);
+  assert.equal(isStageOfWorkEnabled({ STAGE_OF_WORK_ENABLED: undefined }), false);
+  assert.equal(isStageOfWorkEnabled({}), false);
+  assert.equal(isStageOfWorkEnabled(undefined), false);
+});
+
+test('buildSystemPrompt Quick Take wording swaps with config.includeStageOfWork', () => {
+  const baseCtx = { skillLevel: 'Intermediate', subject: 'portrait', style: 'realism' };
+  const baseCfg = selectConfig('free', null);
+
+  const withFlag = buildSystemPrompt({ ...baseCfg, includeStageOfWork: true }, baseCtx);
+  const withoutFlag = buildSystemPrompt({ ...baseCfg, includeStageOfWork: false }, baseCtx);
+
+  assert.match(withFlag, /name the stage you see \(block-in, refinement, polish\)/);
+  assert.ok(!withFlag.includes('first read of the drawing as a whole'),
+    'flag-on Quick Take must drop the old "as a whole" wording');
+
+  assert.match(withoutFlag, /first read of the drawing as a whole/);
+  assert.ok(!withoutFlag.includes('name the stage you see'),
+    'flag-off Quick Take must drop the stage-naming wording');
 });
 
 test('selectVoice returns the matching voice for each hardcoded preset ID without a DB hit', async () => {
