@@ -270,6 +270,12 @@ struct BrushSettings: Codable {
             s.hardness = 0.4      // soft-ish edge
             s.spacing = 0.06
             s.grainDensity = 0.9  // very speckled by default
+        case .blur:
+            s.hardness = 0.4      // soft disc — hard-edged blur leaves visible stamp rings
+            s.spacing = 0.04      // tight overlap so blurred deposits read as a continuous smear
+        case .smudge:
+            s.spacing = 0.05      // tight stamping so the carry stays coherent along the drag
+            s.smudgeStrength = 0.75 // higher pickup so paint travels several brush-widths before fading
         default:
             return nil            // non-brush tools — caller does nothing
         }
