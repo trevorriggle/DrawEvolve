@@ -2663,36 +2663,36 @@ struct DrawingCanvasView: View {
     // so the existing in-flight UI (button spinner, FloatingFeedbackPanel
     // on completion) keeps working unchanged.
     private var critiqueRequestSheet: some View {
-        VStack(spacing: 20) {
-            VStack(spacing: 6) {
+        VStack(spacing: 12) {
+            VStack(spacing: 4) {
                 Text("Request a Critique")
-                    .font(.title3.weight(.semibold))
+                    .font(.headline)
                 Text("How would you describe this drawing right now?")
-                    .font(.subheadline)
+                    .font(.footnote)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
-            .padding(.top, 24)
+            .padding(.top, 16)
 
             Picker("Stage of work", selection: $selectedStageOfWork) {
                 Text("In progress").tag(StageOfWork.inProgress)
                 Text("Finished").tag(StageOfWork.finished)
             }
             .pickerStyle(.segmented)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 20)
 
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 Button(action: {
                     showCritiqueRequestSheet = false
                     requestFeedback()
                 }) {
                     Text("Send to Eve")
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
+                        .padding(.vertical, 10)
                         .background(Color.accentColor)
-                        .cornerRadius(12)
+                        .cornerRadius(10)
                 }
 
                 Button("Cancel") {
@@ -2700,14 +2700,12 @@ struct DrawingCanvasView: View {
                 }
                 .font(.subheadline)
                 .foregroundColor(.secondary)
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
         }
-        .presentationDetents([.height(280)])
+        .presentationDetents([.height(220)])
         .presentationDragIndicator(.visible)
     }
 
