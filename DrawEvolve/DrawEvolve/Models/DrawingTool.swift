@@ -268,8 +268,8 @@ struct BrushSettings: Codable {
             s.size = 24           // wide charcoal stick
             s.opacity = 0.85      // heavy deposit
             s.hardness = 0.4      // soft-ish edge
-            s.spacing = 0.06
-            s.grainDensity = 0.9  // very speckled by default
+            s.spacing = 0.09      // looser overlap so density varies along the stroke
+            s.grainDensity = 1.0  // paper pixels deposit nothing — real gaps under overlap
         case .blur:
             s.hardness = 0.4      // soft disc — hard-edged blur leaves visible stamp rings
             s.spacing = 0.04      // tight overlap so blurred deposits read as a continuous smear

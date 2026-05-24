@@ -754,9 +754,11 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     float edgeBreakup = mix(1.0, brushHash(layerPos * 2.3 + float2(7.0, 5.0)), edgeBand * 0.85);
     alpha *= edgeBreakup;
 
-    // Pressure: moderate. Even light strokes leave visible deposit
-    // (charcoal is sticky), so floor at 0.6.
-    float pressureOpacity = mix(0.6, 1.0, uniforms.pressureAlpha);
+    // Small floor so charcoal still marks at the lightest touch, but a
+    // real Apple-Pencil lift-off taper is visible — the stroke tail
+    // dissolves into the same chunky catches a charcoal stick leaves as
+    // it leaves the paper.
+    float pressureOpacity = mix(0.1, 1.0, uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -936,7 +938,7 @@ fragment float4 charcoalFragmentShaderPremul(VertexOut in [[stage_in]],
     float edgeBreakup = mix(1.0, brushHash(layerPos * 2.3 + float2(7.0, 5.0)), edgeBand * 0.85);
     alpha *= edgeBreakup;
 
-    float pressureOpacity = mix(0.6, 1.0, uniforms.pressureAlpha);
+    float pressureOpacity = mix(0.1, 1.0, uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
