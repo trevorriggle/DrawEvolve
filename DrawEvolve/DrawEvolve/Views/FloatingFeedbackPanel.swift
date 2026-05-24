@@ -566,17 +566,40 @@ struct FloatingFeedbackPanel: View {
                                 ScrollView {
                                     VStack(spacing: 0) {
                                         ForEach(Array(critiqueHistory.enumerated().reversed()), id: \.element.id) { index, entry in
-                                            CritiqueHistoryRow(
-                                                entry: entry,
-                                                isSelected: index == selectedHistoryIndex,
-                                                formattedTimestamp: formatTimestamp(entry.timestamp),
-                                                onTap: {
-                                                    selectedHistoryIndex = index
-                                                    withAnimation(.spring(response: 0.25)) {
-                                                        showHistoryMenu = false
+                                            Button(action: {
+                                                selectedHistoryIndex = index
+                                                withAnimation(.spring(response: 0.25)) {
+                                                    showHistoryMenu = false
+                                                }
+                                            }) {
+                                                HStack(spacing: 8) {
+                                                    VStack(alignment: .leading, spacing: 4) {
+                                                        Text(formatTimestamp(entry.timestamp))
+                                                            .font(.subheadline)
+                                                            .fontWeight(.medium)
+                                                            .foregroundColor(.primary)
+
+                                                        Text({
+                                                            let body = CritiqueSummary.parse(entry.feedback).body
+                                                            return body.prefix(50) + (body.count > 50 ? "..." : "")
+                                                        }())
+                                                            .font(.caption)
+                                                            .foregroundColor(.primary)
+                                                            .lineLimit(2)
+                                                    }
+                                                    Spacer()
+
+                                                    if index == selectedHistoryIndex {
+                                                        Image(systemName: "checkmark")
+                                                            .foregroundColor(.accentColor)
+                                                            .font(.caption)
                                                     }
                                                 }
-                                            )
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 10)
+                                                .background(index == selectedHistoryIndex ? Color.accentColor.opacity(0.1) : Color.clear)
+                                            }
+                                            .buttonStyle(.plain)
 
                                             // Show divider except after the last item
                                             if index > 0 {
@@ -802,110 +825,6 @@ struct FloatingFeedbackPanel: View {
 
             position = CGPoint(x: x, y: y)
             dragOffset = .zero
-        }
-    }
-}
-
-// MARK: - History menu row
-//
-// D3 — each row in the iPad history drawer now shows a 56pt thumbnail of
-// the drawing at the time the critique was generated. The thumb pattern
-// mirrors EvolutionStudioWallView.CritiqueColumn.loadThumbnail (lines
-// 260-279 of that file): signed URL against the `drawings` bucket using
-// the CritiqueEntry.snapshot.thumbPath, TTL 3600s, no fallback to the live
-// drawing when snapshot is nil (per proposal §3.3 — a muted placeholder
-// is correct for pre-snapshot legacy entries and promote-failed rows).
-//
-// Per-row @State requires this to be its own View; inline @State inside a
-// ForEach closure doesn't work. The .task(id: entry.id) keeps the fetch
-// scoped to row identity, so a selection-only tap doesn't redownload.
-
-private struct CritiqueHistoryRow: View {
-    let entry: CritiqueEntry
-    let isSelected: Bool
-    let formattedTimestamp: String
-    let onTap: () -> Void
-
-    @State private var thumbnail: UIImage?
-
-    private static let thumbSize: CGFloat = 56
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 10) {
-                thumbnailView
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(formattedTimestamp)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundColor(.primary)
-
-                    Text(excerpt)
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                        .lineLimit(2)
-                }
-                Spacer(minLength: 0)
-
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .foregroundColor(.accentColor)
-                        .font(.caption)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
-        }
-        .buttonStyle(.plain)
-        .task(id: entry.id) { await loadThumbnail() }
-    }
-
-    @ViewBuilder
-    private var thumbnailView: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color(uiColor: .tertiarySystemBackground))
-            if let thumbnail {
-                Image(uiImage: thumbnail)
-                    .resizable()
-                    .scaledToFill()
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            } else if entry.snapshot != nil {
-                ProgressView()
-                    .controlSize(.mini)
-            } else {
-                Image(systemName: "photo")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary.opacity(0.6))
-            }
-        }
-        .frame(width: Self.thumbSize, height: Self.thumbSize)
-    }
-
-    private var excerpt: String {
-        let body = CritiqueSummary.parse(entry.feedback).body
-        return body.prefix(50) + (body.count > 50 ? "..." : "")
-    }
-
-    @MainActor
-    private func loadThumbnail() async {
-        guard let snapshot = entry.snapshot else { return }
-        guard let client = SupabaseManager.shared.client else { return }
-        do {
-            let signed = try await client.storage
-                .from("drawings")
-                .createSignedURL(path: snapshot.thumbPath, expiresIn: 3600)
-            let (data, _) = try await URLSession.shared.data(from: signed)
-            if let img = UIImage(data: data) {
-                self.thumbnail = img
-            }
-        } catch {
-            // Snapshot exists but fetch failed — keep the placeholder
-            // visible rather than collapsing the slot. Matches the
-            // EvolutionStudioWallView pattern.
-            print("[CritiqueHistoryRow] snapshot thumb fetch failed: \(error.localizedDescription)")
         }
     }
 }

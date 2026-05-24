@@ -97,6 +97,7 @@
 		DE000101 /* EvolutionSkillRadarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100101 /* EvolutionSkillRadarView.swift */; };
 		DE000102 /* EvolutionStudioWallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100102 /* EvolutionStudioWallView.swift */; };
 		DE000902 /* SnapshotCanvasOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100902 /* SnapshotCanvasOverlay.swift */; };
+		DE000903 /* CritiqueSnapshotThumbnail.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100903 /* CritiqueSnapshotThumbnail.swift */; };
 		DE000103 /* LaunchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100103 /* LaunchHomeView.swift */; };
 		DE000104 /* EveConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100104 /* EveConversation.swift */; };
 		DE000105 /* EveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100105 /* EveService.swift */; };
@@ -224,6 +225,7 @@
 		DE100101 /* EvolutionSkillRadarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionSkillRadarView.swift; sourceTree = "<group>"; };
 		DE100102 /* EvolutionStudioWallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionStudioWallView.swift; sourceTree = "<group>"; };
 		DE100902 /* SnapshotCanvasOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotCanvasOverlay.swift; sourceTree = "<group>"; };
+		DE100903 /* CritiqueSnapshotThumbnail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueSnapshotThumbnail.swift; sourceTree = "<group>"; };
 		DE100103 /* LaunchHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchHomeView.swift; sourceTree = "<group>"; };
 		DE100104 /* EveConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveConversation.swift; sourceTree = "<group>"; };
 		DE100105 /* EveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveService.swift; sourceTree = "<group>"; };
@@ -456,6 +458,7 @@
 				DE100134 /* EyeTestIconButton.swift */,
 				DE100135 /* EyeTestPanel.swift */,
 				DE100136 /* EyeTestOverlay.swift */,
+				DE100903 /* CritiqueSnapshotThumbnail.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -704,6 +707,7 @@
 				DE000101 /* EvolutionSkillRadarView.swift in Sources */,
 				DE000102 /* EvolutionStudioWallView.swift in Sources */,
 				DE000902 /* SnapshotCanvasOverlay.swift in Sources */,
+				DE000903 /* CritiqueSnapshotThumbnail.swift in Sources */,
 				DE000103 /* LaunchHomeView.swift in Sources */,
 				DE000104 /* EveConversation.swift in Sources */,
 				DE000105 /* EveService.swift in Sources */,

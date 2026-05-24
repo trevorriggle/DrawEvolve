@@ -318,69 +318,78 @@ struct DrawingDetailView: View {
         let parsed = CritiqueSummary.parse(entry.feedback)
         let isExpanded = expandedCritiqueIDs.contains(entry.id)
 
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "clock")
-                    .font(.caption)
-                    .foregroundColor(.primary)
-                Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundColor(.primary)
-            }
+        HStack(alignment: .top, spacing: 12) {
+            // Thumbnail of the drawing's state at the time this critique
+            // was generated. Sits across from the bullets so a user can
+            // scan a finding while seeing the visual context that prompted
+            // it. Muted placeholder for pre-snapshot legacy entries and
+            // any row whose worker promote step failed.
+            CritiqueSnapshotThumbnail(entry: entry, size: 72)
 
-            Divider()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "clock")
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                    Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                }
 
-            if parsed.hasExplicitSummary {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(parsed.bullets.enumerated()), id: \.offset) { _, bullet in
-                        HStack(alignment: .top, spacing: 8) {
-                            Text("•")
-                                .foregroundColor(.accentColor)
-                                .fontWeight(.bold)
-                            Text(bullet)
-                                .font(.subheadline)
-                                .foregroundColor(.primary)
-                                .fixedSize(horizontal: false, vertical: true)
+                Divider()
+
+                if parsed.hasExplicitSummary {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(parsed.bullets.enumerated()), id: \.offset) { _, bullet in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text("•")
+                                    .foregroundColor(.accentColor)
+                                    .fontWeight(.bold)
+                                Text(bullet)
+                                    .font(.subheadline)
+                                    .foregroundColor(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
+                } else {
+                    // Older critique without the explicit summary block —
+                    // fall back to a first-paragraph excerpt so the card
+                    // still gives the user something at-a-glance.
+                    Text(CritiqueSummary.fallbackExcerpt(from: parsed.body))
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            } else {
-                // Older critique without the explicit summary block —
-                // fall back to a first-paragraph excerpt so the card
-                // still gives the user something at-a-glance.
-                Text(CritiqueSummary.fallbackExcerpt(from: parsed.body))
-                    .font(.subheadline)
-                    .foregroundColor(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
 
-            // Full-critique expansion. Renders below the bullets when
-            // the user taps "Read full critique." Each entry tracks
-            // its own state via `expandedCritiqueIDs` so multiple
-            // critiques can be open at once.
-            if isExpanded {
-                Divider()
-                FormattedMarkdownView(text: parsed.body)
-            }
+                // Full-critique expansion. Renders below the bullets when
+                // the user taps "Read full critique." Each entry tracks
+                // its own state via `expandedCritiqueIDs` so multiple
+                // critiques can be open at once.
+                if isExpanded {
+                    Divider()
+                    FormattedMarkdownView(text: parsed.body)
+                }
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    if isExpanded {
-                        expandedCritiqueIDs.remove(entry.id)
-                    } else {
-                        expandedCritiqueIDs.insert(entry.id)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        if isExpanded {
+                            expandedCritiqueIDs.remove(entry.id)
+                        } else {
+                            expandedCritiqueIDs.insert(entry.id)
+                        }
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                        Text(isExpanded ? "Hide full critique" : "Read full critique")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .foregroundColor(.accentColor)
                 }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.semibold))
-                    Text(isExpanded ? "Hide full critique" : "Read full critique")
-                        .font(.subheadline.weight(.medium))
-                }
-                .foregroundColor(.accentColor)
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding()
         .background(Color(uiColor: .secondarySystemBackground))
