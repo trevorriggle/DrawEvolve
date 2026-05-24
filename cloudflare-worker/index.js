@@ -179,6 +179,8 @@ export {
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
   fetchCoachingContext,
+  updateConversationTitle,
+  fetchFirstUserMessage,
 } from './lib/supabase.js';
 
 export {
@@ -200,7 +202,7 @@ export {
   recordSuccessfulEveTurn,
 } from './middleware/rate-limit.js';
 
-export { handleEve } from './routes/eve.js';
+export { handleEve, deriveTitleFromMessage } from './routes/eve.js';
 
 export {
   handleRecommendations,

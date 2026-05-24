@@ -13,7 +13,6 @@ import SwiftUI
 struct LaunchHomeView: View {
     let onNewCanvas: () -> Void
     let onOpenGallery: () -> Void
-    let onOpenConversations: () -> Void
 
     @EnvironmentObject private var authManager: AuthManager
     @Environment(\.colorScheme) private var colorScheme
@@ -61,14 +60,6 @@ struct LaunchHomeView: View {
                         systemImage: "photo.on.rectangle.angled",
                         isPrimary: false,
                         action: onOpenGallery
-                    )
-
-                    choiceCard(
-                        title: "Conversations with Eve",
-                        subtitle: "Revisit past sessions with your AI mentor",
-                        systemImage: "bubble.left.and.bubble.right",
-                        isPrimary: false,
-                        action: onOpenConversations
                     )
                 }
                 .padding(.horizontal, 24)
@@ -148,6 +139,6 @@ struct LaunchHomeView: View {
 }
 
 #Preview {
-    LaunchHomeView(onNewCanvas: {}, onOpenGallery: {}, onOpenConversations: {})
+    LaunchHomeView(onNewCanvas: {}, onOpenGallery: {})
         .environmentObject(AuthManager.shared)
 }

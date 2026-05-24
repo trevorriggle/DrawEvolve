@@ -50,6 +50,8 @@ import {
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
   fetchCoachingContext,
+  updateConversationTitle,
+  fetchFirstUserMessage,
 } from '../lib/supabase.js';
 import {
   buildEveSystemPrompt,
@@ -87,6 +89,69 @@ const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
 function isValidUuid(s) {
   return typeof s === 'string' && UUID_RE.test(s);
+}
+
+// =============================================================================
+// Auto-naming — derive a scannable title from the user's first message
+// =============================================================================
+//
+// Conversations land in the DB with title=null. The forward path (first
+// user message of a new conversation) derives + persists a title in
+// handleSendMessage. The backfill path (handleListConversations) does
+// the same lookup for older null-title rows on next list-load. Both
+// share this pure derivation function so behavior is deterministic and
+// testable. No LLM call — pure string normalization.
+//
+// Cap is intentionally generous (~40 chars) so titles distinguish
+// conversations on the list. Word-boundary preference when truncating
+// avoids chopping mid-word. Trailing punctuation gets stripped EXCEPT
+// for `?` — questions are perfectly fine titles. Returns null when the
+// input would derive to an empty string (caller falls back to the
+// iOS-side "Eve session" label).
+
+const TITLE_MAX_CHARS = 40;
+const TITLE_WORD_BOUNDARY_LOOKBACK = 10;
+const CANVAS_ATTACHED_PREFIX = '[canvas attached this turn]\n\n';
+
+export function deriveTitleFromMessage(rawContent) {
+  if (typeof rawContent !== 'string') return null;
+
+  // Strip the optional canvas-attached marker the worker prefixes on
+  // persisted user rows. Idempotent — no-op when absent.
+  let s = rawContent.startsWith(CANVAS_ATTACHED_PREFIX)
+    ? rawContent.slice(CANVAS_ATTACHED_PREFIX.length)
+    : rawContent;
+
+  // Collapse all whitespace (incl. newlines, tabs, NBSP) to single
+  // spaces, trim ends.
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length === 0) return null;
+
+  // Truncate at the cap, preferring a word boundary if one exists in
+  // the last TITLE_WORD_BOUNDARY_LOOKBACK chars of the window so we
+  // don't chop mid-word.
+  if (s.length > TITLE_MAX_CHARS) {
+    const window = s.slice(0, TITLE_MAX_CHARS);
+    const lastSpace = window.lastIndexOf(' ');
+    if (lastSpace >= TITLE_MAX_CHARS - TITLE_WORD_BOUNDARY_LOOKBACK) {
+      s = window.slice(0, lastSpace) + '…';
+    } else {
+      s = window + '…';
+    }
+  }
+
+  // Strip trailing punctuation that reads awkwardly as a title.
+  // KEEP `?` — questions are great titles ("How do I render velvet?").
+  // Strip the ellipsis we may have just added only if it's the ONLY
+  // remaining char (i.e., the truncation produced just "…" — defensive).
+  s = s.replace(/[.!,;:]+$/, '');
+  if (s.length === 0 || s === '…') return null;
+
+  // Capitalize the first character only; preserve user's casing of
+  // proper nouns and acronyms mid-sentence.
+  s = s.charAt(0).toUpperCase() + s.slice(1);
+
+  return s;
 }
 
 // =============================================================================
@@ -314,11 +379,57 @@ async function handleListConversations(request, env, ctx, requiresPro) {
 
   try {
     const conversations = await listConversations({ env, userId, limit });
+    await backfillTitles({ env, ctx, conversations });
     return jsonResponse({ conversations });
   } catch (err) {
     console.error('[eve] list failed', err?.message);
     return jsonResponse({ error: 'Internal server error' }, 500);
   }
+}
+
+// =============================================================================
+// Lazy backfill — derive titles for older null-title conversations
+// =============================================================================
+//
+// Conversations that pre-date the auto-naming feature have title=null
+// even though they have user messages. On every list-load, we look at
+// each null-title row, fetch its first user message, derive a title,
+// and PATCH it. Bounded cost: at most one extra Supabase round-trip
+// per null-title row, capped at the list limit. After the first list-
+// load post-deploy, every old conversation has a persisted title and
+// the loop is a no-op forever after.
+//
+// The message fetch is awaited (we want the derived title in the
+// response). The PATCH is fire-and-forget via ctx.waitUntil so list
+// latency is unaffected. The title is also mirrored onto the in-memory
+// conversation row so the response carries it on the very first list
+// call — iOS doesn't have to re-list to see backfilled titles.
+//
+// updateConversationTitle's `&title=is.null` filter is the safety net:
+// even if two concurrent list-loads race, the second PATCH no-ops.
+
+async function backfillTitles({ env, ctx, conversations }) {
+  if (!Array.isArray(conversations) || conversations.length === 0) return;
+  const nullTitleRows = conversations.filter((c) => c && c.title == null);
+  if (nullTitleRows.length === 0) return;
+
+  await Promise.all(nullTitleRows.map(async (row) => {
+    try {
+      const first = await fetchFirstUserMessage({ env, conversationId: row.id });
+      if (!first || typeof first.content !== 'string') return;
+      const derived = deriveTitleFromMessage(first.content);
+      if (!derived) return;
+      // Reflect on the in-memory row so the response carries the title
+      // immediately. The persisted PATCH is fire-and-forget.
+      row.title = derived;
+      ctx.waitUntil(
+        updateConversationTitle({ env, conversationId: row.id, title: derived })
+          .catch((err) => console.error('[eve] title backfill PATCH failed', err?.message)),
+      );
+    } catch (err) {
+      console.error('[eve] title backfill threw', err?.message);
+    }
+  }));
 }
 
 /**
@@ -553,6 +664,29 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
   } catch (err) {
     console.error('[eve] append user message failed', err?.message);
     return jsonResponse({ error: 'Internal server error' }, 500);
+  }
+
+  // Auto-naming forward path. First user message on a null-title
+  // conversation derives a scannable title from `content` (the raw
+  // message — NOT persistedUserContent, which carries the canvas
+  // marker prefix) and persists it. Fire-and-forget; the user's
+  // response shouldn't wait on the PATCH. Reflect the derived title
+  // on the in-memory `conversation` so the response carries it.
+  //
+  // Gating: title is still null AND message_count is 0. After this
+  // turn bumps message_count by 2, the gate naturally closes for
+  // subsequent sends on the same conversation. The updateConversationTitle
+  // helper double-gates with `&title=is.null` so concurrent first-message
+  // races (or the backfill path racing this one) can't clobber.
+  if (conversation.title == null && (conversation.message_count ?? 0) === 0) {
+    const derivedTitle = deriveTitleFromMessage(content);
+    if (derivedTitle) {
+      ctx.waitUntil(
+        updateConversationTitle({ env, conversationId, title: derivedTitle })
+          .catch((err) => console.error('[eve] title forward-path PATCH failed', err?.message)),
+      );
+      conversation.title = derivedTitle;
+    }
   }
 
   // Scope hydration runs in parallel with coaching-context fetch and

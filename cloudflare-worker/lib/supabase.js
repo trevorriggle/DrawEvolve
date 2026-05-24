@@ -450,6 +450,70 @@ export async function getConversationHistory({
 }
 
 /**
+ * Update the title on a conversation row, but only when it is still
+ * null. The `&title=is.null` filter is the safety net for the lazy-
+ * backfill path: even if two concurrent first-message sends or two
+ * concurrent list-load backfills race, the second PATCH no-ops instead
+ * of clobbering a freshly-derived title. Fire-and-forget from callers
+ * — the user-visible response shouldn't wait on this.
+ */
+export async function updateConversationTitle({
+  env,
+  conversationId,
+  title,
+  fetcher = fetch,
+}) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('updateConversationTitle: env not configured');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/conversations`
+    + `?id=eq.${encodeURIComponent(conversationId)}`
+    + `&title=is.null`;
+  const res = await fetcher(url, {
+    method: 'PATCH',
+    headers: supabaseHeaders(env, {
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    }),
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`updateConversationTitle HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+}
+
+/**
+ * Fetch the first user message in a conversation, ordered by created_at
+ * ascending. Used by the lazy-backfill path to derive a title for older
+ * conversations that pre-date the auto-naming feature. Returns the row
+ * (with at least `content`) or null when the conversation has no user
+ * messages yet (newly-created and untouched, or in a corrupt state).
+ */
+export async function fetchFirstUserMessage({
+  env,
+  conversationId,
+  fetcher = fetch,
+}) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) return null;
+  if (!conversationId) return null;
+  const url = `${env.SUPABASE_URL}/rest/v1/conversation_messages`
+    + `?conversation_id=eq.${encodeURIComponent(conversationId)}`
+    + `&role=eq.user`
+    + `&select=content`
+    + `&order=created_at.asc`
+    + `&limit=1`;
+  try {
+    const res = await fetcher(url, { headers: supabaseHeaders(env) });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Look up an existing assistant message with the same per-conversation
  * client_request_id. Used for idempotency on retried send-message calls:
  * if a row already exists, return it verbatim instead of calling OpenAI

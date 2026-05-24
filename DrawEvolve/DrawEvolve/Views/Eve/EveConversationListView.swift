@@ -3,21 +3,22 @@
 //  DrawEvolve
 //
 //  Lists the user's past Eve conversations, most-recent activity first.
-//  Tapping a row presents EveSheetHost with `existingConversationId` so
-//  the conversation hydrates with its full history via the resume path
-//  added in commit b11aba1. The list re-fetches on sheet dismiss so any
-//  new turns sent during the resumed session promote the row to the top
-//  and update its message count / timestamp.
+//  Presented as a sheet from inside EveSheetHost via the in-Eve list
+//  button (see EveSheetHost.swift). Tapping a row invokes `onSelect(id)`
+//  — the parent host swaps its `currentConversationId` state, which
+//  changes the inner container's `.id()` and forces a fresh
+//  EveConversationManager to hydrate the picked conversation. The list
+//  itself never presents another sheet; selection routes back to the
+//  host that already owns the Eve surface.
 //
 
 import SwiftUI
 
 struct EveConversationListView: View {
     var onClose: () -> Void
+    var onSelect: (UUID) -> Void
 
     @StateObject private var model = EveConversationListModel()
-
-    @State private var openConversation: ConversationSelection?
 
     var body: some View {
         NavigationStack {
@@ -26,23 +27,13 @@ struct EveConversationListView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        Button("Home", action: onClose)
+                        Button("Done", action: onClose)
                     }
                 }
                 .task {
                     if case .idle = model.loadState {
                         await model.load()
                     }
-                }
-                .sheet(item: $openConversation, onDismiss: {
-                    Task { await model.load() }
-                }) { selection in
-                    EveSheetHost(
-                        existingConversationId: selection.id,
-                        onClose: { openConversation = nil }
-                    )
-                    .presentationDetents([.large])
-                    .presentationDragIndicator(.visible)
                 }
         }
     }
@@ -110,7 +101,7 @@ struct EveConversationListView: View {
     private var listView: some View {
         List(model.conversations) { conversation in
             Button {
-                openConversation = ConversationSelection(id: conversation.id)
+                onSelect(conversation.id)
             } label: {
                 ConversationRow(conversation: conversation)
             }
@@ -199,14 +190,6 @@ private struct ConversationRow: View {
         f.unitsStyle = .abbreviated
         return f
     }()
-}
-
-// =============================================================================
-// Sheet selection wrapper
-// =============================================================================
-
-private struct ConversationSelection: Identifiable {
-    let id: UUID
 }
 
 // =============================================================================

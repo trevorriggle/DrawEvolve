@@ -66,7 +66,6 @@ private struct SignedInRoot: View {
 
     enum SignedInRoute {
         case canvas(openGallery: Bool)
-        case eveConversations
     }
 
     var body: some View {
@@ -103,13 +102,8 @@ private struct SignedInRoot: View {
                     // Skip the prompt for gallery-entry — user is
                     // browsing, not starting a fresh drawing.
                     route = .canvas(openGallery: true)
-                },
-                onOpenConversations: {
-                    route = .eveConversations
                 }
             )
-        case .eveConversations:
-            EveConversationListView(onClose: { route = nil })
         case .canvas(let openGallery):
             DrawingCanvasView(
                 context: $drawingContext,

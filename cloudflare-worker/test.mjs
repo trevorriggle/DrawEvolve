@@ -52,7 +52,10 @@ import {
   getConversationHistory,
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
+  updateConversationTitle,
+  fetchFirstUserMessage,
   handleEve,
+  deriveTitleFromMessage,
   HISTORY_FRAMING_DEFAULT,
   REGISTRY_FRAMING,
   REGISTRY_MIN_ROWS,
@@ -6243,6 +6246,409 @@ test('handleEve POST /:id/messages rejects oversize content', async () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.match(body.error, /exceeds/);
+  } finally { restore(); }
+});
+
+// ---- Auto-naming ------------------------------------------------------------
+//
+// Pure deriveTitleFromMessage + handleSendMessage forward-path titling +
+// handleListConversations backfill. The pure function is deterministic
+// (no LLM, no clock), so the tests assert exact strings.
+
+test('deriveTitleFromMessage returns short message verbatim with capitalized first letter', () => {
+  assert.equal(deriveTitleFromMessage('how do I render velvet?'), 'How do I render velvet?');
+});
+
+test('deriveTitleFromMessage preserves trailing `?` (questions are valid titles)', () => {
+  assert.equal(deriveTitleFromMessage('What should I draw today?'), 'What should I draw today?');
+});
+
+test('deriveTitleFromMessage strips trailing `.!,;:` punctuation', () => {
+  assert.equal(deriveTitleFromMessage('Please help with my anatomy.'), 'Please help with my anatomy');
+  assert.equal(deriveTitleFromMessage('I need help!'), 'I need help');
+  assert.equal(deriveTitleFromMessage('Help,'), 'Help');
+  assert.equal(deriveTitleFromMessage('Help;'), 'Help');
+  assert.equal(deriveTitleFromMessage('Help:'), 'Help');
+});
+
+test('deriveTitleFromMessage truncates long messages at word boundary near cap with ellipsis', () => {
+  // 85 chars — well over the 40-char cap. Word boundary at position 33
+  // (" figure"), which is within the 30+ lookback window, so the truncation
+  // lands cleanly on a word boundary.
+  const long = "I'm trying to figure out why this composition feels off and what I should do";
+  const out = deriveTitleFromMessage(long);
+  // Cap is 40 chars; ellipsis adds one → 41-char ceiling.
+  assert.ok(out.length <= 41, `expected <=41 chars, got ${out.length}: ${out}`);
+  assert.ok(out.endsWith('…'), `expected ellipsis, got: ${out}`);
+  // Verify the truncation lands on a word boundary, not mid-word.
+  assert.ok(!out.includes('compos…'), `should not chop mid-word: ${out}`);
+});
+
+test('deriveTitleFromMessage hard-truncates when no word boundary in window', () => {
+  // 50 chars, no spaces — forces hard truncate at the cap.
+  const noSpaces = 'a'.repeat(50);
+  const out = deriveTitleFromMessage(noSpaces);
+  assert.equal(out, 'A' + 'a'.repeat(39) + '…');
+});
+
+test('deriveTitleFromMessage returns null for empty / whitespace-only input', () => {
+  assert.equal(deriveTitleFromMessage(''), null);
+  assert.equal(deriveTitleFromMessage('   '), null);
+  assert.equal(deriveTitleFromMessage('\n\n\t  '), null);
+});
+
+test('deriveTitleFromMessage returns null when result reduces to empty (punctuation-only)', () => {
+  assert.equal(deriveTitleFromMessage('!!!!'), null);
+  assert.equal(deriveTitleFromMessage('...'), null);
+  assert.equal(deriveTitleFromMessage(',,,'), null);
+});
+
+test('deriveTitleFromMessage collapses multi-line / mixed whitespace into single spaces', () => {
+  assert.equal(
+    deriveTitleFromMessage('hello\nworld\t\t  this  is\n\nspaced'),
+    'Hello world this is spaced',
+  );
+});
+
+test('deriveTitleFromMessage strips the [canvas attached this turn] prefix before derivation', () => {
+  assert.equal(
+    deriveTitleFromMessage("[canvas attached this turn]\n\nWhat's wrong with the lighting?"),
+    "What's wrong with the lighting?",
+  );
+});
+
+test('deriveTitleFromMessage is deterministic (same input → same output)', () => {
+  const input = 'walk me through the last critique step by step';
+  assert.equal(deriveTitleFromMessage(input), deriveTitleFromMessage(input));
+});
+
+test('deriveTitleFromMessage returns null for non-string input (defensive)', () => {
+  assert.equal(deriveTitleFromMessage(null), null);
+  assert.equal(deriveTitleFromMessage(undefined), null);
+  assert.equal(deriveTitleFromMessage(42), null);
+  assert.equal(deriveTitleFromMessage({}), null);
+});
+
+test('updateConversationTitle PATCHes with title=is.null safety guard', async () => {
+  let capturedUrl = '';
+  let capturedBody = '';
+  const fetcher = async (url, init) => {
+    capturedUrl = String(url);
+    capturedBody = init.body;
+    return { ok: true, json: async () => ([]) };
+  };
+  await updateConversationTitle({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    title: 'Test title',
+    fetcher,
+  });
+  assert.ok(capturedUrl.includes(`id=eq.${EVE_CONVERSATION_ID}`));
+  assert.ok(capturedUrl.includes('title=is.null'),
+    'must filter title=is.null to prevent clobbering an existing title');
+  const body = JSON.parse(capturedBody);
+  assert.equal(body.title, 'Test title');
+});
+
+test('fetchFirstUserMessage queries for first user message ordered ascending', async () => {
+  let capturedUrl = '';
+  const fetcher = async (url) => {
+    capturedUrl = String(url);
+    return { ok: true, json: async () => ([{ content: 'first thing I said' }]) };
+  };
+  const out = await fetchFirstUserMessage({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    fetcher,
+  });
+  assert.equal(out.content, 'first thing I said');
+  assert.ok(capturedUrl.includes(`conversation_id=eq.${EVE_CONVERSATION_ID}`));
+  assert.ok(capturedUrl.includes('role=eq.user'));
+  assert.ok(capturedUrl.includes('order=created_at.asc'));
+  assert.ok(capturedUrl.includes('limit=1'));
+});
+
+test('fetchFirstUserMessage returns null when no user messages exist', async () => {
+  const fetcher = async () => ({ ok: true, json: async () => ([]) });
+  const out = await fetchFirstUserMessage({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    fetcher,
+  });
+  assert.equal(out, null);
+});
+
+test('handleEve POST /:id/messages — first message on null-title conversation triggers title PATCH', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      title: null,
+      message_count: 0,
+      scope_drawing_id: null,
+    };
+    const titlePatches = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      // Idempotency lookup
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${body.role}`, ...body }]) };
+      }
+      // Title PATCH — has the title=is.null filter
+      if (u.includes('/rest/v1/conversations')
+          && init?.method === 'PATCH'
+          && u.includes('title=is.null')) {
+        titlePatches.push(JSON.parse(init.body));
+        return { ok: true, json: async () => ({}) };
+      }
+      // Counter PATCH — no title filter
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 20 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'how do I render velvet?',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    // Title patched with the derived value.
+    assert.equal(titlePatches.length, 1, `expected one title PATCH, saw ${titlePatches.length}`);
+    assert.equal(titlePatches[0].title, 'How do I render velvet?');
+    // Response carries the derived title on the conversation row.
+    assert.equal(body.conversation.title, 'How do I render velvet?');
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages — second message on already-titled conversation skips title PATCH', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      title: 'How do I render velvet?',
+      message_count: 2,
+      scope_drawing_id: null,
+    };
+    let titlePatchCount = 0;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
+        const body = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${body.role}`, ...body }]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && init?.method === 'PATCH'
+          && u.includes('title=is.null')) {
+        titlePatchCount += 1;
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 20 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'follow-up question',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-ffffffffffff',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    assert.equal(titlePatchCount, 0,
+      'title PATCH must NOT fire when title is already set');
+  } finally { restore(); }
+});
+
+test('handleEve GET /v1/eve/conversations — backfills derived titles for null-title rows', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const rows = [
+      { id: 'c1', user_id: TEST_SUB, scope: 'general', title: null },
+      { id: 'c2', user_id: TEST_SUB, scope: 'general', title: 'Already named' },
+      { id: 'c3', user_id: TEST_SUB, scope: 'drawing', title: null },
+    ];
+    const firstMessages = {
+      c1: { content: 'walk me through the last critique' },
+      c3: { content: '[canvas attached this turn]\n\nwhat is wrong with the values?' },
+    };
+    const titlePatches = []; // { conversationId, title }
+
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && !/[?&]id=eq\./.test(u)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => rows };
+      }
+      // First-user-message lookup
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.user')
+          && u.includes('order=created_at.asc')) {
+        // Extract conversation_id from URL
+        const m = u.match(/conversation_id=eq\.([^&]+)/);
+        const cid = m ? m[1] : null;
+        const row = cid && firstMessages[cid] ? [firstMessages[cid]] : [];
+        return { ok: true, json: async () => row };
+      }
+      // Title PATCH
+      if (u.includes('/rest/v1/conversations')
+          && init?.method === 'PATCH'
+          && u.includes('title=is.null')) {
+        const m = u.match(/id=eq\.([^&]+)/);
+        titlePatches.push({ conversationId: m ? m[1] : null, ...JSON.parse(init.body) });
+        return { ok: true, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'GET',
+      headers: eveAuthHeaders(jwt),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+
+    // Already-titled row is unchanged in the response.
+    const c2 = body.conversations.find((c) => c.id === 'c2');
+    assert.equal(c2.title, 'Already named');
+
+    // Null-title rows pick up derived titles in the response.
+    const c1 = body.conversations.find((c) => c.id === 'c1');
+    assert.equal(c1.title, 'Walk me through the last critique');
+    const c3 = body.conversations.find((c) => c.id === 'c3');
+    assert.equal(c3.title, 'What is wrong with the values?');
+
+    // PATCHes fired for c1 and c3 only.
+    assert.equal(titlePatches.length, 2,
+      `expected 2 title PATCHes (c1, c3), saw ${titlePatches.length}`);
+    const patchedIds = titlePatches.map((p) => p.conversationId).sort();
+    assert.deepEqual(patchedIds, ['c1', 'c3']);
+  } finally { restore(); }
+});
+
+test('handleEve GET /v1/eve/conversations — null-title row with no user message gets no PATCH', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const rows = [
+      { id: 'c1', user_id: TEST_SUB, scope: 'general', title: null },
+    ];
+    let titlePatchCount = 0;
+
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && !/[?&]id=eq\./.test(u)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => rows };
+      }
+      // First-user-message lookup returns empty (no messages yet).
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.user')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && init?.method === 'PATCH'
+          && u.includes('title=is.null')) {
+        titlePatchCount += 1;
+        return { ok: true, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'GET',
+      headers: eveAuthHeaders(jwt),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    // Title stays null.
+    assert.equal(body.conversations[0].title, null);
+    // No PATCH fired.
+    assert.equal(titlePatchCount, 0);
   } finally { restore(); }
 });
 
