@@ -636,11 +636,11 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // TIGHTER edge than before (was smoothstep(0.88, 1.0) which had a
-    // visible falloff band). Now the falloff is just enough to
-    // antialias the disc edge — markers should look like crisp flat
-    // discs of color.
-    float alpha = 1.0 - smoothstep(0.97, 1.0, dist);
+    // Softer-than-Sharpie, harder-than-brush feather: chisel-tip marker
+    // ink doesn't deposit at a perfectly sharp edge, but it's also not
+    // airbrushed. 15% feather sits between ink pen (3%) and brush
+    // (~36% at default hardness).
+    float alpha = 1.0 - smoothstep(0.85, 1.0, dist);
 
     // Felt-tip streak: very subtle horizontal banding (~8% modulation)
     // simulating ink wicking through felt fibers along the stroke
@@ -649,10 +649,11 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
     alpha *= streak;
 
-    // Pressure drives SIZE only — opacity slider is authoritative.
-    // Real markers don't vary opacity meaningfully with pressure; the
-    // ink either makes contact or it doesn't.
-    alpha *= uniforms.opacity;
+    // Pressure → SIZE primarily, plus a mild opacity taper so stroke
+    // ends fade as the Pencil lifts. Floor at 0.5 keeps the body at
+    // near-full saturation for typical mid-pressure input — much
+    // milder than charcoal's 0.1 floor.
+    alpha *= uniforms.opacity * mix(0.5, 1.0, uniforms.pressureAlpha);
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
@@ -871,13 +872,14 @@ fragment float4 markerFragmentShaderPremul(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    float alpha = 1.0 - smoothstep(0.97, 1.0, dist);
+    float alpha = 1.0 - smoothstep(0.85, 1.0, dist);
 
     float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
     alpha *= streak;
 
-    // Pressure → SIZE only. See markerFragmentShader for rationale.
-    alpha *= uniforms.opacity;
+    // Pressure → SIZE primarily, plus mild opacity taper on lift. See
+    // markerFragmentShader for rationale.
+    alpha *= uniforms.opacity * mix(0.5, 1.0, uniforms.pressureAlpha);
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 

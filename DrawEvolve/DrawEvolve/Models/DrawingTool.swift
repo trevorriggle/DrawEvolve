@@ -249,7 +249,7 @@ struct BrushSettings: Codable {
             s.spacing = 0.04      // very tight spacing — no gaps in a line
         case .marker:
             s.size = 14           // wider than brush
-            s.opacity = 0.45      // semi-transparent; overlapping deepens
+            s.opacity = 0.65      // saturated color with paper subtly visible — chisel-tip marker, not Sharpie
             s.hardness = 0.6      // soft-ish but flat-topped
             s.spacing = 0.05
         case .airbrush:
