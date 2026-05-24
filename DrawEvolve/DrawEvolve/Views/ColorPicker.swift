@@ -197,8 +197,18 @@ struct AdvancedColorPicker: View {
         }
         .background(Color(uiColor: .systemBackground))
         .onAppear {
-            openingColor = selectedColor
             syncStateFromSelectedColor()
+            // Simple-mode opens at max brightness for the current hue
+            // regardless of the previously-selected color's brightness;
+            // matches the rule that simple-mode interactions also force
+            // saturation = 1.0. Within a single picker session, toggling
+            // to Advanced preserves whatever the user dials in — the
+            // reset only fires on fresh present.
+            if !showAdvanced {
+                brightness = 1.0
+                writeBackFromSimple()
+            }
+            openingColor = selectedColor
         }
         .onChange(of: selectedColor) { _, newValue in
             syncStateFromSelectedColor(skipFor: newValue)

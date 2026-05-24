@@ -2665,7 +2665,7 @@ struct DrawingCanvasView: View {
     private var critiqueRequestSheet: some View {
         VStack(spacing: 20) {
             VStack(spacing: 6) {
-                Text("Ask Eve for feedback")
+                Text("Request a Critique")
                     .font(.title3.weight(.semibold))
                 Text("How would you describe this drawing right now?")
                     .font(.subheadline)
