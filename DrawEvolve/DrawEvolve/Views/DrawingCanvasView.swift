@@ -2687,7 +2687,7 @@ struct DrawingCanvasView: View {
                     showCritiqueRequestSheet = false
                     requestFeedback()
                 }) {
-                    Text("Send to Eve")
+                    Text("Send for critique")
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)

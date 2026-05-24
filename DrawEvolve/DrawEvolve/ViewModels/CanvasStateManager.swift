@@ -2177,30 +2177,65 @@ class CanvasStateManager: ObservableObject {
         return CGPoint(x: sx, y: sy)
     }
 
-    /// Apply zoom. `centerPoint` is the pinch location in screen space; currently only
-    /// used for future zoom-around-point restoration.
+    /// Apply zoom anchored at `centerPoint` (pinch midpoint in MTKView screen-point
+    /// coordinates). The document point currently under `centerPoint` stays fixed on
+    /// screen across the scale step, so the canvas zooms toward/away from the pinch
+    /// rather than toward the viewport center.
     ///
-    /// The previous implementation tried to adjust `panOffset` so the document point
-    /// under `centerPoint` stayed fixed, but its math mixed document coordinates with
-    /// screen coordinates:
+    /// Derivation (entirely in screen space, mirroring `documentToScreen` forward chain):
     ///
-    ///     panOffset += centerPoint − docPoint * zoomScale
+    ///   forward: doc → quad-local → *zoomScale → R(-θ) → +(centerXY + panOffset) → flip
     ///
-    /// `docPoint` lives in a 0…2048 document-space range while `centerPoint` lives in a
-    /// ~0…1366 screen-space range, so `centerPoint − docPoint*zoomScale` produced
-    /// arbitrary values that, reapplied every frame at 60 Hz, grew `panOffset`
-    /// roughly geometrically. This was the cause of the 10^48 → 10^121 coordinate
-    /// explosion after any pinch on device.
+    /// Hold a doc point D under `centerPoint` invariant. Let s = newZoom / oldZoom and
+    /// let cp_m be `centerPoint` reflected about viewport center on each flipped axis
+    /// (flip is applied LAST in the forward chain → FIRST in the inverse, matching
+    /// the convention in `screenToDocument`). Then:
     ///
-    /// For now zoom happens around the screen center (no pan compensation). Zoom-to-
-    /// pinch-point can be restored later with correct aspect/rotation-aware math.
+    ///   R(-θ)(zo·pt_quad) + centerXY + pan_old = cp_m
+    ///   R(-θ)(zn·pt_quad) + centerXY + pan_new = cp_m       (want)
+    ///   ⇒ pan_new = s · pan_old + (1 - s) · (cp_m - centerXY)
+    ///
+    /// Rotation drops out because R(-θ) is linear and uniform scale about origin
+    /// commutes with rotation about origin — no θ term appears in the result.
+    ///
+    /// Edge case (zoom cap): when newZoom is clamped to a cap that equals oldZoom,
+    /// s = 1, so panOffset is unchanged. This is the correct behavior at the cap
+    /// (no spurious drift when pinching past the limit) and falls out of the math
+    /// for free — DO NOT refactor away the `(1 - s)` term, it's load-bearing.
+    ///
+    /// Note: a previous attempt at zoom-around-point mixed doc-space and screen-space
+    /// units (`panOffset += centerPoint − docPoint * zoomScale`), which exploded
+    /// `panOffset` to 10^48+ within a single gesture. This implementation stays
+    /// entirely in screen space — `centerPoint`, `centerXY`, `panOffset` all share
+    /// units — so the previous failure mode cannot recur.
     func zoom(scale: CGFloat, centerPoint: CGPoint) {
         guard scale.isFinite, scale > 0 else { return }
         guard centerPoint.x.isFinite, centerPoint.y.isFinite else { return }
 
+        let oldScale = zoomScale
+        guard oldScale.isFinite, oldScale > 0 else { return }
+
         let newScale = min(max(scale, minZoom), maxZoom)
         guard newScale.isFinite, newScale > 0 else { return }
 
+        let s = newScale / oldScale
+
+        let centerX = screenSize.width / 2
+        let centerY = screenSize.height / 2
+
+        // Inverse-flip centerPoint to pre-flip screen space. Flip is involutive,
+        // so the same mirror works in both directions. Matches the convention
+        // at the head of `screenToDocument`.
+        var cpx = centerPoint.x
+        var cpy = centerPoint.y
+        if flipHorizontal { cpx = 2 * centerX - cpx }
+        if flipVertical   { cpy = 2 * centerY - cpy }
+
+        let newPanX = s * panOffset.x + (1 - s) * (cpx - centerX)
+        let newPanY = s * panOffset.y + (1 - s) * (cpy - centerY)
+        guard newPanX.isFinite, newPanY.isFinite else { return }
+
+        panOffset = CGPoint(x: newPanX, y: newPanY)
         zoomScale = newScale
     }
 
