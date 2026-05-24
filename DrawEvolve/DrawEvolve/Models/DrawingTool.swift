@@ -64,7 +64,7 @@ enum DrawingTool {
         case .paintBucket: return "drop.fill"
         case .eyeDropper: return "eyedropper"
         case .pencil: return "pencil"
-        case .inkPen: return "pencil.tip"
+        case .inkPen: return "fountainpen.tip"
         case .marker: return "highlighter"
         case .airbrush: return "wind"
         case .charcoal: return "scribble.variable"
