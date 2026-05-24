@@ -580,17 +580,18 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     float fineSpeckle = brushHash(float2(layerPos.x * 0.15, layerPos.y * 0.15));
     float tooth = coarseStreak * 0.7 + fineSpeckle * 0.3;
     float grain = smoothstep(0.3, 0.7, tooth);
-    // Grain dominates: alpha drops to 20% where paper "shows through,"
-    // stays near 100% where graphite caught. Genuine paper-show-through
-    // gaps make this read as pencil rather than soft brush.
-    alpha *= mix(0.2, 1.0, grain);
+    // Grain multiplies alpha directly — paper-tooth pixels (grain ≈ 0)
+    // deposit nothing, so dense stamp overlap can't saturate them into a
+    // uniform dark stroke. A nonzero floor here washes the paper-show-
+    // through out after ~20 overlapping stamps along a stroke.
+    alpha *= grain;
 
-    // Pressure curve: opacity-dominant. Cube the pressure (was square)
-    // so light strokes are noticeably lighter — pencil sketches build
-    // up density through repeated light strokes, not heavy single ones.
-    // Reads `pressureAlpha` (not `pressure`) so non-Pencil input doesn't
-    // permanently cap pencil at 0.75³ ≈ 0.42 alpha — see BrushUniforms.
-    float pressureOpacity = uniforms.pressureAlpha * uniforms.pressureAlpha * uniforms.pressureAlpha;
+    // Pressure curve: pow 1.5 — light strokes still build up across
+    // repeated passes, but mid-pressure shows enough alpha for the
+    // grain to actually read. Reads `pressureAlpha` (not `pressure`)
+    // so non-Pencil input doesn't permanently cap pencil — see
+    // BrushUniforms.
+    float pressureOpacity = uniforms.pressureAlpha * sqrt(uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -829,9 +830,9 @@ fragment float4 pencilFragmentShaderPremul(VertexOut in [[stage_in]],
     float fineSpeckle = brushHash(float2(layerPos.x * 0.15, layerPos.y * 0.15));
     float tooth = coarseStreak * 0.7 + fineSpeckle * 0.3;
     float grain = smoothstep(0.3, 0.7, tooth);
-    alpha *= mix(0.2, 1.0, grain);
+    alpha *= grain;
 
-    float pressureOpacity = uniforms.pressureAlpha * uniforms.pressureAlpha * uniforms.pressureAlpha;
+    float pressureOpacity = uniforms.pressureAlpha * sqrt(uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);

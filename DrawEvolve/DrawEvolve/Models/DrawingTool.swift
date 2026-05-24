@@ -239,9 +239,9 @@ struct BrushSettings: Codable {
             s.spacing = 0.1
         case .pencil:
             s.size = 5            // graphite is narrow
-            s.opacity = 0.55      // strokes build up; not opaque per stamp
+            s.opacity = 0.85      // a hard stroke reads as dark graphite, not gray
             s.hardness = 0.95     // sharp edge
-            s.spacing = 0.05      // tight spacing for smooth lines
+            s.spacing = 0.08      // looser overlap so grain gaps aren't saturated out
         case .inkPen:
             s.size = 7            // medium-thin
             s.opacity = 1.0       // confident solid lines
