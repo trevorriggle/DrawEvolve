@@ -17,6 +17,15 @@ struct LayerPanelView: View {
     /// canvas actually redraws (see toggleLayerVisibility's doc).
     let onToggleVisibility: (Int) -> Void
     let onBeginOpacityDrag: (Int) -> Void
+    /// Fires on EVERY slider value change during a drag (not just at
+    /// begin/end). Routed to CanvasStateManager.bumpLayerMutation() so
+    /// the canvas redraws live as the user drags. Without this, the
+    /// slider writes directly to DrawingLayer.opacity (a @Published on
+    /// the layer class), which doesn't publish on CanvasStateManager,
+    /// so the render-on-demand MTKView never gets setNeedsDisplay()
+    /// until drag-end's history-record cascade fires. Same pattern as
+    /// onToggleVisibility above — see toggleLayerVisibility's doc.
+    let onOpacityChanged: (Int) -> Void
     let onEndOpacityDrag: (Int) -> Void
     let onBeginRename: (Int) -> Void
     let onCommitRename: (Int) -> Void
@@ -140,6 +149,7 @@ struct LayerPanelView: View {
                 }
             },
             onBeginOpacityDrag: { onBeginOpacityDrag(index) },
+            onOpacityChanged: { onOpacityChanged(index) },
             onEndOpacityDrag: { onEndOpacityDrag(index) },
             onBeginRename: { onBeginRename(index) },
             onCommitRename: { onCommitRename(index) },
@@ -344,6 +354,10 @@ private struct LayerRow: View {
     let onToggleVisibility: () -> Void
     let onToggleExpand: () -> Void
     let onBeginOpacityDrag: () -> Void
+    /// Fires on every slider value change. See the doc on
+    /// LayerPanelView.onOpacityChanged for why we need a continuous
+    /// callback rather than relying on the begin/end drag hooks alone.
+    let onOpacityChanged: () -> Void
     let onEndOpacityDrag: () -> Void
     let onBeginRename: () -> Void
     let onCommitRename: () -> Void
@@ -489,7 +503,18 @@ private struct LayerRow: View {
                         .foregroundColor(.secondary)
                 }
                 Slider(
-                    value: $layer.opacity,
+                    value: Binding(
+                        get: { layer.opacity },
+                        set: { newValue in
+                            layer.opacity = newValue
+                            // Wake the canvas — DrawingLayer.@Published
+                            // doesn't propagate to CanvasStateManager on
+                            // its own, so without this the MTKView won't
+                            // see setNeedsDisplay until drag-end's
+                            // history cascade fires.
+                            onOpacityChanged()
+                        }
+                    ),
                     in: 0...1,
                     onEditingChanged: { editing in
                         if editing {
@@ -531,6 +556,7 @@ private struct LayerRow: View {
             onMoveLayer: { _, _ in },
             onToggleVisibility: { _ in },
             onBeginOpacityDrag: { _ in },
+            onOpacityChanged: { _ in },
             onEndOpacityDrag: { _ in },
             onBeginRename: { _ in },
             onCommitRename: { _ in },

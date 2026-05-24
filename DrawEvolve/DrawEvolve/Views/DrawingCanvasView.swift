@@ -411,6 +411,7 @@ struct DrawingCanvasView: View {
                     onMoveLayer: { from, to in canvasState.moveLayer(from: from, to: to) },
                     onToggleVisibility: { index in canvasState.toggleLayerVisibility(at: index) },
                     onBeginOpacityDrag: { index in canvasState.beginOpacityDrag(forLayerAt: index) },
+                    onOpacityChanged: { _ in canvasState.bumpLayerMutation() },
                     onEndOpacityDrag: { index in canvasState.endOpacityDrag(forLayerAt: index) },
                     onBeginRename: { index in canvasState.beginLayerRename(forLayerAt: index) },
                     onCommitRename: { index in canvasState.commitLayerRename(forLayerAt: index) },
