@@ -52,12 +52,13 @@ struct EveInputBar: View {
             Divider()
 
             HStack(alignment: .bottom, spacing: 10) {
-                // Multi-line input. The .lineLimit / axis: .vertical
-                // pairing gives a softly-growing field that caps at
-                // 5 lines so a runaway paste doesn't push the chat
-                // off-screen.
-                TextField("Ask Eve…", text: $manager.draft, axis: .vertical)
-                    .lineLimit(1...5)
+                // Single-line on purpose: SwiftUI's vertical-axis TextField
+                // doesn't fire `.onSubmit` on return (return is hard-bound
+                // to newline insertion), so return-to-send only works on
+                // the default horizontal axis. Long messages scroll
+                // horizontally rather than growing the field. `sendDraft()`'s
+                // `!trimmed.isEmpty` guard catches an accidental empty-return.
+                TextField("Ask Eve…", text: $manager.draft)
                     .focused($isFocused)
                     .keyboardType(.default)
                     .padding(.horizontal, 12)
@@ -66,17 +67,6 @@ struct EveInputBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .disabled(manager.sendState == .sending || manager.conversation == nil)
                     .submitLabel(.send)
-                    // Return key is the primary send affordance — Christian
-                    // (and likely most users) hit return rather than reach for
-                    // the corner button. `.submitLabel(.send)` was already
-                    // labelling the key correctly, but with no `.onSubmit`
-                    // wired the keypress only inserted a newline. Multi-line
-                    // composition via return is intentionally NOT supported in
-                    // this iteration; if a tester needs it later we'll add a
-                    // shift+return or separate newline affordance as its own
-                    // task. `sendDraft()`'s internal `!trimmed.isEmpty` guard
-                    // keeps an accidental empty-return from firing a no-op
-                    // request.
                     .onSubmit { submit() }
 
                 Button {
