@@ -2063,14 +2063,55 @@ class CanvasStateManager: ObservableObject {
     // of a pillarbox in landscape returned doc.x ≈ 2390 instead of 2048. That
     // was the "strokes offset consistently" symptom after Phase-1 fixes.
 
-    /// Transform a point from view/screen space (UIKit points) to document space.
+    /// Transform a point from view/screen space (UIKit points) to document
+    /// space. Thin wrapper over `Self.screenToDocument(_:screenSize:...)` —
+    /// pulls every transform input off the live instance and forwards. Kept
+    /// for source-compatibility with all the existing call sites in touch
+    /// handlers, hit-tests, and selection math.
     func screenToDocument(_ point: CGPoint) -> CGPoint {
+        Self.screenToDocument(
+            point,
+            screenSize: screenSize,
+            documentSize: documentSize,
+            zoomScale: zoomScale,
+            panOffset: panOffset,
+            canvasRotationRadians: canvasRotation.radians,
+            flipHorizontal: flipHorizontal,
+            flipVertical: flipVertical
+        )
+    }
+
+    /// Pure inverse-transform from view/screen-points space to document
+    /// space. Single source of truth for the inverse pipeline — the
+    /// instance method above is a thin wrapper that pulls these fields off
+    /// `self`, and `MetalCanvasView.DrawFrameSnapshot.visibleDocRect`
+    /// invokes this directly from outside the actor so the draw loop can
+    /// compute the visible-tile rect without a second MainActor hop.
+    ///
+    /// `nonisolated` because the math touches no actor state — every input
+    /// is a parameter. Safe to call from any context. **All callers that
+    /// need this math must route through this static — do NOT add a second
+    /// copy of the inverse transform.**
+    ///
+    /// Returns `.zero` for degenerate inputs (NaN, zero/negative sizes,
+    /// non-finite transform fields). Callers that care about the
+    /// degenerate case should pre-check rather than relying on the sentinel.
+    nonisolated static func screenToDocument(
+        _ point: CGPoint,
+        screenSize: CGSize,
+        documentSize: CGSize,
+        zoomScale: CGFloat,
+        panOffset: CGPoint,
+        canvasRotationRadians: CGFloat,
+        flipHorizontal: Bool,
+        flipVertical: Bool
+    ) -> CGPoint {
         guard point.x.isFinite, point.y.isFinite,
               screenSize.width > 0, screenSize.height > 0,
               documentSize.width > 0, documentSize.height > 0,
               zoomScale.isFinite, zoomScale > 0,
               panOffset.x.isFinite, panOffset.y.isFinite,
-              canvasRotation.radians.isFinite else {
+              canvasRotationRadians.isFinite else {
             return .zero
         }
 
@@ -2093,7 +2134,7 @@ class CanvasStateManager: ObservableObject {
         if flipVertical   { sy = 2 * centerY - sy }
 
         // Inverse pan, then translate so (0,0) is the viewport center.
-        var pt = CGPoint(x: sx - panOffset.x - centerX,
+        let pt = CGPoint(x: sx - panOffset.x - centerX,
                          y: sy - panOffset.y - centerY)
 
         // Inverse rotation. The shader applies R(θ) in Y-up pixel space, which
@@ -2105,9 +2146,8 @@ class CanvasStateManager: ObservableObject {
         // The previous version had the signs of sinT swapped, which was the
         // cause of strokes "jumping" once any rotation was applied — my
         // screenToDocument was winding the point the wrong way.
-        let theta = canvasRotation.radians
-        let cosT = cos(theta)
-        let sinT = sin(theta)
+        let cosT = cos(canvasRotationRadians)
+        let sinT = sin(canvasRotationRadians)
         let rx = pt.x * cosT - pt.y * sinT
         let ry = pt.x * sinT + pt.y * cosT
 
