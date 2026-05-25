@@ -444,8 +444,21 @@ struct MetalCanvasView: UIViewRepresentable {
             typeOnPathMode: typeOnPathMode
         )
         if context.coordinator.lastRenderSnapshot != snapshot {
+            // Field-aware throttle. Diffs that touch ONLY the throttleable
+            // transform set (viewport gestures, selection / floating-text
+            // drag transforms) coalesce to 60 Hz via requestThrottledRedraw;
+            // diffs that touch anything else (composite content, layer ops,
+            // selection lifecycle, font/text re-raster, mode toggles, etc.)
+            // fire immediately. See CanvasRenderSnapshot.differsOnlyInTransform
+            // for the policy and field-by-field rationale.
+            let transformOnly = context.coordinator.lastRenderSnapshot?
+                .differsOnlyInTransform(from: snapshot) ?? false
             context.coordinator.lastRenderSnapshot = snapshot
-            uiView.setNeedsDisplay()
+            if transformOnly {
+                context.coordinator.requestThrottledRedraw()
+            } else {
+                uiView.setNeedsDisplay()
+            }
         }
     }
 
@@ -2428,7 +2441,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 MainActor.assumeIsolated {
                     cs.floatingText?.anchor = newAnchor
                 }
-                view.setNeedsDisplay()
+                // Floating-text drag — throttleable. The trailing-edge fire
+                // guarantees the final position renders within the throttle
+                // interval of touchesEnded.
+                requestThrottledRedraw()
                 return
             }
 
@@ -2445,7 +2461,9 @@ struct MetalCanvasView: UIViewRepresentable {
                 MainActor.assumeIsolated {
                     canvasState.selectionOffset = offset
                 }
-                view.setNeedsDisplay()
+                // Selection drag — throttleable, same rationale as the
+                // floating-text drag above.
+                requestThrottledRedraw()
 
                 if hypot(offset.x, offset.y) > 5 {
                     print("Dragging selection with offset: \(offset)")
