@@ -1089,6 +1089,67 @@ struct MetalCanvasView: UIViewRepresentable {
                 self.floatingTextDocRect = floatingTextDocRect
                 self.floatingTextRotation = floatingTextRotation
             }
+
+            /// Axis-aligned doc-space bounding rect of everything currently
+            /// visible inside `viewportPoints`. Computed by inverse-transforming
+            /// the four viewport corners through
+            /// `CanvasStateManager.screenToDocument`'s pure static and taking
+            /// the AABB.
+            ///
+            /// Used by `draw(in:)` to pass into
+            /// `encodeLayerTileCompositeOntoIntermediate` so the per-layer
+            /// compose only iterates tiles inside the visible doc region —
+            /// at zoom > 1 the off-viewport tiles aren't visible, so composing
+            /// them is wasted GPU work.
+            ///
+            /// Returns `nil` for degenerate inputs (zero canvas, zero viewport).
+            /// Callers should treat nil as "don't cull, fall back to
+            /// allocatedKeys" — `encodeLayerTileCompositeOntoIntermediate`
+            /// honours a nil parameter that way by default.
+            ///
+            /// At oblique canvas rotations the returned AABB is conservatively
+            /// larger than the rotated visible quad (up to ~2× area at 45°).
+            /// Over-cull is the correct erring direction: a tile included
+            /// unnecessarily is silent waste; a tile missed shows as a visible
+            /// gap.
+            func visibleDocRect(viewportPoints: CGSize) -> CGRect? {
+                guard documentSize.width > 0, documentSize.height > 0,
+                      viewportPoints.width > 0, viewportPoints.height > 0 else {
+                    return nil
+                }
+
+                let corners: [CGPoint] = [
+                    CGPoint(x: 0, y: 0),
+                    CGPoint(x: viewportPoints.width, y: 0),
+                    CGPoint(x: 0, y: viewportPoints.height),
+                    CGPoint(x: viewportPoints.width, y: viewportPoints.height),
+                ]
+
+                var minX = CGFloat.greatestFiniteMagnitude
+                var minY = CGFloat.greatestFiniteMagnitude
+                var maxX = -CGFloat.greatestFiniteMagnitude
+                var maxY = -CGFloat.greatestFiniteMagnitude
+
+                for corner in corners {
+                    let doc = CanvasStateManager.screenToDocument(
+                        corner,
+                        screenSize: viewportPoints,
+                        documentSize: documentSize,
+                        zoomScale: zoomScale,
+                        panOffset: panOffset,
+                        canvasRotationRadians: canvasRotation,
+                        flipHorizontal: flipHorizontal,
+                        flipVertical: flipVertical
+                    )
+                    if doc.x < minX { minX = doc.x }
+                    if doc.x > maxX { maxX = doc.x }
+                    if doc.y < minY { minY = doc.y }
+                    if doc.y > maxY { maxY = doc.y }
+                }
+
+                return CGRect(x: minX, y: minY,
+                              width: maxX - minX, height: maxY - minY)
+            }
         }
 
         func draw(in view: MTKView) {
