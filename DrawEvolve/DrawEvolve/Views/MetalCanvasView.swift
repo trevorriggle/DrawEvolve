@@ -859,16 +859,22 @@ struct MetalCanvasView: UIViewRepresentable {
             }
         }
 
-        /// Memory-warning hook. Logging-only handler for now; populated by
-        /// Tier B+ work in tile-rendering-audit.md (shed undo snapshots,
-        /// drop hidden-layer tiles, clear reference-texture caches).
-        /// Logging through CrashReporter (not raw `print`) so the signal
-        /// is persisted in case the next thing iOS does is kill the app.
+        /// Memory-warning hook. Logs the warning, then sheds the per-layer
+        /// composite cache pool from its default 6 entries down to 3 —
+        /// frees ~48 MB at 2048² (~192 MB at 4096²) of pooled MTLTexture
+        /// memory immediately. Subsequent compose work falls through to
+        /// the renderer's existing tileDisplayIntermediate fallback path
+        /// for layers no longer in the pool.
+        ///
+        /// Future Tier B+ work (per tile-rendering-audit.md) will extend
+        /// this handler to also shed undo snapshots and drop hidden-
+        /// layer tiles.
         @objc private func handleMemoryWarning() {
             CrashReporter.shared.logWarning(
-                "Received UIApplication.didReceiveMemoryWarningNotification",
+                "Received UIApplication.didReceiveMemoryWarningNotification — evicting layer composite cache to 3",
                 context: "MetalCanvasView.Coordinator"
             )
+            renderer?.layerCompositeCache.evictDownTo(3)
         }
 
         // MARK: - Throttled redraw
@@ -1367,22 +1373,59 @@ struct MetalCanvasView: UIViewRepresentable {
                 if let preview = blurPreviewTex {
                     sourceTexture = preview
                 } else if let grid = layer.tileGrid {
-                    renderer?.encodeLayerTileCompositeOntoIntermediate(
-                        grid,
-                        visibleDocRect: visibleDocRect,
-                        on: commandBuffer
-                    )
-                    // Wet-ink live preview: if a wet-ink stroke is active
-                    // on THIS layer, composite strokeScratch on top of the
-                    // tile-composited intermediate via the same commit
-                    // pipeline used at touchesEnded. The preview matches
-                    // the eventual commit bit-for-bit; the user sees the
-                    // in-progress stroke composited correctly with
-                    // within-stroke max-cap behavior already applied.
-                    if renderer?.activeWetInkLayerId == layer.id {
+                    // Tier B 6 — per-layer composite cache. Three branches:
+                    //   1. Active wet-ink layer → bypass cache. Composes
+                    //      with viewport cull (slice 4) into the renderer-
+                    //      owned tileDisplayIntermediate, then the wet-ink
+                    //      preview composites strokeScratch on top using
+                    //      the same intermediate. Cache would miss every
+                    //      frame anyway (compositeVersion bumps per touch),
+                    //      and the wet-ink preview is hardcoded to
+                    //      tileDisplayIntermediate.
+                    //   2. Cache hit → reuse the cached intermediate.
+                    //      Zero compose work this frame.
+                    //   3. Cache miss → reserve a pool slot, compose
+                    //      WITHOUT viewport cull (so the cached entry
+                    //      stays correct across future viewport changes;
+                    //      see LayerCompositeCache doc comment for the
+                    //      viewport-independence rationale). Fallback to
+                    //      tileDisplayIntermediate if the pool can't
+                    //      allocate.
+                    let isActiveWetInk = (renderer?.activeWetInkLayerId == layer.id)
+                    let cacheKey = renderer?.compositeCacheKey(for: layer)
+
+                    if isActiveWetInk {
+                        renderer?.encodeLayerTileCompositeOntoIntermediate(
+                            grid,
+                            visibleDocRect: visibleDocRect,
+                            on: commandBuffer
+                        )
                         renderer?.encodeWetInkPreviewCompositeOntoIntermediate(on: commandBuffer)
+                        sourceTexture = renderer?.tileDisplayIntermediate
+                    } else if let key = cacheKey,
+                              let cached = renderer?.layerCompositeCache.cached(forKey: key) {
+                        sourceTexture = cached
+                    } else if let key = cacheKey,
+                              let target = renderer?.layerCompositeCache.reserve(forKey: key) {
+                        renderer?.encodeLayerCompositeIntoTexture(
+                            grid,
+                            target: target,
+                            visibleDocRect: nil,   // cache full content, viewport-independent
+                            on: commandBuffer
+                        )
+                        sourceTexture = target
+                    } else {
+                        // Pool full + alloc failure, or compositeCacheKey
+                        // returned nil. Fall back to the existing
+                        // intermediate path. Identical to pre-cache
+                        // behaviour (with slice-4 cull intact).
+                        renderer?.encodeLayerTileCompositeOntoIntermediate(
+                            grid,
+                            visibleDocRect: visibleDocRect,
+                            on: commandBuffer
+                        )
+                        sourceTexture = renderer?.tileDisplayIntermediate
                     }
-                    sourceTexture = renderer?.tileDisplayIntermediate
                 } else {
                     // Phase 4.5e: layer.texture is gone. No tileGrid means
                     // the layer has no content to draw — skip it.
