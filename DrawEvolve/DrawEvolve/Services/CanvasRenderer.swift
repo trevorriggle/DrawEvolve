@@ -3477,20 +3477,54 @@ class CanvasRenderer: NSObject {
     func encodeLayerTileCompositeOntoIntermediate(_ tileGrid: TileGrid,
                                                   visibleDocRect: CGRect? = nil,
                                                   on commandBuffer: MTLCommandBuffer) {
-        guard let intermediate = ensureTileDisplayIntermediate(),
-              let tilePipeline = compositeTilePipelineState else {
-            print("⚠️ encodeLayerTileCompositeOntoIntermediate: intermediate / pipeline unavailable")
+        guard let intermediate = ensureTileDisplayIntermediate() else {
+            print("⚠️ encodeLayerTileCompositeOntoIntermediate: intermediate unavailable")
+            return
+        }
+        encodeLayerCompositeIntoTexture(tileGrid,
+                                        target: intermediate,
+                                        visibleDocRect: visibleDocRect,
+                                        on: commandBuffer)
+    }
+
+    /// Compose `tileGrid`'s allocated tiles into `target` via the per-tile
+    /// composite pipeline. Bit-identical to the long-standing
+    /// `encodeLayerTileCompositeOntoIntermediate` path, but parameterised
+    /// over the destination texture so the layer-composite cache can
+    /// supply its own pooled texture rather than always using the
+    /// renderer-owned `tileDisplayIntermediate`.
+    ///
+    /// `target` must be a `.renderTarget`-usable `.bgra8Unorm` texture
+    /// sized to `canvasSize`. The cache's `LayerCompositeCache` allocates
+    /// matching textures; the renderer's own `tileDisplayIntermediate`
+    /// also satisfies the contract.
+    ///
+    /// Same `loadAction = .clear (0,0,0,0)` semantics as the legacy path
+    /// — unwritten regions stay transparent and contribute nothing when
+    /// the result is later sampled by the drawable display draw.
+    ///
+    /// `visibleDocRect` performs the slice-4 viewport cull when supplied;
+    /// nil = iterate all allocated tiles (the layer-composite cache's
+    /// miss path passes nil so the cached intermediate captures the full
+    /// content regardless of current viewport — see LayerCompositeCache
+    /// doc comment for why).
+    func encodeLayerCompositeIntoTexture(_ tileGrid: TileGrid,
+                                         target: MTLTexture,
+                                         visibleDocRect: CGRect? = nil,
+                                         on commandBuffer: MTLCommandBuffer) {
+        guard let tilePipeline = compositeTilePipelineState else {
+            print("⚠️ encodeLayerCompositeIntoTexture: pipeline unavailable")
             return
         }
 
         let composeDesc = MTLRenderPassDescriptor()
-        composeDesc.colorAttachments[0].texture = intermediate
+        composeDesc.colorAttachments[0].texture = target
         composeDesc.colorAttachments[0].loadAction = .clear
         composeDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         composeDesc.colorAttachments[0].storeAction = .store
 
         guard let composeEnc = commandBuffer.makeRenderCommandEncoder(descriptor: composeDesc) else {
-            print("⚠️ encodeLayerTileCompositeOntoIntermediate: failed to create encoder")
+            print("⚠️ encodeLayerCompositeIntoTexture: failed to create encoder")
             return
         }
         composeEnc.setRenderPipelineState(tilePipeline)
@@ -3501,24 +3535,9 @@ class CanvasRenderer: NSObject {
         let tileSize = tileGrid.tileSize
         var tileOpacity: Float = 1.0  // raw layer content; opacity applied at draw step
 
-        // Viewport tile culling (Tier B 7). When `visibleDocRect` is supplied,
-        // iterate only the tiles whose canvas-pixel rect intersects it —
-        // tiles outside the visible viewport contribute nothing the user
-        // would see and don't need to be composed. `tilesIntersecting`
-        // already clamps to grid bounds and handles null/empty rects
-        // defensively, so an off-canvas pan returns an empty key list and
-        // we cleanly compose zero tiles.
-        //
-        // The intermediate is still cleared on load above, so unwritten
-        // regions stay transparent; the drawable's render pass samples the
-        // intermediate and the transparent regions contribute nothing
-        // over the (already-drawn) background. No visible artifact.
-        //
-        // When `visibleDocRect` is nil (export / save / AI paths or any
-        // caller that hasn't opted in), we fall back to allocatedKeys() —
-        // the pre-cull behaviour, unchanged. The per-key `tile(at:)` guard
-        // below handles the case where `tilesIntersecting` returns keys
-        // that haven't been allocated (sparse-grid invariant).
+        // Slice-4 viewport cull when visibleDocRect is supplied. nil = all
+        // allocated (export / cache-miss-into-cached-entry paths). See
+        // tile-rendering-audit.md Tier B 6/7 for the two-tier rationale.
         let keysToCompose: [TileKey]
         if let rect = visibleDocRect {
             keysToCompose = tileGrid.tilesIntersecting(rect)
