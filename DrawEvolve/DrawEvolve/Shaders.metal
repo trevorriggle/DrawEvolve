@@ -183,6 +183,132 @@ fragment float4 compositeTileFragmentShader(VertexOut in [[stage_in]],
     return color;
 }
 
+// MARK: - Tile direct-to-drawable shaders (Phase 6 / Tier C 9)
+//
+// Per-tile vertex shader that maps a tile's canvas-pixel rect through the
+// full canvas-to-drawable transform chain (fit-to-longest, zoom, rotation,
+// pan, flip). Used by the tile-direct rendering path that replaces the
+// per-layer compose-into-intermediate + sample-as-fullscreen-quad pair
+// with a single per-layer pass that rasterizes each visible tile directly
+// onto the drawable.
+//
+// The math is composed line-for-line from `quadVertexShaderWithTransform`
+// (the legacy fullscreen-quad-with-transform), with one extra step at
+// the front: convert the tile's canvas-pixel corner to the equivalent
+// canvas-fraction NDC, then run the existing pipeline. The math is
+// algebraically identical to the legacy path for a quad covering the
+// same canvas region.
+//
+// **Sampler choice:** the fragment shader uses LINEAR to match the
+// legacy display path (`textureDisplayShader` uses LINEAR). NEAREST
+// would pixel-snap at oblique angles and visibly differ. LINEAR can
+// produce 1-texel seams at tile boundaries when sub-pixel sample
+// positions don't reach into the adjacent tile — acceptable visual
+// trade-off for v1; future work could add per-tile texel-overlap
+// padding to eliminate seams.
+//
+// **Bit-exact vs legacy at axis-aligned transforms:** zoom=1.0 with no
+// rotation/flip/sub-pixel-pan produces drawable pixels that land on
+// texel centers; LINEAR = NEAREST in that regime; output is byte-exact
+// with the legacy path. At rotated / sub-pixel transforms ULP-level
+// differences are expected from floating-point vertex math composing
+// differently per-tile vs once-per-fullscreen-quad.
+struct TileDirectUniforms {
+    int4   tileRect;       // (originX, originY, width, height) in canvas pixels
+    float2 canvasSize;     // canvas dimensions in canvas pixels
+    float4 transform;      // [zoom, panX, panY, rotationRadians]
+    float2 viewportSize;   // viewport in UIKit points
+    float2 flipState;      // [flipH, flipV] — each 0 or 1
+};
+
+vertex VertexOut tileDirectVertexShader(uint vertexID [[vertex_id]],
+                                         constant TileDirectUniforms &u [[buffer(0)]]) {
+    VertexOut out;
+
+    // Unit-square corners; texCoord matches so sampling produces "texture
+    // row 0 = tile-y 0" — same convention as the per-tile composite shader.
+    float2 unitPos[6] = {
+        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
+        float2(0.0, 1.0), float2(1.0, 0.0), float2(1.0, 1.0)
+    };
+    float2 unit = unitPos[vertexID];
+
+    int4 rect = u.tileRect;
+
+    // Tile vertex position in canvas-pixel space.
+    float pixelX = float(rect.x) + unit.x * float(rect.z);
+    float pixelY = float(rect.y) + unit.y * float(rect.w);
+
+    // Canvas-pixel → canvas-fraction (0..1).
+    float2 frac = float2(pixelX / u.canvasSize.x, pixelY / u.canvasSize.y);
+
+    // Canvas-fraction → equivalent fullscreen-quad NDC position.
+    // Legacy quadVertexShaderWithTransform takes NDC then does
+    // (ndc * 0.5 + 0.5) * viewport. The texCoord convention is UIKit-Y-down
+    // (top of texture = canvas y=0 = NDC y=+1), so frac.y=0 → ndc.y=+1.
+    float2 ndcPos = float2(frac.x * 2.0 - 1.0, 1.0 - 2.0 * frac.y);
+
+    // From here, EXACTLY the legacy quadVertexShaderWithTransform pipeline.
+
+    float zoom = u.transform.x;
+    float2 pan = float2(u.transform.y, u.transform.z);
+    float rotation = u.transform.w;
+    float2 viewport = u.viewportSize;
+
+    // Aspect-ratio correction: canvas-square fills the longer viewport axis
+    // at zoom=1.
+    float viewportAspect = viewport.x / viewport.y;
+    float2 scale = float2(1.0, 1.0);
+    if (viewportAspect > 1.0) {
+        scale.y = viewportAspect;
+    } else {
+        scale.x = 1.0 / viewportAspect;
+    }
+    float2 correctedPos = ndcPos * scale;
+
+    // NDC → Y-up pixel space.
+    float2 screenPos = (correctedPos * 0.5 + 0.5) * viewport;
+
+    // Zoom around viewport center.
+    float2 screenCenter = viewport * 0.5;
+    screenPos = (screenPos - screenCenter) * zoom + screenCenter;
+
+    // Rotate around viewport center.
+    if (rotation != 0.0) {
+        float2 rel = screenPos - screenCenter;
+        float c = cos(rotation);
+        float s = sin(rotation);
+        screenPos = float2(rel.x * c - rel.y * s, rel.x * s + rel.y * c) + screenCenter;
+    }
+
+    // Pan. UIKit Y-down points; screenPos is Y-up pixels — flip pan.y.
+    screenPos += float2(pan.x, -pan.y);
+
+    // Flip last in screen space.
+    if (u.flipState.x > 0.5) screenPos.x = viewport.x - screenPos.x;
+    if (u.flipState.y > 0.5) screenPos.y = viewport.y - screenPos.y;
+
+    // Back to NDC.
+    float2 finalPos = (screenPos / viewport) * 2.0 - 1.0;
+
+    out.position = float4(finalPos, 0.0, 1.0);
+    out.texCoord = unit;
+    out.pointSize = 1.0;
+
+    return out;
+}
+
+fragment float4 tileDirectFragmentShader(VertexOut in [[stage_in]],
+                                          texture2d<float> tex [[texture(0)]],
+                                          constant float &opacity [[buffer(0)]]) {
+    // LINEAR to match legacy textureDisplayShader. See file header for
+    // the seam-vs-aliasing trade-off discussion.
+    constexpr sampler s(mag_filter::linear, min_filter::linear);
+    float4 color = tex.sample(s, in.texCoord);
+    color.a *= opacity;
+    return color;
+}
+
 // Vertex shader for full-screen quad (compositing) - basic version
 vertex VertexOut quadVertexShader(uint vertexID [[vertex_id]]) {
     VertexOut out;
