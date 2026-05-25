@@ -261,7 +261,18 @@ struct MetalCanvasView: UIViewRepresentable {
         // didEnterBackground / willEnterForeground observers (Fix 1.2).
         metalView.enableSetNeedsDisplay = true
         metalView.isPaused = false
-        metalView.framebufferOnly = false  // Allow texture readback
+        // framebufferOnly = true lets Metal optimise the drawable as
+        // write-only — on TBDR Apple GPUs the drawable's tile memory
+        // doesn't have to be materialised back to DRAM between frames,
+        // which lowers memory bandwidth and thermal load. The live draw
+        // path NEVER reads the drawable's texture back: every getBytes
+        // and blit-copy targets the canvasStagingAtlas, a tile texture,
+        // or a transient intermediate. Save / AI / thumbnail / palette
+        // paths all read from `tileDisplayIntermediate` or
+        // `canvasStagingAtlas`, never from `view.currentDrawable`.
+        // (Verified by `grep drawable.texture` across the iOS target —
+        // only render-target colour-attachment assignments, no reads.)
+        metalView.framebufferOnly = true
         // Off-canvas workbench is light gray so the canvas boundary is visible
         // when zoomed/panned out. At default zoom the canvas fills the viewport.
         metalView.clearColor = MTLClearColor(red: 0.753, green: 0.753, blue: 0.753, alpha: 1)
