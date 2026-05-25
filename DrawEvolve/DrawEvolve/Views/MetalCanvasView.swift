@@ -742,13 +742,17 @@ struct MetalCanvasView: UIViewRepresentable {
             guard let device = view.device,
                   let drawable = view.currentDrawable,
                   let descriptor = view.currentRenderPassDescriptor else {
+                #if DEBUG
                 print("MetalCanvasView.draw: Failed to get device/drawable/descriptor")
+                #endif
                 return
             }
 
             // Initialize renderer if needed
             if renderer == nil {
+                #if DEBUG
                 print("MetalCanvasView.draw: Initializing renderer")
+                #endif
                 renderer = CanvasRenderer(metalDevice: device)
 
                 // Share renderer and screen size with canvas state (for text rendering)
@@ -764,9 +768,11 @@ struct MetalCanvasView: UIViewRepresentable {
                     // blocky/low-res stroke edges. Doc coord system scales
                     // with texture size; brush defaults compensated below.
                     renderer.updateCanvasSize(for: view.drawableSize)
+                    #if DEBUG
                     print("MetalCanvasView.draw: Shared renderer with canvas state")
                     print("  - Screen size: \(view.bounds.size)")
                     print("  - Canvas size: \(renderer.canvasSize)")
+                    #endif
 
                     #if DEBUG
                     // Wet-ink Phase A sanity probe. One-shot, runs once per
