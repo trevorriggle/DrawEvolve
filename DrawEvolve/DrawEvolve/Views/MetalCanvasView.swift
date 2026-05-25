@@ -858,6 +858,67 @@ struct MetalCanvasView: UIViewRepresentable {
             )
         }
 
+        // MARK: - Throttled redraw
+
+        // Throttle for non-stroke redraw requests (gesture-driven viewport
+        // transforms, selection drag, floating-text drag). Leading-edge
+        // fires immediately; subsequent calls within the interval coalesce
+        // into a trailing-edge fire that guarantees the final state lands
+        // within `throttledRedrawInterval` of the last request.
+        //
+        // 60 Hz is the conservative starting value — half of ProMotion's
+        // 120 Hz native cadence. If profile data shows ProMotion devices
+        // can tolerate a faster rung without thermal regression, this is
+        // the one-line edit. Raise to 1.0 / 90.0 or 1.0 / 80.0 to try a
+        // softer cap.
+        private static let throttledRedrawInterval: CFTimeInterval = 1.0 / 60.0
+
+        private var lastThrottledRedrawAt: CFTimeInterval = 0
+        private var pendingThrottledRedrawScheduled = false
+
+        /// Request a redraw that may be coalesced under the
+        /// `throttledRedrawInterval` cap. Safe to call at the input event
+        /// rate; the trailing-edge fire ensures the final state always
+        /// lands within the interval of the last request.
+        ///
+        /// Stroke paths must NOT route through here — they call
+        /// `view.setNeedsDisplay()` directly so brush/eraser/smudge/blur
+        /// render at native input rate. The discriminator is implicit at
+        /// every call site: the SwiftUI snapshot gate's transform-only
+        /// branch + the selection / floating-text touch drags route here;
+        /// stroke touchesBegan/Moved/Ended bypass.
+        ///
+        /// No-op if the metalView ref is gone (Coordinator outliving view
+        /// during teardown).
+        func requestThrottledRedraw() {
+            guard let view = metalView else { return }
+            let now = CACurrentMediaTime()
+            let elapsed = now - lastThrottledRedrawAt
+            if elapsed >= Self.throttledRedrawInterval {
+                // Leading edge: fire immediately, reset window.
+                lastThrottledRedrawAt = now
+                pendingThrottledRedrawScheduled = false
+                view.setNeedsDisplay()
+            } else if !pendingThrottledRedrawScheduled {
+                // Trailing edge: schedule a fire at the end of the current
+                // window so the final state always renders. Don't double-
+                // schedule — repeated requests within the window collapse
+                // to one trailing fire.
+                pendingThrottledRedrawScheduled = true
+                let delay = Self.throttledRedrawInterval - elapsed
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.flushPendingThrottledRedraw()
+                }
+            }
+        }
+
+        private func flushPendingThrottledRedraw() {
+            pendingThrottledRedrawScheduled = false
+            guard let view = metalView else { return }
+            lastThrottledRedrawAt = CACurrentMediaTime()
+            view.setNeedsDisplay()
+        }
+
         /// Apply the current `ProcessInfo.thermalState` to the MTKView's
         /// `preferredFramesPerSecond`. Idempotent — safe to call from
         /// makeUIView for the initial state AND from the notification
