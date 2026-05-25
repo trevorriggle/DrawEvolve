@@ -3670,6 +3670,150 @@ class CanvasRenderer: NSObject {
         composeEnc.endEncoding()
     }
 
+    // MARK: - Tile-direct rendering (Phase 6 / Tier C 9)
+
+    /// Layout-matched twin of the Metal `TileDirectUniforms` struct in
+    /// Shaders.metal. SIMD4<Int32> + SIMD2<Float> + SIMD4<Float> +
+    /// SIMD2<Float> + SIMD2<Float> = 16 + 8 + 16 + 8 + 8 = 56 bytes; SIMD4
+    /// alignment of 16 forces the trailing padding to a multiple of 16, so
+    /// the stride may round up. We use MemoryLayout<...>.stride at the call
+    /// site so the Metal binding picks up the actual stride.
+    fileprivate struct TileDirectUniformsCPU {
+        var tileRect: SIMD4<Int32>
+        var canvasSize: SIMD2<Float>
+        var transform: SIMD4<Float>   // [zoom, panX, panY, rotation]
+        var viewportSize: SIMD2<Float>
+        var flipState: SIMD2<Float>
+    }
+
+    /// Render `tileGrid`'s visible tiles directly to the drawable as a
+    /// stream of transformed quads — one per tile, each sampling the
+    /// tile's texture and applying the canvas-to-drawable transform at
+    /// the vertex shader. Replaces the legacy per-layer compose +
+    /// drawable-sample pair with a single per-layer pass; the
+    /// canvas-sized `tileDisplayIntermediate` is no longer needed.
+    ///
+    /// **Open the render encoder yourself.** This function takes an
+    /// existing render encoder (typically the drawable's render encoder
+    /// from the per-layer loop) and appends draw calls to it. Same
+    /// pattern as `renderTextureToScreen` etc. — caller owns the
+    /// encoder lifecycle (loadAction, scissor, endEncoding).
+    ///
+    /// `visibleDocRect`: when non-nil, only tiles intersecting it are
+    /// drawn (slice-4 viewport cull). nil = all allocated tiles (used
+    /// by the verifier for "render full content" fixtures).
+    ///
+    /// `opacity` is applied as a fragment-shader alpha multiplier —
+    /// matches the legacy layer-opacity application point.
+    func encodeLayerTilesDirectlyToDrawable(
+        _ tileGrid: TileGrid,
+        to renderEncoder: MTLRenderCommandEncoder,
+        opacity: Float,
+        zoomScale: Float,
+        panOffset: SIMD2<Float>,
+        canvasRotation: Float,
+        viewportSize: SIMD2<Float>,
+        flipState: SIMD2<Float>,
+        visibleDocRect: CGRect? = nil
+    ) {
+        guard let pipeline = tileDirectToDrawablePipelineState else {
+            print("⚠️ encodeLayerTilesDirectlyToDrawable: pipeline unavailable")
+            return
+        }
+
+        let canvasW = Int(canvasSize.width)
+        let canvasH = Int(canvasSize.height)
+        let tileSize = tileGrid.tileSize
+
+        let keysToDraw: [TileKey]
+        if let rect = visibleDocRect {
+            keysToDraw = tileGrid.tilesIntersecting(rect)
+        } else {
+            keysToDraw = tileGrid.allocatedKeys()
+        }
+        if keysToDraw.isEmpty { return }
+
+        renderEncoder.setRenderPipelineState(pipeline)
+        var opacityValue = opacity
+
+        for key in keysToDraw {
+            guard let tile = tileGrid.tile(at: key) else { continue }
+            let srcX = key.x * tileSize
+            let srcY = key.y * tileSize
+            let blitW = min(tileSize, canvasW - srcX)
+            let blitH = min(tileSize, canvasH - srcY)
+            if blitW <= 0 || blitH <= 0 { continue }
+
+            var uniforms = TileDirectUniformsCPU(
+                tileRect: SIMD4<Int32>(Int32(srcX), Int32(srcY), Int32(blitW), Int32(blitH)),
+                canvasSize: SIMD2<Float>(Float(canvasW), Float(canvasH)),
+                transform: SIMD4<Float>(zoomScale, Float(panOffset.x), Float(panOffset.y), canvasRotation),
+                viewportSize: viewportSize,
+                flipState: flipState
+            )
+            renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<TileDirectUniformsCPU>.stride, index: 0)
+            renderEncoder.setFragmentTexture(tile.texture, index: 0)
+            renderEncoder.setFragmentBytes(&opacityValue, length: MemoryLayout<Float>.stride, index: 0)
+            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+    }
+
+    /// Composite `strokeScratch` on top of the drawable using the
+    /// wet-ink commit pipeline (premul-over for additive tools, dest-out
+    /// for eraser). Tile-direct equivalent of
+    /// `encodeWetInkPreviewCompositeOntoIntermediate`: instead of
+    /// compositing onto `tileDisplayIntermediate`, it draws onto the
+    /// caller's drawable encoder directly with the canvas-to-drawable
+    /// transform applied.
+    ///
+    /// The scratch is a full-canvas texture; we treat it as a single
+    /// "tile" covering the entire canvas (tileRect = (0, 0, canvasW,
+    /// canvasH)) and reuse `tileDirectVertexShader` for the transform.
+    /// Same vertex shader as the per-tile direct pass; only fragment +
+    /// blend state differ.
+    ///
+    /// No-op if no wet-ink session is active. Caller is responsible for
+    /// invoking this AFTER the active layer's tiles are drawn (so the
+    /// premul-over blend composites correctly on top) and BEFORE the
+    /// layers above the active layer.
+    func encodeWetInkPreviewOntoDrawable(
+        to renderEncoder: MTLRenderCommandEncoder,
+        zoomScale: Float,
+        panOffset: SIMD2<Float>,
+        canvasRotation: Float,
+        viewportSize: SIMD2<Float>,
+        flipState: SIMD2<Float>
+    ) {
+        guard let session = activeWetInkSession,
+              let scratch = strokeScratch else { return }
+        let pipelineOpt: MTLRenderPipelineState?
+        switch session.tool {
+        case .eraser:
+            pipelineOpt = wetInkEraserCommitToDrawablePipelineState
+        default:
+            pipelineOpt = wetInkCommitToDrawablePipelineState
+        }
+        guard let pipeline = pipelineOpt else { return }
+
+        let canvasW = Int(canvasSize.width)
+        let canvasH = Int(canvasSize.height)
+
+        renderEncoder.setRenderPipelineState(pipeline)
+        // Treat the full-canvas scratch as a single tile covering the
+        // entire canvas. tileDirectVertexShader's math handles the
+        // canvas-fraction → drawable-NDC chain identically to a tile.
+        var uniforms = TileDirectUniformsCPU(
+            tileRect: SIMD4<Int32>(0, 0, Int32(canvasW), Int32(canvasH)),
+            canvasSize: SIMD2<Float>(Float(canvasW), Float(canvasH)),
+            transform: SIMD4<Float>(zoomScale, Float(panOffset.x), Float(panOffset.y), canvasRotation),
+            viewportSize: viewportSize,
+            flipState: flipState
+        )
+        renderEncoder.setVertexBytes(&uniforms, length: MemoryLayout<TileDirectUniformsCPU>.stride, index: 0)
+        renderEncoder.setFragmentTexture(scratch, index: 0)
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+    }
+
     /// Set a scissor on the on-screen encoder that matches the canvas
     /// square's footprint on the drawable. Subsequent draws (background,
     /// references, layer composite, floating textures, stroke preview)
