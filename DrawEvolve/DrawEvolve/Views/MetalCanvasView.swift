@@ -1370,13 +1370,111 @@ struct MetalCanvasView: UIViewRepresentable {
             // has a blur preview, the source for its draw pass is the
             // renderer-owned monolithic preview texture (no tile compose).
             for (index, layer) in layers.enumerated() where layer.isVisible {
-                // Determine the source texture for this layer's draw pass:
-                //   - Blur preview active for this layer: renderer-owned
-                //     canvas-sized preview texture (no compose pass needed).
-                //   - Else: compose this layer's tiles into the tile-display
-                //     intermediate, use intermediate as source.
-                //   - tileGrid nil: invariant violation post-Phase-4.5e —
-                //     skip the layer (no content to draw).
+                #if FEATURE_TILE_DIRECT_RENDERING
+                // Tile-direct rendering (Tier C 9). Rasterises each visible
+                // tile directly onto the drawable in a single per-layer pass;
+                // no canvas-sized tileDisplayIntermediate is materialised.
+                //
+                //   - Blur preview active: blur preview is a single canvas-
+                //     sized texture, no tiles to iterate — keep the legacy
+                //     fullscreen-quad path (renderTextureToScreen).
+                //   - Move-tool drag preview: tile-direct vertex shader
+                //     doesn't support per-tile docRect offsets yet (future
+                //     slice). For the dragged layer only, fall back to the
+                //     legacy compose-into-intermediate + renderFloatingTexture
+                //     path. Cost is bounded — only fires during active drag.
+                //   - Standard layer: tile-direct rasterisation. Active wet-
+                //     ink layer adds the wet-ink preview composite on top
+                //     via encodeWetInkPreviewOntoDrawable.
+                let blurPreviewTex: MTLTexture? = {
+                    if index == activeLayerIndex {
+                        return renderer?.blurAdjustmentPreviewTexture(forLayer: layer.id)
+                    }
+                    return nil
+                }()
+                let isDragPreview = isTranslatingActiveLayer
+                    && index == activeLayerIndex
+                    && documentSize.width > 0
+
+                let drawDesc = MTLRenderPassDescriptor()
+                drawDesc.colorAttachments[0].texture = drawable.texture
+                drawDesc.colorAttachments[0].loadAction = .load
+                drawDesc.colorAttachments[0].storeAction = .store
+
+                if isDragPreview, let grid = layer.tileGrid {
+                    // Drag-preview fallback: materialise into legacy
+                    // intermediate so renderFloatingTexture can translate it.
+                    renderer?.encodeLayerTileCompositeOntoIntermediate(
+                        grid, visibleDocRect: nil, on: commandBuffer
+                    )
+                    guard let drawEnc = commandBuffer.makeRenderCommandEncoder(descriptor: drawDesc),
+                          let intermediate = renderer?.tileDisplayIntermediate else { continue }
+                    renderer?.setCanvasFootprintScissor(
+                        on: drawEnc, drawableSize: view.drawableSize, viewportPoints: view.bounds.size,
+                        zoomScale: zoomScale, panOffset: panOffset, canvasRotation: rotation,
+                        flipHorizontal: flipH, flipVertical: flipV
+                    )
+                    let docRect = CGRect(
+                        x: selectionOffsetDoc.x, y: selectionOffsetDoc.y,
+                        width: documentSize.width, height: documentSize.height
+                    )
+                    renderer?.renderFloatingTexture(
+                        intermediate, atDocRect: docRect, to: drawEnc,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
+                    )
+                    drawEnc.endEncoding()
+                    continue
+                }
+
+                guard let drawEnc = commandBuffer.makeRenderCommandEncoder(descriptor: drawDesc) else { continue }
+                renderer?.setCanvasFootprintScissor(
+                    on: drawEnc, drawableSize: view.drawableSize, viewportPoints: view.bounds.size,
+                    zoomScale: zoomScale, panOffset: panOffset, canvasRotation: rotation,
+                    flipHorizontal: flipH, flipVertical: flipV
+                )
+
+                if let preview = blurPreviewTex {
+                    renderer?.renderTextureToScreen(
+                        preview, to: drawEnc,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
+                    )
+                } else if let grid = layer.tileGrid {
+                    renderer?.encodeLayerTilesDirectlyToDrawable(
+                        grid, to: drawEnc,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState,
+                        visibleDocRect: visibleDocRect
+                    )
+                    if renderer?.activeWetInkLayerId == layer.id {
+                        renderer?.encodeWetInkPreviewOntoDrawable(
+                            to: drawEnc,
+                            zoomScale: Float(zoomScale),
+                            panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                            canvasRotation: Float(rotation),
+                            viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                            flipState: flipState
+                        )
+                    }
+                }
+                drawEnc.endEncoding()
+                #else
+                // Legacy compose-into-intermediate + sample-as-fullscreen-quad
+                // path. Preserved during slice-6 soak; deleted in the
+                // post-soak cleanup commit once tile-direct is fully baked.
                 let blurPreviewTex: MTLTexture? = {
                     if index == activeLayerIndex {
                         return renderer?.blurAdjustmentPreviewTexture(forLayer: layer.id)
@@ -1388,32 +1486,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 if let preview = blurPreviewTex {
                     sourceTexture = preview
                 } else if let grid = layer.tileGrid {
-                    // Tier B 6 — per-layer composite cache. Three branches:
-                    //   1. Active wet-ink layer → bypass cache. Composes
-                    //      with viewport cull (slice 4) into the renderer-
-                    //      owned tileDisplayIntermediate, then the wet-ink
-                    //      preview composites strokeScratch on top using
-                    //      the same intermediate. Cache would miss every
-                    //      frame anyway (compositeVersion bumps per touch),
-                    //      and the wet-ink preview is hardcoded to
-                    //      tileDisplayIntermediate.
-                    //   2. Cache hit → reuse the cached intermediate.
-                    //      Zero compose work this frame.
-                    //   3. Cache miss → reserve a pool slot, compose
-                    //      WITHOUT viewport cull (so the cached entry
-                    //      stays correct across future viewport changes;
-                    //      see LayerCompositeCache doc comment for the
-                    //      viewport-independence rationale). Fallback to
-                    //      tileDisplayIntermediate if the pool can't
-                    //      allocate.
                     let isActiveWetInk = (renderer?.activeWetInkLayerId == layer.id)
                     let cacheKey = renderer?.compositeCacheKey(for: layer)
-
                     if isActiveWetInk {
                         renderer?.encodeLayerTileCompositeOntoIntermediate(
-                            grid,
-                            visibleDocRect: visibleDocRect,
-                            on: commandBuffer
+                            grid, visibleDocRect: visibleDocRect, on: commandBuffer
                         )
                         renderer?.encodeWetInkPreviewCompositeOntoIntermediate(on: commandBuffer)
                         sourceTexture = renderer?.tileDisplayIntermediate
@@ -1423,61 +1500,38 @@ struct MetalCanvasView: UIViewRepresentable {
                     } else if let key = cacheKey,
                               let target = renderer?.layerCompositeCache.reserve(forKey: key) {
                         renderer?.encodeLayerCompositeIntoTexture(
-                            grid,
-                            target: target,
-                            visibleDocRect: nil,   // cache full content, viewport-independent
-                            on: commandBuffer
+                            grid, target: target, visibleDocRect: nil, on: commandBuffer
                         )
                         sourceTexture = target
                     } else {
-                        // Pool full + alloc failure, or compositeCacheKey
-                        // returned nil. Fall back to the existing
-                        // intermediate path. Identical to pre-cache
-                        // behaviour (with slice-4 cull intact).
                         renderer?.encodeLayerTileCompositeOntoIntermediate(
-                            grid,
-                            visibleDocRect: visibleDocRect,
-                            on: commandBuffer
+                            grid, visibleDocRect: visibleDocRect, on: commandBuffer
                         )
                         sourceTexture = renderer?.tileDisplayIntermediate
                     }
                 } else {
-                    // Phase 4.5e: layer.texture is gone. No tileGrid means
-                    // the layer has no content to draw — skip it.
                     continue
                 }
                 guard let source = sourceTexture else { continue }
 
-                // Open a new render pass on the drawable with .load to
-                // preserve background + back-references + prior layers'
-                // contributions. Scissor needs to be set per-encoder.
                 let drawDesc = MTLRenderPassDescriptor()
                 drawDesc.colorAttachments[0].texture = drawable.texture
                 drawDesc.colorAttachments[0].loadAction = .load
                 drawDesc.colorAttachments[0].storeAction = .store
                 guard let drawEnc = commandBuffer.makeRenderCommandEncoder(descriptor: drawDesc) else { continue }
                 renderer?.setCanvasFootprintScissor(
-                    on: drawEnc,
-                    drawableSize: view.drawableSize,
-                    viewportPoints: view.bounds.size,
-                    zoomScale: zoomScale,
-                    panOffset: panOffset,
-                    canvasRotation: rotation,
-                    flipHorizontal: flipH,
-                    flipVertical: flipV
+                    on: drawEnc, drawableSize: view.drawableSize, viewportPoints: view.bounds.size,
+                    zoomScale: zoomScale, panOffset: panOffset, canvasRotation: rotation,
+                    flipHorizontal: flipH, flipVertical: flipV
                 )
 
                 if isTranslatingActiveLayer && index == activeLayerIndex && documentSize.width > 0 {
                     let docRect = CGRect(
-                        x: selectionOffsetDoc.x,
-                        y: selectionOffsetDoc.y,
-                        width: documentSize.width,
-                        height: documentSize.height
+                        x: selectionOffsetDoc.x, y: selectionOffsetDoc.y,
+                        width: documentSize.width, height: documentSize.height
                     )
                     renderer?.renderFloatingTexture(
-                        source,
-                        atDocRect: docRect,
-                        to: drawEnc,
+                        source, atDocRect: docRect, to: drawEnc,
                         opacity: layer.opacity,
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -1487,8 +1541,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     )
                 } else {
                     renderer?.renderTextureToScreen(
-                        source,
-                        to: drawEnc,
+                        source, to: drawEnc,
                         opacity: layer.opacity,
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -1499,6 +1552,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
 
                 drawEnc.endEncoding()
+                #endif
             }
 
             // Overlays render pass: floating selection + floating text +
