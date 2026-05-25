@@ -298,6 +298,12 @@ struct MetalCanvasView: UIViewRepresentable {
         // flip isPaused without depending on a per-touch view reference.
         context.coordinator.metalView = metalView
 
+        // Apply current thermal state to the MTKView's frame rate. The
+        // notification only fires on transitions, so without this initial
+        // call the app would stay at 120 Hz until iOS first reports a
+        // change — including the case where it launched into `.serious`.
+        context.coordinator.applyThermalState()
+
         // Add gesture recognizers for zoom, pan, and rotation
         let pinchGesture = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
         pinchGesture.delegate = context.coordinator
@@ -704,6 +710,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 object: nil,
             )
 
+            // Thermal pressure (tile-rendering-audit Tier A item 2). iOS
+            // exposes `ProcessInfo.thermalState`; the notification fires
+            // on transitions. We mirror it onto `preferredFramesPerSecond`
+            // so a hot device drops to 60 / 30 fps instead of pushing the
+            // GPU at 120 Hz until iOS throttles us itself. Initial state
+            // applied below — the notification only fires on changes.
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleThermalStateChange),
+                name: ProcessInfo.thermalStateDidChangeNotification,
+                object: nil,
+            )
+
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
         }
 
@@ -721,6 +740,47 @@ struct MetalCanvasView: UIViewRepresentable {
                 view.isPaused = false
                 view.setNeedsDisplay()
             }
+        }
+
+        /// Map `ProcessInfo.thermalState` to a `preferredFramesPerSecond`
+        /// target. iPad ProMotion runs the canvas at 120 Hz by default;
+        /// under thermal pressure we step down rather than wait for iOS to
+        /// throttle us harder. The ladder is intentionally coarse for v1 —
+        /// if `.fair` shows up regularly during real drawing sessions a
+        /// softer rung (e.g. .fair → 90) is the obvious follow-up. The
+        /// notification only fires on transitions, so `applyThermalState`
+        /// is also called once after metalView is wired up in makeUIView.
+        @objc private func handleThermalStateChange() {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyThermalState()
+            }
+        }
+
+        /// Apply the current `ProcessInfo.thermalState` to the MTKView's
+        /// `preferredFramesPerSecond`. Idempotent — safe to call from
+        /// makeUIView for the initial state AND from the notification
+        /// handler on every transition. No-op if the target rate already
+        /// matches what's set.
+        func applyThermalState() {
+            guard let view = metalView else { return }
+            let state = ProcessInfo.processInfo.thermalState
+            let target: Int
+            switch state {
+            case .nominal, .fair:
+                target = 120
+            case .serious:
+                target = 60
+            case .critical:
+                target = 30
+            @unknown default:
+                target = 120
+            }
+            guard view.preferredFramesPerSecond != target else { return }
+            view.preferredFramesPerSecond = target
+            view.setNeedsDisplay()
+            #if DEBUG
+            print("🌡️ Thermal state \(state) — preferredFramesPerSecond → \(target)")
+            #endif
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
