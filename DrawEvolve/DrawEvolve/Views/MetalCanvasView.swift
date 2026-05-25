@@ -723,6 +723,22 @@ struct MetalCanvasView: UIViewRepresentable {
                 object: nil,
             )
 
+            // Memory pressure (tile-rendering-audit Tier A item 6). iOS
+            // sends UIApplication.didReceiveMemoryWarningNotification when
+            // the system is asking foreground apps to shed memory before
+            // it starts killing background apps. The handler currently
+            // just logs — Tier B+ work will populate it with undo-snapshot
+            // shedding, hidden-layer tile drops, and reference-texture
+            // cache eviction. Logging now means the signal lands in
+            // CrashReporter's persistent log if the next thing that
+            // happens is a memory-kill.
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleMemoryWarning),
+                name: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+            )
+
             print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
         }
 
@@ -754,6 +770,18 @@ struct MetalCanvasView: UIViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 self?.applyThermalState()
             }
+        }
+
+        /// Memory-warning hook. Logging-only handler for now; populated by
+        /// Tier B+ work in tile-rendering-audit.md (shed undo snapshots,
+        /// drop hidden-layer tiles, clear reference-texture caches).
+        /// Logging through CrashReporter (not raw `print`) so the signal
+        /// is persisted in case the next thing iOS does is kill the app.
+        @objc private func handleMemoryWarning() {
+            CrashReporter.shared.logWarning(
+                "Received UIApplication.didReceiveMemoryWarningNotification",
+                context: "MetalCanvasView.Coordinator"
+            )
         }
 
         /// Apply the current `ProcessInfo.thermalState` to the MTKView's
