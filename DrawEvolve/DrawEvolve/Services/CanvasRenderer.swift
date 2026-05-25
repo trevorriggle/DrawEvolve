@@ -3475,6 +3475,7 @@ class CanvasRenderer: NSObject {
     /// The new per-render-pass-on-same-cb pattern relies on Metal
     /// hazard tracking to serialize compose-then-draw across layers.
     func encodeLayerTileCompositeOntoIntermediate(_ tileGrid: TileGrid,
+                                                  visibleDocRect: CGRect? = nil,
                                                   on commandBuffer: MTLCommandBuffer) {
         guard let intermediate = ensureTileDisplayIntermediate(),
               let tilePipeline = compositeTilePipelineState else {
@@ -3500,7 +3501,32 @@ class CanvasRenderer: NSObject {
         let tileSize = tileGrid.tileSize
         var tileOpacity: Float = 1.0  // raw layer content; opacity applied at draw step
 
-        for key in tileGrid.allocatedKeys() {
+        // Viewport tile culling (Tier B 7). When `visibleDocRect` is supplied,
+        // iterate only the tiles whose canvas-pixel rect intersects it —
+        // tiles outside the visible viewport contribute nothing the user
+        // would see and don't need to be composed. `tilesIntersecting`
+        // already clamps to grid bounds and handles null/empty rects
+        // defensively, so an off-canvas pan returns an empty key list and
+        // we cleanly compose zero tiles.
+        //
+        // The intermediate is still cleared on load above, so unwritten
+        // regions stay transparent; the drawable's render pass samples the
+        // intermediate and the transparent regions contribute nothing
+        // over the (already-drawn) background. No visible artifact.
+        //
+        // When `visibleDocRect` is nil (export / save / AI paths or any
+        // caller that hasn't opted in), we fall back to allocatedKeys() —
+        // the pre-cull behaviour, unchanged. The per-key `tile(at:)` guard
+        // below handles the case where `tilesIntersecting` returns keys
+        // that haven't been allocated (sparse-grid invariant).
+        let keysToCompose: [TileKey]
+        if let rect = visibleDocRect {
+            keysToCompose = tileGrid.tilesIntersecting(rect)
+        } else {
+            keysToCompose = tileGrid.allocatedKeys()
+        }
+
+        for key in keysToCompose {
             guard let tile = tileGrid.tile(at: key) else { continue }
             let srcX = key.x * tileSize
             let srcY = key.y * tileSize
