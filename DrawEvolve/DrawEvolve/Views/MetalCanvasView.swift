@@ -502,6 +502,9 @@ struct MetalCanvasView: UIViewRepresentable {
         // Wet-ink Phase D: one-shot guard for the opacity-scaling probe.
         // See WET_INK_DESIGN.md §2.10 + CanvasRenderer.runOpacityScalingPhaseDProbe.
         private var wetInkPhaseDProbeRun = false
+        // Phase 6 / Tier C 9: one-shot guard for the tile-direct equivalence
+        // probe. See TileDirectVerifier.swift / tile-rendering-audit.md.
+        private var tileDirectPhaseSixProbeRun = false
         #endif
 
         // Wet-ink live state. Tool-agnostic — currently routes .brush and
@@ -1239,6 +1242,18 @@ struct MetalCanvasView: UIViewRepresentable {
                     if !wetInkPhaseDProbeRun {
                         wetInkPhaseDProbeRun = true
                         renderer.runOpacityScalingPhaseDProbe()
+                    }
+                    // Phase 6 / Tier C 9: tile-direct equivalence probe.
+                    // Renders the same fixture canvas via the legacy compose+
+                    // sample path and the new tile-direct path; byte-compares
+                    // outputs under tiered tolerance (strict / ULP-relaxed /
+                    // stress) per scenario. Pass/fail per scenario + overall
+                    // written to Documents/tile_direct_phase_6.log. Manual
+                    // log review before flipping FEATURE_TILE_DIRECT_RENDERING
+                    // on for soak. See TileDirectVerifier.swift.
+                    if !tileDirectPhaseSixProbeRun {
+                        tileDirectPhaseSixProbeRun = true
+                        renderer.runTileDirectEquivalencePhaseSixProbe()
                     }
                     #endif
                 }

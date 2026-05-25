@@ -20,6 +20,7 @@
 		DE000014 /* DrawingTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100014 /* DrawingTool.swift */; };
 		DE000015 /* CanvasRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100015 /* CanvasRenderer.swift */; };
 		DE000143 /* LayerCompositeCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100143 /* LayerCompositeCache.swift */; };
+		DE000144 /* TileDirectVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100144 /* TileDirectVerifier.swift */; };
 		DE000016 /* HistoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100016 /* HistoryManager.swift */; };
 		DE000017 /* MetalCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100017 /* MetalCanvasView.swift */; };
 		DE000018 /* ColorPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100018 /* ColorPicker.swift */; };
@@ -150,6 +151,7 @@
 		DE100014 /* DrawingTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingTool.swift; sourceTree = "<group>"; };
 		DE100015 /* CanvasRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasRenderer.swift; sourceTree = "<group>"; };
 		DE100143 /* LayerCompositeCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerCompositeCache.swift; sourceTree = "<group>"; };
+		DE100144 /* TileDirectVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileDirectVerifier.swift; sourceTree = "<group>"; };
 		DE100016 /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
 		DE100017 /* MetalCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalCanvasView.swift; sourceTree = "<group>"; };
 		DE100018 /* ColorPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorPicker.swift; sourceTree = "<group>"; };
@@ -387,6 +389,7 @@
 				DE100007 /* OpenAIManager.swift */,
 				DE100015 /* CanvasRenderer.swift */,
 				DE100143 /* LayerCompositeCache.swift */,
+				DE100144 /* TileDirectVerifier.swift */,
 				DE100016 /* HistoryManager.swift */,
 				DE100024 /* DrawingStorageManager.swift */,
 				DE100029 /* AnonymousUserManager.swift */,
@@ -638,6 +641,7 @@
 				DE000007 /* OpenAIManager.swift in Sources */,
 				DE000015 /* CanvasRenderer.swift in Sources */,
 				DE000143 /* LayerCompositeCache.swift in Sources */,
+				DE000144 /* TileDirectVerifier.swift in Sources */,
 				DE000016 /* HistoryManager.swift in Sources */,
 				DE000021 /* Shaders.metal in Sources */,
 				DE000024 /* DrawingStorageManager.swift in Sources */,
