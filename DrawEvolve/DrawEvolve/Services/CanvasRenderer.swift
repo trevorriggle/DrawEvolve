@@ -222,6 +222,24 @@ class CanvasRenderer: NSObject {
     /// per-tile composite is bit-exact with the legacy full-canvas-quad
     /// composite given Phase 2's tile<->mono invariant.
     private var compositeTilePipelineState: MTLRenderPipelineState?
+    /// Pipeline for tile-direct-to-drawable rendering (Phase 6 / Tier C 9).
+    /// `tileDirectVertexShader` applies the full canvas-to-drawable transform
+    /// per-tile; fragment shader samples the tile texture with LINEAR (matching
+    /// the legacy display path's textureDisplayShader). Standard alpha-over
+    /// blend. Eliminates the per-frame canvas-sized tileDisplayIntermediate
+    /// that the legacy compose-then-sample path materializes.
+    private var tileDirectToDrawablePipelineState: MTLRenderPipelineState?
+    /// Wet-ink commit variant of the tile-direct pipeline. Reuses
+    /// `tileDirectVertexShader` for canvas-to-drawable transform but pairs
+    /// with `wetInkCommitShader` (which outputs scratch sampled as premul)
+    /// and uses premul-over blend (sourceRGB=.one, destRGB=.oneMinusSrcAlpha)
+    /// — matches the existing wetInkCommitPipelineState's blend state but
+    /// targets the drawable directly. Used during touchesMoved to composite
+    /// strokeScratch on top of the active layer's tile-direct content.
+    private var wetInkCommitToDrawablePipelineState: MTLRenderPipelineState?
+    /// Eraser variant: same vertex shader, `wetInkEraserCommitShader`, dest-out
+    /// blend. Mirrors wetInkEraserCommitPipelineState but for direct-to-drawable.
+    private var wetInkEraserCommitToDrawablePipelineState: MTLRenderPipelineState?
     /// Pipeline for reference-image quads rendered in screen space BETWEEN
     /// the canvas's white paper and the layer composite. ONLY used by the
     /// to-screen path; the save/AI/export composite (compositeLayersToTexture)
@@ -402,6 +420,8 @@ class CanvasRenderer: NSObject {
               let smudgeDepositFragment = library.makeFunction(name: "smudgeDepositShader"),
               let compositeTileVertex = library.makeFunction(name: "compositeTileVertexShader"),
               let compositeTileFragment = library.makeFunction(name: "compositeTileFragmentShader"),
+              let tileDirectVertex = library.makeFunction(name: "tileDirectVertexShader"),
+              let tileDirectFragment = library.makeFunction(name: "tileDirectFragmentShader"),
               let wetInkCommitFragment = library.makeFunction(name: "wetInkCommitShader"),
               let wetInkEraserCommitFragment = library.makeFunction(name: "wetInkEraserCommitShader") else {
             print("Failed to load shader functions")
@@ -617,6 +637,53 @@ class CanvasRenderer: NSObject {
         compositeTileDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         compositeTileDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
+        // Tile-direct-to-drawable pipeline (Phase 6 / Tier C 9).
+        // tileDirectVertexShader applies the full canvas-to-drawable transform
+        // per-tile; tileDirectFragmentShader samples with LINEAR (matches
+        // legacy textureDisplayShader for visual consistency). Same standard
+        // premul-source-over blend as the per-tile composite + display
+        // shaders. Targets the drawable directly, eliminating the per-frame
+        // tileDisplayIntermediate materialization.
+        let tileDirectToDrawableDescriptor = MTLRenderPipelineDescriptor()
+        tileDirectToDrawableDescriptor.vertexFunction = tileDirectVertex
+        tileDirectToDrawableDescriptor.fragmentFunction = tileDirectFragment
+        tileDirectToDrawableDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        tileDirectToDrawableDescriptor.colorAttachments[0].isBlendingEnabled = true
+        tileDirectToDrawableDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        tileDirectToDrawableDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        tileDirectToDrawableDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        tileDirectToDrawableDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        tileDirectToDrawableDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        tileDirectToDrawableDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
+        // Wet-ink commit variants targeting the drawable directly. Pair the
+        // new transform vertex shader with the existing wet-ink commit /
+        // eraser-commit fragment shaders. Blend state mirrors
+        // wetInkCommit + wetInkEraserCommit (premul-over / dest-out).
+        let wetInkCommitToDrawableDescriptor = MTLRenderPipelineDescriptor()
+        wetInkCommitToDrawableDescriptor.vertexFunction = tileDirectVertex
+        wetInkCommitToDrawableDescriptor.fragmentFunction = wetInkCommitFragment
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].isBlendingEnabled = true
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        wetInkCommitToDrawableDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
+        let wetInkEraserCommitToDrawableDescriptor = MTLRenderPipelineDescriptor()
+        wetInkEraserCommitToDrawableDescriptor.vertexFunction = tileDirectVertex
+        wetInkEraserCommitToDrawableDescriptor.fragmentFunction = wetInkEraserCommitFragment
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].isBlendingEnabled = true
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].sourceRGBBlendFactor = .zero
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .zero
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         // Texture display pipeline with zoom/pan transform support — same
         // premultiplied-source blend as above.
         let textureDisplayWithTransformDescriptor = MTLRenderPipelineDescriptor()
@@ -744,6 +811,9 @@ class CanvasRenderer: NSObject {
             textureDisplayPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayDescriptor)
             textureDisplayWithTransformPipelineState = try device.makeRenderPipelineState(descriptor: textureDisplayWithTransformDescriptor)
             compositeTilePipelineState = try device.makeRenderPipelineState(descriptor: compositeTileDescriptor)
+            tileDirectToDrawablePipelineState = try device.makeRenderPipelineState(descriptor: tileDirectToDrawableDescriptor)
+            wetInkCommitToDrawablePipelineState = try device.makeRenderPipelineState(descriptor: wetInkCommitToDrawableDescriptor)
+            wetInkEraserCommitToDrawablePipelineState = try device.makeRenderPipelineState(descriptor: wetInkEraserCommitToDrawableDescriptor)
             floatingTexturePipelineState = try device.makeRenderPipelineState(descriptor: floatingTextureDescriptor)
             referenceQuadPipelineState = try device.makeRenderPipelineState(descriptor: referenceQuadDescriptor)
             gaussianBlurPipelineState = try device.makeRenderPipelineState(descriptor: gaussianBlurDescriptor)
