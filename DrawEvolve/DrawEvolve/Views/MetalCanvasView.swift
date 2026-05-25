@@ -182,6 +182,80 @@ struct CanvasRenderSnapshot: Equatable {
         self.backCanvasReferenceIDs = backCanvasReferences.map { $0.id }
         self.typeOnPathMode = typeOnPathMode
     }
+
+    /// True if `self` differs from `other` ONLY in continuously-mutated
+    /// transform fields. Used by MetalCanvasView.updateUIView's snapshot
+    /// gate to route gesture-driven 120 Hz transform spam through a 60 Hz
+    /// throttle while keeping every other state change at native cadence.
+    ///
+    /// **Throttleable (transform) set:**
+    ///   - Viewport: zoomScale, panOffset, canvasRotationRadians,
+    ///     flipHorizontal, flipVertical
+    ///   - Selection drag: selectionOffset, selectionScale,
+    ///     selectionRotationRadians
+    ///   - Floating-text drag: floatingTextRect, floatingTextRotationRadians
+    ///
+    /// **Non-throttleable** (any of these differing → return false → fire
+    /// the redraw immediately): everything else in the snapshot —
+    /// composite content, layer counts/opacities/visibilities/texture IDs,
+    /// selection lifecycle (create/destroy/mask), floating-text identity
+    /// (font/size/content changes swap the texture ID), document size,
+    /// reference images, type-on-path mode.
+    ///
+    /// Notable policy calls baked into the field split below:
+    ///   - **Layer opacities are not throttled.** Slider input is already
+    ///     ~60 Hz from UIKit; throttling adds no win and risks visible lag
+    ///     on a hard yank. Easy to flip later if profiling disagrees.
+    ///   - **Selection mask vs. selection transform are split** —
+    ///     selectionOriginalRect (mask) and floatingSelectionTextureID
+    ///     (lifecycle) live outside the throttle; selectionOffset/Scale/
+    ///     RotationRadians (drag-time transform) live inside.
+    ///   - **Floating-text font/size vs. position is split** —
+    ///     floatingTextTextureID (re-raster on font/size/content) lives
+    ///     outside; floatingTextRect/RotationRadians (position drag) live
+    ///     inside.
+    ///
+    /// Caller contract: only meaningful when `self != other`. If every
+    /// non-transform field matches but no transform field differs either,
+    /// this returns true vacuously; the caller is expected to have
+    /// short-circuited on the equality check before calling.
+    ///
+    /// Adding a new field to CanvasRenderSnapshot? Decide whether it's
+    /// throttleable and either add a guard here (non-throttleable) or
+    /// extend the docstring (throttleable). Default to non-throttleable
+    /// when in doubt — "fires too often" is invisible; "missed a redraw"
+    /// is a visible bug.
+    func differsOnlyInTransform(from other: CanvasRenderSnapshot) -> Bool {
+        // Composite content + identity. Any flip here = pixel change.
+        if layerMutationCounter != other.layerMutationCounter { return false }
+        if layerCount != other.layerCount { return false }
+        if layerOpacities != other.layerOpacities { return false }
+        if layerVisibilities != other.layerVisibilities { return false }
+        if layerTextureIDs != other.layerTextureIDs { return false }
+
+        // Selection lifecycle (mask geometry + presence of a floating
+        // texture). Drag-time transform fields are intentionally excluded
+        // and stay throttleable.
+        if isTranslatingActiveLayer != other.isTranslatingActiveLayer { return false }
+        if selectedLayerIndex != other.selectedLayerIndex { return false }
+        if floatingSelectionTextureID != other.floatingSelectionTextureID { return false }
+        if selectionOriginalRect != other.selectionOriginalRect { return false }
+
+        // Floating-text identity. The texture ID swaps on font / size /
+        // content change; position-only drag keeps the same texture and
+        // only mutates the throttled floatingTextRect.
+        if floatingTextTextureID != other.floatingTextTextureID { return false }
+
+        // One-shot canvas-level state.
+        if documentSize != other.documentSize { return false }
+        if backCanvasReferenceCount != other.backCanvasReferenceCount { return false }
+        if backCanvasReferenceIDs != other.backCanvasReferenceIDs { return false }
+        if typeOnPathMode != other.typeOnPathMode { return false }
+
+        // Every non-transform field matches; any diff is exclusively in
+        // the throttleable transform set.
+        return true
+    }
 }
 
 struct MetalCanvasView: UIViewRepresentable {
