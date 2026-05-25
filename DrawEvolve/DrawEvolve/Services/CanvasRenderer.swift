@@ -343,6 +343,12 @@ class CanvasRenderer: NSObject {
         if newSize != _canvasSize {
             print("📐 Canvas size updated from \(_canvasSize) to \(newSize) based on screen \(screenSize)")
             _canvasSize = newSize
+            // Layer composite cache entries are sized to the old canvas;
+            // drop them so new entries allocate at the new size. The
+            // canvasStagingAtlas / tileDisplayIntermediate / strokeScratch
+            // re-allocate lazily on their next ensure call via the same
+            // pattern.
+            layerCompositeCache.updateCanvasSize(newSize)
         }
     }
 
@@ -353,6 +359,10 @@ class CanvasRenderer: NSObject {
             return nil
         }
         self.commandQueue = queue
+        self.layerCompositeCache = LayerCompositeCache(
+            device: metalDevice,
+            canvasSize: CGSize(width: 2048, height: 2048)
+        )
 
         super.init()
 
@@ -1017,6 +1027,31 @@ class CanvasRenderer: NSObject {
     // intermediate as the source texture to `renderTextureToScreen`.
     // Writes remain confined to the renderer.
     private(set) var tileDisplayIntermediate: MTLTexture?
+
+    /// Per-layer composite cache (Tier B item 6). Holds canvas-sized
+    /// intermediates for layers whose tile content hasn't changed since
+    /// the prior frame, so the per-frame compose loop in MetalCanvasView's
+    /// `draw(in:)` can skip composing them.
+    ///
+    /// Lazy-allocated at the same point `tileDisplayIntermediate` would be
+    /// (first frame after canvas init). Cleared on canvas-size change
+    /// (entries are sized to the old canvas; new ones allocate at the new
+    /// size). Drained on memory-warning via
+    /// `MetalCanvasView.Coordinator.handleMemoryWarning` → `evictDownTo(3)`.
+    ///
+    /// Default pool size 6 = 96 MB at 2048². Active wet-ink layer
+    /// bypasses this cache entirely (see LayerCompositeCache doc comment).
+    let layerCompositeCache: LayerCompositeCache
+
+    /// Convenience: cache key for `layer` at its current
+    /// `tileGrid.compositeVersion`. Used by the draw loop to look up /
+    /// reserve cache entries. Returns nil if the layer has no tileGrid
+    /// (invariant violation — every layer should have one post-Phase-4.5e).
+    func compositeCacheKey(for layer: DrawingLayer) -> LayerCompositeCache.Key? {
+        guard let grid = layer.tileGrid else { return nil }
+        return LayerCompositeCache.Key(layerId: layer.id,
+                                       compositeVersion: grid.compositeVersion)
+    }
 
     /// Return a canvas-sized .private MTLTexture suitable as a render
     /// target for the tile-composite intermediate. Reused across calls;
