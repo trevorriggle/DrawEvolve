@@ -738,6 +738,112 @@ struct MetalCanvasView: UIViewRepresentable {
             }
         }
 
+        /// Single-shot snapshot of every `canvasState` field the draw loop
+        /// reads. Populated under one `MainActor.assumeIsolated` hop at the
+        /// top of `draw(in:)` instead of the previous 7 individual hops.
+        ///
+        /// Behaviour-preserving by construction: each field's nil-state
+        /// fallback mirrors the value the old per-read block returned when
+        /// `canvasState` was nil. The MTKView delegate runs on the main
+        /// thread by default; this struct doesn't change that — it just
+        /// consolidates the reads.
+        private struct DrawFrameSnapshot {
+            // Canvas transform.
+            let zoomScale: CGFloat
+            let panOffset: CGPoint
+            let canvasRotation: CGFloat  // radians
+            let flipHorizontal: Bool
+            let flipVertical: Bool
+
+            // Active-layer drag preview.
+            let isTranslatingActiveLayer: Bool
+            let activeLayerIndex: Int
+            let floatingSelectionTexture: MTLTexture?
+            let selectionOriginalRect: CGRect?
+            let selectionOffset: CGPoint
+            let selectionScale: CGSize
+            let selectionRotation: CGFloat  // radians
+            let documentSize: CGSize
+
+            // Floating-text overlay (read in the overlay pass below).
+            let floatingTextTexture: MTLTexture?
+            let floatingTextDocRect: CGRect
+            let floatingTextRotation: CGFloat  // radians
+
+            static let empty = DrawFrameSnapshot(
+                zoomScale: 1.0,
+                panOffset: .zero,
+                canvasRotation: 0,
+                flipHorizontal: false,
+                flipVertical: false,
+                isTranslatingActiveLayer: false,
+                activeLayerIndex: -1,
+                floatingSelectionTexture: nil,
+                selectionOriginalRect: nil,
+                selectionOffset: .zero,
+                selectionScale: CGSize(width: 1, height: 1),
+                selectionRotation: 0,
+                documentSize: .zero,
+                floatingTextTexture: nil,
+                floatingTextDocRect: .zero,
+                floatingTextRotation: 0
+            )
+
+            @MainActor
+            init(canvasState: CanvasStateManager) {
+                self.zoomScale = canvasState.zoomScale
+                self.panOffset = canvasState.panOffset
+                self.canvasRotation = canvasState.canvasRotation.radians
+                self.flipHorizontal = canvasState.flipHorizontal
+                self.flipVertical = canvasState.flipVertical
+                self.isTranslatingActiveLayer = canvasState.isTranslatingActiveLayer
+                self.activeLayerIndex = canvasState.selectedLayerIndex
+                self.floatingSelectionTexture = canvasState.floatingSelectionTexture
+                self.selectionOriginalRect = canvasState.selectionOriginalRect
+                self.selectionOffset = canvasState.selectionOffset
+                self.selectionScale = canvasState.selectionScale
+                self.selectionRotation = canvasState.selectionRotation.radians
+                self.documentSize = canvasState.documentSize
+                if let ft = canvasState.floatingText, let tex = ft.cachedTexture {
+                    self.floatingTextTexture = tex
+                    self.floatingTextDocRect = ft.displayedRect
+                    self.floatingTextRotation = ft.rotation.radians
+                } else {
+                    self.floatingTextTexture = nil
+                    self.floatingTextDocRect = .zero
+                    self.floatingTextRotation = 0
+                }
+            }
+
+            private init(
+                zoomScale: CGFloat, panOffset: CGPoint, canvasRotation: CGFloat,
+                flipHorizontal: Bool, flipVertical: Bool,
+                isTranslatingActiveLayer: Bool, activeLayerIndex: Int,
+                floatingSelectionTexture: MTLTexture?, selectionOriginalRect: CGRect?,
+                selectionOffset: CGPoint, selectionScale: CGSize,
+                selectionRotation: CGFloat, documentSize: CGSize,
+                floatingTextTexture: MTLTexture?, floatingTextDocRect: CGRect,
+                floatingTextRotation: CGFloat
+            ) {
+                self.zoomScale = zoomScale
+                self.panOffset = panOffset
+                self.canvasRotation = canvasRotation
+                self.flipHorizontal = flipHorizontal
+                self.flipVertical = flipVertical
+                self.isTranslatingActiveLayer = isTranslatingActiveLayer
+                self.activeLayerIndex = activeLayerIndex
+                self.floatingSelectionTexture = floatingSelectionTexture
+                self.selectionOriginalRect = selectionOriginalRect
+                self.selectionOffset = selectionOffset
+                self.selectionScale = selectionScale
+                self.selectionRotation = selectionRotation
+                self.documentSize = documentSize
+                self.floatingTextTexture = floatingTextTexture
+                self.floatingTextDocRect = floatingTextDocRect
+                self.floatingTextRotation = floatingTextRotation
+            }
+        }
+
         func draw(in view: MTKView) {
             guard let device = view.device,
                   let drawable = view.currentDrawable,
@@ -837,18 +943,19 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Get zoom, pan, rotation, and flip state for rendering
-            let zoomScale = MainActor.assumeIsolated {
-                canvasState?.zoomScale ?? 1.0
+            // One-shot snapshot of every canvasState field this frame reads.
+            // Replaces seven separate `MainActor.assumeIsolated` hops with a
+            // single block. Behaviour-preserving: nil-state defaults match
+            // what the previous per-read fallbacks returned.
+            let snap: DrawFrameSnapshot = MainActor.assumeIsolated {
+                guard let canvasState = canvasState else { return .empty }
+                return DrawFrameSnapshot(canvasState: canvasState)
             }
-            let panOffset = MainActor.assumeIsolated {
-                canvasState?.panOffset ?? .zero
-            }
-            let rotation = MainActor.assumeIsolated {
-                canvasState?.canvasRotation.radians ?? 0.0
-            }
-            let flipH = MainActor.assumeIsolated { canvasState?.flipHorizontal ?? false }
-            let flipV = MainActor.assumeIsolated { canvasState?.flipVertical ?? false }
+            let zoomScale = snap.zoomScale
+            let panOffset = snap.panOffset
+            let rotation = snap.canvasRotation
+            let flipH = snap.flipHorizontal
+            let flipV = snap.flipVertical
             let flipState = SIMD2<Float>(flipH ? 1 : 0, flipV ? 1 : 0)
 
             // Clip every subsequent draw on this encoder to the canvas's
@@ -886,33 +993,17 @@ struct MetalCanvasView: UIViewRepresentable {
             // composite path is entirely unaware of them.
             renderBackCanvasReferences(view: view, encoder: renderEncoder)
 
-            // Selection-drag preview state (read once so the layer loop and the
-            // floating overlay below see a consistent snapshot).
-            let (
-                isTranslatingActiveLayer,
-                activeLayerIndex,
-                floatingTexture,
-                selectionOriginalRect,
-                selectionOffsetDoc,
-                selectionScale,
-                selectionRotationRad,
-                documentSize
-            ): (Bool, Int, MTLTexture?, CGRect?, CGPoint, CGSize, CGFloat, CGSize) = MainActor.assumeIsolated {
-                guard let canvasState = canvasState else {
-                    return (false, -1, MTLTexture?.none, CGRect?.none, CGPoint.zero,
-                            CGSize(width: 1, height: 1), CGFloat(0), CGSize.zero)
-                }
-                return (
-                    canvasState.isTranslatingActiveLayer,
-                    canvasState.selectedLayerIndex,
-                    canvasState.floatingSelectionTexture,
-                    canvasState.selectionOriginalRect,
-                    canvasState.selectionOffset,
-                    canvasState.selectionScale,
-                    canvasState.selectionRotation.radians,
-                    canvasState.documentSize
-                )
-            }
+            // Selection-drag preview state — sourced from the up-front snapshot
+            // so the layer loop and the floating overlay below see a
+            // consistent view (same guarantee the previous tuple read provided).
+            let isTranslatingActiveLayer = snap.isTranslatingActiveLayer
+            let activeLayerIndex = snap.activeLayerIndex
+            let floatingTexture = snap.floatingSelectionTexture
+            let selectionOriginalRect = snap.selectionOriginalRect
+            let selectionOffsetDoc = snap.selectionOffset
+            let selectionScale = snap.selectionScale
+            let selectionRotationRad = snap.selectionRotation
+            let documentSize = snap.documentSize
 
             // Phase 4.4a: end the background/references encoder before the
             // per-layer composite. The tile-path layer composite uses
@@ -1086,13 +1177,11 @@ struct MetalCanvasView: UIViewRepresentable {
             // stack (and any floating selection) using the same shader the
             // floating selection uses — rotation included. The text's
             // doc-space `displayedRect` already encodes scale, so we don't
-            // pass a scale uniform.
-            let (floatingTextTexture, floatingTextDocRect, floatingTextRotation): (MTLTexture?, CGRect, CGFloat) = MainActor.assumeIsolated {
-                guard let ft = canvasState?.floatingText, let tex = ft.cachedTexture else {
-                    return (MTLTexture?.none, CGRect.zero, CGFloat(0))
-                }
-                return (tex, ft.displayedRect, ft.rotation.radians)
-            }
+            // pass a scale uniform. Values come from the up-front frame
+            // snapshot, same as every other canvasState field this frame uses.
+            let floatingTextTexture = snap.floatingTextTexture
+            let floatingTextDocRect = snap.floatingTextDocRect
+            let floatingTextRotation = snap.floatingTextRotation
             if let ftTex = floatingTextTexture, floatingTextDocRect.width > 0, floatingTextDocRect.height > 0 {
                 renderer?.renderFloatingTexture(
                     ftTex,
