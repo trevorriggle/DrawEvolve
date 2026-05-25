@@ -1266,6 +1266,13 @@ struct MetalCanvasView: UIViewRepresentable {
             let flipV = snap.flipVertical
             let flipState = SIMD2<Float>(flipH ? 1 : 0, flipV ? 1 : 0)
 
+            // Viewport tile cull (Tier B 7): compute the visible doc-space
+            // AABB once per frame and pass to every per-layer compose call
+            // below. nil when the doc/viewport is degenerate or canvasState
+            // was unavailable; in that case the renderer falls back to
+            // iterating allocatedKeys() — pre-cull behaviour, no regression.
+            let visibleDocRect = snap.visibleDocRect(viewportPoints: view.bounds.size)
+
             // Clip every subsequent draw on this encoder to the canvas's
             // footprint on the drawable. Stops floating-text boxes,
             // dragged selections, and active-layer drag previews from
@@ -1360,7 +1367,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 if let preview = blurPreviewTex {
                     sourceTexture = preview
                 } else if let grid = layer.tileGrid {
-                    renderer?.encodeLayerTileCompositeOntoIntermediate(grid, on: commandBuffer)
+                    renderer?.encodeLayerTileCompositeOntoIntermediate(
+                        grid,
+                        visibleDocRect: visibleDocRect,
+                        on: commandBuffer
+                    )
                     // Wet-ink live preview: if a wet-ink stroke is active
                     // on THIS layer, composite strokeScratch on top of the
                     // tile-composited intermediate via the same commit
