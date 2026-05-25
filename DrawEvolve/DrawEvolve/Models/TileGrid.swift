@@ -60,6 +60,38 @@ final class TileGrid {
     /// set actually changes.
     private var cachedAllocatedKeys: [TileKey]? = nil
 
+    /// Monotonic counter bumped on every successful `updateTile` (per-tile
+    /// content write) and `dropTile` (allocated tile removed). Used as the
+    /// invalidation signal for the per-layer composite cache
+    /// (`LayerCompositeCache`): if `compositeVersion` is unchanged between
+    /// two reads, the rendered composite of all this grid's allocated
+    /// tiles is bit-identical, so a cached intermediate texture can be
+    /// reused.
+    ///
+    /// **Contract that makes "bump only on updateTile/dropTile" correct.**
+    /// A tile allocated via `ensureTileWithClearIfNeeded` but never
+    /// written contains all zeros (the deferred clear render pass
+    /// guarantees this by the next frame's composite). Zero pixels
+    /// composite as transparent — equivalent to "no tile here". So an
+    /// allocation that happens AFTER a cache write produces a transparent
+    /// region in the new composite, identical to the cache's "no tile
+    /// composed for this key" output. No bump needed on `ensureTile`.
+    ///
+    /// This contract is load-bearing for the cache. It rests on:
+    ///   1. No code path calls plain `ensureTile` directly — every
+    ///      allocator route goes through `ensureTileWithClearIfNeeded`.
+    ///   2. No write path to `tile.texture` exists outside
+    ///      `updateTile`'s closure (verified by grep at the time of
+    ///      writing).
+    /// Adding a new allocator that bypasses the clear, or a new write
+    /// path that bypasses `updateTile`, would silently desync the cache
+    /// from on-disk tile contents. If you're adding either, also bump
+    /// `compositeVersion` at the new mutation point.
+    ///
+    /// Wraps at `UInt64.max` (one bump per touch event @ 120 Hz wraps in
+    /// ~5 billion years — practically infinite).
+    private(set) var compositeVersion: UInt64 = 0
+
     /// Creates an empty tile grid.
     ///
     /// - Parameters:
@@ -223,6 +255,7 @@ final class TileGrid {
         bumped.wasCleared = true
         bumped.dirtyVersion &+= 1
         tiles[key] = bumped
+        compositeVersion &+= 1
     }
 
     /// Drops the tile at `key` if allocated. No-op if absent.
@@ -233,6 +266,7 @@ final class TileGrid {
     func dropTile(at key: TileKey) {
         if tiles.removeValue(forKey: key) != nil {
             cachedAllocatedKeys = nil
+            compositeVersion &+= 1
         }
     }
 
