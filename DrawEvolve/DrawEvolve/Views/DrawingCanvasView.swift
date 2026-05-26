@@ -432,6 +432,24 @@ struct DrawingCanvasView: View {
                     }
                 }
             }
+            // Eat the drag at the SwiftUI gesture layer before UIKit's
+            // UISheetPresentationController.panGestureRecognizer can
+            // claim it. interactiveDismissDisabled (above) blocks the
+            // dismiss outcome, but doesn't stop the sheet from
+            // rubber-banding while a pan is tracked — the user
+            // perceives that as "the sheet is still slide-able from
+            // the nav bar." minimumDistance: 0 fires on touch-down so
+            // the SwiftUI gesture engages before UIKit's recognizer
+            // gets a chance. The empty onChanged closure is what tells
+            // SwiftUI to actually engage with touches; an unhandled
+            // DragGesture doesn't reliably claim the touch across iOS
+            // versions. .simultaneousGesture (NOT .highPriorityGesture)
+            // so the layer-row reorder DragGesture(minimumDistance: 10),
+            // the opacity Slider's internal gesture, and Button taps
+            // all continue to fire normally.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0).onChanged { _ in }
+            )
         }
         .sheet(item: $poseDetectionRequest) { kind in
             PoseDetectionSheet(
