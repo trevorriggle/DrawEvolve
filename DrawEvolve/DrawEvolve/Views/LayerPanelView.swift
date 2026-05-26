@@ -487,28 +487,37 @@ private struct LayerRow: View {
         }
     }
 
+    /// Inline controls revealed when the chevron is tapped. Opacity is
+    /// available on any row (selection-independent) so a user can dim
+    /// layer 3 without giving up their active draw target on layer 1.
+    /// Name and Delete are gated on `isSelected` because they're
+    /// destructive or identity-mutating — actions that should require
+    /// the deliberate "I'm working on this layer right now" gesture
+    /// that selection represents.
     private var expandedSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Divider()
                 .padding(.top, 8)
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 4) {
-                    Text("Name")
-                        .font(.caption2.weight(.medium))
-                        .foregroundColor(.secondary)
-                    if !nameFieldFocused {
-                        Image(systemName: "pencil")
-                            .font(.caption2)
-                            .foregroundColor(.secondary.opacity(0.6))
-                            .transition(.opacity)
+            if isSelected {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 4) {
+                        Text("Name")
+                            .font(.caption2.weight(.medium))
+                            .foregroundColor(.secondary)
+                        if !nameFieldFocused {
+                            Image(systemName: "pencil")
+                                .font(.caption2)
+                                .foregroundColor(.secondary.opacity(0.6))
+                                .transition(.opacity)
+                        }
                     }
+                    TextField("Layer name", text: $layer.name)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($nameFieldFocused)
+                        .submitLabel(.done)
+                        .onSubmit { nameFieldFocused = false }
                 }
-                TextField("Layer name", text: $layer.name)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($nameFieldFocused)
-                    .submitLabel(.done)
-                    .onSubmit { nameFieldFocused = false }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -545,7 +554,7 @@ private struct LayerRow: View {
                 )
             }
 
-            if !isOnlyLayer {
+            if isSelected && !isOnlyLayer {
                 Button(action: onDelete) {
                     Label("Delete layer", systemImage: "trash")
                         .font(.subheadline)
