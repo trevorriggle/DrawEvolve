@@ -616,9 +616,17 @@ struct DrawingCanvasView: View {
             Text("DrawEvolve needs permission to save to Photos. Enable it in Settings > Privacy & Security > Photos > DrawEvolve.")
         }
         .onChange(of: canvasState.currentTool) { _, _ in
-            // When tool changes, commit any active selection
-            if canvasState.selectionPixels != nil {
+            // When the tool changes during an active selection:
+            //   - Lifted (floating texture exists) → commit (bake floating
+            //     into layer). Records .selectionCommit, undoable.
+            //   - Polygon-only (selectionPath set, no floating) → silent
+            //     clear. No undo entry — the polygon never destructively
+            //     touched the layer in the non-destructive model.
+            // Per Revision 4 / §10 #5.
+            if canvasState.floatingSelectionTexture != nil {
                 canvasState.commitSelection()
+            } else if canvasState.selectionPath != nil {
+                canvasState.clearSelection()
             }
         }
         .confirmationDialog(

@@ -2160,25 +2160,46 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
             }
 
-            // Check if we're touching inside an existing selection (for any tool)
+            // Check if we're touching inside an existing selection (for any tool).
+            // Two cases:
+            //   (a) Already lifted (floatingSelectionTexture != nil) → drag
+            //       the floating texture directly. Existing behavior.
+            //   (b) Polygon-only (selectionPath != nil, no floating yet) →
+            //       lift on first body-drag, then drag. New behavior per the
+            //       non-destructive selection model.
             if let canvasState = canvasState {
                 let shouldStartDragging = MainActor.assumeIsolated {
-                    guard canvasState.floatingSelectionTexture != nil else { return false }
-                    // Move tool always drags from any tap — the selection
-                    // covers the whole layer so isPointInSelection is moot.
-                    if currentTool == .move { return true }
-                    return isPointInSelection(location)
+                    // Already lifted: drag the floating texture.
+                    if canvasState.floatingSelectionTexture != nil {
+                        if currentTool == .move { return true }
+                        return isPointInSelection(location)
+                    }
+                    // Polygon-only: lift then drag if touch lands in the polygon.
+                    if canvasState.selectionPath != nil {
+                        if currentTool == .move { return true }
+                        return isPointInSelection(location)
+                    }
+                    return false
                 }
 
                 if shouldStartDragging {
-                    // Start dragging the selection
+                    // Trigger lift (idempotent — no-op if already lifted).
+                    // Fast-returns false on hidden/locked active layer, in
+                    // which case the drag still proceeds but operates on
+                    // whatever state exists. Acceptable: the drag will be a
+                    // no-op too because compositeFloatingTextureIntoLayer
+                    // requires a floating texture.
+                    MainActor.assumeIsolated {
+                        canvasState.liftSelectionIfNeeded()
+                    }
                     isDraggingSelection = true
                     selectionDragStart = location
-                    // Body-grab is also a "transform" for UI purposes —
-                    // hide marching ants while the user moves the
-                    // selection content. Cleared in touchesEnded /
-                    // touchesCancelled. See SelectionOverlays' handle
-                    // gestures for the matching set on scale/rotation.
+                    // Body-grab is also a "transform" for UI purposes.
+                    // Cleared in touchesEnded / touchesCancelled. See
+                    // SelectionOverlays' handle gestures for the matching
+                    // set on scale/rotation. (Commit 6 will revisit this
+                    // flag's role once the ants-during-Polygon-only rule
+                    // makes the hiding gate obsolete.)
                     MainActor.assumeIsolated {
                         canvasState.isTransformingSelection = true
                     }
@@ -2193,6 +2214,25 @@ struct MetalCanvasView: UIViewRepresentable {
                 // the floating selection into its layer first, then continue
                 // with the tap's normal behavior. Mirrors Procreate's
                 // "tap outside to confirm transform."
+                //
+                // Synchronous via MainActor.assumeIsolated — runs before the
+                // async clearSelection scheduled in the isSelectionTool block
+                // below. That ordering is the load-bearing detail mitigating
+                // audit root cause #2 / path 3 (new-selection-while-floating
+                // destructive cancel).
+                //
+                // Known narrow edge case: if the active layer was hidden after
+                // the lift but before this tap, commitSelection's
+                // canDrawOnActiveLayer guard returns false → commit is a
+                // silent no-op → the async clearSelection at the bottom of
+                // the isSelectionTool block still fires → floating texture
+                // dropped while the layer-with-hole snapshot is what's on
+                // the layer. Result: lifted pixels are lost without an undo
+                // entry. Requires three deliberate user actions in sequence
+                // (lift → hide layer → tap outside with selection tool), and
+                // the outcome is "selection gone" which is what the user is
+                // signaling anyway. Not fixing for this rebuild; documented
+                // here so it isn't a hidden surprise.
                 let needsCommit = MainActor.assumeIsolated {
                     canvasState.floatingSelectionTexture != nil || canvasState.isTranslatingActiveLayer
                 }
@@ -3324,20 +3364,17 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
                 print("Rectangle select: creating polygon selection with corners \(docCorners)")
 
-                // Store selection in canvas state as a 4-point polygon and
-                // extract pixels via the lasso code path. activeSelection stays
-                // nil — selectionPath is the ground truth under rotation.
+                // Store selection in canvas state as a 4-point polygon.
+                // Non-destructive — no pixel extraction here. The polygon
+                // enters the Polygon state (marching ants visible, cancel
+                // pill visible, transform handles available). Pixels lift
+                // lazily on first transform input via liftSelectionIfNeeded.
                 if let canvasState = canvasState {
                     Task { @MainActor in
                         canvasState.previewSelection = nil
                         canvasState.previewLassoPath = nil
-                        canvasState.activeSelection = nil
-                        canvasState.selectionPath = docCorners
+                        canvasState.setSelectionPolygon(docCorners)
                         print("Rectangle selection created as polygon: \(docCorners)")
-                        canvasState.extractSelectionPixels()
-                        // Floating texture is now composited on top of the
-                        // active layer (which has the hole) by the draw loop —
-                        // no need to render anything back into the layer.
                         view.setNeedsDisplay()
                     }
                 }
@@ -3407,18 +3444,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Close the path by connecting back to start
                 lassoPath.append(lassoPath[0])
 
-                // Store selection in canvas state and extract pixels
+                // Store selection in canvas state. Non-destructive — no
+                // pixel extraction here. Pixels lift lazily on first
+                // transform input via liftSelectionIfNeeded.
                 if let canvasState = canvasState {
                     let pathCopy = lassoPath
                     Task { @MainActor in
                         canvasState.previewLassoPath = nil // Clear preview
-                        canvasState.selectionPath = pathCopy
+                        canvasState.setSelectionPolygon(pathCopy)
                         print("Lasso selection created with \(pathCopy.count) points")
-                        // Extract pixels for moving. Floating texture is now
-                        // composited on top of the active layer by the draw
-                        // loop, so we don't need to render the pixels back into
-                        // the layer at original position.
-                        canvasState.extractSelectionPixels()
                         view.setNeedsDisplay()
                     }
                 }

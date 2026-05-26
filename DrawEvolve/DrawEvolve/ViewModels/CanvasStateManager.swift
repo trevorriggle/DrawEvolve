@@ -1878,80 +1878,118 @@ class CanvasStateManager: ObservableObject {
         clearSelection()
     }
 
-    /// Extract pixels from the selection and store them for moving
-    /// IMPORTANT: This captures snapshots and immediately clears the original pixels for fluent real-time movement
-    func extractSelectionPixels() {
+    /// Store a newly-drawn selection polygon WITHOUT lifting pixels.
+    /// Called from touchesEnded of the rect/lasso tools after geometry
+    /// validation. The polygon enters the Polygon state — marching ants
+    /// render, the cancel pill becomes visible, transform handles render
+    /// — but the layer texture is unchanged and no undo entry is created.
+    /// Pixels lift lazily on first transform input via `liftSelectionIfNeeded`.
+    ///
+    /// Always populates selectionOriginalRect to the polygon's bbox so
+    /// the transform-handles overlay has layout coordinates immediately.
+    /// Resets transform deltas to identity.
+    func setSelectionPolygon(_ path: [CGPoint]) {
+        selectionPath = path
+        selectionOriginalRect = calculateBoundingRect(for: path)
+        selectionOffset = .zero
+        selectionScale = CGSize(width: 1.0, height: 1.0)
+        selectionRotation = .zero
+        // Explicitly nil any stale extraction bookkeeping from a prior
+        // lifecycle. The polygon-state model treats these as "nil until lift."
+        selectionPixels = nil
+        selectionLayerSnapshot = nil
+        selectionBeforeSnapshot = nil
+        floatingSelectionTexture = nil
+        activeSelection = nil
+        bumpLayerMutation()
+    }
+
+    /// Polygon → Lifted transition. Lazily extracts pixels from the
+    /// active selection polygon, creates the floating MTLTexture, and
+    /// records a `.selectionLift` undo entry. Idempotent — fast-returns
+    /// if already lifted (`floatingSelectionTexture != nil`), if no
+    /// polygon exists, or if the active layer can't accept writes
+    /// (hidden/locked, per canDrawOnActiveLayer).
+    ///
+    /// Called from the first transform input on a polygon: body-drag
+    /// start (MetalCanvasView) or transform-handle drag start
+    /// (SelectionOverlays). The "if needed" suffix is load-bearing —
+    /// every drag-start call site fires this unconditionally; the
+    /// idempotency lives here.
+    ///
+    /// Returns true when a lift actually fired (state changed + history
+    /// recorded), false when skipped.
+    @discardableResult
+    func liftSelectionIfNeeded() -> Bool {
+        guard floatingSelectionTexture == nil else { return false }
+        guard let path = selectionPath else { return false }
+        guard canDrawOnActiveLayer else { return false }
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
-              let renderer = renderer else {
-            print("ERROR: Cannot extract selection - invalid layer or tile grid")
-            return
+              let renderer = renderer else { return false }
+        guard path.count >= 3 else { return false }
+        let boundingRect = calculateBoundingRect(for: path)
+        guard boundingRect.width > 0, boundingRect.height > 0 else { return false }
+
+        // 1. Pre-lift snapshot — for undo restore + selectionBeforeSnapshot.
+        guard let preLiftSnapshot = renderer.captureSnapshot(tileGrid: tileGrid) else {
+            print("⚠️ liftSelectionIfNeeded: captureSnapshot(pre-lift) returned nil")
+            return false
         }
 
-        // Capture "before" snapshot for history (BEFORE any modifications)
-        selectionBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
-
-        if let rect = activeSelection {
-            // Extract pixels from rectangular selection
-            // IMPORTANT: rect is in document space, so pass documentSize for 1:1 coordinate mapping
-            selectionPixels = renderer.extractPixels(from: rect, tileGrid: tileGrid, screenSize: documentSize)
-            selectionOriginalRect = rect
-            selectionOffset = .zero
-
-            // Verify extraction succeeded
-            if let pixels = selectionPixels {
-                // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                renderer.clearRect(rect, tileGrid: tileGrid, screenSize: documentSize)
-                // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
-                selectionLayerSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
-                // Upload the extracted pixels to a Metal texture once. The
-                // draw loop composites this on top of the layer (which now
-                // has a hole) at originalRect + offset every frame — no CPU
-                // work during drag.
-                floatingSelectionTexture = renderer.makeTexture(from: pixels)
-                print("✂️ Extracted rectangular selection: \(rect) and cleared original")
-            } else {
-                print("❌ ERROR: Failed to extract rectangular selection — rect \(rect), document \(documentSize)")
-                clearSelection() // Clear invalid selection
-            }
-        } else if let path = selectionPath {
-            // Validate path has enough points
-            guard path.count >= 3 else {
-                print("❌ ERROR: Lasso path too short (\(path.count) points), cannot extract")
-                clearSelection() // Clear invalid selection
-                return
-            }
-
-            // For lasso, find bounding box and extract with mask
-            let boundingRect = calculateBoundingRect(for: path)
-
-            // Validate bounding rect is not empty/invalid
-            guard boundingRect.width > 0 && boundingRect.height > 0 else {
-                print("❌ ERROR: Invalid lasso selection bounding rect: \(boundingRect)")
-                clearSelection() // Clear invalid selection
-                return
-            }
-
-            // IMPORTANT: path is in document space, so pass documentSize for 1:1 coordinate mapping
-            selectionPixels = renderer.extractPixels(fromPath: path, tileGrid: tileGrid, screenSize: documentSize)
-            selectionOriginalRect = boundingRect
-            selectionOffset = .zero
-
-            // Verify extraction succeeded
-            if let pixels = selectionPixels {
-                // IMMEDIATELY clear the original pixels - they'll be rendered at the new position in real-time
-                renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
-                // Capture snapshot AFTER clearing - this is the "base layer with hole" for real-time rendering
-                selectionLayerSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
-                // GPU-side mirror for the live drag preview. See note in the
-                // rect-selection branch above.
-                floatingSelectionTexture = renderer.makeTexture(from: pixels)
-                print("✂️ Extracted lasso selection, bounding rect: \(boundingRect) and cleared original")
-            } else {
-                print("❌ ERROR: Failed to extract lasso selection — bounding rect \(boundingRect), document \(documentSize)")
-                clearSelection() // Clear invalid selection
-            }
+        // 2. CPU extraction via point-in-polygon mask.
+        guard let pixels = renderer.extractPixels(fromPath: path, tileGrid: tileGrid, screenSize: documentSize) else {
+            print("⚠️ liftSelectionIfNeeded: extractPixels(fromPath:) returned nil")
+            return false
         }
+
+        // 3. Punch the hole in the live layer, then capture with-hole snapshot.
+        renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
+        guard let layerWithHoleSnapshot = renderer.captureSnapshot(tileGrid: tileGrid) else {
+            print("⚠️ liftSelectionIfNeeded: captureSnapshot(with-hole) returned nil")
+            // We've already modified the layer; restore from pre-lift to
+            // keep the user's pixels intact and bail.
+            renderer.restoreSnapshot(preLiftSnapshot, tileGrid: tileGrid)
+            return false
+        }
+
+        // 4. Upload the lifted pixels to the GPU as the floating texture.
+        guard let floatingTexture = renderer.makeTexture(from: pixels) else {
+            print("⚠️ liftSelectionIfNeeded: makeTexture(from:) returned nil")
+            renderer.restoreSnapshot(preLiftSnapshot, tileGrid: tileGrid)
+            return false
+        }
+
+        // 5. Populate the live state.
+        selectionBeforeSnapshot = preLiftSnapshot
+        selectionLayerSnapshot = layerWithHoleSnapshot
+        selectionPixels = pixels
+        selectionOriginalRect = boundingRect
+        selectionOffset = .zero
+        selectionScale = CGSize(width: 1.0, height: 1.0)
+        selectionRotation = .zero
+        floatingSelectionTexture = floatingTexture
+
+        // 6. Record the undo entry. Transform deltas are identity at lift
+        // time — the user hasn't moved/scaled/rotated yet.
+        let liftState = SelectionLiftState(
+            preLiftSnapshot: preLiftSnapshot,
+            layerWithHoleSnapshot: layerWithHoleSnapshot,
+            liftedPixels: pixels,
+            sourcePath: path,
+            originalRect: boundingRect,
+            offset: .zero,
+            scale: CGSize(width: 1.0, height: 1.0),
+            rotation: .zero
+        )
+        historyManager.record(.selectionLift(
+            layerId: layers[selectedLayerIndex].id,
+            liftState: liftState
+        ))
+
+        bumpLayerMutation()
+        print("✂️ Lifted selection, bounding rect: \(boundingRect)")
+        return true
     }
 
     /// Render selection pixels in real-time during drag
@@ -1995,30 +2033,48 @@ class CanvasStateManager: ObservableObject {
         // "silent no-op" spec.
         guard canDrawOnActiveLayer else { return }
 
+        // Per the lifted-state model: commit is only meaningful when
+        // there's something lifted. selectionLayerSnapshot is the
+        // "with-hole" snapshot captured at lift time; we use it as the
+        // .selectionCommit entry's pre-commit baseline so undo of the
+        // commit restores to lifted state (not pre-lift). selectionBefore
+        // Snapshot (pre-lift) rides along inside liftState so undo of
+        // commit can repopulate it for any subsequent cancel.
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
-              let beforeSnapshot = selectionBeforeSnapshot else {
-            print("ERROR: Cannot commit selection - missing data")
+              let beforeSnapshot = selectionBeforeSnapshot,
+              let layerWithHoleSnapshot = selectionLayerSnapshot,
+              let pixels = selectionPixels,
+              let originalRect = selectionOriginalRect,
+              let sourcePath = selectionPath else {
+            print("ERROR: Cannot commit selection - missing data (likely commit called without lift)")
             return
         }
 
-        if let floating = floatingSelectionTexture, let originalRect = selectionOriginalRect {
+        // Capture deltas + sourcePath BEFORE we composite (composite
+        // doesn't mutate them, but we want a stable snapshot for the
+        // liftState carried in the history entry).
+        let committedOffset = selectionOffset
+        let committedScale = selectionScale
+        let committedRotation = selectionRotation
+
+        if let floating = floatingSelectionTexture {
             // Compute the final destination rect in doc space (offset + scale).
-            // Layer currently has the source region cleared (extractSelectionPixels
-            // did this), so source-over compositing into it produces exactly
-            // "the moved selection placed where the user released."
+            // Layer currently has the source region cleared, so source-over
+            // compositing into it produces exactly "the moved selection
+            // placed where the user released."
             let finalRect = CGRect(
-                x: originalRect.origin.x + selectionOffset.x,
-                y: originalRect.origin.y + selectionOffset.y,
-                width: originalRect.width * selectionScale.width,
-                height: originalRect.height * selectionScale.height
+                x: originalRect.origin.x + committedOffset.x,
+                y: originalRect.origin.y + committedOffset.y,
+                width: originalRect.width * committedScale.width,
+                height: originalRect.height * committedScale.height
             )
             renderer.compositeFloatingTextureIntoLayer(
                 floating,
                 tileGrid: tileGrid,
                 atDocRect: finalRect,
-                rotation: Float(selectionRotation.radians)
+                rotation: Float(committedRotation.radians)
             )
         } else {
             // Fallback: floating texture wasn't built (e.g. extraction failed
@@ -2028,16 +2084,27 @@ class CanvasStateManager: ObservableObject {
             renderSelectionInRealTime()
         }
 
-        // Capture the current state as "after" for history
+        // Capture the current state as "after" for history.
         let afterSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
 
-        // Record in history (before = original with pixels, after = current with pixels moved)
+        // Record .selectionCommit. Undo restores to lifted state via
+        // liftState; redo restores to afterSnapshot (post-commit Idle).
         if let after = afterSnapshot {
+            let liftState = SelectionLiftState(
+                preLiftSnapshot: beforeSnapshot,
+                layerWithHoleSnapshot: layerWithHoleSnapshot,
+                liftedPixels: pixels,
+                sourcePath: sourcePath,
+                originalRect: originalRect,
+                offset: committedOffset,
+                scale: committedScale,
+                rotation: committedRotation
+            )
             let layerId = layers[selectedLayerIndex].id
-            historyManager.record(.stroke(
+            historyManager.record(.selectionCommit(
                 layerId: layerId,
-                beforeSnapshot: beforeSnapshot,
-                afterSnapshot: after
+                afterSnapshot: after,
+                liftState: liftState
             ))
         }
 
@@ -2060,18 +2127,87 @@ class CanvasStateManager: ObservableObject {
         print("✅ Selection committed to texture")
     }
 
-    /// Throw away the active floating selection without baking it. Restores
-    /// whatever the layer looked like before the selection was extracted /
-    /// imported, then clears all selection state.
-    /// (Wired to the Cancel pill in the toolbar overlay.)
+    /// Throw away the active floating selection and restore the layer
+    /// to its pre-lift state. Records `.selectionCancel` so the cancel
+    /// is undoable (undo of cancel restores the lifted state with the
+    /// floating texture and transform deltas intact at their last drag
+    /// position). Should only be called when a lift has occurred
+    /// (`floatingSelectionTexture != nil`); use `clearSelection()` for
+    /// the pre-lift Polygon-state silent clear.
+    ///
+    /// Per Revision 4 / §10 #1: system-initiated touchesCancelled cleanup
+    /// is silent (no history); the pill-driven cancel goes through here
+    /// and IS undoable.
     func cancelSelection() {
-        if let renderer = renderer,
-           selectedLayerIndex < layers.count,
-           let tileGrid = layers[selectedLayerIndex].tileGrid,
-           let beforeSnapshot = selectionBeforeSnapshot {
-            renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
+        guard selectedLayerIndex < layers.count,
+              let tileGrid = layers[selectedLayerIndex].tileGrid,
+              let renderer = renderer,
+              let beforeSnapshot = selectionBeforeSnapshot,
+              let layerWithHoleSnapshot = selectionLayerSnapshot,
+              let pixels = selectionPixels,
+              let originalRect = selectionOriginalRect,
+              let sourcePath = selectionPath else {
+            // Incomplete lifted state — silent no-op. The intended
+            // caller (cancelOrClearSelection) gates on
+            // floatingSelectionTexture != nil before invoking, so
+            // reaching this point means a wiring bug somewhere. Silently
+            // restoring pixels here WITHOUT recording history would
+            // recreate the destructive-cancel pattern the rebuild
+            // eliminates (audit root cause #2). Prefer to do nothing
+            // visible and let the wiring bug surface via the print.
+            //
+            // For deliberately silent restore (e.g. touchesCancelled
+            // cleanup), use cancelSelectionSilently() — landing in commit 5.
+            print("⚠️ cancelSelection: called without complete lifted state — no-op (wiring bug)")
+            return
         }
+
+        // Capture transform deltas before the restore wipes them — they
+        // belong in the liftState so undo of cancel restores them.
+        let committedOffset = selectionOffset
+        let committedScale = selectionScale
+        let committedRotation = selectionRotation
+
+        // Restore the layer to its pre-lift state, then record cancel.
+        renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
+
+        let liftState = SelectionLiftState(
+            preLiftSnapshot: beforeSnapshot,
+            layerWithHoleSnapshot: layerWithHoleSnapshot,
+            liftedPixels: pixels,
+            sourcePath: sourcePath,
+            originalRect: originalRect,
+            offset: committedOffset,
+            scale: committedScale,
+            rotation: committedRotation
+        )
+        let layerId = layers[selectedLayerIndex].id
+        historyManager.record(.selectionCancel(
+            layerId: layerId,
+            restoredSnapshot: beforeSnapshot,
+            liftState: liftState
+        ))
+
         clearSelection()
+        bumpLayerMutation()
+        print("✂️ Cancelled selection — pixels restored, .selectionCancel recorded")
+    }
+
+    /// Single dispatch for the Cancel pill (lands in commit 3). Routes
+    /// based on which selection state is active:
+    ///   - Lifted (floating exists) → cancelSelection (undoable restore).
+    ///   - Polygon-only → clearSelection (silent, no history).
+    ///   - Floating text only → cancelFloatingText (existing path).
+    ///   - Otherwise → no-op.
+    /// Added now so commit 3 has a single call to wire into the pill.
+    func cancelOrClearSelection() {
+        if floatingSelectionTexture != nil {
+            cancelSelection()
+        } else if floatingText != nil {
+            cancelFloatingText()
+        } else if selectionPath != nil {
+            clearSelection()
+        }
     }
 
     /// After a scale gesture ends, the floating texture has been bilinear-

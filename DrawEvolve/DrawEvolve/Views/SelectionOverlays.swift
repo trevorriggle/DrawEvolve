@@ -158,7 +158,12 @@ struct TransformHandlesOverlay: View {
 
     var body: some View {
         Group {
-            if canvasState.floatingSelectionTexture != nil,
+            // Render handles whenever a selection polygon exists —
+            // Polygon state (no lift yet) AND Lifted state. The handles'
+            // onChanged callbacks trigger liftSelectionIfNeeded on first
+            // drag, so a tap on a handle while in Polygon state lifts
+            // before applying any transform.
+            if canvasState.selectionPath != nil,
                let originalRect = canvasState.selectionOriginalRect {
                 content(originalRect: originalRect)
             } else if canvasState.floatingText != nil {
@@ -264,12 +269,18 @@ struct TransformHandlesOverlay: View {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 if session == nil {
+                    // First onChanged of this gesture — lazy lift if we're
+                    // still in Polygon state. Idempotent: no-op if already
+                    // lifted (Lifted state from a prior body-drag).
+                    canvasState.liftSelectionIfNeeded()
                     session = makeSession(for: handle, fingerScreen: value.startLocation)
                     // Hide the marching ants while the user is moving
                     // geometry — ants chasing the selection through scale
                     // / rotation in real time reads as visual noise and
                     // also re-strokes the (potentially large) animated
                     // polygon every frame. Reset on .onEnded below.
+                    // (Commit 6 will revisit this flag's role once the
+                    // ants-during-Polygon-only rule makes the gate obsolete.)
                     canvasState.isTransformingSelection = true
                 }
                 guard let s = session else { return }
@@ -289,6 +300,9 @@ struct TransformHandlesOverlay: View {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 if session == nil {
+                    // Lazy lift on first transform input — same idempotent
+                    // call as scaleDrag above.
+                    canvasState.liftSelectionIfNeeded()
                     session = makeSession(for: .rotation, fingerScreen: value.startLocation)
                     canvasState.isTransformingSelection = true
                 }
