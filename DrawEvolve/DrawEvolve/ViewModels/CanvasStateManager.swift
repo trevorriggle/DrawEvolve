@@ -1242,6 +1242,24 @@ class CanvasStateManager: ObservableObject {
         layers.removeAll()
         clearSelection()
 
+        // Force renderer canvas size to match the loaded doc's saved
+        // dimensions BEFORE we build per-layer tile grids — makeEmptyTileGrid
+        // reads renderer.canvasSize, so the grids need the right size up
+        // front. Locks the canvas size for the rest of the session so the
+        // SwiftUI ordering race between first-draw updateCanvasSize and
+        // this load path resolves correctly either way. See
+        // CanvasRenderer.setCanvasSize(matchingDoc:) doc comment for the
+        // full reasoning.
+        //
+        // We always call this — even when saved == current — so the lock
+        // flag flips unconditionally on every loaded doc. Belt-and-
+        // suspenders against the race.
+        let savedDocSize = CGSize(
+            width: manifest.document.width,
+            height: manifest.document.height
+        )
+        renderer.setCanvasSize(matchingDoc: savedDocSize)
+
         // Walk in ordinal order — manifest may not already be sorted.
         let ordered = manifest.layers.sorted { $0.ordinal < $1.ordinal }
         var missingOrdinals: [Int] = []
