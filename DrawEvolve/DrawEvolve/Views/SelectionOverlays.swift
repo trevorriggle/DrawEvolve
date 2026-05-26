@@ -839,18 +839,22 @@ private extension CGPoint {
 
 // MARK: - Cancel pill
 
-/// Small floating Cancel-only pill that appears whenever a floating selection
-/// (rect/lasso/import) is active. Tap-outside-the-bounds + tool-change both
-/// commit (handled in CanvasStateManager); Cancel reverts the entire transform
-/// session in one shot.
+/// Small floating Cancel pill, visible whenever a selection polygon
+/// exists (Polygon state — selectionPath set, no floating yet) OR a
+/// floating selection/text exists. Single dispatch via
+/// `cancelOrClearSelection`:
+///   - Polygon-only (no floating yet) → silent clear, no history.
+///   - Lifted (floating exists)         → undoable `.selectionCancel`.
+///   - Floating text                     → existing `cancelFloatingText`.
+/// Tap-outside-the-bounds + tool-change both commit a Lifted selection
+/// (handled in CanvasStateManager); this pill is the universal cancel
+/// surface across all selection-adjacent states.
 struct TransformCancelPill: View {
     @ObservedObject var canvasState: CanvasStateManager
 
     var body: some View {
-        if canvasState.floatingSelectionTexture != nil {
-            cancelButton(action: { canvasState.cancelSelection() })
-        } else if canvasState.floatingText != nil {
-            cancelButton(action: { canvasState.cancelFloatingText() })
+        if canvasState.selectionPath != nil || canvasState.floatingText != nil {
+            cancelButton(action: { canvasState.cancelOrClearSelection() })
         }
     }
 

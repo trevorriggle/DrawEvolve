@@ -2386,16 +2386,25 @@ struct DrawingCanvasView: View {
 
     @ViewBuilder
     private var cancelPillOverlay: some View {
-        // Top-center pill, visible while a floating selection OR a floating
-        // text exists. The pill internally routes to the right cancel.
-        if canvasState.floatingSelectionTexture != nil || canvasState.floatingText != nil {
+        // Top-right pill, visible whenever a selection polygon exists
+        // (Polygon state — selectionPath set, no floating yet) OR a
+        // floating selection/text exists. Pill dispatches via
+        // cancelOrClearSelection: pre-lift → silent clear, post-lift →
+        // undoable .selectionCancel. See SelectionOverlays' TransformCancelPill.
+        //
+        // Placement: top-right with .padding(.top, 180) clears the
+        // existing Gallery + Eve + Eye Test cluster (~162pt + breathing
+        // room) without collision logic. Per Revision 4 / §10 #3 the
+        // 180pt is an estimate — TUNE ON DEVICE if it overlaps any
+        // existing top-right chrome.
+        if canvasState.selectionPath != nil || canvasState.floatingText != nil {
             VStack {
                 HStack {
                     Spacer()
                     TransformCancelPill(canvasState: canvasState)
-                    Spacer()
+                        .padding(.trailing, 12)
                 }
-                .padding(.top, 60)
+                .padding(.top, 180)
                 Spacer()
             }
             .ignoresSafeArea()
@@ -2786,34 +2795,24 @@ struct DrawingCanvasView: View {
                 .font(.caption)
                 .foregroundColor(.primary)
 
-            HStack(spacing: 12) {
-                Button(action: { canvasState.clearSelection() }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16))
-                        Text("Cancel")
-                            .font(.subheadline)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.gray)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+            // Cancel button removed; the top-right TransformCancelPill is now
+            // the sole cancel/clear surface across all selection states
+            // (Polygon, Lifted, floating text). Two cancel affordances doing
+            // the same thing created the ambiguity audit §6 / root cause #2
+            // flagged. Delete stays — it's a distinct destructive action that
+            // shouldn't be conflated with cancel.
+            Button(action: { canvasState.deleteSelectedPixels() }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 16))
+                    Text("Delete")
+                        .font(.subheadline)
                 }
-
-                Button(action: { canvasState.deleteSelectedPixels() }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "trash.fill")
-                            .font(.system(size: 16))
-                        Text("Delete")
-                            .font(.subheadline)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.red)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.red)
+                .foregroundColor(.white)
+                .cornerRadius(10)
             }
         }
         .padding()
