@@ -606,6 +606,33 @@ struct MetalCanvasView: UIViewRepresentable {
         private var textOnPathLastScreen: CGPoint = .zero
         private var isDraggingSelection = false // Track if we're dragging a selection
         private var selectionDragStart: CGPoint? // Where the drag started (doc space)
+        /// Set to true in touchesBegan when the body-drag-start path
+        /// triggers `liftSelectionIfNeeded` and the lift actually fires
+        /// (returns true). Cleared in touchesEnded (after commit) and
+        /// touchesCancelled (after silent restore). Used by
+        /// touchesCancelled to distinguish "we just lifted in this
+        /// touch, restore pixels" from "lift was pre-existing from a
+        /// prior touch, don't touch its state."
+        private var liftedInCurrentTouch = false
+        /// Snapshot of (selectionOffset, selectionScale, selectionRotation)
+        /// captured at the moment a body-drag begins on a PRE-EXISTING
+        /// lifted selection (i.e. `liftSelectionIfNeeded` returned false
+        /// because floating was already present from a prior touch).
+        /// Captured alongside `selectionDragStart`. Cleared in
+        /// touchesEnded's clean-finish path (the drag is committed
+        /// work). Read in touchesCancelled when `liftedInCurrentTouch`
+        /// is false and the snapshot is non-nil: the pre-drag deltas
+        /// are restored so the lifted selection survives at its
+        /// pre-drag position, not its half-drag position.
+        ///
+        /// Scope: per-Coordinator, single in-flight drag at a time.
+        /// UIKit touch cancellation only. SwiftUI handle-gesture
+        /// cancellation in SelectionOverlays' scaleDrag/rotationDrag
+        /// is NOT covered by this mechanism — that's a separate audit
+        /// if it surfaces (handle-drag cancellation goes through
+        /// SwiftUI's onEnded which doesn't distinguish release from
+        /// cancel today).
+        private var preDragTransformSnapshot: (offset: CGPoint, scale: CGSize, rotation: Angle)?
         // Screen-space start of a rectangle-marquee drag. We store the SCREEN
         // point (not just doc point) so that under canvas rotation we can build
         // a screen-axis-aligned rectangle from the user's drag and then map its
@@ -2189,8 +2216,27 @@ struct MetalCanvasView: UIViewRepresentable {
                     // whatever state exists. Acceptable: the drag will be a
                     // no-op too because compositeFloatingTextureIntoLayer
                     // requires a floating texture.
-                    MainActor.assumeIsolated {
+                    //
+                    // Capture the return value: true means the lift actually
+                    // fired in THIS touch. touchesCancelled reads this to
+                    // know whether to call cancelSelectionSilently — only
+                    // touches that did the lift should undo it on cancel;
+                    // pre-existing lifted state from a prior touch survives.
+                    liftedInCurrentTouch = MainActor.assumeIsolated {
                         canvasState.liftSelectionIfNeeded()
+                    }
+                    // Pre-existing lifted state path: snapshot the current
+                    // transform deltas so touchesCancelled can revert the
+                    // partial drag without touching the underlying lifted
+                    // selection. Skip when liftedInCurrentTouch is true —
+                    // that case is handled by cancelSelectionSilently
+                    // (full restore + clear) instead.
+                    if !liftedInCurrentTouch {
+                        preDragTransformSnapshot = MainActor.assumeIsolated {
+                            (offset: canvasState.selectionOffset,
+                             scale: canvasState.selectionScale,
+                             rotation: canvasState.selectionRotation)
+                        }
                     }
                     isDraggingSelection = true
                     selectionDragStart = location
@@ -3341,6 +3387,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Finished dragging selection, committing to layer")
                 isDraggingSelection = false
                 selectionDragStart = nil
+                // Drag finished cleanly via touchesEnded — the lift (if it
+                // fired in this touch) is now part of the user's committed
+                // work, not something to undo. Clear both flags so a later
+                // touchesCancelled on a separate touch doesn't mistakenly
+                // try to restore from this drag.
+                liftedInCurrentTouch = false
+                preDragTransformSnapshot = nil
 
                 // Move-tool whole-layer drag goes through the in-place blit
                 // path (single GPU pass, no UIImage ever built). Floating-
@@ -3942,16 +3995,47 @@ struct MetalCanvasView: UIViewRepresentable {
             }
             resetSnapToLineState()
 
-            // Clear selection previews + stamp cursor.
+            // Clear selection previews + stamp cursor, then route the
+            // selection cleanup based on which flag is set:
+            //
+            //   shouldUnlift == true (lift fired in THIS cancelled touch)
+            //     → cancelSelectionSilently: restore pre-lift pixels, drop
+            //       the floating, clear all selection state. No history.
+            //
+            //   preDragSnapshot != nil (drag started on a pre-existing
+            //   lifted selection — lift was from a prior touch)
+            //     → restore the snapshotted (offset, scale, rotation).
+            //       Lifted state survives at its pre-drag position; the
+            //       partial drag is reverted. No history.
+            //
+            //   Neither (Polygon-only state, or unrelated touch)
+            //     → don't touch selection state. The polygon / lifted
+            //       state survives at whatever it was; cancellation here
+            //       was about an unrelated touch.
+            //
+            // The two flags are mutually exclusive by construction:
+            // liftedInCurrentTouch is set only when liftSelectionIfNeeded
+            // returns true; preDragTransformSnapshot is captured only in
+            // the else branch. At most one fires.
+            let shouldUnlift = liftedInCurrentTouch
+            let preDragSnapshot = preDragTransformSnapshot
+            liftedInCurrentTouch = false
+            preDragTransformSnapshot = nil
             if let canvasState = canvasState {
                 Task { @MainActor in
                     canvasState.previewSelection = nil
                     canvasState.previewLassoPath = nil
                     canvasState.stampCursorCenter = nil
                     canvasState.stampCursorDiameter = 0
-                    // Cancellation always exits any in-flight transform —
-                    // ants should reappear on the (still-active) selection.
                     canvasState.isTransformingSelection = false
+                    if shouldUnlift {
+                        canvasState.cancelSelectionSilently()
+                    } else if let snap = preDragSnapshot {
+                        canvasState.selectionOffset = snap.offset
+                        canvasState.selectionScale = snap.scale
+                        canvasState.selectionRotation = snap.rotation
+                        canvasState.bumpLayerMutation()
+                    }
                 }
             }
             view.setNeedsDisplay()

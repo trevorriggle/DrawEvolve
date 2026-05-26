@@ -2210,6 +2210,32 @@ class CanvasStateManager: ObservableObject {
         }
     }
 
+    /// Silent post-lift cleanup. Restores the layer to its pre-lift
+    /// state if `selectionBeforeSnapshot` is present, drops the
+    /// floating texture, and clears all selection state. Does NOT
+    /// record history — used by system-initiated cancels
+    /// (`MetalCanvasView.touchesCancelled` when a lift happened earlier
+    /// in the same touch), matching the eraser / blur / wet-ink cancel
+    /// precedent in the same handler. The pill-driven cancel uses
+    /// `cancelSelection()`, which DOES record `.selectionCancel`.
+    ///
+    /// Defensive: works whether or not the lifted state is fully
+    /// populated. If only a partial lift happened (e.g., extraction
+    /// succeeded but snapshot capture failed), the snapshot restore is
+    /// skipped and we fall through to plain clearSelection. No risk of
+    /// silent destructive restore — clearSelection itself doesn't
+    /// modify pixels, only state.
+    func cancelSelectionSilently() {
+        if let renderer = renderer,
+           selectedLayerIndex < layers.count,
+           let tileGrid = layers[selectedLayerIndex].tileGrid,
+           let beforeSnapshot = selectionBeforeSnapshot {
+            renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
+        }
+        clearSelection()
+        bumpLayerMutation()
+    }
+
     /// After a scale gesture ends, the floating texture has been bilinear-
     /// upscaled (or downsampled) by the shader, which looks soft for any
     /// large change. Resample from the original full-res source UIImage at
