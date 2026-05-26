@@ -129,5 +129,6 @@ enum HistoryAction {
         case name(old: String, new: String)
         case blendMode(old: BlendMode, new: BlendMode)
         case visibility(old: Bool, new: Bool)
+        case lock(old: Bool, new: Bool)
     }
 }

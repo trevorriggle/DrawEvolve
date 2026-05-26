@@ -16,6 +16,9 @@ struct LayerPanelView: View {
     /// Eyeball-tap path. Routed through CanvasStateManager so the
     /// canvas actually redraws (see toggleLayerVisibility's doc).
     let onToggleVisibility: (Int) -> Void
+    /// Lock-tap path. Routed through CanvasStateManager so the toggle
+    /// records one undo entry (same reasoning as onToggleVisibility above).
+    let onToggleLock: (Int) -> Void
     let onBeginOpacityDrag: (Int) -> Void
     /// Fires on EVERY slider value change during a drag (not just at
     /// begin/end). Routed to CanvasStateManager.bumpLayerMutation() so
@@ -141,6 +144,7 @@ struct LayerPanelView: View {
                 selectedIndex = index
             },
             onToggleVisibility: { onToggleVisibility(index) },
+            onToggleLock: { onToggleLock(index) },
             onToggleExpand: {
                 if expandedLayerIds.contains(layer.id) {
                     expandedLayerIds.remove(layer.id)
@@ -352,6 +356,9 @@ private struct LayerRow: View {
     /// Eyeball-tap. Routed to CanvasStateManager.toggleLayerVisibility
     /// so the canvas redraws (see the comment on that method).
     let onToggleVisibility: () -> Void
+    /// Lock-tap. Routed to CanvasStateManager.toggleLayerLock so the
+    /// toggle records one undo entry.
+    let onToggleLock: () -> Void
     let onToggleExpand: () -> Void
     let onBeginOpacityDrag: () -> Void
     /// Fires on every slider value change. See the doc on
@@ -425,7 +432,7 @@ private struct LayerRow: View {
 
             Spacer(minLength: 8)
 
-            Button(action: { layer.isLocked.toggle() }) {
+            Button(action: onToggleLock) {
                 Image(systemName: layer.isLocked ? "lock.fill" : "lock.open")
                     .foregroundColor(layer.isLocked ? .red : .secondary)
                     .frame(width: 24, height: 24)
@@ -555,6 +562,7 @@ private struct LayerRow: View {
             onDeleteLayer: { _ in },
             onMoveLayer: { _, _ in },
             onToggleVisibility: { _ in },
+            onToggleLock: { _ in },
             onBeginOpacityDrag: { _ in },
             onOpacityChanged: { _ in },
             onEndOpacityDrag: { _ in },

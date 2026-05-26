@@ -410,6 +410,7 @@ struct DrawingCanvasView: View {
                     onDeleteLayer: { index in canvasState.deleteLayer(at: index) },
                     onMoveLayer: { from, to in canvasState.moveLayer(from: from, to: to) },
                     onToggleVisibility: { index in canvasState.toggleLayerVisibility(at: index) },
+                    onToggleLock: { index in canvasState.toggleLayerLock(at: index) },
                     onBeginOpacityDrag: { index in canvasState.beginOpacityDrag(forLayerAt: index) },
                     onOpacityChanged: { _ in canvasState.bumpLayerMutation() },
                     onEndOpacityDrag: { index in canvasState.endOpacityDrag(forLayerAt: index) },

@@ -447,7 +447,31 @@ class CanvasStateManager: ObservableObject {
     /// setNeedsDisplay, so the canvas reflects the visibility change.
     func toggleLayerVisibility(at index: Int) {
         guard layers.indices.contains(index) else { return }
+        let oldValue = layers[index].isVisible
         layers[index].isVisible.toggle()
+        historyManager.record(.layerPropertyChanged(
+            layerId: layers[index].id,
+            property: .visibility(old: oldValue, new: layers[index].isVisible)
+        ))
+        bumpLayerMutation()
+    }
+
+    /// Toggle a layer's isLocked flag and record one undo entry. Same
+    /// rationale as `toggleLayerVisibility` for routing through the state
+    /// manager rather than mutating `layer.isLocked` directly: keeps the
+    /// undo stack honest and (incidentally) bumps the mutation counter so
+    /// any future panel observer that watches it for lock-state changes
+    /// doesn't need its own subscription. Lock doesn't affect rendering,
+    /// so the bump is a no-op for the canvas — kept for symmetry with
+    /// visibility/opacity.
+    func toggleLayerLock(at index: Int) {
+        guard layers.indices.contains(index) else { return }
+        let oldValue = layers[index].isLocked
+        layers[index].isLocked.toggle()
+        historyManager.record(.layerPropertyChanged(
+            layerId: layers[index].id,
+            property: .lock(old: oldValue, new: layers[index].isLocked)
+        ))
         bumpLayerMutation()
     }
 
@@ -622,6 +646,8 @@ class CanvasStateManager: ObservableObject {
                     layer.blendMode = old
                 case .visibility(let old, _):
                     layer.isVisible = old
+                case .lock(let old, _):
+                    layer.isLocked = old
                 }
             }
 
@@ -690,6 +716,8 @@ class CanvasStateManager: ObservableObject {
                     layer.blendMode = new
                 case .visibility(_, let new):
                     layer.isVisible = new
+                case .lock(_, let new):
+                    layer.isLocked = new
                 }
             }
 
