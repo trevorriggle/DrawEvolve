@@ -2417,18 +2417,17 @@ struct DrawingCanvasView: View {
 
     @ViewBuilder
     private var cancelPillOverlay: some View {
-        // Top-right pill, visible whenever a selection polygon exists
-        // (Polygon state — selectionPath set, no floating yet) OR a
-        // floating selection/text exists. Pill dispatches via
-        // cancelOrClearSelection: pre-lift → silent clear, post-lift →
-        // undoable .selectionCancel. See SelectionOverlays' TransformCancelPill.
+        // Top-right pill, narrowed to floating-text only. Selection
+        // cancel (Polygon and Lifted) moved back into selectionActiveCard
+        // under the Delete button — the pill didn't feel right on device
+        // for the selection paths. Floating text has no other manual
+        // cancel surface (auto-cancel only fires for empty text), so the
+        // pill keeps its top-right placement for that case.
         //
-        // Placement: top-right with .padding(.top, 180) clears the
-        // existing Gallery + Eve + Eye Test cluster (~162pt + breathing
-        // room) without collision logic. Per Revision 4 / §10 #3 the
-        // 180pt is an estimate — TUNE ON DEVICE if it overlaps any
-        // existing top-right chrome.
-        if canvasState.selectionPath != nil || canvasState.floatingText != nil {
+        // Placement: .padding(.top, 180) clears the existing Gallery + Eve
+        // + Eye Test cluster (~162pt + breathing room). Tune-on-device
+        // note from §10 #3 still applies.
+        if canvasState.floatingText != nil {
             VStack {
                 HStack {
                     Spacer()
@@ -2821,17 +2820,24 @@ struct DrawingCanvasView: View {
     // belong in one computed property to prevent functional drift.
 
     private var selectionActiveCard: some View {
-        VStack(spacing: 12) {
+        // Cancel button restored under Delete after the top-right pill
+        // moved didn't feel right on device. Cancel is the selection
+        // cancel surface (Polygon-only → silent clear; Lifted → undoable
+        // .selectionCancel via cancelOrClearSelection's dispatch).
+        // Floating-text cancel still goes through TransformCancelPill at
+        // the top-right — the pill's gate was narrowed to floatingText
+        // only, since text cancel has no other UI surface.
+        //
+        // Order: Delete first (red, destructive), Cancel second (gray,
+        // reversible). 8pt VStack spacing keeps the two tap targets
+        // distinct so a finger reaching for Cancel doesn't fat-finger
+        // Delete. Caption stays neutral ("Selection Active") so it
+        // doesn't bias toward either action.
+        VStack(spacing: 8) {
             Text("Selection Active")
                 .font(.caption)
                 .foregroundColor(.primary)
 
-            // Cancel button removed; the top-right TransformCancelPill is now
-            // the sole cancel/clear surface across all selection states
-            // (Polygon, Lifted, floating text). Two cancel affordances doing
-            // the same thing created the ambiguity audit §6 / root cause #2
-            // flagged. Delete stays — it's a distinct destructive action that
-            // shouldn't be conflated with cancel.
             Button(action: { canvasState.deleteSelectedPixels() }) {
                 HStack(spacing: 6) {
                     Image(systemName: "trash.fill")
@@ -2842,6 +2848,20 @@ struct DrawingCanvasView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
                 .background(Color.red)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+            }
+
+            Button(action: { canvasState.cancelOrClearSelection() }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16))
+                    Text("Cancel")
+                        .font(.subheadline)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.gray)
                 .foregroundColor(.white)
                 .cornerRadius(10)
             }
