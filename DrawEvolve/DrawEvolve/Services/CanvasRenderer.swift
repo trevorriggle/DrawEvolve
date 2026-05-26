@@ -348,13 +348,87 @@ class CanvasRenderer: NSObject {
         set { _canvasSize = newValue }
     }
 
+    /// Once set true by `setCanvasSize(matchingDoc:)`, subsequent
+    /// `updateCanvasSize(for:)` calls become no-ops. Existing-document
+    /// loads override the device-cap-derived screen sizing because the
+    /// loaded doc's saved dimensions are authoritative for that session.
+    /// Resolves the SwiftUI ordering race documented in slice 7 § "timing
+    /// race I caught" — either order (load-then-firstdraw, or firstdraw-
+    /// then-load) reaches the same end state.
+    ///
+    /// Stays true for the renderer's lifetime; each new DrawingCanvasView
+    /// spawns a fresh renderer (via MetalCanvasView UIViewRepresentable),
+    /// which starts with the flag false. "Clear Canvas" within an
+    /// existing-doc session deliberately does NOT reset this flag —
+    /// clearing is a within-doc operation, the canvas dimensions stay
+    /// at the loaded doc's size.
+    private var _canvasSizeLockedToDoc: Bool = false
+
+    /// Device-capability-driven max canvas dimension. Used by both
+    /// `updateCanvasSize(for:)` (screen-derived sizing for new docs) and
+    /// `setCanvasSize(matchingDoc:)` (clamp on existing-doc load).
+    ///
+    /// Three-tier gate:
+    ///   1. iPhone (any model): 2048². iPhone screens are too small to
+    ///      usefully display 4096² content and the form factor isn't the
+    ///      platform for high-res canvas work.
+    ///   2. iPad with `recommendedMaxWorkingSetSize` < 2 GB: 2048².
+    ///      Covers iPad 9th/10th gen, iPad mini 6, iPad Air 4 — devices
+    ///      with 3-4 GB total RAM whose Metal heap budget can't safely
+    ///      carry the ~1.16 GB renderer footprint at 4096² plus user
+    ///      content, AI payloads, and iOS overhead.
+    ///   3. iPad with WSS ≥ 2 GB: 4096². iPad Air M1+, iPad Pro M1+,
+    ///      iPad mini 7 (A17 Pro). Margin over the ~1.16 GB renderer
+    ///      footprint for headroom.
+    ///
+    /// The 2 GB threshold is sized for renderer working set + margin, not
+    /// total system RAM — `recommendedMaxWorkingSetSize` already reports
+    /// the Metal-safe budget Apple has provisioned for the app. If
+    /// real-device numbers show the renderer fits comfortably at lower
+    /// budgets we can lower this; raising it is the safer mistake.
+    ///
+    /// Gated behind FEATURE_HIGH_RESOLUTION_CANVAS so we can flip both
+    /// configs OFF in pbxproj to revert to unconditional 2048² without
+    /// touching code.
+    var maxCanvasDimension: CGFloat {
+        #if FEATURE_HIGH_RESOLUTION_CANVAS
+        if DeviceIdiom.isPhone { return 2048 }
+        let wss = device.recommendedMaxWorkingSetSize
+        let twoGigabytes: UInt64 = 2 * 1024 * 1024 * 1024
+        return wss >= twoGigabytes ? 4096 : 2048
+        #else
+        return 2048
+        #endif
+    }
+
+    /// One-shot startup log: working-set size + chosen cap. Lets you
+    /// verify on a real device which tier the gate selected without a
+    /// debugger. Fires the first time `maxCanvasDimension` would matter
+    /// (called from the first updateCanvasSize / setCanvasSize). Idempotent
+    /// — the guard prevents repeat logging on rotation / doc reload.
+    private var _maxCapLogged = false
+    private func logMaxCanvasDimensionOnce() {
+        guard !_maxCapLogged else { return }
+        _maxCapLogged = true
+        let wss = device.recommendedMaxWorkingSetSize
+        let wssMB = wss / (1024 * 1024)
+        let cap = maxCanvasDimension
+        let idiom = DeviceIdiom.isPhone ? "phone" : "pad"
+        print("📐 Canvas cap: \(Int(cap))² — idiom=\(idiom), WSS=\(wssMB) MB")
+    }
+
     /// Update canvas size based on screen dimensions
     /// Canvas should be a square with side length = ceil(screen diagonal) to avoid clipping when rotated
     func updateCanvasSize(for screenSize: CGSize) {
-        let maxTextureDimension: CGFloat = 2048
+        // Once a loaded doc has locked the canvas size, the screen-
+        // derived path no-ops — the saved doc dimensions are
+        // authoritative for the rest of the session.
+        guard !_canvasSizeLockedToDoc else { return }
+        logMaxCanvasDimensionOnce()
+        let cap = maxCanvasDimension
         let diagonal = ceil(sqrt(screenSize.width * screenSize.width + screenSize.height * screenSize.height))
-        // Round up to nearest power of 2 for better GPU performance, but cap at 2048 to avoid memory pressure on device
-        let size = min(pow(2, ceil(log2(diagonal))), maxTextureDimension)
+        // Round up to nearest power of 2 for better GPU performance, cap at maxCanvasDimension to bound memory pressure
+        let size = min(pow(2, ceil(log2(diagonal))), cap)
         let newSize = CGSize(width: size, height: size)
 
         // Only update if size actually changed
@@ -368,6 +442,46 @@ class CanvasRenderer: NSObject {
             // pattern.
             layerCompositeCache.updateCanvasSize(newSize)
         }
+    }
+
+    /// Force the canvas size to match a loaded document's saved
+    /// dimensions, clamped to `maxCanvasDimension`. Called by
+    /// `CanvasStateManager.loadLayered` after parsing the manifest's
+    /// `document.width` / `document.height`. Locks the canvas size for
+    /// the rest of the session so subsequent screen-driven
+    /// `updateCanvasSize` calls don't override it.
+    ///
+    /// **Why locking is correct.** A loaded doc's saved size is
+    /// authoritative — strokes are stored at saved-canvas coordinates,
+    /// not screen coordinates. If the renderer's canvas were bumped
+    /// back to the device cap after load, the doc's content would
+    /// appear shifted in the canvas-pixel coordinate space.
+    ///
+    /// **Cross-device case.** A doc saved at 4096² on iPad Pro opened
+    /// on iPad mini 6: `savedSize=4096×4096`, `maxCanvasDimension=2048`,
+    /// clamp drops to 2048×2048. The existing
+    /// `LoadedWithSizeMismatch` warning in `loadLayered` still fires;
+    /// content beyond the clamped region partially loads (top-left
+    /// of the saved 4096² lands in the 2048² grid). Acceptable v1
+    /// limitation; proper cross-device support is a downscale-on-import
+    /// follow-up.
+    func setCanvasSize(matchingDoc savedSize: CGSize) {
+        logMaxCanvasDimensionOnce()
+        let cap = maxCanvasDimension
+        let w = max(256, min(savedSize.width, cap))
+        let h = max(256, min(savedSize.height, cap))
+        // Round to power of 2 to keep texture allocation paths aligned
+        // (atlas, intermediate, scratch all use the same nearest-pow2
+        // assumption baked into the legacy diagonal-fit math).
+        let w2 = pow(2, ceil(log2(w)))
+        let h2 = pow(2, ceil(log2(h)))
+        let newSize = CGSize(width: w2, height: h2)
+        if newSize != _canvasSize {
+            print("📐 Canvas size set to \(newSize) matching loaded doc (saved=\(savedSize), cap=\(Int(cap))²)")
+            _canvasSize = newSize
+            layerCompositeCache.updateCanvasSize(newSize)
+        }
+        _canvasSizeLockedToDoc = true
     }
 
     init?(metalDevice: MTLDevice) {
