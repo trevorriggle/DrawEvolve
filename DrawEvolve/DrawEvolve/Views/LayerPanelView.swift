@@ -129,10 +129,13 @@ struct LayerPanelView: View {
         let isDragging = draggingLayerId == layer.id
         let displacement = displacementOffset(for: index, layer: layer)
         let isExpanded = expandedLayerIds.contains(layer.id)
+        // Hoisted from inline so the .gesture(...) modifier below can
+        // read it for the GestureMask.
+        let isSelected = selectedIndex == index
 
         LayerRow(
             layer: layer,
-            isSelected: selectedIndex == index,
+            isSelected: isSelected,
             isExpanded: isExpanded,
             isDragging: isDragging,
             isOnlyLayer: layers.count <= 1,
@@ -159,39 +162,7 @@ struct LayerPanelView: View {
             onEndOpacityDrag: { onEndOpacityDrag(index) },
             onBeginRename: { onBeginRename(index) },
             onCommitRename: { onCommitRename(index) },
-            onDelete: { onDeleteLayer(index) },
-            // Pickup + tracking. The "first call" of an active drag is
-            // detected by draggingLayerId == nil. Collapsing all expanded
-            // rows on pickup keeps the displacement-math row stride
-            // uniform — see displacementOffset's comment.
-            onDragChanged: { translation in
-                if draggingLayerId == nil {
-                    draggingLayerId = layer.id
-                    expandedLayerIds.removeAll()
-                }
-                if draggingLayerId == layer.id {
-                    dragTranslation = translation
-                }
-            },
-            // Drop. `to` for moveLayer(from:to:) is a pre-removal
-            // insertion point, so when moving up the array (target >
-            // source) we pass target+1 so the post-removal insert lands
-            // at `target`. Reversed display means dragging visually
-            // DOWN (positive y) maps to a LOWER array index.
-            onDragEnded: { finalTranslation in
-                guard draggingLayerId == layer.id else { return }
-                defer {
-                    draggingLayerId = nil
-                    dragTranslation = 0
-                }
-                let stride = measuredRowHeight + rowSpacing
-                let rowsMovedVisually = Int((finalTranslation / stride).rounded())
-                guard rowsMovedVisually != 0 else { return }
-                let targetArrayIndex = max(0, min(layers.count - 1, index - rowsMovedVisually))
-                guard targetArrayIndex != index else { return }
-                let destIndex = targetArrayIndex > index ? targetArrayIndex + 1 : targetArrayIndex
-                onMoveLayer(index, destIndex)
-            }
+            onDelete: { onDeleteLayer(index) }
         )
         // Only collapsed rows contribute to the measured row height — see
         // CollapsedRowHeightKey for why.
@@ -204,6 +175,17 @@ struct LayerPanelView: View {
                 y: isDragging ? 4 : 0)
         .opacity(isDragging ? 0.95 : 1.0)
         .zIndex(isDragging ? 1 : 0)
+        // Row-body reorder. GestureMask gates the entire gesture on
+        // selection: `.all` while selected (drag is live), `.subviews`
+        // otherwise (drag is fully off — touches fall through to the
+        // row's onTapGesture and the child Buttons). The mask flips
+        // without rebuilding the view, so view identity stays stable
+        // across selection changes. minimumDistance: 10 keeps quick
+        // button taps from being read as drags.
+        .gesture(
+            rowReorderGesture(index: index, layer: layer),
+            including: isSelected ? .all : .subviews
+        )
     }
 
     @ViewBuilder
@@ -223,18 +205,16 @@ struct LayerPanelView: View {
     /// dragging row. Rows visually between the source and the projected drop
     /// position shift by one row-stride; everything else stays put.
     ///
-    /// This math survives the gesture rewrite that replaced the long-press-
-    /// sequenced reorder with a dedicated grab handle on the selected row.
+    /// This math has survived two gesture rewrites — first the LongPress-
+    /// sequenced row gesture, then a dedicated grab handle on the selected
+    /// row, now a row-body DragGesture gated via GestureMask on isSelected.
     /// The inputs (draggingLayerId, dragTranslation, layer index) are the
-    /// same; the reversed-visual-order math is independent of which gesture
-    /// sets dragTranslation. The prior pickup-roulette / 250ms-hold / 50pt-
-    /// maximumDistance tuning is gone because the handle itself is the
-    /// commitment indicator — only one row has it, and only one gesture is
-    /// attached to it, so there's nothing to disambiguate. The function's
-    /// uniform-row-stride assumption still holds because onDragChanged
-    /// collapses all expanded rows on pickup. Kept (not deleted) because
-    /// "shift the visually-between rows" is the same problem regardless of
-    /// how the drag was initiated.
+    /// same in every case; the reversed-visual-order math is independent
+    /// of which gesture sets dragTranslation. The function's uniform-row-
+    /// stride assumption still holds because rowReorderGesture collapses
+    /// all expanded rows on pickup. Kept (not deleted) because "shift the
+    /// visually-between rows" is the same problem regardless of how the
+    /// drag was initiated.
     private func displacementOffset(for index: Int, layer: DrawingLayer) -> CGFloat {
         guard let draggingId = draggingLayerId,
               let draggingIndex = layers.firstIndex(where: { $0.id == draggingId }),
@@ -254,6 +234,55 @@ struct LayerPanelView: View {
             return stride
         }
         return 0
+    }
+
+    /// Row-body reorder gesture. Attached at the row level (not on a
+    /// child handle) with `.gesture(_:, including:)` masked on
+    /// `isSelected` so unselected rows can't initiate a drag — touches
+    /// there fall through to the row's onTapGesture (which selects the
+    /// row) and the eye / lock / chevron Buttons (which fire normally).
+    /// minimumDistance: 10 keeps button-tap finger jitter (typically
+    /// <10pt) from being misread as a drag.
+    ///
+    /// Pickup state (`draggingLayerId`, `dragTranslation`) and the drop
+    /// math live here because they're owned by LayerPanelView's @State —
+    /// LayerRow is unaware of the drag.
+    private func rowReorderGesture(index: Int, layer: DrawingLayer) -> some Gesture {
+        DragGesture(minimumDistance: 10, coordinateSpace: .local)
+            .onChanged { value in
+                // "First call of an active drag" detected by
+                // draggingLayerId == nil. Collapse expanded rows on
+                // pickup so displacementOffset's uniform-row-stride
+                // assumption holds.
+                if draggingLayerId == nil {
+                    draggingLayerId = layer.id
+                    expandedLayerIds.removeAll()
+                }
+                if draggingLayerId == layer.id {
+                    dragTranslation = value.translation.height
+                }
+            }
+            .onEnded { value in
+                guard draggingLayerId == layer.id else { return }
+                defer {
+                    draggingLayerId = nil
+                    dragTranslation = 0
+                }
+                let stride = measuredRowHeight + rowSpacing
+                let rowsMovedVisually = Int((value.translation.height / stride).rounded())
+                guard rowsMovedVisually != 0 else { return }
+                // Reversed display: dragging visually DOWN (positive y)
+                // means moving toward the bottom of the stack = lower
+                // array index.
+                let targetArrayIndex = max(0, min(layers.count - 1, index - rowsMovedVisually))
+                guard targetArrayIndex != index else { return }
+                // moveLayer(from:to:) interprets `to` as a pre-removal
+                // insertion point: target+1 when moving up the array
+                // (so the post-removal insert lands at `target`); plain
+                // target when moving down.
+                let destIndex = targetArrayIndex > index ? targetArrayIndex + 1 : targetArrayIndex
+                onMoveLayer(index, destIndex)
+            }
     }
 
 }
@@ -345,13 +374,6 @@ private struct LayerRow: View {
     let onBeginRename: () -> Void
     let onCommitRename: () -> Void
     let onDelete: () -> Void
-    /// Reorder drag callbacks. The gesture is attached to a grab handle
-    /// view that only renders on the selected row, so unselected rows
-    /// can't accidentally pick themselves up. Parent owns drag state
-    /// (draggingLayerId, dragTranslation) and pickup/drop logic — these
-    /// callbacks just relay the gesture's translation.
-    let onDragChanged: (CGFloat) -> Void
-    let onDragEnded: (CGFloat) -> Void
 
     @FocusState private var nameFieldFocused: Bool
 
@@ -423,10 +445,6 @@ private struct LayerRow: View {
             }
             .buttonStyle(.borderless)
 
-            if isSelected {
-                grabHandle
-            }
-
             Button(action: onToggleExpand) {
                 Image(systemName: "chevron.right")
                     .font(.footnote.weight(.semibold))
@@ -437,31 +455,6 @@ private struct LayerRow: View {
             }
             .buttonStyle(.borderless)
         }
-    }
-
-    /// Drag-to-reorder affordance. Only rendered when the row is selected
-    /// (the parent gates this with `if isSelected`). DragGesture lives on
-    /// the handle alone — not the whole row — so eye/lock/chevron taps on
-    /// any row remain unimpeded and there's no row-vs-button gesture
-    /// disambiguation problem. minimumDistance: 5 absorbs finger jitter
-    /// without forcing the user through the long-press commitment that
-    /// the previous gesture stack needed.
-    private var grabHandle: some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.footnote.weight(.semibold))
-            .foregroundColor(.secondary)
-            .frame(width: 28, height: 28)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 5, coordinateSpace: .local)
-                    .onChanged { value in
-                        onDragChanged(value.translation.height)
-                    }
-                    .onEnded { value in
-                        onDragEnded(value.translation.height)
-                    }
-            )
-            .accessibilityLabel("Reorder layer")
     }
 
     @ViewBuilder
@@ -594,3 +587,4 @@ private struct LayerRow: View {
         .navigationTitle("Layers")
     }
 }
+
