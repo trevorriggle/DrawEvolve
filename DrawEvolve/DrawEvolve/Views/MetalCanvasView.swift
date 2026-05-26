@@ -2715,8 +2715,17 @@ struct MetalCanvasView: UIViewRepresentable {
                 // user's drag whenever rotation is non-zero.
                 let endScreen = latestScreenLocation
                 let corners = marqueeCorners(screenStart: startScreen, screenEnd: endScreen)
-                let docCorners: [CGPoint] = corners.map {
-                    canvasState?.screenToDocument($0) ?? $0
+                // Per-corner NaN-skip via screenToDocumentOrNil. If any of
+                // the 4 corner conversions fails, drop the whole preview
+                // frame — a 3-corner rect is degenerate, and a corner-with-
+                // contaminated-screen-coords is the audit's root cause #6.
+                let docSize = canvasState?.documentSize ?? .zero
+                let maybeCorners: [CGPoint?] = corners.map { canvasState?.screenToDocumentOrNil($0) }
+                guard maybeCorners.allSatisfy({ $0 != nil }) else {
+                    return  // Skip this preview frame; geometry incomplete.
+                }
+                let docCorners: [CGPoint] = maybeCorners.compactMap { $0 }.map {
+                    CanvasStateManager.clampToCanvas($0, documentSize: docSize)
                 }
 
                 if let canvasState = canvasState {
@@ -2731,11 +2740,18 @@ struct MetalCanvasView: UIViewRepresentable {
             if currentTool == .lasso {
                 // For lasso, append every coalesced sample so the path captures fine detail
                 // on Apple Pencil (~240 Hz) instead of the ~60 Hz top-level events.
+                // Per-sample NaN-skip + clamp: a single contaminated sample
+                // (audit root cause #6) used to land raw screen coords into a
+                // doc-space polygon; now we skip and continue.
                 let samples = event?.coalescedTouches(for: touch) ?? [touch]
+                let docSize = canvasState?.documentSize ?? .zero
                 for sample in samples {
                     let sampleScreen = sample.location(in: view)
-                    let sampleDoc = canvasState?.screenToDocument(sampleScreen) ?? sampleScreen
-                    lassoPath.append(sampleDoc)
+                    guard let sampleDoc = canvasState?.screenToDocumentOrNil(sampleScreen) else {
+                        continue
+                    }
+                    let clamped = CanvasStateManager.clampToCanvas(sampleDoc, documentSize: docSize)
+                    lassoPath.append(clamped)
                 }
 
                 if let canvasState = canvasState {
@@ -3359,10 +3375,49 @@ struct MetalCanvasView: UIViewRepresentable {
                 // exactly matches what the user dragged on screen.
                 let endScreen = screenEndLocation
                 let corners = marqueeCorners(screenStart: startScreen, screenEnd: endScreen)
-                let docCorners: [CGPoint] = corners.map {
-                    canvasState?.screenToDocument($0) ?? $0
+                // Per-corner NaN-skip via screenToDocumentOrNil. If any of
+                // the 4 corner conversions fails the rect is degenerate;
+                // bail without storing a polygon (clears preview, no
+                // selection created). Mirrors the lasso's "drop bad
+                // sample" pattern.
+                let docSize = canvasState?.documentSize ?? .zero
+                let maybeCorners: [CGPoint?] = corners.map { canvasState?.screenToDocumentOrNil($0) }
+                guard maybeCorners.allSatisfy({ $0 != nil }) else {
+                    print("Rectangle select: corner conversion failed (NaN) — ignoring selection")
+                    if let canvasState = canvasState {
+                        Task { @MainActor in
+                            canvasState.previewSelection = nil
+                            canvasState.previewLassoPath = nil
+                        }
+                    }
+                    resetShapeToolState()
+                    return
+                }
+                let docCorners: [CGPoint] = maybeCorners.compactMap { $0 }.map {
+                    CanvasStateManager.clampToCanvas($0, documentSize: docSize)
                 }
                 print("Rectangle select: creating polygon selection with corners \(docCorners)")
+
+                // Rect min-size validation — parity with the lasso's
+                // existing <10×10 reject (audit §7.2 #1). A 1×1 invisible
+                // rect used to commit and trigger an unwanted lift; now
+                // it's rejected at the polygon-storage stage.
+                let xs = docCorners.map(\.x)
+                let ys = docCorners.map(\.y)
+                let width  = (xs.max() ?? 0) - (xs.min() ?? 0)
+                let height = (ys.max() ?? 0) - (ys.min() ?? 0)
+                let minSelectionSize: CGFloat = 10
+                if width < minSelectionSize || height < minSelectionSize {
+                    print("Rectangle select: too small (\(width)x\(height)), ignoring")
+                    if let canvasState = canvasState {
+                        Task { @MainActor in
+                            canvasState.previewSelection = nil
+                            canvasState.previewLassoPath = nil
+                        }
+                    }
+                    resetShapeToolState()
+                    return
+                }
 
                 // Store selection in canvas state as a 4-point polygon.
                 // Non-destructive — no pixel extraction here. The polygon

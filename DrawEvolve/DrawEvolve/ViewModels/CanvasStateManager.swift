@@ -2399,6 +2399,43 @@ class CanvasStateManager: ObservableObject {
         )
     }
 
+    /// Same as `screenToDocument` but returns nil on degenerate inputs
+    /// (NaN, non-finite transform fields, zero-size canvas/screen)
+    /// instead of the `.zero` sentinel. Used by selection touch paths
+    /// (lasso/rect at touchesMoved/touchesEnded) so a NaN sample is
+    /// dropped rather than silently substituted with screen coordinates
+    /// — the latter was the suspected cause of the "snap to bottom
+    /// edge" symptom per audit root cause #6.
+    func screenToDocumentOrNil(_ point: CGPoint) -> CGPoint? {
+        Self.screenToDocumentOrNil(
+            point,
+            screenSize: screenSize,
+            documentSize: documentSize,
+            zoomScale: zoomScale,
+            panOffset: panOffset,
+            canvasRotationRadians: canvasRotation.radians,
+            flipHorizontal: flipHorizontal,
+            flipVertical: flipVertical
+        )
+    }
+
+    /// Clamp a document-space point to canvas bounds
+    /// [0, documentSize.width] × [0, documentSize.height]. Used at
+    /// input-time and storage-time for selectionPath / lassoPath /
+    /// previewLassoPath so the marching-ants overlay never renders
+    /// outside the canvas. Renderer-side clamps in extractPixels /
+    /// texturePixelRect remain as belt-and-suspenders but should no
+    /// longer be load-bearing.
+    ///
+    /// `nonisolated static` for symmetry with `screenToDocument` — pure
+    /// function of inputs, no actor state.
+    nonisolated static func clampToCanvas(_ point: CGPoint, documentSize: CGSize) -> CGPoint {
+        CGPoint(
+            x: max(0, min(documentSize.width, point.x)),
+            y: max(0, min(documentSize.height, point.y))
+        )
+    }
+
     /// Pure inverse-transform from view/screen-points space to document
     /// space. Single source of truth for the inverse pipeline — the
     /// instance method above is a thin wrapper that pulls these fields off
@@ -2413,7 +2450,11 @@ class CanvasStateManager: ObservableObject {
     ///
     /// Returns `.zero` for degenerate inputs (NaN, zero/negative sizes,
     /// non-finite transform fields). Callers that care about the
-    /// degenerate case should pre-check rather than relying on the sentinel.
+    /// degenerate case should call `screenToDocumentOrNil` (which
+    /// returns nil on the same conditions) rather than parsing the
+    /// `.zero` sentinel — a legitimate `.zero` result from inverse-
+    /// transforming the document's top-left corner is indistinguishable
+    /// from a guard-failure return here.
     nonisolated static func screenToDocument(
         _ point: CGPoint,
         screenSize: CGSize,
@@ -2424,13 +2465,45 @@ class CanvasStateManager: ObservableObject {
         flipHorizontal: Bool,
         flipVertical: Bool
     ) -> CGPoint {
+        Self.screenToDocumentOrNil(
+            point,
+            screenSize: screenSize,
+            documentSize: documentSize,
+            zoomScale: zoomScale,
+            panOffset: panOffset,
+            canvasRotationRadians: canvasRotationRadians,
+            flipHorizontal: flipHorizontal,
+            flipVertical: flipVertical
+        ) ?? .zero
+    }
+
+    /// Nil-returning sibling of `screenToDocument`. Same math; returns
+    /// `nil` instead of `.zero` on degenerate input. Selection touch
+    /// paths use this to skip NaN samples rather than appending coord-
+    /// frame-mixed points to `lassoPath`/`selectionPath` (audit root
+    /// cause #6 — the `?? screenLocation` fallback was silently writing
+    /// raw screen points into document-space polygons).
+    ///
+    /// The inverse-transform math lives here as the single source of
+    /// truth; the `.zero`-returning sibling delegates to this and maps
+    /// nil → `.zero` for source compatibility with non-selection callers.
+    nonisolated static func screenToDocumentOrNil(
+        _ point: CGPoint,
+        screenSize: CGSize,
+        documentSize: CGSize,
+        zoomScale: CGFloat,
+        panOffset: CGPoint,
+        canvasRotationRadians: CGFloat,
+        flipHorizontal: Bool,
+        flipVertical: Bool
+    ) -> CGPoint? {
         guard point.x.isFinite, point.y.isFinite,
               screenSize.width > 0, screenSize.height > 0,
               documentSize.width > 0, documentSize.height > 0,
               zoomScale.isFinite, zoomScale > 0,
               panOffset.x.isFinite, panOffset.y.isFinite,
               canvasRotationRadians.isFinite else {
-            return .zero
+            return nil
         }
 
         let fitSize = max(screenSize.width, screenSize.height)
