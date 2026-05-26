@@ -420,6 +420,10 @@ struct DrawingCanvasView: View {
                 )
                 .navigationTitle("Layers")
                 .navigationBarTitleDisplayMode(.inline)
+                // Dismiss only via the Done button. Without this, the
+                // sheet drag-down gesture silently closes the panel,
+                // which made it feel disposable. Done is the one path.
+                .interactiveDismissDisabled()
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") {
