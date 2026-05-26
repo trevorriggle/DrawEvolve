@@ -874,3 +874,87 @@ struct TransformCancelPill: View {
         }
     }
 }
+
+// MARK: - Floating selection border
+
+/// Thin static (non-animated) border around the floating texture's
+/// current transformed bounding box. Visible only during the Lifted
+/// state (`floatingSelectionTexture != nil`); replaces the marching-
+/// ants outline (which after commit 6 is Polygon-state-only).
+///
+/// Per-corner math mirrors TransformHandlesOverlay's so the border
+/// follows scale + rotation + offset in lockstep with the floating
+/// texture compositor. White stroke with a 1pt dark drop shadow so
+/// the border reads on light and dark canvases without picking a
+/// fixed canvas-relative color.
+///
+/// **Coexistence note:** TransformHandlesOverlay already draws a blue
+/// 1.5pt bounding-box outline at SelectionOverlays.swift:218-227 as
+/// part of the handles' visual cluster. After commit 6 ships, both
+/// outlines render in Lifted state. Per the proposal's "revisit
+/// during implementation" allowance for styling: if the two outlines
+/// read as visual clutter on device, follow-up options are (a) drop
+/// the handle overlay's blue outline so only this border shows, (b)
+/// match this border's color to the handle's blue, or (c) remove this
+/// border and let the handle outline serve dual-duty. Default for now:
+/// keep both visible — they reinforce the "this is your selection"
+/// signal and the white+shadow stands out from the blue handles.
+struct FloatingSelectionBorder: View {
+    @ObservedObject var canvasState: CanvasStateManager
+
+    var body: some View {
+        if canvasState.floatingSelectionTexture != nil,
+           let originalRect = canvasState.selectionOriginalRect {
+            content(originalRect: originalRect)
+        }
+    }
+
+    @ViewBuilder
+    private func content(originalRect: CGRect) -> some View {
+        let displayedW = originalRect.width  * canvasState.selectionScale.width
+        let displayedH = originalRect.height * canvasState.selectionScale.height
+        let centerDoc = CGPoint(
+            x: originalRect.origin.x + canvasState.selectionOffset.x + displayedW / 2,
+            y: originalRect.origin.y + canvasState.selectionOffset.y + displayedH / 2
+        )
+        let halfW = displayedW / 2
+        let halfH = displayedH / 2
+        let theta = canvasState.selectionRotation.radians
+
+        // Local positions relative to displayed-rect center, Y-down.
+        let cornerLocals: [CGPoint] = [
+            CGPoint(x: -halfW, y: -halfH),  // TL
+            CGPoint(x:  halfW, y: -halfH),  // TR
+            CGPoint(x:  halfW, y:  halfH),  // BR
+            CGPoint(x: -halfW, y:  halfH),  // BL
+        ]
+
+        // Rotation math inlined (rotateLocalToDoc is private to
+        // TransformHandlesOverlay — making it fileprivate would creep
+        // outside commit 6's scope). Same Y-down rotation formula:
+        //   x' =  x cosθ + y sinθ
+        //   y' = -x sinθ + y cosθ
+        let cornerDocs: [CGPoint] = cornerLocals.map { p in
+            if theta == 0 {
+                return CGPoint(x: p.x + centerDoc.x, y: p.y + centerDoc.y)
+            }
+            let c = cos(theta), s = sin(theta)
+            return CGPoint(
+                x:  p.x * c + p.y * s + centerDoc.x,
+                y: -p.x * s + p.y * c + centerDoc.y
+            )
+        }
+        let cornerScreens = cornerDocs.map { canvasState.documentToScreen($0) }
+
+        Path { p in
+            p.move(to: cornerScreens[0])
+            p.addLine(to: cornerScreens[1])
+            p.addLine(to: cornerScreens[2])
+            p.addLine(to: cornerScreens[3])
+            p.closeSubpath()
+        }
+        .stroke(Color.white, lineWidth: 1.5)
+        .shadow(color: Color.black.opacity(0.5), radius: 0, x: 0, y: 1)
+        .allowsHitTesting(false)
+    }
+}

@@ -853,9 +853,17 @@ struct DrawingCanvasView: View {
                         .ignoresSafeArea()
                 }
 
+                // Marching ants — Polygon-state only after this commit.
+                // Gate: selection polygon exists AND no lift has happened
+                // yet (floatingSelectionTexture == nil). The earlier
+                // `!isTransformingSelection` condition is removed; the
+                // broader gate subsumes it (one gate, one rule per
+                // Revision 4 / §10 #2). Lifted-state visual indicator is
+                // FloatingSelectionBorder, mounted alongside the handles
+                // below.
                 if !isViewingSnapshot,
                    let path = canvasState.selectionPath,
-                   !canvasState.isTransformingSelection {
+                   canvasState.floatingSelectionTexture == nil {
                     let screenPath = canvasState.documentPathToScreen(path)
                     MarchingAntsPath(path: screenPath)
                         .allowsHitTesting(false)
@@ -867,6 +875,17 @@ struct DrawingCanvasView: View {
                 // the overlay frame falls through to MTKView.
                 if !isViewingSnapshot {
                     TransformHandlesOverlay(canvasState: canvasState)
+                        .ignoresSafeArea()
+                }
+
+                // Static bounding-box border around the floating texture.
+                // Replaces marching ants during Lifted state; sits at the
+                // same level as TransformHandlesOverlay so the handles'
+                // dots render on top of the border's corners (handles' own
+                // bounding-box outline coexists — see Coexistence note on
+                // FloatingSelectionBorder).
+                if !isViewingSnapshot {
+                    FloatingSelectionBorder(canvasState: canvasState)
                         .ignoresSafeArea()
                 }
 
@@ -1302,12 +1321,15 @@ struct DrawingCanvasView: View {
                 .allowsHitTesting(false)
             }
 
+            // Marching ants — Polygon-state only after this commit.
+            // Same gate change as the iPad path above: add
+            // `floatingSelectionTexture == nil`; remove the
+            // `!isTransformingSelection` condition. Lifted-state visual
+            // is FloatingSelectionBorder, mounted alongside the handles
+            // below.
             if !isViewingSnapshot,
                let path = canvasState.selectionPath,
-               !canvasState.isTransformingSelection {
-                // Transform path from document space to screen space.
-                // Hidden during transform — see iPad activeSelection
-                // branch above for the rationale.
+               canvasState.floatingSelectionTexture == nil {
                 let screenPath = canvasState.documentPathToScreen(path)
                 MarchingAntsPath(path: screenPath)
                     .allowsHitTesting(false)
@@ -1334,6 +1356,15 @@ struct DrawingCanvasView: View {
             // frame is transparent and lets touches fall through to MTKView.
             if !isViewingSnapshot {
                 TransformHandlesOverlay(canvasState: canvasState)
+                    .ignoresSafeArea()
+            }
+
+            // Static bounding-box border around the floating texture.
+            // Replaces marching ants during Lifted state. See iPad
+            // mount above for the coexistence note with the handles'
+            // own outline.
+            if !isViewingSnapshot {
+                FloatingSelectionBorder(canvasState: canvasState)
                     .ignoresSafeArea()
             }
 
