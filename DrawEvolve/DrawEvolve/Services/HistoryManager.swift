@@ -7,6 +7,7 @@
 
 import Foundation
 import UIKit
+import SwiftUI  // for Angle (used in SelectionLiftState)
 
 extension Notification.Name {
     /// Broadcast when the app receives a `didReceiveMemoryWarning` and
@@ -110,6 +111,33 @@ class HistoryManager: ObservableObject {
     }
 }
 
+/// Bundle of everything needed to reconstruct the "lifted" selection state
+/// (layer-with-hole + floating texture + polygon + transform deltas).
+/// Carried by the three new selection HistoryAction cases. Stored as
+/// UIImage rather than MTLTexture so the history stack stays CPU-resident
+/// — the floating MTLTexture is recreated via `renderer.makeTexture(from:)`
+/// on undo/redo. `preLiftSnapshot` is included so that undo-of-commit /
+/// undo-of-cancel can restore CanvasStateManager.selectionBeforeSnapshot,
+/// which any subsequent user-triggered cancel from the restored lifted
+/// state will need.
+struct SelectionLiftState {
+    /// Layer state BEFORE the lift (no hole).
+    let preLiftSnapshot: CanvasRenderer.LayerSnapshot
+    /// Layer state AT the lift (hole punched).
+    let layerWithHoleSnapshot: CanvasRenderer.LayerSnapshot
+    /// CPU copy of the lifted pixels, used to rebuild the floating MTLTexture.
+    let liftedPixels: UIImage
+    /// Polygon at lift time (RDP-simplified + closed for lasso; 4-corner quad for rect).
+    let sourcePath: [CGPoint]
+    /// Bbox at lift time. Restored to `selectionOriginalRect`.
+    let originalRect: CGRect
+    /// Transform deltas captured at the moment commit/cancel fired
+    /// (zero/identity for `.selectionLift` — no transforms applied yet).
+    let offset: CGPoint
+    let scale: CGSize
+    let rotation: Angle
+}
+
 enum HistoryAction {
     case stroke(layerId: UUID, beforeSnapshot: CanvasRenderer.LayerSnapshot, afterSnapshot: CanvasRenderer.LayerSnapshot)
     case layerAdded(DrawingLayer)
@@ -123,6 +151,26 @@ enum HistoryAction {
     // visibility changes between record and undo don't re-flip the
     // wrong set.
     case flipContent(layerIds: [UUID], flipH: Bool, flipV: Bool)
+
+    // MARK: - Selection lifecycle (Polygon ↔ Lifted ↔ Idle)
+    //
+    // Three explicit cases for the rebuilt selection state machine.
+    // - .selectionLift: Polygon → Lifted (first transform input).
+    //   Undo: liftState.preLiftSnapshot → pre-lift Idle.
+    //   Redo: liftState.layerWithHoleSnapshot + recreate floating + restore polygon.
+    // - .selectionCommit: Lifted → Idle (tap-outside / tool-change / floating-drag release).
+    //   Undo: restore lifted state from liftState.
+    //   Redo: afterSnapshot → post-commit Idle.
+    // - .selectionCancel: Lifted → Idle (pill tap post-lift).
+    //   Undo: restore lifted state from liftState.
+    //   Redo: restoredSnapshot → pre-lift Idle.
+    //
+    // None of these are recorded yet — call sites land in a later commit.
+    // Restore branches in CanvasStateManager.undo()/redo() are wired so
+    // the schema is exhaustive and functional the moment a call site exists.
+    case selectionLift(layerId: UUID, liftState: SelectionLiftState)
+    case selectionCommit(layerId: UUID, afterSnapshot: CanvasRenderer.LayerSnapshot, liftState: SelectionLiftState)
+    case selectionCancel(layerId: UUID, restoredSnapshot: CanvasRenderer.LayerSnapshot, liftState: SelectionLiftState)
 
     enum LayerProperty {
         case opacity(old: Float, new: Float)

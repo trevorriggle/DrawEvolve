@@ -607,6 +607,81 @@ class CanvasStateManager: ObservableObject {
             : min(selectedLayerIndex, layers.count - 1)
     }
 
+    // MARK: - Selection history restore helpers
+    //
+    // Used by the three new .selection* cases in undo()/redo() below.
+    // Centralized to keep the switch cases tiny — each case maps to one
+    // of these two restores, plus an optional layer-snapshot restore for
+    // "Idle" transitions.
+
+    /// Restore the layer to a snapshot and clear all selection state.
+    /// Used by:
+    ///   - undo of .selectionLift (back to pre-lift Idle)
+    ///   - redo of .selectionCommit (forward to post-commit Idle)
+    ///   - redo of .selectionCancel (forward to post-cancel Idle, pre-lift)
+    private func restoreLayerAndClearSelection(layerId: UUID, snapshot: CanvasRenderer.LayerSnapshot) {
+        guard let layer = layers.first(where: { $0.id == layerId }),
+              let tileGrid = layer.tileGrid,
+              let renderer = renderer else { return }
+        renderer.restoreSnapshot(snapshot, tileGrid: tileGrid)
+        clearSelection()
+        refreshLayerThumbnailAfterSelectionRestore(layerId: layerId, tileGrid: tileGrid, renderer: renderer)
+    }
+
+    /// Restore the full lifted state from a SelectionLiftState. Used by:
+    ///   - undo of .selectionCommit (back to lifted)
+    ///   - undo of .selectionCancel (back to lifted)
+    ///   - redo of .selectionLift (forward to lifted)
+    /// Repopulates `selectionBeforeSnapshot` from liftState.preLiftSnapshot
+    /// so any subsequent user-triggered cancel from this restored state has
+    /// the right snapshot to revert to.
+    private func restoreLiftedState(layerId: UUID, liftState: SelectionLiftState) {
+        guard let layer = layers.first(where: { $0.id == layerId }),
+              let tileGrid = layer.tileGrid,
+              let renderer = renderer else { return }
+
+        renderer.restoreSnapshot(liftState.layerWithHoleSnapshot, tileGrid: tileGrid)
+
+        // Rebuild the floating MTLTexture from the CPU copy. If the
+        // texture upload fails the lifted state is incomplete (no
+        // floating texture, but polygon present) — undo/redo will look
+        // wrong but won't crash. Failure is unlikely; surface a print so
+        // we'd see it in tail logs if it ever happens.
+        if let texture = renderer.makeTexture(from: liftState.liftedPixels) {
+            floatingSelectionTexture = texture
+        } else {
+            print("⚠️ restoreLiftedState: makeTexture(from:) returned nil — floating texture not rebuilt")
+        }
+
+        selectionPath = liftState.sourcePath
+        selectionOriginalRect = liftState.originalRect
+        selectionOffset = liftState.offset
+        selectionScale = liftState.scale
+        selectionRotation = liftState.rotation
+        selectionBeforeSnapshot = liftState.preLiftSnapshot
+        selectionLayerSnapshot = liftState.layerWithHoleSnapshot
+        selectionPixels = liftState.liftedPixels
+
+        refreshLayerThumbnailAfterSelectionRestore(layerId: layerId, tileGrid: tileGrid, renderer: renderer)
+    }
+
+    /// Same off-main thumbnail refresh pattern used by the .stroke restore
+    /// branches above. Factored out so the two selection helpers don't
+    /// duplicate the Sendable-dance.
+    private func refreshLayerThumbnailAfterSelectionRestore(layerId: UUID, tileGrid: TileGrid, renderer: CanvasRenderer) {
+        nonisolated(unsafe) let unsafeRenderer = renderer
+        nonisolated(unsafe) let unsafeTileGrid: TileGrid? = tileGrid
+        Task.detached {
+            if let thumbnail = unsafeRenderer.generateThumbnail(fromTileGrid: unsafeTileGrid, size: CGSize(width: 44, height: 44)) {
+                await MainActor.run {
+                    if let layer = self.layers.first(where: { $0.id == layerId }) {
+                        layer.updateThumbnail(thumbnail)
+                    }
+                }
+            }
+        }
+    }
+
     func undo() {
         guard let action = historyManager.undo() else { return }
         defer { bumpLayerMutation() }
@@ -673,6 +748,18 @@ class CanvasStateManager: ObservableObject {
             // current visibility) so a layer hidden after the op is
             // still un-flipped.
             applyFlipToLayers(layerIds: layerIds, flipH: flipH, flipV: flipV)
+
+        case .selectionLift(let layerId, let liftState):
+            // Undo: pre-lift Idle. Layer pixels back, no floating, no polygon.
+            restoreLayerAndClearSelection(layerId: layerId, snapshot: liftState.preLiftSnapshot)
+
+        case .selectionCommit(let layerId, _, let liftState):
+            // Undo: restore lifted state. User can re-drag, re-commit, or cancel.
+            restoreLiftedState(layerId: layerId, liftState: liftState)
+
+        case .selectionCancel(let layerId, _, let liftState):
+            // Undo: restore lifted state (same shape as undo of commit).
+            restoreLiftedState(layerId: layerId, liftState: liftState)
         }
     }
 
@@ -739,6 +826,18 @@ class CanvasStateManager: ObservableObject {
 
         case .flipContent(let layerIds, let flipH, let flipV):
             applyFlipToLayers(layerIds: layerIds, flipH: flipH, flipV: flipV)
+
+        case .selectionLift(let layerId, let liftState):
+            // Redo: forward to lifted state.
+            restoreLiftedState(layerId: layerId, liftState: liftState)
+
+        case .selectionCommit(let layerId, let afterSnapshot, _):
+            // Redo: forward to post-commit Idle.
+            restoreLayerAndClearSelection(layerId: layerId, snapshot: afterSnapshot)
+
+        case .selectionCancel(let layerId, let restoredSnapshot, _):
+            // Redo: forward to post-cancel Idle (pre-lift state).
+            restoreLayerAndClearSelection(layerId: layerId, snapshot: restoredSnapshot)
         }
     }
 
