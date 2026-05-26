@@ -475,6 +475,22 @@ class CanvasStateManager: ObservableObject {
         bumpLayerMutation()
     }
 
+    /// Single source of truth for "can the user write pixels to the
+    /// active layer right now." False when there's no valid selected
+    /// layer, when the active layer is hidden, or when it's locked.
+    ///
+    /// Read at the live-stroke entry point (MetalCanvasView.touchesBegan)
+    /// and at the top of every CanvasStateManager commit method that
+    /// writes pixels (text, pose, selection, translation, blur). Per
+    /// spec, hidden- or locked-layer write attempts no-op silently —
+    /// no toast, no haptic, no auto-unselect. The user can toggle
+    /// visibility / unlock and retry.
+    var canDrawOnActiveLayer: Bool {
+        guard layers.indices.contains(selectedLayerIndex) else { return false }
+        let layer = layers[selectedLayerIndex]
+        return layer.isVisible && !layer.isLocked
+    }
+
     func deleteLayer(at index: Int) {
         guard layers.count > 1, layers.indices.contains(index) else { return }
         let layer = layers[index]
@@ -821,6 +837,13 @@ class CanvasStateManager: ObservableObject {
     func commitFloatingText() {
         guard floatingText != nil else { return }
 
+        // Bail before rasterizing or registering the floatingText=nil
+        // defer below. Hidden/locked active layer: keep the floating
+        // text intact so the user can toggle vis on / unlock and try
+        // the commit again. The defer at line ~838 would silently
+        // destroy the floatingText if we reached it.
+        guard canDrawOnActiveLayer else { return }
+
         // Cancel any pending debounced rasterise and run one synchronously
         // so the commit always uses the latest content/settings — a setting
         // tweak immediately followed by a tool change can otherwise commit
@@ -1163,9 +1186,10 @@ class CanvasStateManager: ObservableObject {
     /// renderImage call.
     @discardableResult
     func commitPoseToTrace(skeleton: PoseSkeleton, opacity: CGFloat) -> Bool {
-        guard selectedLayerIndex >= 0, selectedLayerIndex < layers.count else { return false }
+        // Subsumes the prior `selectedLayerIndex` bounds + `!isLocked`
+        // checks and extends to `isVisible`. See canDrawOnActiveLayer.
+        guard canDrawOnActiveLayer else { return false }
         let layer = layers[selectedLayerIndex]
-        guard !layer.isLocked else { return false }
         guard let tileGrid = layer.tileGrid else { return false }
         guard let renderer = renderer else { return false }
         guard let image = PoseRasterizer.rasterize(
@@ -1865,6 +1889,13 @@ class CanvasStateManager: ObservableObject {
     /// bake it back into the layer in a single GPU pass and then drop the
     /// floating texture.
     func commitSelection() {
+        // Hidden/locked active layer: leave the floating selection
+        // intact. User can re-trigger the commit by re-dragging (will
+        // be blocked again) or drop the floating state via the Cancel
+        // pill (clearSelection). No state mutation here per the
+        // "silent no-op" spec.
+        guard canDrawOnActiveLayer else { return }
+
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
@@ -2009,6 +2040,12 @@ class CanvasStateManager: ObservableObject {
     /// Finalize a move-tool whole-layer drag. One GPU blit moves the bits;
     /// no per-pixel CPU work.
     func commitActiveLayerTranslation() {
+        // Hidden/locked active layer: leave the in-flight translation
+        // state intact (selectionOffset, isTranslatingActiveLayer).
+        // User can re-drag (blocked again) or switch tools to drop it.
+        // Same shape as commitSelection.
+        guard canDrawOnActiveLayer else { return }
+
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
@@ -2541,6 +2578,12 @@ class CanvasStateManager: ObservableObject {
     /// re-snapshot so the user can immediately stack another blur on top.
     /// Tool stays active per directive.
     func commitBlurAdjustment() {
+        // Hidden/locked active layer: keep the blur preview HUD active
+        // and the GPU-side adjustment state armed. User can re-drag the
+        // scrubber (blocked again) or ✕ (cancelBlurAdjustment) to
+        // discard.
+        guard canDrawOnActiveLayer else { return }
+
         guard blurAdjustmentActive,
               let renderer = renderer,
               let layer = layers[safe: selectedLayerIndex],

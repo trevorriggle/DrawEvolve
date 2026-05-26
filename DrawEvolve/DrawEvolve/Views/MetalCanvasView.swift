@@ -1789,6 +1789,16 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Hidden or locked active layer: silently no-op. Per spec
+            // we don't auto-unselect — the layer stays selected so the
+            // user can toggle visibility back on or unlock without
+            // re-selecting. canDrawOnActiveLayer is the single policy
+            // locus; live strokes and all CanvasStateManager commit
+            // methods consult it.
+            guard canvasState?.canDrawOnActiveLayer == true else {
+                return
+            }
+
             // Perfect-shape two-finger constraint. A new touch landing on
             // the canvas while a shape stroke is mid-drag is the modifier
             // that snaps the in-progress rectangle/circle/line to a square
