@@ -570,6 +570,55 @@ struct MetalCanvasView: UIViewRepresentable {
 
         private var strokeSessions: [ObjectIdentifier: StrokeSession] = [:]
 
+        /// Deferred stroke commit (Issue 2a). Finger touches on drawing tools
+        /// (non-shape, non-pencil) stash a `PendingTouchSample` here at
+        /// `touchesBegan` instead of immediately creating a `StrokeSession`.
+        /// Resolution:
+        ///   - `touchesMoved`: movement ≥ `pendingCommitDistanceThreshold` OR
+        ///     elapsed ≥ `pendingCommitTimeDeadline` → promote into a real
+        ///     session (seeded with the ORIGINAL touch-down sample, not the
+        ///     current finger position).
+        ///   - `touchesMoved` with `event.allTouches.count > 1`: gesture is
+        ///     taking over → discard all pending, no session created.
+        ///   - `touchesEnded`: pending sample ended without ever crossing the
+        ///     commit gate → promote as a tap-dot (single-stamp stroke). The
+        ///     rest of `touchesEnded` then commits it via the existing
+        ///     session-end path. Preserves tap-to-place-a-dot.
+        ///   - `touchesCancelled`: discard with no visible artifact —
+        ///     deferred samples never deposited stamps into scratch or layer.
+        ///
+        /// Pencil bypasses the defer: pencil never participates in a
+        /// two-finger gesture and latency is sacred on Pencil. Shape tools
+        /// (.line/.rectangle/.circle) also bypass: their preview is touch-
+        /// down-driven and the user expects immediate response.
+        private struct PendingTouchSample {
+            let touchID: ObjectIdentifier
+            let location: CGPoint              // doc-space
+            let screenLocation: CGPoint
+            let timestamp: TimeInterval
+            let pressure: CGFloat
+            let pressureAlpha: CGFloat
+            let inputType: BrushStroke.InputType
+            let rawTouchForce: CGFloat
+            let rawTouchMaxForce: CGFloat
+            let createdAt: CFTimeInterval      // CACurrentMediaTime() — for the 1-frame deadline
+        }
+
+        private var pendingTouchSamples: [ObjectIdentifier: PendingTouchSample] = [:]
+
+        /// Movement threshold (doc points) that promotes a pending finger
+        /// sample into a real stroke during `touchesMoved`. A drawing finger
+        /// drifts more than this in a few frames; a finger about to
+        /// participate in a two-finger gesture typically doesn't move past
+        /// this before the second finger lands.
+        private static let pendingCommitDistanceThreshold: CGFloat = 1.5
+
+        /// Time deadline (~one frame at 60Hz) after which a pending finger
+        /// sample is treated as a confirmed stroke even without movement.
+        /// Gesture recognizers usually claim within this window; if they
+        /// haven't by now, the user is starting a single-finger stroke.
+        private static let pendingCommitTimeDeadline: CFTimeInterval = 1.0 / 60.0
+
         // Tools that route through the wet-ink lifecycle. Brush, eraser,
         // and the 5 additive variants (Phase E). Shape tools (line, rect,
         // circle) stay on OLD renderStroke until Phase H.
@@ -2418,6 +2467,86 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Deferred commit dispatch (Issue 2a). Decide whether to promote
+            // synchronously or stash a PendingTouchSample for later.
+            // `isShapeTool` is in scope from above (shape tools fall through
+            // to this block after setting their shapeStart* fields).
+            let touchID = ObjectIdentifier(touch)
+            let isPencilInput = (inputType == .pencil)
+
+            // Multi-touch-during-defer: another finger already has a pending
+            // sample. Kill all pending — a two-finger gesture is incoming.
+            // The user can re-tap if they intended a single-finger stroke.
+            if !pendingTouchSamples.isEmpty && pendingTouchSamples[touchID] == nil {
+                pendingTouchSamples.removeAll()
+                return
+            }
+
+            if isShapeTool || isPencilInput {
+                // No defer: shape tools need immediate preview, pencil never
+                // races against two-finger gestures and is latency-sensitive.
+                // Promote synchronously — equivalent to pre-(a) behavior.
+                promotePendingSample(
+                    touch: touch,
+                    view: view,
+                    location: location,
+                    screenLocation: screenLocation,
+                    timestamp: timestamp,
+                    pressure: pressure,
+                    pressureAlpha: pressureAlpha,
+                    inputType: inputType,
+                    rawTouchForce: rawTouchForce,
+                    rawTouchMaxForce: rawTouchMaxForce
+                )
+            } else {
+                // Defer: stash the touch-down sample. Promotion happens in
+                // touchesMoved (movement threshold or 1-frame deadline) or
+                // touchesEnded (tap-dot). Discard in touchesCancelled.
+                pendingTouchSamples[touchID] = PendingTouchSample(
+                    touchID: touchID,
+                    location: location,
+                    screenLocation: screenLocation,
+                    timestamp: timestamp,
+                    pressure: pressure,
+                    pressureAlpha: pressureAlpha,
+                    inputType: inputType,
+                    rawTouchForce: rawTouchForce,
+                    rawTouchMaxForce: rawTouchMaxForce,
+                    createdAt: CACurrentMediaTime()
+                )
+            }
+        }
+
+        /// Body of the former drawing-tool branch in `touchesBegan`. Creates
+        /// the `BrushStroke` + `StrokeSession`, runs wet-ink/eraser-fallback/
+        /// blur session begin, arms snap-to-line, sets up the blur stamp
+        /// cursor, and triggers a redraw.
+        ///
+        /// Called from three sites:
+        ///   - `touchesBegan` drawing-tool branch, when input is pencil OR
+        ///     tool is a shape tool (immediate promotion, no defer).
+        ///   - `touchesMoved`, when a pending finger sample crosses the
+        ///     commit distance threshold or the one-frame deadline.
+        ///   - `touchesEnded`, when a pending finger sample ends without
+        ///     ever crossing the threshold (tap-dot promotion).
+        ///
+        /// All sample data is passed in as parameters so the
+        /// `touchesMoved`/`touchesEnded` callers can seed the session with
+        /// the ORIGINAL touch-down sample (from the stashed
+        /// `PendingTouchSample`) rather than the current finger position.
+        /// The first stamp belongs where the finger first landed.
+        private func promotePendingSample(
+            touch: UITouch,
+            view: MTKView,
+            location: CGPoint,
+            screenLocation: CGPoint,
+            timestamp: TimeInterval,
+            pressure: CGFloat,
+            pressureAlpha: CGFloat,
+            inputType: BrushStroke.InputType,
+            rawTouchForce: CGFloat,
+            rawTouchMaxForce: CGFloat
+        ) {
             // Start new stroke
             let point = BrushStroke.StrokePoint(
                 location: location,
@@ -2903,8 +3032,55 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Regular tools need a current stroke session.
+            // Pending-sample resolution (Issue 2a). If this touch has a
+            // PendingTouchSample stashed from touchesBegan, decide whether
+            // to promote (commit threshold met) or discard (multi-touch
+            // detected) or keep waiting.
             let touchID = ObjectIdentifier(touch)
+            if let pending = pendingTouchSamples[touchID] {
+                // Multi-touch arbitration: if any other touch is on screen
+                // now, kill all pending. A two-finger gesture is taking
+                // over; no stroke gets committed for this finger.
+                if (event?.allTouches?.count ?? 1) > 1 {
+                    pendingTouchSamples.removeAll()
+                    return
+                }
+
+                let movedDistance = hypot(
+                    latestLocation.x - pending.location.x,
+                    latestLocation.y - pending.location.y
+                )
+                let elapsed = CACurrentMediaTime() - pending.createdAt
+
+                if movedDistance >= Self.pendingCommitDistanceThreshold ||
+                    elapsed >= Self.pendingCommitTimeDeadline {
+                    // Promote with the ORIGINAL touch-down sample — the
+                    // first stamp belongs where the finger first landed,
+                    // not where it has drifted to.
+                    pendingTouchSamples.removeValue(forKey: touchID)
+                    promotePendingSample(
+                        touch: touch,
+                        view: view,
+                        location: pending.location,
+                        screenLocation: pending.screenLocation,
+                        timestamp: pending.timestamp,
+                        pressure: pending.pressure,
+                        pressureAlpha: pending.pressureAlpha,
+                        inputType: pending.inputType,
+                        rawTouchForce: pending.rawTouchForce,
+                        rawTouchMaxForce: pending.rawTouchMaxForce
+                    )
+                    // Fall through into the existing touchesMoved body so
+                    // the current sample point gets appended after
+                    // promotion seeded session.lastPoint with the
+                    // touch-down location.
+                } else {
+                    // Not yet promoted — drop this move event entirely.
+                    return
+                }
+            }
+
+            // Regular tools need a current stroke session.
             guard var session = strokeSessions[touchID],
                   var stroke = session.stroke else {
                 print("touchesMoved: No current stroke session for touch")
@@ -3686,6 +3862,33 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
+            // Tap-dot promotion (Issue 2a). If a pending sample is ending
+            // without ever crossing the commit gate, promote it now so the
+            // existing session-finding logic below finds a 1-stamp stroke
+            // and commits it. Preserves tap-to-place-a-dot — critical for
+            // detail work and paint placement.
+            //
+            // Single-active discipline guarantees at most one pending
+            // sample at any time; the loop breaks after the first match.
+            for endingTouch in touches {
+                let tid = ObjectIdentifier(endingTouch)
+                if let pending = pendingTouchSamples.removeValue(forKey: tid) {
+                    promotePendingSample(
+                        touch: endingTouch,
+                        view: view,
+                        location: pending.location,
+                        screenLocation: pending.screenLocation,
+                        timestamp: pending.timestamp,
+                        pressure: pending.pressure,
+                        pressureAlpha: pending.pressureAlpha,
+                        inputType: pending.inputType,
+                        rawTouchForce: pending.rawTouchForce,
+                        rawTouchMaxForce: pending.rawTouchMaxForce
+                    )
+                    break
+                }
+            }
+
             // Resolve the session for the lifting touch. Under single-active
             // discipline the only session in the dict is this stroke's; the
             // match-by-touchID form remains correct if discipline relaxes.
@@ -4000,6 +4203,15 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
+            // Discard pending samples for cancelled touches (Issue 2a). They
+            // never deposited stamps into scratch or the layer, so no
+            // visible artifact — purely a state cleanup. Gesture
+            // recognizers claiming the touches is the canonical path
+            // through this branch.
+            for cancelledTouch in touches {
+                pendingTouchSamples.removeValue(forKey: ObjectIdentifier(cancelledTouch))
+            }
+
             // Resolve which (if any) cancelled touch owns a stroke session.
             // touchesCancelled is also called when no stroke is active
             // (e.g. lasso cancelled, gesture grab on idle canvas), so
