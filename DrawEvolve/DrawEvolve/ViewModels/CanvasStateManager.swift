@@ -2634,66 +2634,149 @@ class CanvasStateManager: ObservableObject {
         return CGPoint(x: sx, y: sy)
     }
 
-    /// Apply zoom anchored at `centerPoint` (pinch midpoint in MTKView screen-point
-    /// coordinates). The document point currently under `centerPoint` stays fixed on
-    /// screen across the scale step, so the canvas zooms toward/away from the pinch
-    /// rather than toward the viewport center.
+    /// Generalized anchor-preserving transform — composes a multiplicative scale and
+    /// an additive rotation around a single screen-space anchor, adjusting `panOffset`
+    /// so the canvas content under `anchor` stays visually fixed.
     ///
-    /// Derivation (entirely in screen space, mirroring `documentToScreen` forward chain):
+    /// Both pinch (zoom-only) and rotate (rotation-only) gestures route through this.
+    /// Pinch + rotate firing simultaneously compose incrementally via repeated calls.
     ///
-    ///   forward: doc → quad-local → *zoomScale → R(-θ) → +(centerXY + panOffset) → flip
+    /// Derivation (entirely in screen space, UIKit Y-down — where `panOffset`,
+    /// `anchor`, and `screenSize` all live):
     ///
-    /// Hold a doc point D under `centerPoint` invariant. Let s = newZoom / oldZoom and
-    /// let cp_m be `centerPoint` reflected about viewport center on each flipped axis
-    /// (flip is applied LAST in the forward chain → FIRST in the inverse, matching
-    /// the convention in `screenToDocument`). Then:
+    ///   forward: doc → quad-local → *zoomScale → R_yd(θ) → +(centerXY + panOffset) → flip
     ///
-    ///   R(-θ)(zo·pt_quad) + centerXY + pan_old = cp_m
-    ///   R(-θ)(zn·pt_quad) + centerXY + pan_new = cp_m       (want)
-    ///   ⇒ pan_new = s · pan_old + (1 - s) · (cp_m - centerXY)
+    /// Hold a doc point D under `anchor` invariant across the step. Let s = scaleFactor
+    /// (= newZoom / oldZoom, possibly clamped), Δθ = rotationDelta, and let a_m be `anchor`
+    /// reflected about viewport center on each flipped axis (flip is applied LAST in the
+    /// forward chain → FIRST in the inverse). With d = a_m - centerXY:
     ///
-    /// Rotation drops out because R(-θ) is linear and uniform scale about origin
-    /// commutes with rotation about origin — no θ term appears in the result.
+    ///   R_yd(θ_new)·z_new·q + centerXY + pan_new = a_m       (want)
+    ///   R_yd(Δθ)·R_yd(θ_old)·(s·z_old·q) = d - pan_new
+    ///   ⇒ pan_new = d - R_yd(Δθ)·s·(d - pan_old)
+    ///   ⇒ pan_new = R_yd(Δθ)·(s · pan_old) + (d - R_yd(Δθ)·(s · d))
     ///
-    /// Edge case (zoom cap): when newZoom is clamped to a cap that equals oldZoom,
-    /// s = 1, so panOffset is unchanged. This is the correct behavior at the cap
-    /// (no spurious drift when pinching past the limit) and falls out of the math
-    /// for free — DO NOT refactor away the `(1 - s)` term, it's load-bearing.
+    /// Special cases:
+    ///   • Δθ = 0: collapses to pan_new = s·pan_old + (1 − s)·d — bit-equivalent to the
+    ///     prior pure-zoom formula (the `(1 − s)` term is load-bearing — DO NOT refactor
+    ///     away).
+    ///   • s = 1: collapses to a pure rotation of the (pan, anchor-offset) pair about
+    ///     Δθ — the missing term the prior `rotate(by:)` lacked, and the root cause of
+    ///     "rotation pivots around viewport center" at deep zoom.
+    ///   • Zoom cap: when newScale is clamped to a value equal to oldScale, the effective
+    ///     `s` is 1, so panOffset is unchanged — anchor stays under the finger at the cap,
+    ///     no spurious drift. Falls out of the math for free.
+    ///
+    /// Rotation-matrix sign: the Metal shader rotates `screenPos` in Y-up via
+    /// [[c, −sn], [sn, c]]. `panOffset` and `anchor` here are in UIKit Y-down. The
+    /// y-axis flip between conventions inverts the off-diagonal signs, so the
+    /// equivalent Y-down rotation matrix is R_yd(Δθ) = [[c, sn], [−sn, c]]. Using R_yup
+    /// here would produce a sign-flipped pan correction that visibly drifts opposite
+    /// the user's twist direction.
+    ///
+    /// Flip handling: anchor is inverse-flipped to pre-flip space at the top (mirror is
+    /// involutive); rotation direction is XOR-flipped per `flipHorizontal != flipVertical`
+    /// (matches the prior `rotate(by:)` flip rule, which a single mirror would otherwise
+    /// invert visually).
+    ///
+    /// Hard clamp on panOffset: same `2 · max(documentSize.w, documentSize.h)` bound as
+    /// `pan(delta:)`. Defensive against a degenerate gesture pumping panOffset to
+    /// infinity; legitimate transforms stay well inside the bound.
     ///
     /// Note: a previous attempt at zoom-around-point mixed doc-space and screen-space
     /// units (`panOffset += centerPoint − docPoint * zoomScale`), which exploded
     /// `panOffset` to 10^48+ within a single gesture. This implementation stays
-    /// entirely in screen space — `centerPoint`, `centerXY`, `panOffset` all share
-    /// units — so the previous failure mode cannot recur.
-    func zoom(scale: CGFloat, centerPoint: CGPoint) {
-        guard scale.isFinite, scale > 0 else { return }
-        guard centerPoint.x.isFinite, centerPoint.y.isFinite else { return }
+    /// entirely in screen space — `anchor`, `centerXY`, `panOffset` all share units — so
+    /// the previous failure mode cannot recur.
+    private func applyAnchoredTransform(
+        scaleFactor: CGFloat,
+        rotationDelta: Angle,
+        anchor: CGPoint
+    ) {
+        guard scaleFactor.isFinite, scaleFactor > 0 else { return }
+        guard rotationDelta.radians.isFinite else { return }
+        guard anchor.x.isFinite, anchor.y.isFinite else { return }
 
         let oldScale = zoomScale
         guard oldScale.isFinite, oldScale > 0 else { return }
-
-        let newScale = min(max(scale, minZoom), maxZoom)
+        let newScale = min(max(oldScale * scaleFactor, minZoom), maxZoom)
         guard newScale.isFinite, newScale > 0 else { return }
-
         let s = newScale / oldScale
 
         let centerX = screenSize.width / 2
         let centerY = screenSize.height / 2
 
-        // Inverse-flip centerPoint to pre-flip screen space. Flip is involutive,
-        // so the same mirror works in both directions. Matches the convention
-        // at the head of `screenToDocument`.
-        var cpx = centerPoint.x
-        var cpy = centerPoint.y
-        if flipHorizontal { cpx = 2 * centerX - cpx }
-        if flipVertical   { cpy = 2 * centerY - cpy }
+        // Inverse-flip anchor to pre-flip screen space. Flip is involutive.
+        var ax = anchor.x
+        var ay = anchor.y
+        if flipHorizontal { ax = 2 * centerX - ax }
+        if flipVertical   { ay = 2 * centerY - ay }
 
-        let newPanX = s * panOffset.x + (1 - s) * (cpx - centerX)
-        let newPanY = s * panOffset.y + (1 - s) * (cpy - centerY)
+        // XOR flip rule on rotation direction — single mirror reverses orientation;
+        // double mirror is equivalent to 180° (orientation-preserving). Matches the
+        // rule the prior `rotate(by:)` already used.
+        let invertForFlip = flipHorizontal != flipVertical
+        let effectiveDelta = invertForFlip ? -rotationDelta.radians : rotationDelta.radians
+
+        let c = CGFloat(cos(effectiveDelta))
+        let sn = CGFloat(sin(effectiveDelta))
+
+        // d = anchor offset from viewport center, pre-flip, Y-down.
+        let dx = ax - centerX
+        let dy = ay - centerY
+
+        // R_yd(Δθ) · (s · pan_old).
+        let scaledPanX = panOffset.x * s
+        let scaledPanY = panOffset.y * s
+        let rotPanX = scaledPanX * c + scaledPanY * sn
+        let rotPanY = -scaledPanX * sn + scaledPanY * c
+
+        // R_yd(Δθ) · (s · d).
+        let scaledDx = dx * s
+        let scaledDy = dy * s
+        let rotSDx = scaledDx * c + scaledDy * sn
+        let rotSDy = -scaledDx * sn + scaledDy * c
+
+        let newPanX = rotPanX + (dx - rotSDx)
+        let newPanY = rotPanY + (dy - rotSDy)
         guard newPanX.isFinite, newPanY.isFinite else { return }
 
-        panOffset = CGPoint(x: newPanX, y: newPanY)
+        // Defensive clamp — matches `pan(delta:)`.
+        let maxPan = 2 * max(documentSize.width, documentSize.height)
+        panOffset = CGPoint(
+            x: min(max(newPanX, -maxPan), maxPan),
+            y: min(max(newPanY, -maxPan), maxPan)
+        )
         zoomScale = newScale
+
+        // Rotation update — skip the negligible-delta no-op (matches the prior
+        // `rotate(by:)` guard at 0.1°). The pan correction above ran with the
+        // full effectiveDelta unconditionally, which is correct: even a sub-0.1°
+        // pan adjustment that gets discarded for canvasRotation is bounded by
+        // the matrix being effectively identity at that scale.
+        if abs(rotationDelta.degrees) > 0.1 {
+            var newRotation = canvasRotation + Angle(radians: effectiveDelta)
+            newRotation = .degrees(newRotation.degrees.truncatingRemainder(dividingBy: 360))
+            if newRotation.degrees < 0 { newRotation = .degrees(newRotation.degrees + 360) }
+            canvasRotation = newRotation
+        }
+    }
+
+    /// Apply zoom anchored at `centerPoint` (pinch midpoint in MTKView screen-point
+    /// coordinates). The document point currently under `centerPoint` stays fixed on
+    /// screen across the scale step. Thin wrapper around `applyAnchoredTransform`.
+    func zoom(scale: CGFloat, centerPoint: CGPoint) {
+        guard scale.isFinite, scale > 0 else { return }
+        guard centerPoint.x.isFinite, centerPoint.y.isFinite else { return }
+        let oldScale = zoomScale
+        guard oldScale.isFinite, oldScale > 0 else { return }
+        let newScale = min(max(scale, minZoom), maxZoom)
+        guard newScale.isFinite, newScale > 0 else { return }
+        applyAnchoredTransform(
+            scaleFactor: newScale / oldScale,
+            rotationDelta: .zero,
+            anchor: centerPoint
+        )
     }
 
     /// Pan the canvas by a delta in screen space.
@@ -2723,39 +2806,47 @@ class CanvasStateManager: ObservableObject {
         panOffset.y = min(max(panOffset.y, -maxPan), maxPan)
     }
 
-    /// Rotate the canvas by an angle increment.
+    /// Rotate the canvas by an angle increment about an explicit screen-space anchor.
+    /// The two-finger rotation gesture handler calls this with the captured centroid so
+    /// the canvas pivots around the user's fingers instead of viewport center —
+    /// stable Procreate-style feel, and eliminates the deep-zoom rotation drift that
+    /// scaled the (anchor − viewport center) offset by zoom.
     ///
-    /// Flip compensation: a single mirror reverses orientation, so a CCW
-    /// gesture under one active flip would visually appear as CW rotation
-    /// without compensation. A double mirror (both flipH and flipV) is
-    /// equivalent to a 180° rotation, which preserves orientation — no
-    /// inversion needed in that case. Rule: invert when EXACTLY ONE flip
-    /// is active (XOR of the two flags).
-    func rotate(by angle: Angle, snapToGrid: Bool = true) {
+    /// Anchor convention: MTKView screen-point coordinates (UIKit Y-down). Inverse-flip
+    /// is handled inside `applyAnchoredTransform`.
+    ///
+    /// Flip compensation: same XOR rule as before — a single mirror reverses
+    /// orientation, so a CCW gesture under one active flip would visually appear as CW
+    /// rotation without compensation. Double mirror is orientation-preserving (180°).
+    /// Handled inside the primitive.
+    ///
+    /// Snap-to-grid: passing `true` snaps the post-update `canvasRotation` to the
+    /// nearest `rotationSnappingInterval` multiple. The gesture handler passes `false`
+    /// during continuous `.changed` events (60Hz snapping ratchets to 15° per frame —
+    /// see the gesture handler comment for the bug this avoids) and uses a custom
+    /// 90°-on-`.ended` snap routed back through this function with a synthetic delta,
+    /// so the release snap also pivots around the captured anchor.
+    func rotate(by angle: Angle, around anchor: CGPoint, snapToGrid: Bool = true) {
         guard angle.radians.isFinite else { return }
-        // Prevent rotation if change is negligible
         guard abs(angle.degrees) > 0.1 else { return }
 
-        let invertForFlip = flipHorizontal != flipVertical
-        let effectiveAngle = invertForFlip ? Angle(radians: -angle.radians) : angle
+        applyAnchoredTransform(scaleFactor: 1.0, rotationDelta: angle, anchor: anchor)
 
-        var newRotation = canvasRotation + effectiveAngle
-
-        // Normalize to 0-360° to prevent overflow
-        newRotation = .degrees(newRotation.degrees.truncatingRemainder(dividingBy: 360))
-        if newRotation.degrees < 0 {
-            newRotation = .degrees(newRotation.degrees + 360)
-        }
-
-        // Snap to grid if enabled (typically only on gesture .ended; passing true here
-        // during continuous rotation causes per-frame 15° ratcheting — see the gesture
-        // handler comment for the bug this avoids).
         if snapToGrid && enableRotationSnapping {
-            let snappedDegrees = round(newRotation.degrees / rotationSnappingInterval.degrees) * rotationSnappingInterval.degrees
-            newRotation = .degrees(snappedDegrees)
+            let snappedDegrees = round(canvasRotation.degrees / rotationSnappingInterval.degrees) * rotationSnappingInterval.degrees
+            canvasRotation = .degrees(snappedDegrees)
         }
+    }
 
-        canvasRotation = newRotation
+    /// Legacy convenience — rotate around viewport center.
+    ///
+    /// Preserved for programmatic callers (reset paths, future UI buttons) that don't
+    /// have a meaningful screen-space anchor. The gesture handler does NOT call this
+    /// — it calls `rotate(by:around:snapToGrid:)` with the captured two-finger
+    /// centroid so deep-zoom rotation pivots around the fingers, not viewport center.
+    func rotate(by angle: Angle, snapToGrid: Bool = true) {
+        let centerXY = CGPoint(x: screenSize.width / 2, y: screenSize.height / 2)
+        rotate(by: angle, around: centerXY, snapToGrid: snapToGrid)
     }
 
     /// Reset rotation to 0°

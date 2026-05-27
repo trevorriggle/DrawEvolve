@@ -507,20 +507,68 @@ struct MetalCanvasView: UIViewRepresentable {
         private var tileDirectPhaseSixProbeRun = false
         #endif
 
-        // Wet-ink live state. Tool-agnostic — currently routes .brush and
-        // .eraser through the wet-ink lifecycle. Phase E extends to the
-        // remaining additive tools and shape tools.
+        // Per-touch stroke session. Replaces the formerly single-valued
+        // `currentStroke` / `wetInk*` / `eraser*BeforeSnapshot` / `blurStroke*BeforeSnapshot`
+        // / `smudgeBeforeSnapshot` / `lastPoint` / `lastTimestamp` state.
         //
-        // Capture BEFORE snapshot at touchesBegan, flush new stamps per
-        // touchesMoved batch via the renderer's deposit pipeline (picked
-        // by tool: premul-additive for brush family, eraser-alpha-only
-        // for eraser), commit at touchesEnded and capture the AFTER
-        // snapshot in the completion to record HistoryAction.stroke.
-        private var wetInkActive: Bool = false
-        private var wetInkBeforeSnapshot: CanvasRenderer.LayerSnapshot?
-        private var wetInkLayerIndex: Int?
-        private var wetInkLayerId: UUID?
-        private var wetInkCommittedPointCount: Int = 0
+        // Discipline: single-active stroke at a time. `touchesBegan` early-returns
+        // when `strokeSessions` is non-empty — the second touch never creates a
+        // competing session. The dict can hold multiple in principle, which leaves
+        // the door open if concurrent strokes are ever wanted, but today
+        // `strokeSessions.count <= 1` invariantly. Every call site is explicit
+        // about which `touchID` it operates on — no convenience accessor that
+        // promotes single-stroke assumptions.
+        //
+        // Why a struct value-type held in a dict (not a class):
+        //   - Bookkeeping fields only; no reference identity needed.
+        //   - Single owner (the dict) — no aliasing surprises.
+        //   - Mutations follow the read-modify-write pattern via `strokeSessions[touchID] = session`.
+        //
+        // What is NOT in the session (deliberate partial migration):
+        //   - Blur's `blurStrokeActive` / `blurStrokeLayerIndex` / `blurStrokeLayerId` /
+        //     `blurCommittedPointCount` — stay top-level. Under single-active
+        //     discipline they're already bound to the one in-flight blur stroke;
+        //     migration scope was specifically the BEFORE snapshot.
+        //   - Smudge's `isSmudgeStrokeActive` / `smudgeStrokeLayerIndex` /
+        //     `smudgeStrokeLayerId` / `smudgeStrokeID` / `smudgePendingTouchdown` —
+        //     same reasoning; only `smudgeBeforeSnapshot` migrated.
+        //   - Shape-tool state (`shape*`) — stays top-level. Shape tools have
+        //     their own multi-touch constraint tracking via `shapePrimaryTouchID`
+        //     and `shapeConstraintTouchIDs`.
+        //   - Pre-stroke tool state (paint-bucket pending, text request, etc.) —
+        //     unrelated to stroke sessions.
+        //
+        // Wet-ink lifecycle (preserved end-to-end):
+        //   - Capture BEFORE snapshot at touchesBegan → session.wetInkBeforeSnapshot.
+        //   - Flush new stamps per touchesMoved batch via flushWetInkSession(touchID:),
+        //     which reads/writes session.wetInkCommittedPointCount.
+        //   - Commit at touchesEnded and capture the AFTER snapshot in the completion
+        //     to record HistoryAction.stroke. Session is removed at the same time.
+        private struct StrokeSession {
+            let touchID: ObjectIdentifier
+            var stroke: BrushStroke?
+            var lastPoint: CGPoint?
+            var lastTimestamp: TimeInterval = 0
+
+            // Wet-ink lifecycle (brush + eraser + 5 additive variants).
+            var wetInkActive: Bool = false
+            var wetInkBeforeSnapshot: CanvasRenderer.LayerSnapshot?
+            var wetInkLayerIndex: Int?
+            var wetInkLayerId: UUID?
+            var wetInkCommittedPointCount: Int = 0
+
+            // Eraser fallback (when wet-ink begin fails).
+            var eraserBeforeSnapshot: CanvasRenderer.LayerSnapshot?
+            var eraserCommittedPointCount: Int = 0
+
+            // Blur stroke — before-snapshot only (rest is top-level).
+            var blurStrokeBeforeSnapshot: CanvasRenderer.LayerSnapshot?
+
+            // Smudge stroke — before-snapshot only (rest is top-level).
+            var smudgeBeforeSnapshot: CanvasRenderer.LayerSnapshot?
+        }
+
+        private var strokeSessions: [ObjectIdentifier: StrokeSession] = [:]
 
         // Tools that route through the wet-ink lifecycle. Brush, eraser,
         // and the 5 additive variants (Phase E). Shape tools (line, rect,
@@ -534,9 +582,6 @@ struct MetalCanvasView: UIViewRepresentable {
             }
         }
 
-        private var currentStroke: BrushStroke?
-        private var lastPoint: CGPoint?
-        private var lastTimestamp: TimeInterval = 0
         private var shapeStartPoint: CGPoint? // For shape tools (doc space)
         // Screen-space start for shape tools that should ignore canvas rotation
         // (rectangle, circle). Line is rotation-invariant so it can use the
@@ -670,7 +715,6 @@ struct MetalCanvasView: UIViewRepresentable {
         // batch in `touchesMoved` (so it dispatches as the pickup-only
         // first stamp). Cleared after the first batch.
         private var smudgePendingTouchdown: BrushStroke.StrokePoint?
-        private var smudgeBeforeSnapshot: CanvasRenderer.LayerSnapshot?
 
         // Eraser real-time commit (Tier 1.5). The gray-ghost preview is
         // gone — eraser stamps now write straight into the active layer
@@ -684,8 +728,6 @@ struct MetalCanvasView: UIViewRepresentable {
         // `currentStroke` have already been rendered into the layer, so
         // each touchesMoved only flushes the *new* sub-stroke instead of
         // re-rendering the whole accumulated stroke.
-        private var eraserBeforeSnapshot: CanvasRenderer.LayerSnapshot?
-        private var eraserCommittedPointCount: Int = 0
 
         // Real-time blur stroke session (experiment/blur-brush-realtime).
         // Mirrors the eraser substroke flush pattern: capture before-snapshot
@@ -694,7 +736,6 @@ struct MetalCanvasView: UIViewRepresentable {
         // finalize at touchesEnded with the same after-snapshot + history
         // recording the deferred path uses.
         private var blurStrokeActive = false
-        private var blurStrokeBeforeSnapshot: CanvasRenderer.LayerSnapshot?
         private var blurStrokeLayerIndex: Int?
         private var blurStrokeLayerId: UUID?
         private var blurCommittedPointCount: Int = 0
@@ -715,6 +756,11 @@ struct MetalCanvasView: UIViewRepresentable {
         // increment); lift commits as a normal stroke through the existing
         // touchesEnded path.
         private var snapToLineTimer: Timer?
+        // The touch whose stroke the snap-to-line timer will operate on.
+        // Captured when the timer arms (touchesBegan / touchesMoved) so
+        // `engageSnapToLine` can resolve the right session without a
+        // single-stroke assumption. Cleared in resetSnapToLineState.
+        private var snapToLineTouchID: ObjectIdentifier?
         private var isSnappedToLine = false
         private var snapToLineStartDoc: CGPoint?
         private var snapToLineAnchorScreen: CGPoint?
@@ -1671,9 +1717,15 @@ struct MetalCanvasView: UIViewRepresentable {
             // renderStrokePreview on top would double-deposit.
             // Shape tools (line/rect/circle) still need the preview path
             // until Phase H lands.
-            if let stroke = currentStroke, !stroke.points.isEmpty,
-               stroke.tool != .blur,
-               !isWetInkTool(stroke.tool) {
+            // Per-touch tracking: iterate sessions instead of reading a
+            // single `currentStroke`. Under single-active discipline this
+            // loops at most once today, but the iteration is the explicit
+            // form — if multi-stroke is ever enabled, every in-flight stroke
+            // gets its preview here without further restructuring.
+            for session in strokeSessions.values {
+                guard let stroke = session.stroke, !stroke.points.isEmpty,
+                      stroke.tool != .blur,
+                      !isWetInkTool(stroke.tool) else { continue }
                 renderer?.renderStrokePreview(
                     stroke,
                     to: overlayEnc,
@@ -1917,6 +1969,15 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Smudge: cannot begin stroke — invalid layer or tile grid")
                     return
                 }
+                // Single-active-stroke discipline: if any stroke session is
+                // already in flight, ignore this touch. The new finger never
+                // creates a competing session; UIKit may still claim it for
+                // a transform gesture, in which case touchesCancelled tears
+                // down the active session — that path is unchanged.
+                guard strokeSessions.isEmpty else {
+                    print("Smudge: skip touchesBegan, stroke session already active")
+                    return
+                }
                 let layerId = layers[selectedLayerIndex].id
                 // Selection geometry is fixed for the duration of a stroke;
                 // pass it once at begin and the renderer rasterises + caches.
@@ -1931,7 +1992,12 @@ struct MetalCanvasView: UIViewRepresentable {
                     print("Smudge: renderer failed to allocate patch textures")
                     return
                 }
-                smudgeBeforeSnapshot = layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
+                let touchID = ObjectIdentifier(touch)
+                var session = StrokeSession(touchID: touchID)
+                session.smudgeBeforeSnapshot = layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
+                session.lastPoint = location
+                session.lastTimestamp = timestamp
+                strokeSessions[touchID] = session
                 smudgeStrokeLayerIndex = selectedLayerIndex
                 smudgeStrokeLayerId = layerId
                 smudgeStrokeID = strokeID
@@ -1945,8 +2011,6 @@ struct MetalCanvasView: UIViewRepresentable {
                     timestamp: timestamp
                 )
                 isSmudgeStrokeActive = true
-                lastPoint = location
-                lastTimestamp = timestamp
 
                 // Stamp cursor outline — same overlay as the blur brush.
                 if let cs = canvasState {
@@ -2343,6 +2407,17 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Shape tool: stored start point \(location) (screen: \(screenLocation))")
             }
 
+            // Single-active-stroke discipline: bail before creating a new
+            // session if one is already in flight. Shape-tool secondary-
+            // finger constraint logic above already returned in its own
+            // branch — this guard catches everything else (brush, eraser,
+            // blur, additive variants) that would otherwise clobber the
+            // active session's state under the old single-valued model.
+            guard strokeSessions.isEmpty else {
+                print("Drawing tool: skip touchesBegan, stroke session already active")
+                return
+            }
+
             // Start new stroke
             let point = BrushStroke.StrokePoint(
                 location: location,
@@ -2355,30 +2430,31 @@ struct MetalCanvasView: UIViewRepresentable {
             )
 
             // Symmetry: mirror the initial stamp too. A single tap (no drag)
-            // should still produce mirrored stamps. `lastPoint` stays at the
-            // original location only — the spacing-interpolation chain in
-            // touchesMoved follows the user's actual finger/pencil path; the
-            // mirrors piggyback per stamp without participating in the chain.
+            // should still produce mirrored stamps. `session.lastPoint` stays
+            // at the original location only — the spacing-interpolation chain
+            // in touchesMoved follows the user's actual finger/pencil path;
+            // the mirrors piggyback per stamp without participating in the chain.
             let symmetryDocSize = MainActor.assumeIsolated {
                 canvasState?.documentSize ?? .zero
             }
             let initialMirrors = mirroredPoints([point], in: symmetryDocSize, mode: symmetry.mode)
             let initialPoints = [point] + initialMirrors
 
-            currentStroke = BrushStroke(
+            let stroke = BrushStroke(
                 points: initialPoints,
                 settings: brushSettings,
                 tool: currentTool,
                 layerId: layers[selectedLayerIndex].id
             )
-
-            lastPoint = location
-            lastTimestamp = timestamp
+            let touchID = ObjectIdentifier(touch)
+            var session = StrokeSession(touchID: touchID)
+            session.stroke = stroke
+            session.lastPoint = location
+            session.lastTimestamp = timestamp
+            strokeSessions[touchID] = session
             print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
             #if DEBUG
-            if let currentStroke {
-                CanvasStrokeDiagnostics.log("stroke begin stroke=\(CanvasStrokeDiagnostics.shortID(currentStroke.id)) tool=\(currentTool) input=\(inputType.diagnosticName) slider{\(CanvasStrokeDiagnostics.format(brushSettings))} pressure=\(CanvasStrokeDiagnostics.format(pressure)) pressureAlpha=\(CanvasStrokeDiagnostics.format(pressureAlpha)) start=\(CanvasStrokeDiagnostics.format(location))")
-            }
+            CanvasStrokeDiagnostics.log("stroke begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(currentTool) input=\(inputType.diagnosticName) slider{\(CanvasStrokeDiagnostics.format(brushSettings))} pressure=\(CanvasStrokeDiagnostics.format(pressure)) pressureAlpha=\(CanvasStrokeDiagnostics.format(pressureAlpha)) start=\(CanvasStrokeDiagnostics.format(location))")
             #endif
 
             // Wet-ink real-time session. Routes every wet-ink-enabled
@@ -2389,8 +2465,8 @@ struct MetalCanvasView: UIViewRepresentable {
             // additive, dest-out for eraser). Shape tools (line, rect,
             // circle) stay on OLD renderStroke until Phase H.
             //
-            // If beginWetInkStroke fails, wetInkActive stays false and
-            // the OLD per-tool fallback blocks below take over.
+            // If beginWetInkStroke fails, session.wetInkActive stays false
+            // and the OLD per-tool fallback blocks below take over.
             if isWetInkTool(currentTool),
                let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
@@ -2398,12 +2474,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 let wetInkDocSize = MainActor.assumeIsolated {
                     canvasState?.documentSize ?? view.bounds.size
                 }
-                wetInkBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
-                wetInkLayerIndex = selectedLayerIndex
-                wetInkLayerId = layers[selectedLayerIndex].id
-                wetInkCommittedPointCount = 0
-                wetInkActive = renderer.beginWetInkStroke(
-                    strokeID: currentStroke?.id ?? UUID(),
+                var updated = strokeSessions[touchID] ?? session
+                updated.wetInkBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
+                updated.wetInkLayerIndex = selectedLayerIndex
+                updated.wetInkLayerId = layers[selectedLayerIndex].id
+                updated.wetInkCommittedPointCount = 0
+                updated.wetInkActive = renderer.beginWetInkStroke(
+                    strokeID: stroke.id,
                     tool: currentTool,
                     settings: brushSettings,
                     layerId: layers[selectedLayerIndex].id,
@@ -2411,21 +2488,24 @@ struct MetalCanvasView: UIViewRepresentable {
                     selectionPath: wetInkSelectionPath,
                     documentSize: wetInkDocSize
                 )
-                if wetInkActive {
-                    flushWetInkSession()
+                strokeSessions[touchID] = updated
+                if updated.wetInkActive {
+                    flushWetInkSession(touchID: touchID)
                 }
             }
 
             // Tier-1.5 eraser real-time commit — OLD path, retained as
             // fallback when wet-ink failed to begin. Skipped when
-            // wetInkActive is true (eraser now flows through wet-ink).
-            if !wetInkActive,
+            // session.wetInkActive is true (eraser now flows through wet-ink).
+            if strokeSessions[touchID]?.wetInkActive != true,
                currentTool == .eraser,
                let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
-                eraserBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
-                eraserCommittedPointCount = 0
-                flushEraserSubStroke(view: view)
+                var updated = strokeSessions[touchID] ?? session
+                updated.eraserBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
+                updated.eraserCommittedPointCount = 0
+                strokeSessions[touchID] = updated
+                flushEraserSubStroke(view: view, touchID: touchID)
             }
 
             // Real-time blur stroke: snapshot the layer + open a renderer
@@ -2442,19 +2522,21 @@ struct MetalCanvasView: UIViewRepresentable {
                 let blurDocSize = MainActor.assumeIsolated {
                     canvasState?.documentSize ?? view.bounds.size
                 }
-                blurStrokeBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
+                var updated = strokeSessions[touchID] ?? session
+                updated.blurStrokeBeforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
+                strokeSessions[touchID] = updated
                 blurStrokeLayerIndex = selectedLayerIndex
                 blurStrokeLayerId = layers[selectedLayerIndex].id
                 blurCommittedPointCount = 0
                 blurStrokeActive = renderer.beginBlurStroke(
-                    strokeID: currentStroke?.id ?? UUID(),
+                    strokeID: stroke.id,
                     tileGrid: tileGrid,
                     settings: brushSettings,
                     screenSize: blurDocSize,
                     selectionPath: blurSelectionPath
                 )
                 if blurStrokeActive {
-                    flushBlurSubStroke()
+                    flushBlurSubStroke(touchID: touchID)
                 }
             }
 
@@ -2476,6 +2558,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // renderStroke(...,  selectionPath:) just like any wobbly stroke,
             // so the mask still applies if a selection is active.
             if canSnapToLine {
+                snapToLineTouchID = ObjectIdentifier(touch)
                 snapToLineStartDoc = location
                 snapToLineAnchorScreen = screenLocation
                 snapLatestDoc = location
@@ -2588,6 +2671,13 @@ struct MetalCanvasView: UIViewRepresentable {
                     assertionFailure("Smudge: layer mismatch during touchesMoved")
                     return
                 }
+                let touchID = ObjectIdentifier(touch)
+                guard var session = strokeSessions[touchID] else {
+                    // Smudge state says active but no per-touch session — most
+                    // likely the session was torn down by touchesCancelled
+                    // while this event was already in flight. Bail.
+                    return
+                }
 
                 var batch: [BrushStroke.StrokePoint] = []
                 if let touchdown = smudgePendingTouchdown {
@@ -2605,7 +2695,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     let sampleRawMaxForce = sample.maximumPossibleForce
                     let sampleTimestamp = sample.timestamp
 
-                    if let last = lastPoint {
+                    if let last = session.lastPoint {
                         let distance = hypot(sampleLoc.x - last.x, sampleLoc.y - last.y)
                         let spacing = brushSettings.size * brushSettings.spacing
                         if distance > spacing {
@@ -2634,14 +2724,15 @@ struct MetalCanvasView: UIViewRepresentable {
                                     timestamp: sampleTimestamp
                                 ))
                             }
-                            lastPoint = sampleLoc
-                            lastTimestamp = sampleTimestamp
+                            session.lastPoint = sampleLoc
+                            session.lastTimestamp = sampleTimestamp
                         }
                     } else {
-                        lastPoint = sampleLoc
-                        lastTimestamp = sampleTimestamp
+                        session.lastPoint = sampleLoc
+                        session.lastTimestamp = sampleTimestamp
                     }
                 }
+                strokeSessions[touchID] = session
 
                 if !batch.isEmpty {
                     let docSize = MainActor.assumeIsolated {
@@ -2812,9 +2903,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            // Regular tools need a current stroke
-            guard var stroke = currentStroke else {
-                print("touchesMoved: No current stroke")
+            // Regular tools need a current stroke session.
+            let touchID = ObjectIdentifier(touch)
+            guard var session = strokeSessions[touchID],
+                  var stroke = session.stroke else {
+                print("touchesMoved: No current stroke session for touch")
                 return
             }
 
@@ -2893,7 +2986,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
                 let mirrors = mirroredPoints(originals, in: docSize, mode: symmetry.mode)
                 stroke.points = originals + mirrors
-                currentStroke = stroke
+                session.stroke = stroke
+                strokeSessions[touchID] = session
             } else {
                 // Snap-to-line: track latest sample and stationarity for the
                 // 600ms hold-to-snap timer. Once snapped, replace the in-progress
@@ -2916,7 +3010,8 @@ struct MetalCanvasView: UIViewRepresentable {
 
                     if isSnappedToLine, let start = snapToLineStartDoc {
                         stroke.points = buildSnapLineGeometry(start: start, target: lastSampleDoc)
-                        currentStroke = stroke
+                        session.stroke = stroke
+                        strokeSessions[touchID] = session
                         return
                     }
 
@@ -2945,7 +3040,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     let sampleRawMaxForce = sample.maximumPossibleForce
                     let sampleTimestamp = sample.timestamp
 
-                    if let last = lastPoint {
+                    if let last = session.lastPoint {
                         let distance = hypot(sampleLoc.x - last.x, sampleLoc.y - last.y)
                         let spacing = brushSettings.size * brushSettings.spacing
 
@@ -2974,14 +3069,14 @@ struct MetalCanvasView: UIViewRepresentable {
                                 // entire rest of the stroke fails to render.
                                 let safePrev = previousPressure.isFinite ? previousPressure : samplePressure
                                 let safeSample = samplePressure.isFinite ? samplePressure : 1.0
-                                let interpPressure = (lastTimestamp > 0)
+                                let interpPressure = (session.lastTimestamp > 0)
                                     ? (1 - t) * safePrev + t * safeSample
                                     : safeSample
 
                                 let previousPressureAlpha = stroke.points.last?.pressureAlpha ?? samplePressureAlpha
                                 let safePrevAlpha = previousPressureAlpha.isFinite ? previousPressureAlpha : samplePressureAlpha
                                 let safeSampleAlpha = samplePressureAlpha.isFinite ? samplePressureAlpha : 1.0
-                                let interpPressureAlpha = (lastTimestamp > 0)
+                                let interpPressureAlpha = (session.lastTimestamp > 0)
                                     ? (1 - t) * safePrevAlpha + t * safeSampleAlpha
                                     : safeSampleAlpha
 
@@ -3023,8 +3118,8 @@ struct MetalCanvasView: UIViewRepresentable {
                             // single-stamp stroke. Now distance accumulates
                             // from the last stamped point until it earns
                             // a stamp.
-                            lastPoint = sampleLoc
-                            lastTimestamp = sampleTimestamp
+                            session.lastPoint = sampleLoc
+                            session.lastTimestamp = sampleTimestamp
                         }
                         // else: distance < spacing — keep lastPoint where
                         // it was so subsequent samples can accumulate.
@@ -3032,12 +3127,13 @@ struct MetalCanvasView: UIViewRepresentable {
                         // Defensive: if lastPoint is somehow nil mid-stroke
                         // (shouldn't happen — touchesBegan seeds it), seed
                         // here so the next sample has an anchor.
-                        lastPoint = sampleLoc
-                        lastTimestamp = sampleTimestamp
+                        session.lastPoint = sampleLoc
+                        session.lastTimestamp = sampleTimestamp
                     }
                 }
 
-                currentStroke = stroke
+                session.stroke = stroke
+                strokeSessions[touchID] = session
 
                 // Tier-1.5 eraser real-time commit: flush the new sub-stroke
                 // (points appended this batch) into the layer texture so the
@@ -3046,10 +3142,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Eraser real-time. Prefer the wet-ink path when active;
                 // fall back to the OLD per-stamp commit otherwise.
                 if currentTool == .eraser {
-                    if wetInkActive {
-                        flushWetInkSession()
+                    if session.wetInkActive {
+                        flushWetInkSession(touchID: touchID)
                     } else {
-                        flushEraserSubStroke(view: view)
+                        flushEraserSubStroke(view: view, touchID: touchID)
                     }
                 }
                 // Real-time blur stroke (experiment/blur-brush-realtime):
@@ -3059,11 +3155,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 // touchesBegan); deferred-path fallback at touchesEnded
                 // still runs in that case.
                 if currentTool == .blur {
-                    flushBlurSubStroke()
+                    flushBlurSubStroke(touchID: touchID)
                 }
                 // Wet-ink real-time deposit for brush + additive variants
                 // (pencil, inkPen, marker, airbrush, charcoal). Eraser is
-                // handled in its own branch above. No-op when wetInkActive
+                // handled in its own branch above. No-op when session.wetInkActive
                 // is false (begin failed); OLD renderStroke fallback runs
                 // at touchesEnded in that case.
                 if currentTool == .brush ||
@@ -3072,7 +3168,7 @@ struct MetalCanvasView: UIViewRepresentable {
                    currentTool == .marker ||
                    currentTool == .airbrush ||
                    currentTool == .charcoal {
-                    flushWetInkSession()
+                    flushWetInkSession(touchID: touchID)
                 }
 
                 // Print every 10th point to avoid spam
@@ -3094,11 +3190,12 @@ struct MetalCanvasView: UIViewRepresentable {
         // pass `nil` for callers that just want to fire-and-forget.
         // See touchesBegan / touchesMoved / touchesEnded for the live-
         // commit lifecycle around this helper.
-        private func flushEraserSubStroke(view: MTKView, completion: (() -> Void)? = nil) {
+        private func flushEraserSubStroke(view: MTKView, touchID: ObjectIdentifier, completion: (() -> Void)? = nil) {
             let onDone = completion ?? {}
-            guard let stroke = currentStroke,
+            guard var session = strokeSessions[touchID],
+                  let stroke = session.stroke,
                   stroke.tool == .eraser,
-                  stroke.points.count > eraserCommittedPointCount,
+                  stroke.points.count > session.eraserCommittedPointCount,
                   selectedLayerIndex < layers.count,
                   let tileGrid = layers[selectedLayerIndex].tileGrid,
                   let renderer = renderer else {
@@ -3109,8 +3206,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 canvasState?.documentSize ?? view.bounds.size
             }
             let selPath = MainActor.assumeIsolated { canvasState?.selectionPath }
-            let stampIndexBase = eraserCommittedPointCount
-            let newPoints = Array(stroke.points[eraserCommittedPointCount..<stroke.points.count])
+            let stampIndexBase = session.eraserCommittedPointCount
+            let newPoints = Array(stroke.points[session.eraserCommittedPointCount..<stroke.points.count])
             let subStroke = BrushStroke(
                 id: stroke.id,
                 points: newPoints,
@@ -3118,7 +3215,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 tool: .eraser,
                 layerId: stroke.layerId
             )
-            eraserCommittedPointCount = stroke.points.count
+            session.eraserCommittedPointCount = stroke.points.count
+            strokeSessions[touchID] = session
             renderer.renderStroke(
                 subStroke,
                 tileGrid: tileGrid,
@@ -3130,12 +3228,17 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         /// Real-time blur substroke flush — peels off any points appended
-        /// to `currentStroke.points` since the last call and hands them to
+        /// to the session's stroke since the last call and hands them to
         /// the renderer's active blur session. Idempotent / no-op when
         /// the session isn't active or no new points have arrived.
-        private func flushBlurSubStroke() {
+        ///
+        /// `blurCommittedPointCount` remains a top-level field (single-active
+        /// discipline binds it to the in-flight blur stroke); only the
+        /// before-snapshot lives on `StrokeSession`.
+        private func flushBlurSubStroke(touchID: ObjectIdentifier) {
             guard blurStrokeActive,
-                  let stroke = currentStroke,
+                  let session = strokeSessions[touchID],
+                  let stroke = session.stroke,
                   stroke.tool == .blur,
                   let renderer = renderer,
                   stroke.points.count > blurCommittedPointCount else {
@@ -3148,21 +3251,23 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         /// Wet-ink brush real-time deposit. Mirrors `flushBlurSubStroke`:
-        /// slices off `[committedCount..<count]` from currentStroke.points
+        /// slices off `[committedCount..<count]` from the session's stroke
         /// and hands them to the renderer for deposit into strokeScratch.
         /// No-op when the session isn't active or no new points have
         /// arrived since the last call.
-        private func flushWetInkSession() {
-            guard wetInkActive,
-                  let stroke = currentStroke,
+        private func flushWetInkSession(touchID: ObjectIdentifier) {
+            guard var session = strokeSessions[touchID],
+                  session.wetInkActive,
+                  let stroke = session.stroke,
                   isWetInkTool(stroke.tool),
                   let renderer = renderer,
-                  stroke.points.count > wetInkCommittedPointCount else {
+                  stroke.points.count > session.wetInkCommittedPointCount else {
                 return
             }
-            let newPoints = Array(stroke.points[wetInkCommittedPointCount..<stroke.points.count])
-            let stampIndexBase = wetInkCommittedPointCount
-            wetInkCommittedPointCount = stroke.points.count
+            let newPoints = Array(stroke.points[session.wetInkCommittedPointCount..<stroke.points.count])
+            let stampIndexBase = session.wetInkCommittedPointCount
+            session.wetInkCommittedPointCount = stroke.points.count
+            strokeSessions[touchID] = session
             renderer.flushWetInkSubStroke(stamps: newPoints, stampIndexBase: stampIndexBase)
         }
 
@@ -3285,12 +3390,21 @@ struct MetalCanvasView: UIViewRepresentable {
                 isSmudgeStrokeActive = false
                 let strokeLayerIndex = smudgeStrokeLayerIndex
                 let strokeLayerId = smudgeStrokeLayerId
-                let beforeSnapshot = smudgeBeforeSnapshot
+                // Resolve the smudge session by matching an ending touch to a
+                // session entry. Under single-active discipline the smudge
+                // session is the only one in the dict; the match-by-touchID
+                // form stays correct even if discipline relaxes later.
+                let smudgeTouchID = touches
+                    .first(where: { strokeSessions[ObjectIdentifier($0)] != nil })
+                    .map { ObjectIdentifier($0) }
+                let beforeSnapshot = smudgeTouchID.flatMap { strokeSessions[$0]?.smudgeBeforeSnapshot }
                 smudgeStrokeLayerIndex = nil
                 smudgeStrokeLayerId = nil
                 smudgeStrokeID = nil
                 smudgePendingTouchdown = nil
-                smudgeBeforeSnapshot = nil
+                if let tid = smudgeTouchID {
+                    strokeSessions.removeValue(forKey: tid)
+                }
 
                 if let renderer = renderer {
                     if let li = strokeLayerIndex,
@@ -3327,8 +3441,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     renderer.endSmudgeStroke()
                 }
 
-                lastPoint = nil
-                lastTimestamp = 0
+                // lastPoint / lastTimestamp lived on the smudge session, which
+                // was just removed via strokeSessions.removeValue above. No
+                // separate clear needed.
                 if let cs = canvasState {
                     MainActor.assumeIsolated {
                         cs.stampCursorCenter = nil
@@ -3571,7 +3686,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 return
             }
 
-            guard let stroke = currentStroke else {
+            // Resolve the session for the lifting touch. Under single-active
+            // discipline the only session in the dict is this stroke's; the
+            // match-by-touchID form remains correct if discipline relaxes.
+            let endingTouchID: ObjectIdentifier? = touches
+                .first(where: { strokeSessions[ObjectIdentifier($0)] != nil })
+                .map { ObjectIdentifier($0) }
+            guard let touchID = endingTouchID,
+                  let session = strokeSessions[touchID],
+                  let stroke = session.stroke else {
                 print("ERROR: No current stroke to commit")
                 return
             }
@@ -3582,29 +3705,26 @@ struct MetalCanvasView: UIViewRepresentable {
             ensureLayerTextures()
 
             // Tier-1.5 eraser real-time commit fast path — OLD path.
-            // Skipped when wetInkActive is true (the wet-ink eraser
+            // Skipped when session.wetInkActive is true (the wet-ink eraser
             // commit branch below handles it). Retained as fallback for
             // the rare case beginWetInkStroke failed in touchesBegan.
-            if !wetInkActive, stroke.tool == .eraser {
+            if !session.wetInkActive, stroke.tool == .eraser {
                 guard selectedLayerIndex < layers.count,
                       let capturedTileGrid = layers[selectedLayerIndex].tileGrid,
                       let renderer = renderer else {
-                    currentStroke = nil
-                    lastPoint = nil
+                    strokeSessions.removeValue(forKey: touchID)
                     resetShapeToolState()
-                    eraserBeforeSnapshot = nil
-                    eraserCommittedPointCount = 0
                     renderer?.endPreviewMask()
                     return
                 }
-                let beforeSnapshot = eraserBeforeSnapshot
+                let beforeSnapshot = session.eraserBeforeSnapshot
                 let layerId = stroke.layerId
                 let currentLayerIndex = selectedLayerIndex
                 let capturedCanvasState = canvasState
                 #if DEBUG
                 CanvasStrokeDiagnostics.log("eraser commit begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) \(CanvasStrokeDiagnostics.ranges(for: stroke.points)) strokeSettingsAtBegin{\(CanvasStrokeDiagnostics.format(stroke.settings))} slidersAtCommit{\(CanvasStrokeDiagnostics.format(brushSettings))}")
                 #endif
-                flushEraserSubStroke(view: view) { [weak self] in
+                flushEraserSubStroke(view: view, touchID: touchID) { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if let before = beforeSnapshot,
                        let after = afterSnapshot,
@@ -3626,11 +3746,8 @@ struct MetalCanvasView: UIViewRepresentable {
                         }
                     }
                 }
-                currentStroke = nil
-                lastPoint = nil
+                strokeSessions.removeValue(forKey: touchID)
                 resetShapeToolState()
-                eraserBeforeSnapshot = nil
-                eraserCommittedPointCount = 0
                 renderer.endPreviewMask()
                 resetSnapToLineState()
                 if let cs = canvasState {
@@ -3645,8 +3762,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Commit stroke to layer
             guard selectedLayerIndex < layers.count else {
                 print("ERROR: Invalid layer index \(selectedLayerIndex)")
-                currentStroke = nil
-                lastPoint = nil
+                strokeSessions.removeValue(forKey: touchID)
                 renderer?.endPreviewMask()
                 return
             }
@@ -3664,14 +3780,13 @@ struct MetalCanvasView: UIViewRepresentable {
                stroke.tool == .blur,
                layer.tileGrid != nil,
                let renderer = renderer {
-                flushBlurSubStroke()  // final tail of points
-                let beforeSnapshot = blurStrokeBeforeSnapshot
+                flushBlurSubStroke(touchID: touchID)  // final tail of points
+                let beforeSnapshot = session.blurStrokeBeforeSnapshot
                 let strokeLayerIndex = blurStrokeLayerIndex ?? selectedLayerIndex
                 let strokeLayerId = blurStrokeLayerId ?? layer.id
                 guard let capturedTileGrid = layers[strokeLayerIndex].tileGrid else { return }
                 let capturedCanvasState = canvasState
                 blurStrokeActive = false
-                blurStrokeBeforeSnapshot = nil
                 blurStrokeLayerIndex = nil
                 blurStrokeLayerId = nil
                 blurCommittedPointCount = 0
@@ -3698,8 +3813,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
 
-                currentStroke = nil
-                lastPoint = nil
+                strokeSessions.removeValue(forKey: touchID)
                 resetShapeToolState()
                 renderer.endPreviewMask()
                 resetSnapToLineState()
@@ -3720,29 +3834,21 @@ struct MetalCanvasView: UIViewRepresentable {
             // into tile grid) and uses the completion to capture the
             // AFTER snapshot for undo. Skips the deferred dispatchStroke
             // path below.
-            if wetInkActive,
+            if session.wetInkActive,
                isWetInkTool(stroke.tool),
                layer.tileGrid != nil,
                let renderer = renderer {
-                flushWetInkSession()  // tail flush of any straggler points
-                let beforeSnapshot = wetInkBeforeSnapshot
-                let strokeLayerIndex = wetInkLayerIndex ?? selectedLayerIndex
-                let strokeLayerId = wetInkLayerId ?? layer.id
+                flushWetInkSession(touchID: touchID)  // tail flush of any straggler points
+                let beforeSnapshot = session.wetInkBeforeSnapshot
+                let strokeLayerIndex = session.wetInkLayerIndex ?? selectedLayerIndex
+                let strokeLayerId = session.wetInkLayerId ?? layer.id
                 guard let capturedTileGrid = layers[strokeLayerIndex].tileGrid else {
-                    wetInkActive = false
-                    wetInkBeforeSnapshot = nil
-                    wetInkLayerIndex = nil
-                    wetInkLayerId = nil
-                    wetInkCommittedPointCount = 0
+                    strokeSessions.removeValue(forKey: touchID)
                     renderer.cancelWetInkStroke()
                     return
                 }
                 let capturedCanvasState = canvasState
-                wetInkActive = false
-                wetInkBeforeSnapshot = nil
-                wetInkLayerIndex = nil
-                wetInkLayerId = nil
-                wetInkCommittedPointCount = 0
+                strokeSessions.removeValue(forKey: touchID)
 
                 renderer.commitWetInkStroke { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
@@ -3774,8 +3880,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
 
-                currentStroke = nil
-                lastPoint = nil
+                // Session was removed before the renderer.commitWetInkStroke
+                // dispatch above; rest of the per-stroke top-level state is
+                // tool bookkeeping that survives the session removal.
                 resetShapeToolState()
                 renderer.endPreviewMask()
                 resetSnapToLineState()
@@ -3870,9 +3977,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("  - Renderer exists: \(renderer != nil)")
             }
 
-            // Clear current stroke so preview stops rendering
-            currentStroke = nil
-            lastPoint = nil
+            // Remove the session — preview stops compositing this stroke.
+            // (The OLD dispatchStroke path above already dispatched the
+            // stroke value through `dispatchStroke`, so the session no
+            // longer needs to hold it.)
+            strokeSessions.removeValue(forKey: touchID)
             resetShapeToolState()
             marqueeStartScreen = nil
             // Free the cached preview selection mask. The committed stroke
@@ -3891,23 +4000,33 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesCancelled(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
+            // Resolve which (if any) cancelled touch owns a stroke session.
+            // touchesCancelled is also called when no stroke is active
+            // (e.g. lasso cancelled, gesture grab on idle canvas), so
+            // session may be nil. The rest of the function handles the
+            // non-session state (lasso, selection, pendingPaintBucketFill,
+            // etc.) regardless.
+            let cancelledTouchID: ObjectIdentifier? = touches
+                .first(where: { strokeSessions[ObjectIdentifier($0)] != nil })
+                .map { ObjectIdentifier($0) }
+            let cancelledSession = cancelledTouchID.flatMap { strokeSessions[$0] }
+
             // Tier-1.5 eraser OLD path: the layer texture was mutated
             // mid-stroke, so a system-cancel needs to roll the layer back
-            // to its pre-stroke state. Skipped when wetInkActive is true
-            // (the wet-ink eraser path defers all layer mutation to
+            // to its pre-stroke state. Skipped when session.wetInkActive is
+            // true (the wet-ink eraser path defers all layer mutation to
             // touchesEnded; the wet-ink cleanup block below handles the
             // cancel and clears scratch on next begin).
-            if !wetInkActive,
+            if let session = cancelledSession,
+               !session.wetInkActive,
                currentTool == .eraser,
-               let beforeSnapshot = eraserBeforeSnapshot,
+               let beforeSnapshot = session.eraserBeforeSnapshot,
                selectedLayerIndex < layers.count,
                let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
                 print("Eraser cancelled — restored layer to pre-stroke snapshot")
             }
-            eraserBeforeSnapshot = nil
-            eraserCommittedPointCount = 0
 
             // Real-time blur stroke: same rollback semantics as eraser.
             // Stamps were deposited mid-stroke, so a system-cancel must
@@ -3915,7 +4034,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // scratch textures get released via cancelBlurStroke (no
             // finalisation buffer).
             if blurStrokeActive,
-               let beforeSnapshot = blurStrokeBeforeSnapshot,
+               let beforeSnapshot = cancelledSession?.blurStrokeBeforeSnapshot,
                let li = blurStrokeLayerIndex, li < layers.count,
                let tileGrid = layers[li].tileGrid,
                let renderer = renderer {
@@ -3924,7 +4043,6 @@ struct MetalCanvasView: UIViewRepresentable {
                 print("Blur cancelled — restored layer to pre-stroke snapshot")
             }
             blurStrokeActive = false
-            blurStrokeBeforeSnapshot = nil
             blurStrokeLayerIndex = nil
             blurStrokeLayerId = nil
             blurCommittedPointCount = 0
@@ -3933,9 +4051,10 @@ struct MetalCanvasView: UIViewRepresentable {
             // any tiles were mutated by a partial commit (none should be,
             // since commit only runs at touchesEnded, but defensively
             // restore anyway). Scratch stays dirty until next begin.
-            if wetInkActive,
-               let beforeSnapshot = wetInkBeforeSnapshot,
-               let li = wetInkLayerIndex, li < layers.count,
+            if let session = cancelledSession,
+               session.wetInkActive,
+               let beforeSnapshot = session.wetInkBeforeSnapshot,
+               let li = session.wetInkLayerIndex, li < layers.count,
                let tileGrid = layers[li].tileGrid,
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
@@ -3944,14 +4063,13 @@ struct MetalCanvasView: UIViewRepresentable {
             } else if let renderer = renderer {
                 renderer.cancelWetInkStroke()
             }
-            wetInkActive = false
-            wetInkBeforeSnapshot = nil
-            wetInkLayerIndex = nil
-            wetInkLayerId = nil
-            wetInkCommittedPointCount = 0
 
-            currentStroke = nil
-            lastPoint = nil
+            // Drop the session entry — every per-touch field on it
+            // (currentStroke, lastPoint, all wet-ink/eraser/blur/smudge
+            // before-snapshots and committed counters) goes away together.
+            if let tid = cancelledTouchID {
+                strokeSessions.removeValue(forKey: tid)
+            }
             resetShapeToolState()
             marqueeStartScreen = nil
             lassoPath = []
@@ -3972,13 +4090,16 @@ struct MetalCanvasView: UIViewRepresentable {
             // record). Layer texture is left in its partially-mutated
             // state; the user can undo if they want to roll back. This
             // matches how the brush handles cancellation today.
+            // session.smudgeBeforeSnapshot was already removed via the
+            // session removal above (under single-active discipline the
+            // smudge session is THE cancelledSession when smudge is the
+            // active tool).
             if isSmudgeStrokeActive {
                 isSmudgeStrokeActive = false
                 smudgeStrokeLayerIndex = nil
                 smudgeStrokeLayerId = nil
                 smudgeStrokeID = nil
                 smudgePendingTouchdown = nil
-                smudgeBeforeSnapshot = nil
                 renderer?.endSmudgeStroke()
             }
 
@@ -4341,6 +4462,7 @@ struct MetalCanvasView: UIViewRepresentable {
             isSnappedToLine = false
             snapToLineStartDoc = nil
             snapToLineAnchorScreen = nil
+            snapToLineTouchID = nil
         }
 
         /// Fired by `snapToLineTimer` after 600ms of stationary touch.
@@ -4348,13 +4470,22 @@ struct MetalCanvasView: UIViewRepresentable {
         /// clean line from the stroke start to the latest tracked sample.
         /// Subsequent touchesMoved events refresh the geometry as the user
         /// adjusts the endpoint.
+        ///
+        /// Touch resolution: the timer is armed with `snapToLineTouchID` set
+        /// to the touch whose stroke it covers, so the mutation lands on the
+        /// correct `StrokeSession`. Bail if the session has already gone
+        /// away (lift / cancel during the 600ms hold) — the timer may still
+        /// fire after the session is torn down.
         private func engageSnapToLine() {
             snapToLineTimer = nil
-            guard var stroke = currentStroke,
+            guard let touchID = snapToLineTouchID,
+                  var session = strokeSessions[touchID],
+                  var stroke = session.stroke,
                   let start = snapToLineStartDoc else { return }
             isSnappedToLine = true
             stroke.points = buildSnapLineGeometry(start: start, target: snapLatestDoc)
-            currentStroke = stroke
+            session.stroke = stroke
+            strokeSessions[touchID] = session
         }
 
         /// Build the snapped-line stroke point list, including symmetry mirrors.
@@ -4856,6 +4987,26 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // MARK: - Gesture Recognizers
 
+        // Shared anchor for simultaneous pinch + pan + rotation gestures. Captured
+        // once at the first transform-gesture `.began` so the canvas pivots around
+        // the user's two fingers (stable Procreate-style feel) instead of slosh-
+        // following per-frame centroid drift. Cleared when all transform gestures
+        // have ended or cancelled. All three of pinch/pan/rotation participate in
+        // the refcount — they're coupled in practice (all require 2 touches) but
+        // bumping all three keeps the anchor alive across any subset firing.
+        private var transformAnchor: CGPoint?
+        private var activeTransformGestures: Set<ObjectIdentifier> = []
+
+        private func captureTransformAnchorIfNeeded(_ gr: UIGestureRecognizer, at location: CGPoint) {
+            activeTransformGestures.insert(ObjectIdentifier(gr))
+            if transformAnchor == nil { transformAnchor = location }
+        }
+
+        private func releaseTransformAnchor(_ gr: UIGestureRecognizer) {
+            activeTransformGestures.remove(ObjectIdentifier(gr))
+            if activeTransformGestures.isEmpty { transformAnchor = nil }
+        }
+
         @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
             guard let canvasState = canvasState, let view = gesture.view else { return }
 
@@ -4863,6 +5014,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             switch gesture.state {
             case .began:
+                captureTransformAnchorIfNeeded(gesture, at: location)
                 print("Pinch began at \(location), scale: \(gesture.scale)")
 
             case .changed:
@@ -4876,13 +5028,19 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 guard scaleDelta.isFinite, scaleDelta > 0 else { return }
 
+                // Use the captured anchor so simultaneous pinch+rotate compose around
+                // the same point. Fallback to current gesture location if anchor wasn't
+                // captured (defensive — `.began` should always run first).
+                let anchor = transformAnchor ?? location
+
                 // Gesture callbacks are main-actor; run the mutation synchronously.
                 MainActor.assumeIsolated {
                     let newScale = canvasState.zoomScale * scaleDelta
-                    canvasState.zoom(scale: newScale, centerPoint: location)
+                    canvasState.zoom(scale: newScale, centerPoint: anchor)
                 }
 
             case .ended, .cancelled:
+                releaseTransformAnchor(gesture)
                 print("Pinch ended, final zoom: \(canvasState.zoomScale)")
 
             default:
@@ -4895,6 +5053,12 @@ struct MetalCanvasView: UIViewRepresentable {
 
             switch gesture.state {
             case .began:
+                // Pan doesn't pivot around an anchor (pure translation), but
+                // bumps the refcount so the shared anchor stays alive across
+                // pinch→pan→pinch sequences. Its location is a meaningful
+                // centroid if it happens to fire first.
+                let location = gesture.location(in: view)
+                captureTransformAnchorIfNeeded(gesture, at: location)
                 print("Two-finger pan began")
 
             case .changed:
@@ -4908,6 +5072,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
 
             case .ended, .cancelled:
+                releaseTransformAnchor(gesture)
                 print("Two-finger pan ended")
 
             default:
@@ -4966,11 +5131,14 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
-            guard let canvasState = canvasState else { return }
+            guard let canvasState = canvasState, let view = gesture.view else { return }
+
+            let location = gesture.location(in: view)
 
             switch gesture.state {
             case .began:
-                print("Rotation began")
+                captureTransformAnchorIfNeeded(gesture, at: location)
+                print("Rotation began at \(location)")
 
             case .changed:
                 // Capture delta BEFORE resetting. Do NOT snap during `.changed`: the
@@ -4986,22 +5154,34 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 guard rotationAngle.radians.isFinite else { return }
 
+                let anchor = transformAnchor ?? location
+
                 MainActor.assumeIsolated {
-                    canvasState.rotate(by: rotationAngle, snapToGrid: false)
+                    canvasState.rotate(by: rotationAngle, around: anchor, snapToGrid: false)
                 }
 
             case .ended:
-                print("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
-
-                // Optionally snap to nearest 90° on release if very close.
+                // 90° snap on release: route through the same anchor-preserving
+                // primitive (via rotate(by:around:)) so the snap pivots around the
+                // captured two-finger centroid instead of viewport center. Direct-
+                // assigning canvasRotation would skip the pan compensation and
+                // throw content several hundred px at deep zoom for even a 1-5°
+                // snap delta.
                 MainActor.assumeIsolated {
                     let currentDegrees = canvasState.canvasRotation.degrees
                     let nearest90 = round(currentDegrees / 90) * 90
                     if abs(currentDegrees - nearest90) < 5 {
-                        canvasState.canvasRotation = .degrees(nearest90)
+                        let snapDelta = Angle(degrees: nearest90 - currentDegrees)
+                        let snapAnchor = self.transformAnchor ?? location
+                        canvasState.rotate(by: snapDelta, around: snapAnchor, snapToGrid: false)
                         print("Snapped to nearest 90°: \(nearest90)°")
                     }
                 }
+                releaseTransformAnchor(gesture)
+                print("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
+
+            case .cancelled:
+                releaseTransformAnchor(gesture)
 
             default:
                 break
@@ -5022,17 +5202,18 @@ struct MetalCanvasView: UIViewRepresentable {
 
         /// Allow transform gestures to begin even mid-stroke. When UIKit then claims the
         /// touches for the gesture, it will call `touchesCancelled` on the MTKView, which
-        /// clears `currentStroke` via `touchesCancelled(_:in:)` above. Previously this
-        /// returned `false` whenever a stroke was in progress, which meant any 2-finger
-        /// pan/pinch/rotation was rejected because `touchesBegan` had already started a
-        /// stroke on the first finger (bug 1.2).
+        /// tears down the active session via `touchesCancelled(_:in:)` above. Previously
+        /// this returned `false` whenever a stroke was in progress, which meant any
+        /// 2-finger pan/pinch/rotation was rejected because `touchesBegan` had already
+        /// started a stroke on the first finger (bug 1.2).
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             if Coordinator.isTransformGesture(gestureRecognizer) {
                 return true
             }
             // Non-transform gestures (should be none on our MTKView) fall back to the
-            // previous conservative behavior.
-            return currentStroke == nil
+            // previous conservative behavior — only begin when no stroke session is
+            // active.
+            return strokeSessions.isEmpty
         }
 
         private static func isTransformGesture(_ gr: UIGestureRecognizer) -> Bool {
