@@ -537,7 +537,7 @@ private struct GalleryContent: View {
                 if let err = customPromptManager.lastError {
                     Text(err).foregroundColor(.red)
                 } else {
-                    Text("Custom voices are synced across your devices via Supabase.")
+                    Text("Your custom critique voices sync across your devices.")
                 }
             }
         }

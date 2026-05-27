@@ -75,7 +75,7 @@ struct PromptEditView: View {
                 } header: {
                     Text("Custom voice")
                 } footer: {
-                    Text("Describe your coach in your own words — e.g. \"A retired Japanese sumi-e master who critiques in haiku.\" Leave empty to use the selected preset voice (Studio Mentor, The Crit, etc.).")
+                    Text("Describe your critique voice in your own words — e.g. \"A retired Japanese sumi-e master who critiques in haiku.\" Leave empty to use the selected preset voice (Studio Mentor, The Crit, etc.).")
                 }
 
                 Section {

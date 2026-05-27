@@ -57,7 +57,7 @@ struct BetaTransparencyPopup: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        BetaWarningItem(text: "Bugs will happen. Tell us what you find.")
+                        BetaWarningItem(text: "Bugs will happen. Reply to the TestFlight invite, or use \"Send Beta Feedback\" inside the TestFlight app.")
                         BetaWarningItem(text: "The iPhone build has more rough edges than iPad. Both work, but iPad feels more polished right now.")
                         BetaWarningItem(text: "Auto-save keeps your work backed up between manual saves, so a crash won't wipe what you've drawn.")
                     }
@@ -101,11 +101,11 @@ struct BetaTransparencyPopup: View {
                         )
                         BetaFeatureItem(
                             icon: "sparkles",
-                            text: "AI critique that remembers what it told you last time on the same drawing."
+                            text: "Iterative critiques that build on each other. Each time you request feedback on a drawing, your critique voice picks up where the last one left off — not a fresh, generic take."
                         )
                         BetaFeatureItem(
                             icon: "person.crop.circle.badge.questionmark",
-                            text: "Four coach voices, or write your own."
+                            text: "Four critique voices (Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master), or write your own."
                         )
                         BetaFeatureItem(
                             icon: "slider.horizontal.3",
@@ -135,7 +135,6 @@ struct BetaTransparencyPopup: View {
 
                     VStack(alignment: .leading, spacing: 8) {
                         ComingSoonItem(text: "Better brushes. Oil paint and watercolor with real texture.")
-                        ComingSoonItem(text: "Pinned prompts that override your default voice for one drawing.")
                         ComingSoonItem(text: "More export options.")
                         ComingSoonItem(text: "Sharing your evolution if you want to.")
                     }
@@ -218,7 +217,7 @@ struct BetaTransparencyPopup: View {
                             }
 
                             VStack(alignment: .leading, spacing: 8) {
-                                BetaWarningItem(text: "Bugs will happen. Tell us what you find.")
+                                BetaWarningItem(text: "Bugs will happen. Reply to the TestFlight invite, or use \"Send Beta Feedback\" inside the TestFlight app.")
                                 BetaWarningItem(text: "The iPhone build has more rough edges than iPad. Both work, but iPad feels more polished right now.")
                                 BetaWarningItem(text: "Auto-save keeps your work backed up between manual saves, so a crash won't wipe what you've drawn.")
                             }
@@ -298,7 +297,6 @@ struct BetaTransparencyPopup: View {
 
                             VStack(alignment: .leading, spacing: 8) {
                                 ComingSoonItem(text: "Better brushes. Oil paint and watercolor with real texture.")
-                                ComingSoonItem(text: "Pinned prompts that override your default voice for one drawing.")
                                 ComingSoonItem(text: "More export options.")
                                 ComingSoonItem(text: "Sharing your evolution if you want to.")
                             }

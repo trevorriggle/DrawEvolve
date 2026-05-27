@@ -31,9 +31,10 @@ struct OnboardingPopup: View {
                         .scaledToFit()
                         .frame(height: 120)
 
-                    Text("Your personalized drawing coach")
+                    Text("Honest AI critiques + Eve, the coach who remembers your work.")
                         .font(.subheadline)
                         .foregroundColor(.primary)
+                        .multilineTextAlignment(.center)
                 }
 
                 Divider()
@@ -45,7 +46,7 @@ struct OnboardingPopup: View {
                     OnboardingStep(
                         icon: "doc.text.fill",
                         title: "Tell us about your drawing",
-                        description: "Describe what you're working on, or skip and just start."
+                        description: "A short setup collects your subject, skill level, and focus area. The more accurately you describe what you're trying to do, the sharper the critique."
                     )
 
                     OnboardingStep(
@@ -56,14 +57,14 @@ struct OnboardingPopup: View {
 
                     OnboardingStep(
                         icon: "person.crop.circle.badge.questionmark",
-                        title: "Pick a coach",
-                        description: "Four voices to choose from, or write your own."
+                        title: "Choose your critique voice",
+                        description: "Four built-in voices live in Gallery → My Prompts. Pick the one whose opinion you trust — you can switch any time."
                     )
 
                     OnboardingStep(
                         icon: "sparkles",
                         title: "Get feedback",
-                        description: "Tap Get Feedback for honest critique. Your coach builds on what it said last time."
+                        description: "Tap Get Feedback for an honest critique. Your critique voice remembers prior critiques on the same drawing — every new one picks up where the last one left off."
                     )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -115,9 +116,10 @@ struct OnboardingPopup: View {
                         .scaledToFit()
                         .frame(height: 120)
 
-                    Text("Your personalized drawing coach")
+                    Text("Honest AI critiques + Eve, the coach who remembers your work.")
                         .font(.subheadline)
                         .foregroundColor(.primary)
+                        .multilineTextAlignment(.center)
                 }
 
                 Divider()
@@ -130,7 +132,7 @@ struct OnboardingPopup: View {
                     OnboardingStep(
                         icon: "doc.text.fill",
                         title: "Tell us about your drawing",
-                        description: "Describe what you're working on, or skip and just start."
+                        description: "A short setup collects your subject, skill level, and focus area. The more accurately you describe what you're trying to do, the sharper the critique."
                     )
 
                     OnboardingStep(
@@ -141,14 +143,14 @@ struct OnboardingPopup: View {
 
                     OnboardingStep(
                         icon: "person.crop.circle.badge.questionmark",
-                        title: "Pick a coach",
-                        description: "Four voices to choose from, or write your own."
+                        title: "Choose your critique voice",
+                        description: "Four built-in voices live in Gallery → My Prompts. Pick the one whose opinion you trust — you can switch any time."
                     )
 
                     OnboardingStep(
                         icon: "sparkles",
                         title: "Get feedback",
-                        description: "Tap Get Feedback for honest critique. Your coach builds on what it said last time."
+                        description: "Tap Get Feedback for an honest critique. Your critique voice remembers prior critiques on the same drawing — every new one picks up where the last one left off."
                     )
                 }
                 .padding(.horizontal)
