@@ -51,6 +51,10 @@ import {
   fetchCritiqueForConversation,
   fetchCoachingContext,
   updateConversationTitle,
+  updateConversationFirstUserMessage,
+  capFirstUserMessageForStorage,
+  countActiveConversations,
+  evictOldestActiveConversation,
   fetchFirstUserMessage,
 } from '../lib/supabase.js';
 import {
@@ -80,6 +84,16 @@ const MAX_MESSAGE_CONTENT_BYTES = 8 * 1024;
 // a malicious / buggy client from blowing up the worker request size
 // budget and burning vision tokens unbounded.
 const MAX_CANVAS_IMAGE_BASE64_BYTES = 5 * 1024 * 1024;
+
+// Hard cap on the user's active (non-deleted, non-empty) conversations.
+// Sized to match the worker's listConversations default limit of 50 so
+// the list endpoint never has to clip. When a create would push the
+// count past this, handleCreateConversation evicts the oldest by
+// last_message_at before inserting. Only conversations with
+// message_count > 0 count toward the cap — empty rows handle themselves
+// via iOS auto-delete-on-dismiss + the one-shot purge migration.
+// Bumping this above 50 requires implementing list pagination first.
+const MAX_ACTIVE_CONVERSATIONS = 50;
 
 // Loose base64 shape check. Doesn't decode — that's wasted work in a
 // worker — but ensures the field looks like base64 before we splice it
@@ -331,13 +345,26 @@ async function handleCreateConversation(request, env, ctx, requiresPro) {
     clientRequestId = body.client_request_id;
   }
 
+  // No cap enforcement on the create path. Per the EVE-PATCHES design
+  // (footgun fix), eviction is deferred to handleSendMessage's first-
+  // message gate — only committed conversations (those the user has
+  // actually sent into) count toward the cap. Empty drafts produced by
+  // the iOS "+ New Chat" flow get cleaned up via the host's dismiss
+  // hook before they could trigger eviction. This prevents the failure
+  // mode where exploratory "+ New Chat" taps silently evict the user's
+  // older committed conversations.
+  //
+  // evicted_conversation_id stays in the response shape (always null
+  // here) so iOS clients have a stable contract — the field is now
+  // populated by the send-message response when eviction actually fires.
+
   try {
     const conversation = await createConversation({
       env, userId, scope,
       scopeDrawingId, scopeCritiqueSequence,
       title, clientRequestId,
     });
-    return jsonResponse({ conversation }, 201);
+    return jsonResponse({ conversation, evicted_conversation_id: null }, 201);
   } catch (err) {
     // Unique-constraint hit on client_request_id (PostgreSQL 23505 →
     // PostgREST 409) means a retry of the same create. Look up the
@@ -347,7 +374,12 @@ async function handleCreateConversation(request, env, ctx, requiresPro) {
       const existing = await listConversations({ env, userId, limit: 50 })
         .then((rows) => rows.find((r) => r.client_request_id === clientRequestId) ?? null)
         .catch(() => null);
-      if (existing) return jsonResponse({ conversation: existing }, 200);
+      if (existing) {
+        return jsonResponse({
+          conversation: existing,
+          evicted_conversation_id: null,
+        }, 200);
+      }
     }
     console.error('[eve] create failed', err?.message);
     return jsonResponse({ error: 'Internal server error' }, 500);
@@ -410,7 +442,15 @@ async function handleListConversations(request, env, ctx, requiresPro) {
 
 async function backfillTitles({ env, ctx, conversations }) {
   if (!Array.isArray(conversations) || conversations.length === 0) return;
-  const nullTitleRows = conversations.filter((c) => c && c.title == null);
+  // Per Path Y read order: iOS reads first_user_message > title > "New chat"
+  // fallback. A row with first_user_message populated never falls through
+  // to title on display, so backfilling title for those rows is wasted
+  // work. Only backfill rows where BOTH columns are null — typically
+  // pre-0016 rows where the SQL backfill missed (race or empty-message-
+  // shape edge cases) and we want SOMETHING to display.
+  const nullTitleRows = conversations.filter(
+    (c) => c && c.title == null && c.first_user_message == null,
+  );
   if (nullTitleRows.length === 0) return;
 
   await Promise.all(nullTitleRows.map(async (row) => {
@@ -548,6 +588,13 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     return jsonResponse({ error: 'client_request_id must be a lowercase UUID' }, 400);
   }
 
+  // Function-scope so all three response paths (idempotency replay,
+  // orphan, success) can include it. Set later inside the first-message
+  // gate if eviction fires. The replay path returns before the gate so
+  // it stays null there — correct, since the eviction (if any) happened
+  // on the original call, not this retry.
+  let evictedConversationId = null;
+
   // Optional canvas attachment. iOS only sends this from the
   // canvas-launched Eve sheet (gated client-side) but we still validate
   // server-side — the field is user-controllable input. JPEG-only by
@@ -592,6 +639,7 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
       user_message: null,
       assistant_message: replay,
       conversation,
+      evicted_conversation_id: evictedConversationId,
     }, 200, { 'X-Idempotent-Replay': '1' });
   }
 
@@ -673,20 +721,52 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
   // response shouldn't wait on the PATCH. Reflect the derived title
   // on the in-memory `conversation` so the response carries it.
   //
-  // Gating: title is still null AND message_count is 0. After this
-  // turn bumps message_count by 2, the gate naturally closes for
-  // subsequent sends on the same conversation. The updateConversationTitle
-  // helper double-gates with `&title=is.null` so concurrent first-message
-  // races (or the backfill path racing this one) can't clobber.
-  if (conversation.title == null && (conversation.message_count ?? 0) === 0) {
-    const derivedTitle = deriveTitleFromMessage(content);
-    if (derivedTitle) {
-      ctx.waitUntil(
-        updateConversationTitle({ env, conversationId, title: derivedTitle })
-          .catch((err) => console.error('[eve] title forward-path PATCH failed', err?.message)),
-      );
-      conversation.title = derivedTitle;
+  // Forward path: stamp the raw first user message onto the conversation
+  // for list-row preview + nav-bar title rendering on iOS. Per Path Y,
+  // the worker no longer writes `title` for new conversations — iOS
+  // reads first_user_message directly and truncates client-side. The
+  // existing lazy-backfill path for `title` (handleListConversations →
+  // backfillTitles) still runs for pre-0016 rows that have title=null
+  // AND non-null first_user_message after the SQL backfill, but that's
+  // back-compat only.
+  //
+  // Gating: first_user_message is still null AND message_count is 0.
+  // After this turn bumps message_count by 2, the gate naturally closes
+  // for subsequent sends. updateConversationFirstUserMessage double-
+  // gates with `&first_user_message=is.null` so concurrent first-message
+  // races can't clobber. Fire-and-forget; the user's response shouldn't
+  // wait on the PATCH. Mirror the value on the in-memory row so the
+  // response carries it.
+  if (conversation.first_user_message == null && (conversation.message_count ?? 0) === 0) {
+    // First-message gate: this is the moment the conversation commits.
+    // Run cap enforcement here (not at create time) so empty drafts
+    // from "+ New Chat" exploration don't silently evict older
+    // committed conversations. The current in-progress conversation
+    // doesn't count toward the cap yet (message_count is still 0 at
+    // this point), so a check that returns 50 means 50 OTHER committed
+    // conversations — eviction is correct.
+    //
+    // Best-effort: if eviction fails, log with greppable
+    // EVE_CAP_FAILOPEN tag and continue. The cap is a soft business
+    // rule; the user's intent (sending a message) is more important
+    // than the invariant. Spike in telemetry → investigate.
+    try {
+      const activeCount = await countActiveConversations({ env, userId });
+      if (activeCount >= MAX_ACTIVE_CONVERSATIONS) {
+        evictedConversationId = await evictOldestActiveConversation({ env, userId });
+      }
+    } catch (err) {
+      console.error('EVE_CAP_FAILOPEN cap enforcement failed (allowing send)', err?.message);
     }
+
+    ctx.waitUntil(
+      updateConversationFirstUserMessage({
+        env, conversationId, firstUserMessage: content,
+      }).catch((err) => console.error('[eve] first_user_message PATCH failed', err?.message)),
+    );
+    // Mirror the persisted (capped) value on the in-memory row so the
+    // response carries the same string the row actually has.
+    conversation.first_user_message = capFirstUserMessageForStorage(content);
   }
 
   // Scope hydration runs in parallel with coaching-context fetch and
@@ -831,6 +911,7 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
       assistant_message: { content: assistantContent, role: 'assistant' },
       conversation,
       warning: 'persistence_orphan',
+      evicted_conversation_id: evictedConversationId,
     }, 200);
   }
 
@@ -863,6 +944,7 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     user_message: userMessage,
     assistant_message: assistantMessage,
     conversation: freshConversation,
+    evicted_conversation_id: evictedConversationId,
   });
 }
 

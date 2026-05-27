@@ -107,6 +107,15 @@ actor EveService {
             path: "/v1/eve/conversations",
             body: body,
         )
+        // The worker stamps evictedConversationId when the user was at
+        // the active-conversation cap and the oldest got soft-deleted to
+        // make room. Currently log-only — silent eviction is intentional
+        // per product decision; no UI banner. Logged here so the rate is
+        // visible via Console / CrashReporter telemetry; if it spikes
+        // we'll know users are routinely hitting the cap.
+        if let evictedId = response.evictedConversationId {
+            print("[Eve] cap eviction during create — archived \(evictedId.uuidString)")
+        }
         return response.conversation
     }
 

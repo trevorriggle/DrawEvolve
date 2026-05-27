@@ -222,14 +222,13 @@ struct DrawingCanvasView: View {
     @State private var showSettings = false   // Phase 6 — gear in collapsible chrome
 
     // Eve coach sheet state. `showEve` toggles the iPad floating overlay /
-    // iPhone sheet; `eveScope` + `eveCritiqueSequence` + `eveDrawingTitle`
-    // configure the conversation being opened. Cleared between sessions so
-    // closing the sheet and re-opening from a different entry point gets
-    // a fresh scope. See Feature 2, Phase 2A in DrawEvolve-Three-Big-Features.md.
+    // iPhone sheet; `eveOpenIntent` selects which contents the sheet shows
+    // on open. Per the Phase 3b/3c restructure (EVE-PATCHES), the canvas
+    // Eve icon opens on the list (.openOnList — no auto-create), while the
+    // critique-panel "Ask Eve" buttons open directly on a fresh conversation
+    // (.openOnNewConversation — scope/drawing/critique baked in).
     @State private var showEve = false
-    @State private var eveScope: EveScope = .general
-    @State private var eveCritiqueSequence: Int? = nil
-    @State private var eveDrawingTitle: String? = nil
+    @State private var eveOpenIntent: EveSheetHost.EveOpenIntent = .openOnList
 
     // Composition / "Eye Test" panel. Gated by the
     // `eye_test_panel` feature flag — both Eye Test flags default
@@ -543,16 +542,14 @@ struct DrawingCanvasView: View {
                     Task { await clearIntentMarker() }
                 },
                 onAskEve: {
-                    // M6 handoff: dismiss the panel and open Eve in
-                    // `.drawing` scope so the conversation context is
-                    // anchored to the current drawing. openEve always
-                    // starts a fresh sheet — EveConversationManager
-                    // creates a new conversation when none exists for
-                    // (drawing, critique) — so this does not continue
-                    // an existing thread, per condition 6 of the M6
-                    // build plan.
+                    // M6 handoff: dismiss the panel and open Eve directly
+                    // on a fresh `.drawing`-scoped conversation. Bypasses
+                    // the conversation list — user has explicit task
+                    // intent ("ask about this critique") so landing on a
+                    // browse list would be the wrong UX. Closing the
+                    // sheet returns to the canvas, not to the list.
                     showEyeTestPanel = false
-                    openEve(scope: .drawing)
+                    openEveOnNewConversation(scope: .drawing)
                 },
                 onClose: { showEyeTestPanel = false }
             )
@@ -1055,8 +1052,10 @@ struct DrawingCanvasView: View {
                             // Dismiss critique sheet first; the Eve sheet
                             // opens via the .sheet modifier on the parent
                             // body so we can't stack two presentations.
+                            // Direct-to-conversation flow per Phase 3c —
+                            // bypasses the list for modal-task UX.
                             showFeedback = false
-                            openEve(scope: .drawing, critiqueSequence: sequence)
+                            openEveOnNewConversation(scope: .drawing, critiqueSequence: sequence)
                         },
                         onActiveEntryChange: { entry, isLatest in
                             // Same phase 2 snapshot rule as iPad. On
@@ -1088,10 +1087,7 @@ struct DrawingCanvasView: View {
             // the component, mirroring how FloatingFeedbackPanel works).
             .sheet(isPresented: $showEve) {
                 EveSheetHost(
-                    scope: eveScope,
-                    drawingId: eveScope == .drawing ? currentDrawingID : nil,
-                    critiqueSequence: eveCritiqueSequence,
-                    drawingTitle: eveDrawingTitle,
+                    intent: eveOpenIntent,
                     captureCanvas: { [canvasState] in
                         // Mirrors the critique flow's encoding path
                         // (CanvasStateManager.requestFeedback). The
@@ -1473,7 +1469,8 @@ struct DrawingCanvasView: View {
                     critiqueHistory: critiqueHistory,
                     isPresented: $showFeedback,
                     onAskEve: { sequence in
-                        openEve(scope: .drawing, critiqueSequence: sequence)
+                        // Direct-to-conversation flow per Phase 3c.
+                        openEveOnNewConversation(scope: .drawing, critiqueSequence: sequence)
                     },
                     onActiveEntryChange: { entry, isLatest in
                         // Snapshot mode rule: enter iff the user picked
@@ -1557,7 +1554,7 @@ struct DrawingCanvasView: View {
                         // iPhone path defers this affordance — iPhone
                         // users reach Eve via Ask Eve on FloatingFeedback-
                         // Panel only (per Phase 2A spec).
-                        EveIconButton(action: { openEve(scope: .general) })
+                        EveIconButton(action: { openEveOnList() })
 
                         // Composition / "Eye Test" entry. Sits immediately
                         // below Eve in the always-visible chrome tier so
@@ -1618,10 +1615,7 @@ struct DrawingCanvasView: View {
 
                 GeometryReader { geo in
                     EveSheetHost(
-                        scope: eveScope,
-                        drawingId: eveScope == .drawing ? currentDrawingID : nil,
-                        critiqueSequence: eveCritiqueSequence,
-                        drawingTitle: eveDrawingTitle,
+                        intent: eveOpenIntent,
                         captureCanvas: { [canvasState] in
                             canvasState.exportImage()?.jpegData(compressionQuality: 0.8)
                         },
@@ -2474,18 +2468,40 @@ struct DrawingCanvasView: View {
         .transition(.move(edge: .trailing).combined(with: .opacity))
     }
 
-    /// Opens the Eve coach sheet/panel with the given scope. Reads the
-    /// current drawing's title from in-memory storage so the EveContextChip
-    /// can render "About your drawing 'Forest at Dusk'" without an extra
-    /// round-trip. iPad presents an in-place overlay (see padBody); iPhone
-    /// uses a .sheet attached to the body wrapper. Both paths key off
-    /// `showEve` so the dismiss button works the same in both idioms.
-    private func openEve(scope: EveScope, critiqueSequence: Int? = nil) {
-        eveScope = scope
-        eveCritiqueSequence = critiqueSequence
-        eveDrawingTitle = currentDrawingTitle
-        // Use a soft animation on iPad so the panel slides in; iPhone's
-        // sheet has its own animation.
+    /// Opens the Eve coach sheet with the list as the root view. No
+    /// conversation is created here — the user picks one from the list
+    /// or taps "+ New Chat" inside the sheet to start fresh. Used by the
+    /// canvas Eve icon (general entry point). iPad presents an in-place
+    /// overlay (see padBody); iPhone uses a .sheet attached to the body
+    /// wrapper. Both paths key off `showEve`.
+    private func openEveOnList() {
+        eveOpenIntent = .openOnList
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+            showEve = true
+        }
+    }
+
+    /// Opens the Eve coach sheet directly on a fresh conversation tied
+    /// to the given scope (typically `.drawing`). The user lands on the
+    /// conversation immediately — no list browse step. Used by the
+    /// critique-panel "Ask Eve" buttons (EyeTestPanel, FloatingFeedback-
+    /// Panel) where the user has explicit modal-task intent. Closing the
+    /// sheet returns to the canvas; there is no back-to-list affordance
+    /// in this flow (the back button is hidden by the host).
+    ///
+    /// Bakes the current drawing's id and title into the intent at call
+    /// time, so the conversation persists with the right anchor even if
+    /// the user navigates the canvas later before the sheet renders.
+    private func openEveOnNewConversation(
+        scope: EveScope,
+        critiqueSequence: Int? = nil
+    ) {
+        eveOpenIntent = .openOnNewConversation(
+            scope: scope,
+            drawingId: scope == .drawing ? currentDrawingID : nil,
+            critiqueSequence: critiqueSequence,
+            drawingTitle: currentDrawingTitle
+        )
         withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
             showEve = true
         }

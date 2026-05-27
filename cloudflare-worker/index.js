@@ -180,6 +180,9 @@ export {
   fetchCritiqueForConversation,
   fetchCoachingContext,
   updateConversationTitle,
+  updateConversationFirstUserMessage,
+  countActiveConversations,
+  evictOldestActiveConversation,
   fetchFirstUserMessage,
 } from './lib/supabase.js';
 

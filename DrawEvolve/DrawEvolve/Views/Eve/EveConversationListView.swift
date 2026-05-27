@@ -3,39 +3,30 @@
 //  DrawEvolve
 //
 //  Lists the user's past Eve conversations, most-recent activity first.
-//  Presented as a sheet from inside EveSheetHost via the in-Eve list
-//  button (see EveSheetHost.swift). Tapping a row invokes `onSelect(id)`
-//  — the parent host swaps its `currentConversationId` state, which
-//  changes the inner container's `.id()` and forces a fresh
-//  EveConversationManager to hydrate the picked conversation. The list
-//  itself never presents another sheet; selection routes back to the
-//  host that already owns the Eve surface.
+//  Per the Phase 3b restructure, this view is the ROOT of EveSheetHost's
+//  NavigationStack (rather than a sheet-popover stacked on top). Tapping
+//  a row invokes `onSelect(id)` — the host appends an .existing(id)
+//  destination to its NavigationPath, which pushes a fresh
+//  EveConversationContainer to hydrate that conversation.
+//
+//  Chrome (navigationTitle, toolbar X, "+ New Chat") is owned by the
+//  host. This view provides only content + the load lifecycle.
 //
 
 import SwiftUI
 
 struct EveConversationListView: View {
-    var onClose: () -> Void
     var onSelect: (UUID) -> Void
 
     @StateObject private var model = EveConversationListModel()
 
     var body: some View {
-        NavigationStack {
-            content
-                .navigationTitle("Conversations with Eve")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button("Done", action: onClose)
-                    }
+        content
+            .task {
+                if case .idle = model.loadState {
+                    await model.load()
                 }
-                .task {
-                    if case .idle = model.loadState {
-                        await model.load()
-                    }
-                }
-        }
+            }
     }
 
     @ViewBuilder
@@ -99,15 +90,52 @@ struct EveConversationListView: View {
     }
 
     private var listView: some View {
-        List(model.conversations) { conversation in
-            Button {
-                onSelect(conversation.id)
-            } label: {
-                ConversationRow(conversation: conversation)
+        List {
+            Section {
+                ForEach(model.conversations) { conversation in
+                    Button {
+                        onSelect(conversation.id)
+                    } label: {
+                        ConversationRow(conversation: conversation)
+                    }
+                    .buttonStyle(.plain)
+                    // Mirrors GalleryView.swift:497 — allowsFullSwipe:false
+                    // because accidental full-swipe deletes on a coaching
+                    // log would feel terrible. Optimistic remove + server
+                    // rollback handled in EveConversationListModel.delete.
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            Task { await model.delete(id: conversation.id) }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                }
+            } footer: {
+                // Always-on subtitle setting expectations about the cap.
+                // No per-eviction banner per product decision — silent
+                // eviction is intentional. This footer just makes the
+                // policy discoverable without surprise.
+                Text("Showing 50 most recent — older chats are archived automatically.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
         }
         .listStyle(.insetGrouped)
+        // Optimistic-delete rollback surfaces here. Binding's setter
+        // clears the message when the user dismisses the alert.
+        .alert(
+            "Couldn't delete",
+            isPresented: Binding(
+                get: { model.deleteErrorMessage != nil },
+                set: { if !$0 { model.deleteErrorMessage = nil } }
+            ),
+            presenting: model.deleteErrorMessage
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { msg in
+            Text(msg)
+        }
     }
 }
 
@@ -120,24 +148,23 @@ private struct ConversationRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: leadingSymbol)
+            // Unified icon for all rows per Phase 3d — dropped the two-
+            // bubble symbol that used to distinguish critique-attached.
+            // Context is conveyed by the "From critique #N" subtitle
+            // instead, which reads cleaner with less visual noise.
+            Image(systemName: "bubble.left")
                 .font(.system(size: 18))
                 .foregroundStyle(.tint)
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(displayTitle)
+                Text(displayPreview)
                     .font(.headline)
                     .lineLimit(1)
 
-                HStack(spacing: 8) {
-                    if let critiqueBadge {
-                        Text(critiqueBadge)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(messageCountLabel)
-                        .font(.caption)
+                if let critiqueSubtitle {
+                    Text(critiqueSubtitle)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -157,25 +184,29 @@ private struct ConversationRow: View {
         .contentShape(Rectangle())
     }
 
-    private var leadingSymbol: String {
-        conversation.scope == .drawing
-            ? "bubble.left.and.bubble.right"
-            : "bubble.left.fill"
+    // Per Path Y read order: first_user_message → title → "New chat".
+    // The "New chat" fallback only appears during the brief window
+    // between "+ New Chat" tap and first message send; afterward the
+    // worker stamps first_user_message and the next list refresh swaps
+    // the label. Title is the back-compat fallback for pre-0016 rows
+    // the SQL backfill couldn't populate. Word-boundary truncation at
+    // ~60 chars so list rows stay readable on iPhone.
+    private var displayPreview: String {
+        if let first = conversation.firstUserMessage, !first.isEmpty {
+            return first.truncatedAtWordBoundary(maxLen: 60)
+        }
+        if let title = conversation.title, !title.isEmpty {
+            return title.truncatedAtWordBoundary(maxLen: 60)
+        }
+        return "New chat"
     }
 
-    private var displayTitle: String {
-        if let title = conversation.title, !title.isEmpty { return title }
-        return "Eve session"
-    }
-
-    private var critiqueBadge: String? {
+    // Optional second line for critique-anchored conversations. Skipped
+    // for general / unscoped rows so they read as a single tight line.
+    private var critiqueSubtitle: String? {
         guard conversation.scope == .drawing,
               let seq = conversation.scopeCritiqueSequence else { return nil }
         return "From critique #\(seq)"
-    }
-
-    private var messageCountLabel: String {
-        conversation.messageCount == 1 ? "1 message" : "\(conversation.messageCount) messages"
     }
 
     private var relativeTimestamp: String {
@@ -200,6 +231,10 @@ private struct ConversationRow: View {
 private final class EveConversationListModel: ObservableObject {
     @Published private(set) var loadState: LoadState = .idle
     @Published private(set) var conversations: [EveConversation] = []
+    // Surfaced via .alert in the list view. Set when an optimistic delete
+    // had to roll back. The view binds a Bool around `!= nil` for .alert
+    // presentation, then clears on dismiss.
+    @Published var deleteErrorMessage: String? = nil
 
     enum LoadState: Equatable {
         case idle
@@ -209,6 +244,7 @@ private final class EveConversationListModel: ObservableObject {
     }
 
     private static let defaultFailureCopy = "Couldn't load your conversations. Please try again."
+    private static let defaultDeleteFailureCopy = "Couldn't delete that conversation. Please try again."
 
     func load() async {
         loadState = .loading
@@ -224,6 +260,27 @@ private final class EveConversationListModel: ObservableObject {
             loadState = .failed(message: err.errorDescription ?? Self.defaultFailureCopy)
         } catch {
             loadState = .failed(message: Self.defaultFailureCopy)
+        }
+    }
+
+    /// Optimistically remove from the local array, then await the server
+    /// delete. On failure, re-insert at the original index and surface an
+    /// error message for the view's .alert. softDeleteConversation server-
+    /// side is idempotent — a double-tap during animation that fires the
+    /// delete twice would no-op on the second call.
+    func delete(id: UUID) async {
+        guard let originalIndex = conversations.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let removed = conversations.remove(at: originalIndex)
+        do {
+            try await EveService.shared.deleteConversation(id: id)
+        } catch let err as EveServiceError {
+            conversations.insert(removed, at: originalIndex)
+            deleteErrorMessage = err.errorDescription ?? Self.defaultDeleteFailureCopy
+        } catch {
+            conversations.insert(removed, at: originalIndex)
+            deleteErrorMessage = Self.defaultDeleteFailureCopy
         }
     }
 }

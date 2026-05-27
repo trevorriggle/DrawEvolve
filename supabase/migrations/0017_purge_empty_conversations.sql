@@ -1,0 +1,49 @@
+-- One-shot purge of pre-existing empty Eve conversations.
+-- =========================================================================
+-- How to apply:
+--   1. Open the Supabase dashboard for project `jkjfcjptzvieaonrmkzd`.
+--   2. SQL Editor → + New query → paste this file → Run.
+--   3. Re-runnable safely (DELETE on an already-empty set is a no-op).
+--
+-- What it does:
+--   - Hard-deletes every row in public.conversations where the user
+--     never sent anything. conversation_messages cascades on delete
+--     (FK ON DELETE CASCADE in 0012), but message_count = 0 means
+--     there are no child rows by definition, so cascade is effectively
+--     a no-op here. Token totals and other counters are also zero.
+--
+-- Why hard delete (not soft):
+--   - Soft delete would leave dead weight in the table with nothing of
+--     value to audit later (rows are empty by definition — no messages,
+--     no title, no first_user_message). Hard delete reclaims storage
+--     and keeps the soft-delete pile small for the eventual 90-day
+--     hard-delete cron (see comment in lib/supabase.js softDeleteConversation).
+--   - This is a one-shot cleanup of a bug's residue, not user-facing
+--     deletion. Different intent → different mechanism.
+--
+-- DEPLOY ORDER (CRITICAL):
+--   This must run AFTER both the worker (Phase 2 changes) and the iOS
+--   client (Phase 3 changes) are deployed. Specifically:
+--     - Worker must be live so the create path no longer triggers
+--       eviction (footgun fix moves eviction to send-message), AND so
+--       new conversations get first_user_message populated on send.
+--     - iOS must be live so the host's dismiss hook auto-deletes empty
+--       in-session conversations.
+--   If this migration runs BEFORE those deploys, the empty-chat-on-open
+--   bug keeps regenerating rows — you'd delete them once and they'd
+--   come back on the next user session.
+--
+-- What it does NOT do:
+--   - Touch the cap (50 active conversations). The cap is enforced at
+--     send-message time in the worker; this migration just drains
+--     existing empties.
+--   - Touch soft-deleted rows (deleted_at IS NOT NULL). Those stay for
+--     the future 90-day cron.
+--   - Recover anything. Hard delete is irreversible from the app side;
+--     row-level backups via Supabase point-in-time recovery are your
+--     only fallback if you change your mind after running this.
+-- =========================================================================
+
+delete from public.conversations
+ where message_count = 0
+   and deleted_at is null;

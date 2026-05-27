@@ -41,6 +41,7 @@ struct EveConversation: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let userId: UUID
     var title: String?
+    var firstUserMessage: String?
     let scope: EveScope
     let scopeDrawingId: UUID?
     let scopeCritiqueSequence: Int?
@@ -56,6 +57,7 @@ struct EveConversation: Identifiable, Codable, Equatable, Sendable {
         case id
         case userId = "user_id"
         case title
+        case firstUserMessage = "first_user_message"
         case scope
         case scopeDrawingId = "scope_drawing_id"
         case scopeCritiqueSequence = "scope_critique_sequence"
@@ -119,6 +121,18 @@ struct EveMessage: Identifiable, Codable, Equatable, Sendable {
 
 struct EveConversationResponse: Decodable, Sendable {
     let conversation: EveConversation
+    // Worker carries this on POST /v1/eve/conversations when the cap
+    // (MAX_ACTIVE_CONVERSATIONS = 50 server-side) forced an eviction
+    // before insert. Currently decoded-and-ignored on the iOS side per
+    // product decision: silent eviction is the goal, no banner. Field
+    // is reserved for future use (e.g., "recently archived" recovery
+    // sub-view). Always null on GET / PATCH responses.
+    let evictedConversationId: UUID?
+
+    enum CodingKeys: String, CodingKey {
+        case conversation
+        case evictedConversationId = "evicted_conversation_id"
+    }
 }
 
 struct EveConversationListResponse: Decodable, Sendable {
@@ -141,5 +155,36 @@ struct EveSendMessageResponse: Decodable, Sendable {
         case assistantMessage = "assistant_message"
         case conversation
         case warning
+    }
+}
+
+// =============================================================================
+// String truncation helper — used by ConversationRow + EveSheetHost nav title
+// =============================================================================
+//
+// Word-boundary aware truncation. If the string is shorter than maxLen,
+// return as-is. Otherwise cut to maxLen, look backwards for a whitespace
+// boundary within wordBoundaryLookback chars of the cut; if found, slice
+// there and append the ellipsis. If no nearby boundary exists, accept
+// the hard cut at maxLen to avoid pathologically short results.
+//
+// Mirrors the deriveTitleFromMessage helper in the Cloudflare worker
+// (cloudflare-worker/routes/eve.js TITLE_MAX_CHARS / TITLE_WORD_BOUNDARY_
+// LOOKBACK constants). Defaults: 60 char list rows, 40 char nav titles —
+// caller passes whichever cap.
+
+extension String {
+    func truncatedAtWordBoundary(
+        maxLen: Int,
+        ellipsis: String = "…",
+        wordBoundaryLookback: Int = 10
+    ) -> String {
+        guard self.count > maxLen else { return self }
+        let window = self.prefix(maxLen)
+        if let lastSpaceIndex = window.lastIndex(where: { $0.isWhitespace }),
+           window.distance(from: lastSpaceIndex, to: window.endIndex) <= wordBoundaryLookback {
+            return window[..<lastSpaceIndex] + ellipsis
+        }
+        return window + ellipsis
     }
 }

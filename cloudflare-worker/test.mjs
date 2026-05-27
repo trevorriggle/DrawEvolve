@@ -53,6 +53,9 @@ import {
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
   updateConversationTitle,
+  updateConversationFirstUserMessage,
+  countActiveConversations,
+  evictOldestActiveConversation,
   fetchFirstUserMessage,
   handleEve,
   deriveTitleFromMessage,
@@ -6378,7 +6381,7 @@ test('fetchFirstUserMessage returns null when no user messages exist', async () 
   assert.equal(out, null);
 });
 
-test('handleEve POST /:id/messages — first message on null-title conversation triggers title PATCH', async () => {
+test('handleEve POST /:id/messages — first message on empty conversation triggers first_user_message PATCH (Path Y)', async () => {
   const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
   try {
     const conv = {
@@ -6386,9 +6389,11 @@ test('handleEve POST /:id/messages — first message on null-title conversation 
       user_id: TEST_SUB,
       scope: 'general',
       title: null,
+      first_user_message: null,
       message_count: 0,
       scope_drawing_id: null,
     };
+    const firstMsgPatches = [];
     const titlePatches = [];
     globalThis.fetch = async (url, init) => {
       const u = String(url);
@@ -6414,14 +6419,21 @@ test('handleEve POST /:id/messages — first message on null-title conversation 
         const body = JSON.parse(init.body);
         return { ok: true, json: async () => ([{ id: `m-${body.role}`, ...body }]) };
       }
-      // Title PATCH — has the title=is.null filter
+      // first_user_message PATCH — has the first_user_message=is.null filter
+      if (u.includes('/rest/v1/conversations')
+          && init?.method === 'PATCH'
+          && u.includes('first_user_message=is.null')) {
+        firstMsgPatches.push(JSON.parse(init.body));
+        return { ok: true, json: async () => ({}) };
+      }
+      // title PATCH (must NOT fire on forward path post-Path-Y)
       if (u.includes('/rest/v1/conversations')
           && init?.method === 'PATCH'
           && u.includes('title=is.null')) {
         titlePatches.push(JSON.parse(init.body));
         return { ok: true, json: async () => ({}) };
       }
-      // Counter PATCH — no title filter
+      // Counter PATCH — no filter on first_user_message / title
       if (u.includes('/rest/v1/conversations') && init?.method === 'PATCH') {
         return { ok: true, json: async () => ({}) };
       }
@@ -6452,15 +6464,17 @@ test('handleEve POST /:id/messages — first message on null-title conversation 
     const res = await handleEve(req, env, ctx);
     assert.equal(res.status, 200);
     const body = await res.json();
-    // Title patched with the derived value.
-    assert.equal(titlePatches.length, 1, `expected one title PATCH, saw ${titlePatches.length}`);
-    assert.equal(titlePatches[0].title, 'How do I render velvet?');
-    // Response carries the derived title on the conversation row.
-    assert.equal(body.conversation.title, 'How do I render velvet?');
+    // first_user_message patched with the RAW content (no derivation, no truncation).
+    assert.equal(firstMsgPatches.length, 1, `expected one first_user_message PATCH, saw ${firstMsgPatches.length}`);
+    assert.equal(firstMsgPatches[0].first_user_message, 'how do I render velvet?');
+    // Path Y: forward path must NOT write title on new conversations.
+    assert.equal(titlePatches.length, 0, `expected zero title PATCH (Path Y dropped forward-path title writes), saw ${titlePatches.length}`);
+    // Response carries first_user_message on the conversation row.
+    assert.equal(body.conversation.first_user_message, 'how do I render velvet?');
   } finally { restore(); }
 });
 
-test('handleEve POST /:id/messages — second message on already-titled conversation skips title PATCH', async () => {
+test('handleEve POST /:id/messages — second message on already-used conversation skips first_user_message PATCH', async () => {
   const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
   try {
     const conv = {
@@ -6468,9 +6482,11 @@ test('handleEve POST /:id/messages — second message on already-titled conversa
       user_id: TEST_SUB,
       scope: 'general',
       title: 'How do I render velvet?',
+      first_user_message: 'how do I render velvet?',
       message_count: 2,
       scope_drawing_id: null,
     };
+    let firstMsgPatchCount = 0;
     let titlePatchCount = 0;
     globalThis.fetch = async (url, init) => {
       const u = String(url);
@@ -6494,6 +6510,12 @@ test('handleEve POST /:id/messages — second message on already-titled conversa
       if (u.endsWith('/rest/v1/conversation_messages') && init?.method === 'POST') {
         const body = JSON.parse(init.body);
         return { ok: true, json: async () => ([{ id: `m-${body.role}`, ...body }]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && init?.method === 'PATCH'
+          && u.includes('first_user_message=is.null')) {
+        firstMsgPatchCount += 1;
+        return { ok: true, json: async () => ({}) };
       }
       if (u.includes('/rest/v1/conversations')
           && init?.method === 'PATCH'
@@ -6530,8 +6552,10 @@ test('handleEve POST /:id/messages — second message on already-titled conversa
     );
     const res = await handleEve(req, env, ctx);
     assert.equal(res.status, 200);
+    assert.equal(firstMsgPatchCount, 0,
+      'first_user_message PATCH must NOT fire when message_count > 0 (gate closed)');
     assert.equal(titlePatchCount, 0,
-      'title PATCH must NOT fire when title is already set');
+      'title PATCH must NOT fire on forward path (Path Y dropped title writes)');
   } finally { restore(); }
 });
 
@@ -8806,4 +8830,584 @@ test('incrementSnapshotCounter swallows put errors — telemetry never fails the
   await incrementSnapshotCounter(env, 'failure', () => new Date(Date.UTC(2026, 4, 21)));
   // If we reach this line, the function did not throw.
   assert.ok(true);
+});
+
+// =============================================================================
+// Eve conversation cap + first_user_message helpers (Phase 2d)
+// =============================================================================
+//
+// Covers the helpers added in lib/supabase.js (countActiveConversations,
+// evictOldestActiveConversation, updateConversationFirstUserMessage) and
+// the cap enforcement integration in handleCreateConversation (49 → no
+// eviction, 50 → oldest evicted with evicted_conversation_id in response,
+// 409 idempotent retry returns existing row).
+
+test('countActiveConversations parses Content-Range header and filters non-empty + non-deleted', async () => {
+  let capturedUrl = '';
+  let capturedHeaders = null;
+  const fetcher = async (url, init) => {
+    capturedUrl = String(url);
+    capturedHeaders = init?.headers;
+    return {
+      ok: true,
+      status: 206,
+      headers: { get: (name) => name.toLowerCase() === 'content-range' ? '0-0/42' : null },
+      text: async () => '',
+    };
+  };
+  const n = await countActiveConversations({ env: TEST_SUPABASE, userId: EVE_USER, fetcher });
+  assert.equal(n, 42);
+  assert.ok(capturedUrl.includes(`user_id=eq.${EVE_USER}`));
+  assert.ok(capturedUrl.includes('deleted_at=is.null'));
+  assert.ok(capturedUrl.includes('message_count=gt.0'),
+    'cap only counts conversations with at least one message');
+  assert.equal(capturedHeaders.Prefer, 'count=exact');
+});
+
+test('countActiveConversations returns 0 on missing Content-Range header (fail-open)', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    headers: { get: () => null },
+    text: async () => '',
+  });
+  const n = await countActiveConversations({ env: TEST_SUPABASE, userId: EVE_USER, fetcher });
+  assert.equal(n, 0);
+});
+
+test('countActiveConversations returns 0 when Content-Range total is non-numeric', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    headers: { get: () => '*/*' },
+    text: async () => '',
+  });
+  const n = await countActiveConversations({ env: TEST_SUPABASE, userId: EVE_USER, fetcher });
+  assert.equal(n, 0);
+});
+
+test('evictOldestActiveConversation SELECTs oldest then PATCHes deleted_at, returns id', async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    const u = String(url);
+    const method = init?.method ?? 'GET';
+    calls.push({ url: u, method });
+    if (method === 'GET' && u.includes('order=last_message_at.asc')) {
+      return { ok: true, json: async () => ([{ id: 'oldest-id' }]) };
+    }
+    if (method === 'PATCH' && u.includes('id=eq.oldest-id')) {
+      return { ok: true, json: async () => ([{ id: 'oldest-id' }]) };
+    }
+    throw new Error(`unexpected call: ${method} ${u}`);
+  };
+  const id = await evictOldestActiveConversation({ env: TEST_SUPABASE, userId: EVE_USER, fetcher });
+  assert.equal(id, 'oldest-id');
+  assert.equal(calls.length, 2);
+  // Verify the SELECT applied the right filters.
+  assert.ok(calls[0].url.includes(`user_id=eq.${EVE_USER}`));
+  assert.ok(calls[0].url.includes('deleted_at=is.null'));
+  assert.ok(calls[0].url.includes('message_count=gt.0'));
+  assert.ok(calls[0].url.includes('order=last_message_at.asc'));
+  assert.ok(calls[0].url.includes('limit=1'));
+});
+
+test('evictOldestActiveConversation returns null when no eligible row exists', async () => {
+  const fetcher = async () => ({ ok: true, json: async () => ([]) });
+  const id = await evictOldestActiveConversation({ env: TEST_SUPABASE, userId: EVE_USER, fetcher });
+  assert.equal(id, null);
+});
+
+test('updateConversationFirstUserMessage PATCHes with first_user_message=is.null safety guard', async () => {
+  let capturedUrl = '';
+  let capturedBody = '';
+  const fetcher = async (url, init) => {
+    capturedUrl = String(url);
+    capturedBody = init.body;
+    return { ok: true, json: async () => ([]) };
+  };
+  await updateConversationFirstUserMessage({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    firstUserMessage: 'raw user content goes here, untrimmed',
+    fetcher,
+  });
+  assert.ok(capturedUrl.includes(`id=eq.${EVE_CONVERSATION_ID}`));
+  assert.ok(capturedUrl.includes('first_user_message=is.null'),
+    'must filter first_user_message=is.null to prevent clobbering');
+  const body = JSON.parse(capturedBody);
+  assert.equal(body.first_user_message, 'raw user content goes here, untrimmed');
+});
+
+test('updateConversationFirstUserMessage caps stored value at 500 chars (no ellipsis)', async () => {
+  let capturedBody = '';
+  const fetcher = async (url, init) => {
+    capturedBody = init.body;
+    return { ok: true, json: async () => ([]) };
+  };
+  const longInput = 'x'.repeat(900);
+  await updateConversationFirstUserMessage({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    firstUserMessage: longInput,
+    fetcher,
+  });
+  const body = JSON.parse(capturedBody);
+  assert.equal(body.first_user_message.length, 500,
+    'stored value must be capped at 500 chars');
+  assert.equal(body.first_user_message, 'x'.repeat(500),
+    'no ellipsis on storage — iOS adds its own at display time');
+});
+
+test('updateConversationFirstUserMessage does not modify short content', async () => {
+  let capturedBody = '';
+  const fetcher = async (url, init) => {
+    capturedBody = init.body;
+    return { ok: true, json: async () => ([]) };
+  };
+  const shortInput = 'just a short question?';
+  await updateConversationFirstUserMessage({
+    env: TEST_SUPABASE,
+    conversationId: EVE_CONVERSATION_ID,
+    firstUserMessage: shortInput,
+    fetcher,
+  });
+  const body = JSON.parse(capturedBody);
+  assert.equal(body.first_user_message, shortInput,
+    'short content passes through unchanged');
+});
+
+// -----------------------------------------------------------------------------
+// Cap enforcement integration — eviction deferred to send-message (footgun fix)
+// -----------------------------------------------------------------------------
+//
+// EVE-PATCHES design: cap eviction was originally on the create path, but
+// "+ New Chat" exploration could silently evict committed conversations
+// even when the user never sent a message in the new draft. Moved to the
+// first-message gate in handleSendMessage — only committed conversations
+// trigger cap behavior. Empty drafts get cleaned up via the host's
+// dismiss hook before they ever matter.
+
+test('handleEve POST /conversations NEVER evicts — even at 50 active (deferred to send)', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const calls = { countQueries: 0, patches: [], inserts: 0 };
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      // Count query — track whether the create path triggers one.
+      // Per the footgun fix, it must not.
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('message_count=gt.0')
+          && method === 'GET') {
+        calls.countQueries += 1;
+        return {
+          ok: true,
+          status: 206,
+          headers: { get: (n) => n.toLowerCase() === 'content-range' ? '0-0/50' : null },
+          text: async () => '',
+        };
+      }
+      // INSERT
+      if (u.endsWith('/rest/v1/conversations') && method === 'POST') {
+        calls.inserts += 1;
+        return {
+          ok: true,
+          json: async () => ([{ id: EVE_CONVERSATION_ID, user_id: TEST_SUB, scope: 'general', message_count: 0 }]),
+        };
+      }
+      // Any PATCH would be an eviction — assert none fire.
+      if (u.includes('/rest/v1/conversations') && method === 'PATCH') {
+        calls.patches.push(u);
+        return { ok: true, json: async () => ([]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'POST',
+      headers: eveAuthHeaders(jwt),
+      body: JSON.stringify({ scope: 'general' }),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.conversation.id, EVE_CONVERSATION_ID);
+    assert.equal(body.evicted_conversation_id, null,
+      'create path must never populate evicted_conversation_id');
+    assert.equal(calls.countQueries, 0,
+      'create path must not query active count — eviction deferred to send');
+    assert.equal(calls.patches.length, 0,
+      'create path must not trigger any eviction PATCH');
+    assert.equal(calls.inserts, 1);
+  } finally { restore(); }
+});
+
+test('handleEve POST /conversations idempotent 409 retry — returns existing row, no double-INSERT', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const clientReqId = 'cccccccc-1111-2222-3333-444444444444';
+    const existingRow = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      client_request_id: clientReqId,
+      message_count: 0,
+    };
+    let insertAttempts = 0;
+    let countQueries = 0;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      // Track any count query — create path must not fire one (footgun fix).
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('message_count=gt.0')
+          && method === 'GET') {
+        countQueries += 1;
+        return {
+          ok: true,
+          status: 206,
+          headers: { get: (n) => n.toLowerCase() === 'content-range' ? '0-0/10' : null },
+          text: async () => '',
+        };
+      }
+      // INSERT — always 409s in this test (simulating the retry case)
+      if (u.endsWith('/rest/v1/conversations') && method === 'POST') {
+        insertAttempts += 1;
+        return {
+          ok: false,
+          status: 409,
+          text: async () => '{"message":"duplicate key value violates unique constraint \\"conversations_client_request_id_key\\""}',
+        };
+      }
+      // Lookup existing via listConversations after 409
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('order=last_message_at.desc')
+          && method === 'GET') {
+        return { ok: true, json: async () => ([existingRow]) };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request('https://drawevolve-backend.test/v1/eve/conversations', {
+      method: 'POST',
+      headers: eveAuthHeaders(jwt),
+      body: JSON.stringify({ scope: 'general', client_request_id: clientReqId }),
+    });
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200, 'idempotent retry returns 200 (existing) not 201 (created)');
+    const body = await res.json();
+    assert.equal(body.conversation.id, EVE_CONVERSATION_ID);
+    assert.equal(body.conversation.client_request_id, clientReqId);
+    assert.equal(insertAttempts, 1, 'only one INSERT attempt — no double-create');
+    assert.equal(countQueries, 0,
+      'create path must not query active count — footgun fix deferred eviction to send');
+    assert.equal(body.evicted_conversation_id, null,
+      'create path never populates evicted_conversation_id');
+  } finally { restore(); }
+});
+
+// -----------------------------------------------------------------------------
+// Cap enforcement on send-message path (the new home post-footgun-fix)
+// -----------------------------------------------------------------------------
+
+test('handleEve POST /:id/messages — first message at 49 active conversations, no eviction', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      title: null,
+      first_user_message: null,
+      message_count: 0,
+      scope_drawing_id: null,
+    };
+    let countQueries = 0;
+    const evictionPatches = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      // Idempotency lookup — no replay
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      // Count query — must fire on send path (gate open)
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('message_count=gt.0')
+          && u.includes('select=id')
+          && !u.includes('order=last_message_at')
+          && method === 'GET') {
+        countQueries += 1;
+        return {
+          ok: true, status: 206,
+          headers: { get: (n) => n.toLowerCase() === 'content-range' ? '0-0/49' : null },
+          text: async () => '',
+        };
+      }
+      // Conversation lookup
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && method === 'POST') {
+        const b = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${b.role}`, ...b }]) };
+      }
+      // Track any eviction-shaped PATCH (would be the soft-delete on the victim)
+      if (u.includes('/rest/v1/conversations')
+          && method === 'PATCH'
+          && !u.includes('first_user_message=is.null')
+          && !u.includes('title=is.null')
+          && !u.includes(`id=eq.${EVE_CONVERSATION_ID}`)) {
+        evictionPatches.push(u);
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations') && method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 20 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'first message',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-000000000049',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(countQueries, 1,
+      'send path must count active conversations on the first-message gate');
+    assert.equal(evictionPatches.length, 0,
+      'below cap (49 < 50) — no eviction');
+    assert.equal(body.evicted_conversation_id, null);
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages — first message at 50 active evicts oldest, response carries evicted_conversation_id', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      title: null,
+      first_user_message: null,
+      message_count: 0,
+      scope_drawing_id: null,
+    };
+    let countQueries = 0;
+    let oldestSelects = 0;
+    let evictionPatches = 0;
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      // Count query
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('message_count=gt.0')
+          && u.includes('select=id')
+          && !u.includes('order=last_message_at')
+          && method === 'GET') {
+        countQueries += 1;
+        return {
+          ok: true, status: 206,
+          headers: { get: (n) => n.toLowerCase() === 'content-range' ? '0-0/50' : null },
+          text: async () => '',
+        };
+      }
+      // Oldest SELECT
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('order=last_message_at.asc')
+          && method === 'GET') {
+        oldestSelects += 1;
+        return { ok: true, json: async () => ([{ id: 'oldest-victim-id' }]) };
+      }
+      // Eviction PATCH
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('id=eq.oldest-victim-id')
+          && method === 'PATCH') {
+        evictionPatches += 1;
+        return { ok: true, json: async () => ([{ id: 'oldest-victim-id' }]) };
+      }
+      // Conversation lookup
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && method === 'POST') {
+        const b = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${b.role}`, ...b }]) };
+      }
+      if (u.includes('/rest/v1/conversations') && method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 20 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'first message',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-000000000050',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(countQueries, 1, 'count query fires on first-message gate');
+    assert.equal(oldestSelects, 1, 'oldest SELECT fires when at cap');
+    assert.equal(evictionPatches, 1, 'soft-delete PATCH fires on the victim');
+    assert.equal(body.evicted_conversation_id, 'oldest-victim-id',
+      'response carries the evicted id for client logging');
+  } finally { restore(); }
+});
+
+test('handleEve POST /:id/messages — non-first message at 50 active NEVER evicts (gate closed)', async () => {
+  const { env, ctx, jwt, jwk, restore } = await setupEveEnv();
+  try {
+    const conv = {
+      id: EVE_CONVERSATION_ID,
+      user_id: TEST_SUB,
+      scope: 'general',
+      title: null,
+      first_user_message: 'earlier user msg',
+      message_count: 2,
+      scope_drawing_id: null,
+    };
+    let countQueries = 0;
+    const evictionPatches = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = init?.method ?? 'GET';
+      if (u.endsWith('/.well-known/jwks.json')) {
+        return { ok: true, json: async () => ({ keys: [jwk] }) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('role=eq.assistant')
+          && u.includes('client_request_id=eq.')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes('message_count=gt.0')
+          && method === 'GET') {
+        countQueries += 1;
+        return {
+          ok: true, status: 206,
+          headers: { get: (n) => n.toLowerCase() === 'content-range' ? '0-0/50' : null },
+          text: async () => '',
+        };
+      }
+      if (u.includes('/rest/v1/conversations')
+          && u.includes(`id=eq.${EVE_CONVERSATION_ID}`)
+          && (!init || init.method === 'GET' || init.method === undefined)) {
+        return { ok: true, json: async () => ([conv]) };
+      }
+      if (u.includes('/rest/v1/conversation_messages')
+          && u.includes('order=created_at.asc')) {
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.endsWith('/rest/v1/conversation_messages') && method === 'POST') {
+        const b = JSON.parse(init.body);
+        return { ok: true, json: async () => ([{ id: `m-${b.role}`, ...b }]) };
+      }
+      // PATCH that's NOT a counter bump on the current conversation = eviction
+      if (u.includes('/rest/v1/conversations')
+          && method === 'PATCH'
+          && !u.includes(`id=eq.${EVE_CONVERSATION_ID}`)) {
+        evictionPatches.push(u);
+        return { ok: true, json: async () => ([]) };
+      }
+      if (u.includes('/rest/v1/conversations') && method === 'PATCH') {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (u.includes('api.openai.com')) {
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: 'reply' } }],
+            usage: { prompt_tokens: 50, completion_tokens: 20 },
+          }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
+
+    const req = new Request(
+      `https://drawevolve-backend.test/v1/eve/conversations/${EVE_CONVERSATION_ID}/messages`,
+      {
+        method: 'POST',
+        headers: eveAuthHeaders(jwt),
+        body: JSON.stringify({
+          content: 'second message',
+          client_request_id: 'aaaaaaaa-bbbb-cccc-dddd-000000000099',
+        }),
+      },
+    );
+    const res = await handleEve(req, env, ctx);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(countQueries, 0,
+      'gate closed (message_count > 0) — must NOT count, even at 50 active');
+    assert.equal(evictionPatches.length, 0,
+      'no eviction on non-first-message turns');
+    assert.equal(body.evicted_conversation_id, null);
+  } finally { restore(); }
 });

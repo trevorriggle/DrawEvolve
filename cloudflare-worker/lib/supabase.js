@@ -131,6 +131,7 @@ const CONVERSATION_BASE_COLUMNS = [
   'id',
   'user_id',
   'title',
+  'first_user_message',
   'scope',
   'scope_drawing_id',
   'scope_critique_sequence',
@@ -274,6 +275,12 @@ export async function listConversations({ env, userId, limit = 50, fetcher = fet
  * Soft-delete a conversation. Idempotent: PATCHing an already-deleted
  * row updates zero rows and returns []. Returns true when one row was
  * affected, false otherwise. Caller maps to 200 / 404.
+ *
+ * Future cleanup (NOT shipped here): a cron job to hard-delete rows
+ * where deleted_at < now() - interval '90 days'. Right now soft-deleted
+ * rows accumulate forever (no growth pressure since they're filtered
+ * out of every read), but eventually we'll want to reclaim the storage.
+ * Tracked as a followup; do not add here without a separate proposal.
  */
 export async function softDeleteConversation({ env, userId, conversationId, fetcher = fetch }) {
   if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
@@ -456,6 +463,12 @@ export async function getConversationHistory({
  * concurrent list-load backfills race, the second PATCH no-ops instead
  * of clobbering a freshly-derived title. Fire-and-forget from callers
  * — the user-visible response shouldn't wait on this.
+ *
+ * Still used by the lazy-backfill path in handleListConversations
+ * (back-compat for pre-0016 rows that have title=null AND first_user_message
+ * non-null after the migration). The forward path in handleSendMessage
+ * no longer calls this — new conversations populate first_user_message
+ * instead (see updateConversationFirstUserMessage below).
  */
 export async function updateConversationTitle({
   env,
@@ -481,6 +494,145 @@ export async function updateConversationTitle({
     const body = await res.text().catch(() => '<unreadable>');
     throw new Error(`updateConversationTitle HTTP ${res.status}: ${body.slice(0, 500)}`);
   }
+}
+
+/**
+ * Hard cap on the stored length of first_user_message. Anything beyond
+ * this is dead weight in list payloads — iOS truncates display down to
+ * ~60 chars (row) or ~40 chars (nav title) anyway. No ellipsis on
+ * storage; the iOS display layer adds its own when truncating further.
+ * Mirrored in supabase/migrations/0016 backfill (left(content, 500)).
+ */
+export const FIRST_USER_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * Cap firstUserMessage at FIRST_USER_MESSAGE_MAX_CHARS for storage.
+ * Exposed so the handleSendMessage in-memory mirror can match what was
+ * persisted (response carries the truncated value, not the raw input).
+ */
+export function capFirstUserMessageForStorage(content) {
+  if (typeof content !== 'string') return content;
+  return content.length > FIRST_USER_MESSAGE_MAX_CHARS
+    ? content.slice(0, FIRST_USER_MESSAGE_MAX_CHARS)
+    : content;
+}
+
+/**
+ * Stamp the first user message onto a conversation row, gated on
+ * first_user_message=is.null so concurrent first-message races (or a
+ * future runtime backfill) can't clobber. Fire-and-forget from
+ * handleSendMessage on the first-message gate.
+ *
+ * Storage policy: caps at FIRST_USER_MESSAGE_MAX_CHARS to keep list
+ * payloads bounded. No ellipsis on storage. iOS truncates further for
+ * display (word-boundary aware, ~60 chars in list rows, ~40 chars in
+ * nav title) — see Phase 3d.
+ *
+ * Replaces updateConversationTitle on the forward path (per Path Y).
+ * Old conversations with title populated stay as-is; the iOS client
+ * reads first_user_message > title > "New chat" fallback.
+ */
+export async function updateConversationFirstUserMessage({
+  env,
+  conversationId,
+  firstUserMessage,
+  fetcher = fetch,
+}) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('updateConversationFirstUserMessage: env not configured');
+  }
+  const stored = capFirstUserMessageForStorage(firstUserMessage);
+  const url = `${env.SUPABASE_URL}/rest/v1/conversations`
+    + `?id=eq.${encodeURIComponent(conversationId)}`
+    + `&first_user_message=is.null`;
+  const res = await fetcher(url, {
+    method: 'PATCH',
+    headers: supabaseHeaders(env, {
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    }),
+    body: JSON.stringify({ first_user_message: stored }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`updateConversationFirstUserMessage HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+}
+
+/**
+ * Count the user's active (non-deleted, non-empty) conversations.
+ * Used by the cap-enforcement path in handleCreateConversation —
+ * the cap (MAX_ACTIVE_CONVERSATIONS in routes/eve.js) only counts
+ * conversations with message_count > 0, so empty drafts created by
+ * the iOS "+ New Chat" flow don't trip eviction until they receive
+ * a message.
+ *
+ * Uses PostgREST's `Prefer: count=exact` header + a tiny SELECT to
+ * get the total without fetching rows. Content-Range comes back as
+ * "0-N/total" or "* /0" when empty — we parse the slash-delimited
+ * total. Returns 0 on any header parse error so the cap path fails
+ * open rather than blocking creates.
+ */
+export async function countActiveConversations({ env, userId, fetcher = fetch }) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('countActiveConversations: env not configured');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/conversations`
+    + `?user_id=eq.${encodeURIComponent(userId)}`
+    + `&deleted_at=is.null`
+    + `&message_count=gt.0`
+    + `&select=id`;
+  const res = await fetcher(url, {
+    headers: supabaseHeaders(env, {
+      Prefer: 'count=exact',
+      Range: '0-0',
+    }),
+  });
+  if (!res.ok && res.status !== 206) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`countActiveConversations HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+  const contentRange = res.headers.get('content-range') || '';
+  const slash = contentRange.lastIndexOf('/');
+  if (slash < 0) return 0;
+  const totalStr = contentRange.slice(slash + 1).trim();
+  const total = parseInt(totalStr, 10);
+  return Number.isFinite(total) ? total : 0;
+}
+
+/**
+ * Find the user's oldest active+non-empty conversation by last_message_at
+ * and soft-delete it. Returns the evicted conversation's id, or null if
+ * the user has no active conversations to evict (shouldn't happen on the
+ * cap-enforcement path since the caller already counted ≥ cap, but
+ * defensive). Two round-trips: a SELECT to find the victim, a PATCH to
+ * stamp deleted_at. Not atomic with the subsequent INSERT in
+ * handleCreateConversation — see the race-condition note there.
+ */
+export async function evictOldestActiveConversation({ env, userId, fetcher = fetch }) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('evictOldestActiveConversation: env not configured');
+  }
+  const selectUrl = `${env.SUPABASE_URL}/rest/v1/conversations`
+    + `?user_id=eq.${encodeURIComponent(userId)}`
+    + `&deleted_at=is.null`
+    + `&message_count=gt.0`
+    + `&select=id`
+    + `&order=last_message_at.asc`
+    + `&limit=1`;
+  const selRes = await fetcher(selectUrl, { headers: supabaseHeaders(env) });
+  if (!selRes.ok) {
+    const body = await selRes.text().catch(() => '<unreadable>');
+    throw new Error(`evictOldestActiveConversation SELECT HTTP ${selRes.status}: ${body.slice(0, 500)}`);
+  }
+  const rows = await selRes.json();
+  const victim = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  if (!victim?.id) return null;
+
+  const ok = await softDeleteConversation({
+    env, userId, conversationId: victim.id, fetcher,
+  });
+  return ok ? victim.id : null;
 }
 
 /**
