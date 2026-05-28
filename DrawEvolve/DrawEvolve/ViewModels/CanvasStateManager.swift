@@ -315,13 +315,14 @@ class CanvasStateManager: ObservableObject {
                     self.endBlurAdjustment()
                 }
 
-                if newTool != .move {
-                    if self.floatingSelectionTexture != nil {
-                        self.commitSelection()
-                    } else if self.isTranslatingActiveLayer {
-                        self.commitActiveLayerTranslation()
-                    }
-                }
+                // Pending selection transforms (floating-selection or
+                // whole-layer translation) survive tool switches. Locked
+                // model: Apply is the only commit gesture; tool switch
+                // does not auto-bake. User can grab the eyedropper to
+                // pick a color while a transform is pending, then come
+                // back to Apply/Cancel. Floating text below keeps its
+                // own auto-commit policy — separate lifecycle, separate
+                // decision (deferred to a later PR per §5 punch list).
 
                 // Auto-commit any active floating text whenever we leave a
                 // text-hosting tool. Both .text (plain) and .textOnPath
@@ -1462,6 +1463,26 @@ class CanvasStateManager: ObservableObject {
 
         hasLoadedExistingImage = true
         historyManager.clear()
+        bumpLayerMutation()
+
+        // EMPTY-LAYER-DIAG (Part A3): per-layer allocatedKeys snapshot + an
+        // explicit note about redraw triggering. `@Published var layers`
+        // mutation will publish to SwiftUI observers; the CanvasRenderSnapshot
+        // gate in MetalCanvasView.updateUIView compares layerCount and
+        // layerTextureIDs and fires setNeedsDisplay() on mismatch. No explicit
+        // bumpLayerMutation() / setNeedsDisplay() is called at the end of
+        // loadLayered — the redraw rides on the @Published mutation chain.
+        var __a3Lines: [String] = []
+        for (__idx, __layer) in layers.enumerated() {
+            let __keys = __layer.tileGrid?.allocatedKeys().count ?? -1
+            let __gw = __layer.tileGrid?.gridWidth ?? 0
+            let __gh = __layer.tileGrid?.gridHeight ?? 0
+            let __ts = __layer.tileGrid?.tileSize ?? 0
+            __a3Lines.append("layer[\(__idx)] id=\(__layer.id.uuidString.prefix(8)) name=\(__layer.name) allocatedKeys=\(__keys)/\(__gw * __gh) grid=\(__gw)×\(__gh) tile=\(__ts) tileGrid=\(__layer.tileGrid == nil ? "NIL" : "set")")
+        }
+        print("📥 LOADLAYERED-A3 finished. layers.count=\(layers.count) hasLoadedExistingImage=\(hasLoadedExistingImage) selectedLayerIndex=\(selectedLayerIndex)")
+        for __line in __a3Lines { print("📥 LOADLAYERED-A3   \(__line)") }
+        print("📥 LOADLAYERED-A3 redrawTrigger=NONE_EXPLICIT — relies on @Published layers mutation → CanvasRenderSnapshot mismatch → MetalCanvasView.updateUIView setNeedsDisplay")
 
         // Document-size sanity check is informational — we don't resample.
         let saved = CGSize(width: manifest.document.width, height: manifest.document.height)
@@ -2342,6 +2363,35 @@ class CanvasStateManager: ObservableObject {
 
         clearSelection()  // resets selectionOffset, isTranslatingActiveLayer, snapshots
         print("✅ Layer translation committed")
+    }
+
+    /// Revert a pending move-tool whole-layer translation. Restores the
+    /// layer to its pre-drag snapshot, zeroes `selectionOffset`, and clears
+    /// the translating flag. No history entry: the original drag never
+    /// produced one (the .stroke entry is recorded inside
+    /// `commitActiveLayerTranslation`), so the symmetric cancel has nothing
+    /// to record — it's just rolling back transient state.
+    func cancelActiveLayerTranslation() {
+        guard isTranslatingActiveLayer else { return }
+        if let renderer = renderer,
+           selectedLayerIndex < layers.count,
+           let tileGrid = layers[selectedLayerIndex].tileGrid,
+           let beforeSnapshot = selectionBeforeSnapshot {
+            renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
+        }
+        selectionOffset = .zero
+        isTranslatingActiveLayer = false
+        selectionBeforeSnapshot = nil
+        bumpLayerMutation()
+        print("✂️ Cancelled layer translation — restored")
+    }
+
+    /// True when there is something the Apply button can bake into pixels:
+    /// either a lifted selection (floating texture present) or a move-tool
+    /// whole-layer translation in progress. Polygon-only state returns
+    /// false — there's no transform to apply, just a marquee.
+    var hasPendingTransform: Bool {
+        floatingSelectionTexture != nil || isTranslatingActiveLayer
     }
 
     /// Apply scale and rotation transforms to a UIImage

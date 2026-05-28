@@ -95,8 +95,8 @@ struct DrawingCanvasView: View {
         .padding(.leading, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
-    /// iPhone-only — surfaces the 6 brush variants (pencil/brush/inkPen/
-    /// marker/airbrush/charcoal) in a sheet, since the flat iPhone tool
+    /// iPhone-only — surfaces the 5 brush variants (pencil/brush/marker/
+    /// airbrush/charcoal) in a sheet, since the flat iPhone tool
     /// grid has no room for the iPad's long-press popover. Triggered by
     /// the single brush tile in phoneToolPanel. iPad uses
     /// `ToolGroup.brushes` via `GroupedToolButton` instead — separate
@@ -196,6 +196,15 @@ struct DrawingCanvasView: View {
     // the top-center pill that's visible only while .textOnPath is the
     // active tool AND no float / preview is in progress.
     @AppStorage("typeOnPath.pathMode") private var typeOnPathPathModeRaw: String = TypeOnPathPathMode.freehand.rawValue
+
+    // Tutorial v1 flags. hasSeenTutorialV1 gates whether the Get Feedback
+    // coach-mark fires at all (only for users who completed/dismissed the
+    // intro cards — Skip-without-reading also sets this so opted-out users
+    // don't get ambushed). hasSeenGetFeedbackCoachMarkV1 is the one-shot
+    // suppressor for this specific surface.
+    @AppStorage("hasSeenTutorialV1") private var hasSeenTutorialV1 = false
+    @AppStorage("hasSeenGetFeedbackCoachMarkV1") private var hasSeenGetFeedbackCoachMarkV1 = false
+    @State private var showGetFeedbackCoachMark = false
     private var typeOnPathPathMode: TypeOnPathPathMode {
         TypeOnPathPathMode(rawValue: typeOnPathPathModeRaw) ?? .freehand
     }
@@ -719,7 +728,42 @@ struct DrawingCanvasView: View {
                 canvasState.viewingSnapshot = nil
             }
         }
+        .modifier(CoachMarkSurfaceHook(
+            show: $showGetFeedbackCoachMark,
+            title: "Tap Get Feedback when you're ready.",
+            message: "Your critique voice writes back — and remembers next time on the same drawing.",
+            anchor: .getFeedback,
+            surfaceFlag: hasSeenGetFeedbackCoachMarkV1,
+            tutorialFlag: hasSeenTutorialV1,
+            onArm: armGetFeedbackCoachMarkIfNeeded,
+            onDismissAction: {
+                hasSeenGetFeedbackCoachMarkV1 = true
+                EventLogService.shared.log(
+                    event: "coach_mark_seen",
+                    payload: ["mark": "get_feedback"]
+                )
+            }
+        ))
         .preferredColorScheme(colorSchemeValue)
+    }
+
+    /// Fires the Get Feedback coach-mark on first canvas appearance for
+    /// users who completed/skipped the intro tutorial (Skip sets all
+    /// five tutorial flags so opted-out users skip this too). One-shot
+    /// via hasSeenGetFeedbackCoachMarkV1; subsequent canvas appearances
+    /// no-op.
+    private func armGetFeedbackCoachMarkIfNeeded() {
+        guard hasSeenTutorialV1, !hasSeenGetFeedbackCoachMarkV1, !showGetFeedbackCoachMark else {
+            return
+        }
+        // Small delay so the mark doesn't render before the canvas
+        // chrome has settled — anchor resolution needs the trailing
+        // panel laid out first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            withAnimation(.easeIn(duration: 0.25)) {
+                showGetFeedbackCoachMark = true
+            }
+        }
     }
 
     // MARK: - iPhone Phase 2 / C1 skeleton
@@ -1000,8 +1044,8 @@ struct DrawingCanvasView: View {
                             BrushSizeRailHorizontal(
                                 size: $canvasState.brushSettings.size,
                                 // Hide hardness track for tools whose shader
-                                // ignores the uniform (inkPen, marker,
-                                // airbrush) or floors it (pencil). The rail
+                                // ignores the uniform (marker, airbrush)
+                                // or floors it (pencil). The rail
                                 // already treats a nil binding as "no
                                 // hardness track."
                                 hardness: canvasState.currentTool.usesHardness ? $canvasState.brushSettings.hardness : nil,
@@ -1418,28 +1462,25 @@ struct DrawingCanvasView: View {
                 stampCursorOverlay
             }
 
-            // Delete button for active selection (rect or lasso)
+            // Selection action HUD (top of canvas).
+            //
+            // Three-button triplet for active selections (rect / lasso /
+            // lifted float / whole-layer translation). Red Delete +
+            // green Apply + gray Cancel reads as the destructive /
+            // confirm / undo platform-conventional triplet.
+            //
+            // Apply is the only commit gesture under the deferred-commit
+            // model — tap-outside and tool-switch no longer auto-bake
+            // pending transforms. Apply is disabled (not hidden) when
+            // there's nothing to apply (Polygon-only state, no lift) so
+            // the user learns the three-button rhythm and can see what
+            // the control is *for* even when it can't fire yet.
             if !isViewingSnapshot,
                canvasState.activeSelection != nil || canvasState.selectionPath != nil {
                 VStack {
                     HStack {
                         Spacer()
-                        Button(action: {
-                            canvasState.deleteSelectedPixels()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "trash")
-                                Text("Delete")
-                            }
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(Color.red)
-                            .cornerRadius(10)
-                            .shadow(radius: 3)
-                        }
+                        selectionActionHUD
                         Spacer()
                     }
                     Spacer()
@@ -1500,25 +1541,13 @@ struct DrawingCanvasView: View {
             // z-fight and let canvas touches pass through to the brush
             // pipeline. See the `// Eve modal — iPad` block below.
 
-            // Selection actions overlay — iPad positioning. The card
-            // content (caption + Cancel + Delete pills) lives in the
-            // shared `selectionActiveCard` computed property; only the
-            // outer VStack/Spacer/HStack/Spacer + bottom-200 positioning
-            // is iPad-specific. Same justified-deviation pattern as
-            // Phase 4's critiqueContent extraction.
-            if !isViewingSnapshot,
-               canvasState.activeSelection != nil || canvasState.selectionPath != nil {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        selectionActiveCard
-                        .padding(.trailing, 12)
-                        .padding(.bottom, 200) // Position above Save/Feedback buttons
-                    }
-                }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
+            // iPad selectionActiveCard overlay removed (was bottom-right
+            // at .padding(.bottom, 200) — occluded by the brush rail's
+            // opacity column, hiding both its Delete and Cancel pills).
+            // The top-of-canvas `selectionActionHUD` above is now the
+            // canonical surface for Delete / Apply / Cancel on iPad.
+            // iPhone path keeps its own `phoneSelectionContextBar` since
+            // the brush rail doesn't collide there.
 
             // Top right - Gallery button (always visible) + gear icon
             // (visibility tied to toolbar collapse). The two share a VStack so
@@ -1767,20 +1796,30 @@ struct DrawingCanvasView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
                 }
 
-                // Collapse/Expand button at bottom of toolbar
+                // Collapse/Expand button at bottom of toolbar. v3 Q8 fix:
+                // the chevron previously had no label, so users who tapped
+                // it accidentally couldn't find their way back to the
+                // tools. The stacked "Tools" label below the chevron
+                // makes the affordance self-describing in both states
+                // without growing the 44pt tap target.
                 Button(action: {
                     withAnimation(.spring(response: 0.3)) {
                         isToolbarCollapsed.toggle()
                     }
                 }) {
-                    Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.primary)
-                        .frame(width: 44, height: 44)
-                        .background(Color(uiColor: .systemBackground).opacity(0.95))
-                        .cornerRadius(8)
-                        .shadow(radius: 5)
+                    VStack(spacing: 2) {
+                        Image(systemName: isToolbarCollapsed ? "chevron.right" : "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Tools")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                    .foregroundColor(.primary)
+                    .frame(width: 44, height: 44)
+                    .background(Color(uiColor: .systemBackground).opacity(0.95))
+                    .cornerRadius(8)
+                    .shadow(radius: 5)
                 }
+                .accessibilityLabel(isToolbarCollapsed ? "Expand tools" : "Collapse tools")
                 .padding(.leading, 8)
                 .padding(.top, isToolbarCollapsed ? 8 : 4)
             }
@@ -2122,7 +2161,7 @@ struct DrawingCanvasView: View {
     /// brush-shaped hover cursor makes visual sense.
     private var toolUsesBrushCursor: Bool {
         switch canvasState.currentTool {
-        case .brush, .eraser, .pencil, .inkPen, .marker, .airbrush,
+        case .brush, .eraser, .pencil, .marker, .airbrush,
              .charcoal, .blur, .smudge, .line, .rectangle, .circle:
             return true
         default:
@@ -2731,6 +2770,7 @@ struct DrawingCanvasView: View {
         }
         .disabled(isRequestingFeedback || canvasState.isEmpty)
         .opacity(canvasState.isEmpty ? 0.5 : 1.0)
+        .coachMarkAnchor(.getFeedback)
     }
 
     // Resets the toggle to .inProgress at the call site (not via
@@ -2835,14 +2875,98 @@ struct DrawingCanvasView: View {
     // extraction: shared elements that need idiom-specific positioning
     // belong in one computed property to prevent functional drift.
 
+    // MARK: - Top-of-canvas selection action HUD (iPad-canonical surface)
+    //
+    // Delete / Apply / Cancel triplet shown above the canvas whenever a
+    // selection or selection path is active. Replaces both the old red-
+    // Delete-only top button AND the iPad bottom-right `selectionActiveCard`
+    // (which was occluded by the brush rail's opacity column).
+    //
+    // Apply is the only commit gesture under the deferred-commit model.
+    // It is disabled (not hidden) in Polygon-only state so the user
+    // learns the three-button rhythm — the control is visible-but-inert
+    // until there's actually a transform to bake.
+    //
+    // Routing:
+    //   Apply  → commitSelection (lifted float)
+    //          → commitActiveLayerTranslation (move-tool whole-layer)
+    //          → no-op (Polygon-only — button disabled anyway)
+    //   Cancel → cancelOrClearSelection (handles lifted + polygon + text)
+    //          → cancelActiveLayerTranslation (move-tool whole-layer)
+    //   Delete → deleteSelectedPixels (unchanged)
+    private var selectionActionHUD: some View {
+        VStack(spacing: 8) {
+            // Red Delete — destructive, always available with selection.
+            Button(action: { canvasState.deleteSelectedPixels() }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash")
+                    Text("Delete")
+                }
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.red)
+                .cornerRadius(10)
+                .shadow(radius: 3)
+            }
+
+            // Green Apply — commits pending transform. Disabled in
+            // Polygon-only state (nothing to bake yet).
+            Button(action: {
+                if canvasState.floatingSelectionTexture != nil {
+                    canvasState.commitSelection()
+                } else if canvasState.isTranslatingActiveLayer {
+                    canvasState.commitActiveLayerTranslation()
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                    Text("Apply")
+                }
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(canvasState.hasPendingTransform ? Color.green : Color.green.opacity(0.4))
+                .cornerRadius(10)
+                .shadow(radius: 3)
+            }
+            .disabled(!canvasState.hasPendingTransform)
+
+            // Gray Cancel — reverts pending transform OR clears polygon.
+            Button(action: {
+                if canvasState.isTranslatingActiveLayer {
+                    canvasState.cancelActiveLayerTranslation()
+                } else {
+                    canvasState.cancelOrClearSelection()
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark")
+                    Text("Cancel")
+                }
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.gray)
+                .cornerRadius(10)
+                .shadow(radius: 3)
+            }
+        }
+    }
+
     private var selectionActiveCard: some View {
-        // Cancel button restored under Delete after the top-right pill
-        // moved didn't feel right on device. Cancel is the selection
-        // cancel surface (Polygon-only → silent clear; Lifted → undoable
-        // .selectionCancel via cancelOrClearSelection's dispatch).
-        // Floating-text cancel still goes through TransformCancelPill at
-        // the top-right — the pill's gate was narrowed to floatingText
-        // only, since text cancel has no other UI surface.
+        // iPhone-only surface now. iPad uses the top-of-canvas
+        // `selectionActionHUD` above; this card was removed from the
+        // iPad overlay path because the brush rail was occluding both
+        // its Delete and Cancel pills. iPhone's `phoneSelectionContextBar`
+        // sits in the bottom inset stack where the rail doesn't collide,
+        // so the card stays put for that idiom.
         //
         // Order: Delete first (red, destructive), Cancel second (gray,
         // reversible). 8pt VStack spacing keeps the two tap targets
@@ -2868,7 +2992,38 @@ struct DrawingCanvasView: View {
                 .cornerRadius(10)
             }
 
-            Button(action: { canvasState.cancelOrClearSelection() }) {
+            // Apply — green, disabled in Polygon-only state. Mirrors the
+            // iPad selectionActionHUD's commit routing so iPhone users
+            // also have an explicit commit gesture under the deferred-
+            // commit model (tool-switch and tap-outside no longer bake).
+            Button(action: {
+                if canvasState.floatingSelectionTexture != nil {
+                    canvasState.commitSelection()
+                } else if canvasState.isTranslatingActiveLayer {
+                    canvasState.commitActiveLayerTranslation()
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 16))
+                    Text("Apply")
+                        .font(.subheadline)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(canvasState.hasPendingTransform ? Color.green : Color.green.opacity(0.4))
+                .foregroundColor(.white)
+                .cornerRadius(10)
+            }
+            .disabled(!canvasState.hasPendingTransform)
+
+            Button(action: {
+                if canvasState.isTranslatingActiveLayer {
+                    canvasState.cancelActiveLayerTranslation()
+                } else {
+                    canvasState.cancelOrClearSelection()
+                }
+            }) {
                 HStack(spacing: 6) {
                     Image(systemName: "xmark")
                         .font(.system(size: 16))
@@ -2978,7 +3133,7 @@ struct DrawingCanvasView: View {
     /// `BrushSizeRail.swift`; keep them in sync when adding tools.
     private var phoneBrushSizeRailVisible: Bool {
         switch canvasState.currentTool {
-        case .brush, .pencil, .inkPen, .marker, .airbrush, .charcoal,
+        case .brush, .pencil, .marker, .airbrush, .charcoal,
              .eraser, .blur, .smudge,
              .line, .rectangle, .circle:
             return true
@@ -2989,7 +3144,7 @@ struct DrawingCanvasView: View {
 
     // MARK: - iPhone brush variant picker (sheet)
     //
-    // The 6 brush variants live behind a single tile on iPhone (the
+    // The 5 brush variants live behind a single tile on iPhone (the
     // flat tile grid has no room for an iPad-style long-press popover).
     // Tap → picker sheet → tap a variant → currentTool updates and
     // sheet dismisses. The tile's icon reflects the active variant so
@@ -3000,7 +3155,7 @@ struct DrawingCanvasView: View {
     /// rendering surface is different. Source of truth on which tools
     /// count as "brush variants" lives here.
     private static let phoneBrushVariants: [DrawingTool] = [
-        .pencil, .brush, .inkPen, .marker, .airbrush, .charcoal,
+        .pencil, .brush, .marker, .airbrush, .charcoal,
     ]
 
     private var isCurrentToolBrushVariant: Bool {
@@ -3076,7 +3231,6 @@ struct DrawingCanvasView: View {
         switch tool {
         case .pencil:   return "Sharp, narrow, paper-tooth grain"
         case .brush:    return "Round disc, soft edge — the default"
-        case .inkPen:   return "Confident hard edge, pressure scales width"
         case .marker:   return "Flat-topped, semi-transparent, overlaps deepen"
         case .airbrush: return "Big soft mist, builds via overlap"
         case .charcoal: return "Wide, grainy, broken edges"
@@ -3470,8 +3624,8 @@ struct DrawingCanvasView: View {
         ) {
             Group {
                 // Single brush tile on iPhone — tapping opens the brush
-                // variant picker sheet (pencil / brush / inkPen / marker
-                // / airbrush / charcoal). The tile's ICON reflects
+                // variant picker sheet (pencil / brush / marker /
+                // airbrush / charcoal). The tile's ICON reflects
                 // whichever variant is currently active so the user can
                 // tell at a glance which brush they're holding.
                 // isSelected is true whenever ANY brush variant is the

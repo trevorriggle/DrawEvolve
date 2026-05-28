@@ -624,7 +624,7 @@ struct MetalCanvasView: UIViewRepresentable {
         // circle) stay on OLD renderStroke until Phase H.
         private func isWetInkTool(_ tool: DrawingTool) -> Bool {
             switch tool {
-            case .brush, .eraser, .pencil, .inkPen, .marker, .airbrush, .charcoal:
+            case .brush, .eraser, .pencil, .marker, .airbrush, .charcoal:
                 return true
             default:
                 return false
@@ -1493,6 +1493,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // renderer-owned monolithic preview texture (no tile compose).
             for (index, layer) in layers.enumerated() where layer.isVisible {
                 #if FEATURE_TILE_DIRECT_RENDERING
+                print("[EVE-AUDIT] PATH=tile_direct layer=\(layer.id.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
                 // Tile-direct rendering (Tier C 9). Rasterises each visible
                 // tile directly onto the drawable in a single per-layer pass;
                 // no canvas-sized tileDisplayIntermediate is materialised.
@@ -1542,6 +1543,49 @@ struct MetalCanvasView: UIViewRepresentable {
                     )
                     renderer?.renderFloatingTexture(
                         intermediate, atDocRect: docRect, to: drawEnc,
+                        opacity: layer.opacity,
+                        zoomScale: Float(zoomScale),
+                        panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
+                        canvasRotation: Float(rotation),
+                        viewportSize: SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height)),
+                        flipState: flipState
+                    )
+                    drawEnc.endEncoding()
+                    continue
+                }
+
+                // Eraser wet-ink preview carve-out. Mirrors the move-tool
+                // drag-preview block above. The standard tile-direct preview
+                // (encodeWetInkPreviewOntoDrawable) writes dest-out onto the
+                // already-composited drawable, which zeros the composite
+                // instead of revealing layers below — eraser needs an
+                // isolated single-layer destination for the dest-out math
+                // to mean "erase from the active layer." Fall back to the
+                // legacy compose-into-intermediate path: stage the active
+                // layer's tiles into tileDisplayIntermediate, dest-out
+                // scratch onto that isolated texture via
+                // encodeWetInkPreviewCompositeOntoIntermediate, then blit
+                // the now-erased intermediate to the drawable via
+                // premul-over so the alpha holes reveal layers below.
+                // Additive tools (brush, pencil, marker, airbrush,
+                // charcoal) stay on the standard tile-direct path because
+                // their premul-over preview is target-agnostic.
+                let isEraserWetInkPreview = renderer?.activeWetInkLayerId == layer.id
+                    && renderer?.activeWetInkTool == .eraser
+                if isEraserWetInkPreview, let grid = layer.tileGrid {
+                    renderer?.encodeLayerTileCompositeOntoIntermediate(
+                        grid, visibleDocRect: visibleDocRect, on: commandBuffer
+                    )
+                    renderer?.encodeWetInkPreviewCompositeOntoIntermediate(on: commandBuffer)
+                    guard let drawEnc = commandBuffer.makeRenderCommandEncoder(descriptor: drawDesc),
+                          let intermediate = renderer?.tileDisplayIntermediate else { continue }
+                    renderer?.setCanvasFootprintScissor(
+                        on: drawEnc, drawableSize: view.drawableSize, viewportPoints: view.bounds.size,
+                        zoomScale: zoomScale, panOffset: panOffset, canvasRotation: rotation,
+                        flipHorizontal: flipH, flipVertical: flipV
+                    )
+                    renderer?.renderTextureToScreen(
+                        intermediate, to: drawEnc,
                         opacity: layer.opacity,
                         zoomScale: Float(zoomScale),
                         panOffset: SIMD2<Float>(Float(panOffset.x), Float(panOffset.y)),
@@ -1759,8 +1803,8 @@ struct MetalCanvasView: UIViewRepresentable {
             // into the active layer texture in `touchesMoved`, and the every-
             // frame layer composite picks up the cuts — there's no separate
             // preview to draw on the drawable.
-            // Skip every wet-ink tool: brush, eraser, and the 5 additive
-            // variants (pencil/inkPen/marker/airbrush/charcoal). Their
+            // Skip every wet-ink tool: brush, eraser, and the 4 additive
+            // variants (pencil/marker/airbrush/charcoal). Their
             // strokes are already visible via the scratch-over-intermediate
             // composite encoded earlier in the per-layer loop; running
             // renderStrokePreview on top would double-deposit.
@@ -2366,44 +2410,17 @@ struct MetalCanvasView: UIViewRepresentable {
                     return
                 }
 
-                // Tap-outside-commit: a tap that didn't fall into the floating
-                // selection's hit area (or onto a transform handle, which the
-                // SwiftUI overlay already consumed before reaching here) means
-                // the user is choosing to act on the canvas elsewhere. Bake
-                // the floating selection into its layer first, then continue
-                // with the tap's normal behavior. Mirrors Procreate's
-                // "tap outside to confirm transform."
+                // Tap-outside neutralized: under the deferred-commit model,
+                // a tap outside the floating selection does NOT auto-apply
+                // the pending transform. The float stays put; the new
+                // touch starts whatever the current tool does (a new
+                // stroke on the layer beneath/around the float, a new
+                // marquee, etc.). Apply is the only commit gesture.
                 //
-                // Synchronous via MainActor.assumeIsolated — runs before the
-                // async clearSelection scheduled in the isSelectionTool block
-                // below. That ordering is the load-bearing detail mitigating
-                // audit root cause #2 / path 3 (new-selection-while-floating
-                // destructive cancel).
-                //
-                // Known narrow edge case: if the active layer was hidden after
-                // the lift but before this tap, commitSelection's
-                // canDrawOnActiveLayer guard returns false → commit is a
-                // silent no-op → the async clearSelection at the bottom of
-                // the isSelectionTool block still fires → floating texture
-                // dropped while the layer-with-hole snapshot is what's on
-                // the layer. Result: lifted pixels are lost without an undo
-                // entry. Requires three deliberate user actions in sequence
-                // (lift → hide layer → tap outside with selection tool), and
-                // the outcome is "selection gone" which is what the user is
-                // signaling anyway. Not fixing for this rebuild; documented
-                // here so it isn't a hidden surprise.
-                let needsCommit = MainActor.assumeIsolated {
-                    canvasState.floatingSelectionTexture != nil || canvasState.isTranslatingActiveLayer
-                }
-                if needsCommit {
-                    MainActor.assumeIsolated {
-                        if canvasState.floatingSelectionTexture != nil {
-                            canvasState.commitSelection()
-                        } else if canvasState.isTranslatingActiveLayer {
-                            canvasState.commitActiveLayerTranslation()
-                        }
-                    }
-                }
+                // Photoshop / classic-floating-selection precedent: the
+                // float overlays the layer, and you can paint on the
+                // layer underneath without disturbing it until you
+                // explicitly commit.
             }
 
             // Handle selection tools (rectangleSelect, lasso)
@@ -2587,8 +2604,8 @@ struct MetalCanvasView: UIViewRepresentable {
             #endif
 
             // Wet-ink real-time session. Routes every wet-ink-enabled
-            // tool (brush, eraser, pencil, inkPen, marker, airbrush,
-            // charcoal) through the unified lifecycle: deposit stamps
+            // tool (brush, eraser, pencil, marker, airbrush, charcoal)
+            // through the unified lifecycle: deposit stamps
             // into strokeScratch via .max/.max (no within-stroke
             // accumulation), commit at touchesEnded (premul-over for
             // additive, dest-out for eraser). Shape tools (line, rect,
@@ -3334,13 +3351,12 @@ struct MetalCanvasView: UIViewRepresentable {
                     flushBlurSubStroke(touchID: touchID)
                 }
                 // Wet-ink real-time deposit for brush + additive variants
-                // (pencil, inkPen, marker, airbrush, charcoal). Eraser is
+                // (pencil, marker, airbrush, charcoal). Eraser is
                 // handled in its own branch above. No-op when session.wetInkActive
                 // is false (begin failed); OLD renderStroke fallback runs
                 // at touchesEnded in that case.
                 if currentTool == .brush ||
                    currentTool == .pencil ||
-                   currentTool == .inkPen ||
                    currentTool == .marker ||
                    currentTool == .airbrush ||
                    currentTool == .charcoal {
@@ -3675,7 +3691,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Handle ending a selection drag
             if isDraggingSelection {
-                print("Finished dragging selection, committing to layer")
+                print("Finished dragging selection — transform now pending (await Apply/Cancel)")
                 isDraggingSelection = false
                 selectionDragStart = nil
                 // Drag finished cleanly via touchesEnded — the lift (if it
@@ -3686,18 +3702,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 liftedInCurrentTouch = false
                 preDragTransformSnapshot = nil
 
-                // Move-tool whole-layer drag goes through the in-place blit
-                // path (single GPU pass, no UIImage ever built). Floating-
-                // texture drags (rect/lasso, or move on top of an existing
-                // selection) go through the GPU composite path.
+                // No commit on release. Transform (translation / scale /
+                // rotation) persists in canvasState.selectionOffset/Scale/
+                // Rotation and bakes only on explicit Apply. Drop the
+                // marching-ants gate so the marquee re-animates while the
+                // user decides.
                 if let canvasState = canvasState {
                     Task { @MainActor in
                         canvasState.isTransformingSelection = false
-                        if canvasState.isTranslatingActiveLayer {
-                            canvasState.commitActiveLayerTranslation()
-                        } else {
-                            canvasState.commitSelection()
-                        }
                     }
                 }
                 return
@@ -4643,7 +4655,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var canSnapToLine: Bool {
             switch currentTool {
             case .brush, .eraser, .blur,
-                 .pencil, .inkPen, .marker, .airbrush, .charcoal:
+                 .pencil, .marker, .airbrush, .charcoal:
                 return true
             default:
                 return false
