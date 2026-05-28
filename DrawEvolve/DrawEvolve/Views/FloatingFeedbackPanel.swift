@@ -60,6 +60,16 @@ struct FloatingFeedbackPanel: View {
     @State private var selectedHistoryIndex = 0
     @State private var screenSize: CGSize = .zero
 
+    // Tutorial v1 — Ask Eve coach-mark. Fires after a 4-second delay
+    // on first appearance of the Ask Eve row so the user actually reads
+    // a few sentences of the critique before the callout interrupts.
+    // Gated on hasSeenTutorialV1 so users who skipped the intro cards
+    // don't get ambushed here. (Per v3 mod #5 — 4s delay, not 1s.)
+    @AppStorage("hasSeenTutorialV1") private var hasSeenTutorialV1 = false
+    @AppStorage("hasSeenAskEveCoachMarkV1") private var hasSeenAskEveCoachMarkV1 = false
+    @State private var showAskEveCoachMark = false
+    @State private var hasArmedAskEveCoachMark = false
+
     private let collapsedSize: CGSize = CGSize(width: 60, height: 60)
     private let expandedSize: CGSize = CGSize(width: 656, height: 625)
     /// Snapshot-mode compact size — smaller frame for nav + excerpt + a
@@ -146,6 +156,38 @@ struct FloatingFeedbackPanel: View {
             withAnimation(.spring(response: 0.3)) {
                 isExpanded = false
                 isFullSize = false  // next pill-tap expands to compact
+            }
+        }
+        .coachMark(
+            isPresented: $showAskEveCoachMark,
+            anchor: .askEve,
+            title: "Want to dig into this?",
+            message: "Tap Ask Eve — she'll have read the critique and can talk it through with you.",
+            onDismiss: {
+                hasSeenAskEveCoachMarkV1 = true
+                EventLogService.shared.log(
+                    event: "coach_mark_seen",
+                    payload: ["mark": "ask_eve"]
+                )
+            }
+        )
+        // Replay path 1: Settings → Replay Tutorial reset the surface
+        // flag while the panel was already showing. .onAppear on
+        // askEveBar has already fired; reset the hasArmed guard and
+        // re-fire the armer (which queues the 4s delay again).
+        .onChange(of: hasSeenAskEveCoachMarkV1) { _, newValue in
+            if !newValue {
+                hasArmedAskEveCoachMark = false
+                armAskEveCoachMarkIfNeeded()
+            }
+        }
+        // Replay path 2: cards dismissed → hasSeenTutorialV1 flipped
+        // true. The armer's guard requires that, so re-fire now that
+        // the replay cards are out of the way.
+        .onChange(of: hasSeenTutorialV1) { _, newValue in
+            if newValue {
+                hasArmedAskEveCoachMark = false
+                armAskEveCoachMarkIfNeeded()
             }
         }
     }
@@ -314,6 +356,31 @@ struct FloatingFeedbackPanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .coachMarkAnchor(.askEve)
+            .onAppear { armAskEveCoachMarkIfNeeded() }
+        }
+    }
+
+    /// Arms the Ask Eve coach-mark on first appearance of the askEveBar
+    /// row, with a 4-second delay so the user can read the critique
+    /// above before the callout interrupts. One-shot via
+    /// hasArmedAskEveCoachMark @State so multiple appearances per session
+    /// (e.g., navigating between critique history entries) don't re-fire
+    /// or stack the delayed presentation.
+    private func armAskEveCoachMarkIfNeeded() {
+        guard hasSeenTutorialV1,
+              !hasSeenAskEveCoachMarkV1,
+              !hasArmedAskEveCoachMark else {
+            return
+        }
+        hasArmedAskEveCoachMark = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            // Re-check the flag in case Replay Tutorial reset it during
+            // the 4s window (paranoid; cheap).
+            guard !hasSeenAskEveCoachMarkV1 else { return }
+            withAnimation(.easeIn(duration: 0.25)) {
+                showAskEveCoachMark = true
+            }
         }
     }
 

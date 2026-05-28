@@ -41,9 +41,16 @@ struct DrawEvolveApp: App {
             // Refresh remote feature flags whenever the app becomes
             // active. Throttled internally (5 min) so rapid toggling
             // doesn't fan out into a stream of network calls.
+            //
+            // Also kick a pending-upload sweep here (slice 3 of the
+            // durability rework). Launch + reachability-restored sweeps
+            // already exist; foreground is the missing third trigger.
+            // Idempotent — retryPendingUploads skips drawings with an
+            // already-running task and honors per-drawing backoff.
             if newPhase == .active {
                 Task { @MainActor in
                     await AppFeatureFlags.shared.refreshOnForegroundIfStale()
+                    await CloudDrawingStorageManager.shared.resumePendingUploads()
                 }
             }
         }

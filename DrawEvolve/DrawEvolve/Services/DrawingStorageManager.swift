@@ -62,6 +62,15 @@ final class CloudDrawingStorageManager: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var pendingUploadCount: Int = 0
 
+    /// Drawings whose pending-upload entry has crossed
+    /// `stalledAttemptThreshold` attempts without succeeding. Populated
+    /// alongside `pendingUploadCount` from the same disk read; cleared
+    /// when the entry succeeds (and thus disappears from `pendingDir`).
+    /// Slice-2 data feed for the gallery's "this drawing isn't backed
+    /// up yet — N failed attempts" surface (slice 2 wires the UI; this
+    /// field is the source of truth).
+    @Published private(set) var stalledDrawingIDs: Set<UUID> = []
+
     // MARK: - Internals
 
     private let fileManager = FileManager.default
@@ -82,14 +91,17 @@ final class CloudDrawingStorageManager: ObservableObject {
     private let fullImageJPEGQuality: CGFloat = 0.9
     private let thumbnailJPEGQuality: CGFloat = 0.8
 
-    /// Hard ceiling on per-drawing upload retries. Pending entries past
-    /// this attempt count get dropped (no row upsert, drawing stays in
-    /// local cache only). At ~60s max backoff per attempt this is roughly
-    /// 32 minutes of compressed retries; spread across launches +
-    /// NWPathMonitor recoveries it's days-to-weeks of real-world retries
-    /// before we give up. The bound exists so a permanently-broken
-    /// pending entry doesn't sit on disk forever and log on every launch.
-    private let uploadGiveUpAttempts = 32
+    /// Slice-2 stalled-flag threshold. A pending entry whose persisted
+    /// `attemptCount` crosses this value joins `stalledDrawingIDs`,
+    /// which the gallery (in a follow-up slice) will surface as "this
+    /// drawing isn't backed up yet — N failed attempts." Sized so the
+    /// flag fires after ~7-10 minutes of compressed backoff retries
+    /// (exp(N) capped at 60s + jitter) — long enough to rule out a
+    /// one-off network blip, short enough that a stuck drawing shows
+    /// up while the tester is still in the session that caused it.
+    /// `attemptCount` is persisted by `incrementPendingAttempts` so
+    /// the threshold accumulates across launches too.
+    private let stalledAttemptThreshold = 10
 
     /// In-memory thumbnail cache keyed by drawing id, populated by fetchDrawings().
     /// Sync access for gallery cells. ~10-30KB per entry; for very large galleries
@@ -289,7 +301,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         nextRetryAt.removeAll()
         for (_, task) in activeUploadTasks { task.cancel() }
         activeUploadTasks.removeAll()
-        pendingUploadCount = countPendingEntriesForCurrentUser()
+        refreshPendingState()
         errorMessage = nil
     }
 
@@ -304,7 +316,7 @@ final class CloudDrawingStorageManager: ObservableObject {
     }
 
     private func onLaunchRecovery() async {
-        pendingUploadCount = countPendingEntriesForCurrentUser()
+        refreshPendingState()
         await retryPendingUploads()
     }
 
@@ -964,7 +976,7 @@ final class CloudDrawingStorageManager: ObservableObject {
 
         // Always wipe local cache + pending entry.
         removeLocalArtifacts(forDrawingID: id)
-        pendingUploadCount = countPendingEntriesForCurrentUser()
+        refreshPendingState()
 
         // Best-effort cloud delete. Skip for bypass user. Failures are logged
         // but not surfaced — the row will remain orphaned in cloud, which is
@@ -1030,6 +1042,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         clearAllThumbnails()
         snapshotCompositeCache.removeAllObjects()
         pendingUploadCount = 0
+        stalledDrawingIDs = []
 
         // Wipe contents of the cache subdirs but leave the directories
         // in place — they're recreated lazily on first use otherwise.
@@ -1062,6 +1075,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             for url in urls { try? fileManager.removeItem(at: url) }
         }
         pendingUploadCount = 0
+        stalledDrawingIDs = []
 
         #if DEBUG
         if AuthManager.shared.isDebugBypassed { return }
@@ -1650,7 +1664,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             createdAt: Date()
         )
         writePendingEntry(entry)
-        pendingUploadCount = countPendingEntriesForCurrentUser()
+        refreshPendingState()
 
         // Cancel any prior in-flight task for this drawing — newer save wins.
         activeUploadTasks[drawing.id]?.cancel()
@@ -1686,7 +1700,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         guard let drawing = drawings.first(where: { $0.id == id }) else {
             // Local copy gone (deleted) — cancel any pending entry too.
             removePendingEntry(id: id)
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            refreshPendingState()
             activeUploadTasks[id] = nil
             return
         }
@@ -1701,7 +1715,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // path is unrecoverable. Drop the entry; the layered path (if any)
             // will be retried via its own pending entry.
             removePendingEntry(id: id)
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            refreshPendingState()
             activeUploadTasks[id] = nil
             return
         }
@@ -1712,20 +1726,14 @@ final class CloudDrawingStorageManager: ObservableObject {
             // Local image bytes missing at upload time. The pre-D1 behavior
             // was to silently drop the pending entry — but that produced a
             // save the user thought had landed while no row + no file ever
-            // reached the cloud. Treat as a retryable failure so a transient
-            // I/O hiccup (mid-write file, briefly evicted disk-cache entry)
-            // gets another pass. Surface a visible error and drop only after
-            // hitting the give-up ceiling.
+            // reached the cloud. The slice-1 durability rework removed the
+            // 32-attempt give-up branch entirely: this path now retries
+            // indefinitely. A transient I/O hiccup (mid-write file, briefly
+            // evicted disk-cache entry) self-heals; a permanently missing
+            // local artifact never will, and the stalled-attempt threshold
+            // (slice 2) is what surfaces that case to the user.
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            if attempts >= uploadGiveUpAttempts {
-                print("☁️ ❌ PERMANENT: flat upload \(id) has no local image bytes after \(attempts) attempts — dropping pending entry. Drawing remains in local cache; cloud row NOT written.")
-                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
-                removePendingEntry(id: id)
-                activeUploadTasks[id] = nil
-                pendingUploadCount = countPendingEntriesForCurrentUser()
-                return
-            }
-            print("☁️ Flat upload missing local image bytes for \(id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — scheduling retry")
+            print("☁️ Flat upload missing local image bytes for \(id) (attempt \(attempts)) — scheduling retry")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
             return
@@ -1760,19 +1768,11 @@ final class CloudDrawingStorageManager: ObservableObject {
             removePendingEntry(id: id)
             nextRetryAt[id] = nil
             activeUploadTasks[id] = nil
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            refreshPendingState()
             print("☁️ Uploaded \(drawing.id) '\(drawing.title)'")
         } catch {
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            if attempts >= uploadGiveUpAttempts {
-                print("☁️ ❌ PERMANENT: giving up on flat upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
-                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
-                removePendingEntry(id: id)
-                activeUploadTasks[id] = nil
-                pendingUploadCount = countPendingEntriesForCurrentUser()
-                return
-            }
-            print("☁️ Upload failed for \(drawing.id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — keeping pending: \(error.localizedDescription)")
+            print("☁️ Upload failed for \(drawing.id) (attempt \(attempts)) — keeping pending: \(error.localizedDescription)")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
@@ -1826,7 +1826,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             legacyThumbnailPath: legacy?.thumbnailPath
         )
         writePendingEntry(entry)
-        pendingUploadCount = countPendingEntriesForCurrentUser()
+        refreshPendingState()
 
         activeUploadTasks[drawing.id]?.cancel()
         activeUploadTasks[drawing.id] = Task { [weak self] in
@@ -1842,7 +1842,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         }
         guard let drawing = drawings.first(where: { $0.id == id }) else {
             removePendingEntry(id: id)
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            refreshPendingState()
             activeUploadTasks[id] = nil
             return
         }
@@ -1858,18 +1858,13 @@ final class CloudDrawingStorageManager: ObservableObject {
             // Local manifest missing — we can't upload without it. The
             // pre-D1 path silently dropped the pending entry, which left the
             // user's local cache intact but produced zero cloud presence for
-            // the save. Treat as retryable (transient I/O) and only give up
-            // after the same ceiling that bounds the rest of the pipeline.
+            // the save. The slice-1 durability rework removed the give-up
+            // ceiling: this path now retries indefinitely. A transient I/O
+            // hiccup self-heals; a permanently missing manifest never will,
+            // and the stalled-attempt threshold (slice 2) is what surfaces
+            // that case to the user.
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            if attempts >= uploadGiveUpAttempts {
-                print("☁️ ❌ PERMANENT: layered upload \(id) has no local manifest after \(attempts) attempts — dropping pending entry. Drawing remains in local cache; cloud row NOT written.")
-                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
-                removePendingEntry(id: id)
-                activeUploadTasks[id] = nil
-                pendingUploadCount = countPendingEntriesForCurrentUser()
-                return
-            }
-            print("☁️ Layered upload missing local manifest for \(id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — scheduling retry")
+            print("☁️ Layered upload missing local manifest for \(id) (attempt \(attempts)) — scheduling retry")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
             return
@@ -2036,21 +2031,13 @@ final class CloudDrawingStorageManager: ObservableObject {
             removePendingEntry(id: id)
             nextRetryAt[id] = nil
             activeUploadTasks[id] = nil
-            pendingUploadCount = countPendingEntriesForCurrentUser()
+            refreshPendingState()
             print("☁️ Uploaded layered \(drawing.id) '\(drawing.title)' (\(layerCount) layers)")
         } catch {
             // Persist whatever we got done so the next retry resumes correctly.
             updatePendingEntry(entry)
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            if attempts >= uploadGiveUpAttempts {
-                print("☁️ ❌ PERMANENT: giving up on layered upload \(drawing.id) after \(attempts) attempts — dropping pending entry. Drawing still in local cache; cloud row NOT written.")
-                errorMessage = "A drawing failed to upload after repeated retries. Try saving it again."
-                removePendingEntry(id: id)
-                activeUploadTasks[id] = nil
-                pendingUploadCount = countPendingEntriesForCurrentUser()
-                return
-            }
-            print("☁️ Layered upload failed for \(drawing.id) (attempt \(attempts)/\(uploadGiveUpAttempts)) — keeping pending: \(error.localizedDescription)")
+            print("☁️ Layered upload failed for \(drawing.id) (attempt \(attempts)) — keeping pending: \(error.localizedDescription)")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
@@ -2280,6 +2267,18 @@ final class CloudDrawingStorageManager: ObservableObject {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Public wrapper around `retryPendingUploads()` for lifecycle-driven
+    /// sweeps. Launch is already covered by `onLaunchRecovery()` (init)
+    /// and reachability-restored by `setupNetworkObserver()`; this entry
+    /// point exists so the app's scenePhase `.active` handler can kick
+    /// off a sweep when the user foregrounds the app, alongside the
+    /// existing feature-flag refresh. Idempotent: `retryPendingUploads`
+    /// skips drawings with an already-running `activeUploadTasks` entry
+    /// and per-drawing backoff is honored at the head of each attempt.
+    func resumePendingUploads() async {
+        await retryPendingUploads()
+    }
+
     private func retryPendingUploads() async {
         let entries = readPendingEntries()
         let activeUserID = currentEffectiveUserID()
@@ -2353,9 +2352,23 @@ final class CloudDrawingStorageManager: ObservableObject {
         writePendingEntry(entry)
     }
 
-    private func countPendingEntriesForCurrentUser() -> Int {
-        guard let activeUserID = currentEffectiveUserID() else { return 0 }
-        return readPendingEntries().filter { $0.userID == activeUserID }.count
+    /// Recompute the two @Published pending-state fields from a single
+    /// `pendingDir` scan. Both `pendingUploadCount` and `stalledDrawingIDs`
+    /// derive from the same per-user filter — keep their updates fused
+    /// here so they never drift. Replaces the slice-1 `pendingUploadCount
+    /// = countPendingEntriesForCurrentUser()` pattern that was called at
+    /// every pending-state mutation site.
+    private func refreshPendingState() {
+        guard let activeUserID = currentEffectiveUserID() else {
+            pendingUploadCount = 0
+            stalledDrawingIDs = []
+            return
+        }
+        let mine = readPendingEntries().filter { $0.userID == activeUserID }
+        pendingUploadCount = mine.count
+        stalledDrawingIDs = Set(
+            mine.filter { $0.attemptCount >= stalledAttemptThreshold }.map { $0.drawingID }
+        )
     }
 
     // MARK: - Helpers

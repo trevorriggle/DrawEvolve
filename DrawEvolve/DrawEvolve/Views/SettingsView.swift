@@ -17,13 +17,24 @@ struct SettingsView: View {
     @State private var showDeleteSheet = false
     @State private var signOutInFlight = false
     @State private var showBetaNotice = false
-    @State private var showHowItWorks = false
+    @State private var showSendFeedback = false
+
+    // Tutorial flags. Replay Tutorial resets all five so the cards re-
+    // present AND the surface-specific coach-marks re-arm. ContentView's
+    // onChange(of: hasSeenTutorialV1) picks up the reset and fires the
+    // cards in replay mode over whatever screen the user is on.
+    @AppStorage("hasSeenTutorialV1") private var hasSeenTutorialV1 = false
+    @AppStorage("hasSeenPromptInputBannerV1") private var hasSeenPromptInputBannerV1 = false
+    @AppStorage("hasSeenGetFeedbackCoachMarkV1") private var hasSeenGetFeedbackCoachMarkV1 = false
+    @AppStorage("hasSeenAskEveCoachMarkV1") private var hasSeenAskEveCoachMarkV1 = false
+    @AppStorage("hasSeenGalleryTourV1") private var hasSeenGalleryTourV1 = false
 
     var body: some View {
         NavigationStack {
             Form {
                 infoSection
                 accountSection
+                helpSection
                 actionsSection
                 legalSection
                 aboutSection
@@ -46,20 +57,25 @@ struct SettingsView: View {
             .sheet(isPresented: $showDeleteSheet) {
                 DeleteAccountConfirmationSheet()
             }
+            .sheet(isPresented: $showSendFeedback) {
+                SendFeedbackSheet()
+            }
             .fullScreenCover(isPresented: $showBetaNotice) {
                 BetaTransparencyPopup(isPresented: $showBetaNotice)
-            }
-            .fullScreenCover(isPresented: $showHowItWorks) {
-                OnboardingPopup(isPresented: $showHowItWorks)
             }
         }
     }
 
     // MARK: - Sections
 
-    /// Beta Notice + How It Works — re-access path for the first-launch
-    /// popups. Side-by-side buttons rendered as a single Form row with
-    /// clear background so they read as floating actions, not list rows.
+    /// Beta Notice + Replay Tutorial — re-access paths. Side-by-side
+    /// buttons rendered as a single Form row with clear background so
+    /// they read as floating actions, not list rows.
+    ///
+    /// Replay Tutorial resets all 5 tutorial flags and dismisses the
+    /// sheet. ContentView's onChange(of: hasSeenTutorialV1) picks up the
+    /// reset and presents the cards in replay mode over whatever screen
+    /// the user was on (per v3 Q4 decision — do not navigate to LaunchHome).
     private var infoSection: some View {
         Section {
             HStack(spacing: 12) {
@@ -80,12 +96,12 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    showHowItWorks = true
+                    replayTutorial()
                 } label: {
                     VStack(spacing: 6) {
-                        Image(systemName: "questionmark.circle")
+                        Image(systemName: "arrow.clockwise")
                             .font(.title3)
-                        Text("How It Works")
+                        Text("Replay Tutorial")
                             .font(.footnote.weight(.medium))
                     }
                     .frame(maxWidth: .infinity)
@@ -97,6 +113,35 @@ struct SettingsView: View {
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             .listRowBackground(Color.clear)
+        }
+    }
+
+    /// Send Feedback row + footer. Inserts into public.feedback_submissions
+    /// (migration 0018) via FeedbackService — RLS-protected, server-
+    /// enforced 5/hr/user rate limit. Sheet handles category picker,
+    /// message body, and error/success states.
+    private var helpSection: some View {
+        Section {
+            Button {
+                showSendFeedback = true
+            } label: {
+                HStack {
+                    Image(systemName: "envelope")
+                        .foregroundStyle(.accent)
+                        .frame(width: 24)
+                    Text("Send Feedback")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+        } header: {
+            Text("Help")
+        } footer: {
+            Text("We read every submission. We can't reply individually, but it shapes what ships next.")
         }
     }
 
@@ -152,6 +197,18 @@ struct SettingsView: View {
     }
 
     // MARK: - Actions
+
+    /// Reset all five tutorial flags, then dismiss the Settings sheet.
+    /// The reset triggers ContentView.SignedInRoot's onChange(of:
+    /// hasSeenTutorialV1) which presents the cards in replay mode.
+    private func replayTutorial() {
+        hasSeenTutorialV1 = false
+        hasSeenPromptInputBannerV1 = false
+        hasSeenGetFeedbackCoachMarkV1 = false
+        hasSeenAskEveCoachMarkV1 = false
+        hasSeenGalleryTourV1 = false
+        dismiss()
+    }
 
     private func performSignOut() async {
         signOutInFlight = true

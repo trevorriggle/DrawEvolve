@@ -15,7 +15,6 @@
 		DE000007 /* OpenAIManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100007 /* OpenAIManager.swift */; };
 		DE000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200001 /* Assets.xcassets */; };
 		DE000009 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE200002 /* Preview Assets.xcassets */; };
-		DE000012 /* OnboardingPopup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100012 /* OnboardingPopup.swift */; };
 		DE000013 /* DrawingLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100013 /* DrawingLayer.swift */; };
 		DE000014 /* DrawingTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100014 /* DrawingTool.swift */; };
 		DE000015 /* CanvasRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100015 /* CanvasRenderer.swift */; };
@@ -131,6 +130,12 @@
 		DE000140 /* LayerTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100140 /* LayerTile.swift */; };
 		DE000141 /* TileGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100141 /* TileGrid.swift */; };
 		DE000900 /* AdjustmentHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100900 /* AdjustmentHUD.swift */; };
+		DE000904 /* FeedbackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100904 /* FeedbackService.swift */; };
+		DE000905 /* EventLogService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100905 /* EventLogService.swift */; };
+		DE000906 /* CoachMarkOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100906 /* CoachMarkOverlay.swift */; };
+		DE000907 /* TutorialCardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100907 /* TutorialCardsView.swift */; };
+		DE000908 /* SendFeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100908 /* SendFeedbackSheet.swift */; };
+		DE000909 /* EveTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100909 /* EveTextField.swift */; };
 		DEPACKAGE06 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE02 /* Supabase */; };
 		DEPACKAGE07 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE03 /* Auth */; };
 		DEPACKAGE08 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = DEPACKAGE04 /* PostgREST */; };
@@ -146,7 +151,6 @@
 		DE100004 /* DrawingCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingCanvasView.swift; sourceTree = "<group>"; };
 		DE100006 /* DrawingContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingContext.swift; sourceTree = "<group>"; };
 		DE100007 /* OpenAIManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIManager.swift; sourceTree = "<group>"; };
-		DE100012 /* OnboardingPopup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingPopup.swift; sourceTree = "<group>"; };
 		DE100013 /* DrawingLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingLayer.swift; sourceTree = "<group>"; };
 		DE100014 /* DrawingTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingTool.swift; sourceTree = "<group>"; };
 		DE100015 /* CanvasRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasRenderer.swift; sourceTree = "<group>"; };
@@ -261,6 +265,12 @@
 		DE100140 /* LayerTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerTile.swift; sourceTree = "<group>"; };
 		DE100141 /* TileGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TileGrid.swift; sourceTree = "<group>"; };
 		DE100900 /* AdjustmentHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdjustmentHUD.swift; sourceTree = "<group>"; };
+		DE100904 /* FeedbackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackService.swift; sourceTree = "<group>"; };
+		DE100905 /* EventLogService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventLogService.swift; sourceTree = "<group>"; };
+		DE100906 /* CoachMarkOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachMarkOverlay.swift; sourceTree = "<group>"; };
+		DE100907 /* TutorialCardsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TutorialCardsView.swift; sourceTree = "<group>"; };
+		DE100908 /* SendFeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFeedbackSheet.swift; sourceTree = "<group>"; };
+		DE100909 /* EveTextField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EveTextField.swift; sourceTree = "<group>"; };
 		DE200001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DE200002 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		DE300002 /* Config.example.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config.example.plist; sourceTree = "<group>"; };
@@ -323,7 +333,9 @@
 				DE100002 /* ContentView.swift */,
 				DE100043 /* AuthGateView.swift */,
 				DE100035 /* BetaTransparencyPopup.swift */,
-				DE100012 /* OnboardingPopup.swift */,
+				DE100906 /* CoachMarkOverlay.swift */,
+				DE100907 /* TutorialCardsView.swift */,
+				DE100908 /* SendFeedbackSheet.swift */,
 				DE100003 /* PromptInputView.swift */,
 				DE100050 /* PromptEditView.swift */,
 				DE100051 /* PromptListView.swift */,
@@ -409,6 +421,8 @@
 				DE100118 /* PaletteService.swift */,
 				DE100120 /* PaletteGenerator.swift */,
 				DE100133 /* AppFeatureFlags.swift */,
+				DE100904 /* FeedbackService.swift */,
+				DE100905 /* EventLogService.swift */,
 				DE000318 /* Vision */,
 				DE000321 /* Pose */,
 			);
@@ -532,6 +546,7 @@
 				DE100111 /* EveConversationView.swift */,
 				DE100112 /* EveSheetHost.swift */,
 				DE100123 /* EveConversationListView.swift */,
+				DE100909 /* EveTextField.swift */,
 			);
 			path = Eve;
 			sourceTree = "<group>";
@@ -628,7 +643,6 @@
 				DE000001 /* DrawEvolveApp.swift in Sources */,
 				DE000002 /* ContentView.swift in Sources */,
 				DE000035 /* BetaTransparencyPopup.swift in Sources */,
-				DE000012 /* OnboardingPopup.swift in Sources */,
 				DE000003 /* PromptInputView.swift in Sources */,
 				DE000004 /* DrawingCanvasView.swift in Sources */,
 				DE000017 /* MetalCanvasView.swift in Sources */,
@@ -746,6 +760,12 @@
 				DE000139 /* TileKey.swift in Sources */,
 				DE000140 /* LayerTile.swift in Sources */,
 				DE000141 /* TileGrid.swift in Sources */,
+				DE000904 /* FeedbackService.swift in Sources */,
+				DE000905 /* EventLogService.swift in Sources */,
+				DE000906 /* CoachMarkOverlay.swift in Sources */,
+				DE000907 /* TutorialCardsView.swift in Sources */,
+				DE000908 /* SendFeedbackSheet.swift in Sources */,
+				DE000909 /* EveTextField.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

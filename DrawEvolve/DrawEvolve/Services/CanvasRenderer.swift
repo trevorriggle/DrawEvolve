@@ -168,7 +168,6 @@ class CanvasRenderer: NSObject {
     // `brushPipelineState`; only the fragment function differs. Selected
     // by `pipelineState(forTool:)`.
     private var pencilPipelineState: MTLRenderPipelineState?
-    private var inkPenPipelineState: MTLRenderPipelineState?
     private var markerPipelineState: MTLRenderPipelineState?
     private var airbrushPipelineState: MTLRenderPipelineState?
     private var charcoalPipelineState: MTLRenderPipelineState?
@@ -180,7 +179,6 @@ class CanvasRenderer: NSObject {
     // for the wet-ink deposit pass.
     private var brushPremulPipelineState: MTLRenderPipelineState?
     private var pencilPremulPipelineState: MTLRenderPipelineState?
-    private var inkPenPremulPipelineState: MTLRenderPipelineState?
     private var markerPremulPipelineState: MTLRenderPipelineState?
     private var airbrushPremulPipelineState: MTLRenderPipelineState?
     private var charcoalPremulPipelineState: MTLRenderPipelineState?
@@ -199,7 +197,6 @@ class CanvasRenderer: NSObject {
     // .max/.max within-stroke deposit blend. Commit step is shared with
     // brush (premul-over via wetInkCommitPipelineState).
     private var pencilScratchDepositPipelineState: MTLRenderPipelineState?
-    private var inkPenScratchDepositPipelineState: MTLRenderPipelineState?
     private var markerScratchDepositPipelineState: MTLRenderPipelineState?
     private var airbrushScratchDepositPipelineState: MTLRenderPipelineState?
     private var charcoalScratchDepositPipelineState: MTLRenderPipelineState?
@@ -512,13 +509,11 @@ class CanvasRenderer: NSObject {
               let brushFragment = library.makeFunction(name: "brushFragmentShader"),
               let eraserFragment = library.makeFunction(name: "eraserFragmentShader"),
               let pencilFragment = library.makeFunction(name: "pencilFragmentShader"),
-              let inkPenFragment = library.makeFunction(name: "inkPenFragmentShader"),
               let markerFragment = library.makeFunction(name: "markerFragmentShader"),
               let airbrushFragment = library.makeFunction(name: "airbrushFragmentShader"),
               let charcoalFragment = library.makeFunction(name: "charcoalFragmentShader"),
               let brushFragmentPremul = library.makeFunction(name: "brushFragmentShaderPremul"),
               let pencilFragmentPremul = library.makeFunction(name: "pencilFragmentShaderPremul"),
-              let inkPenFragmentPremul = library.makeFunction(name: "inkPenFragmentShaderPremul"),
               let markerFragmentPremul = library.makeFunction(name: "markerFragmentShaderPremul"),
               let airbrushFragmentPremul = library.makeFunction(name: "airbrushFragmentShaderPremul"),
               let charcoalFragmentPremul = library.makeFunction(name: "charcoalFragmentShaderPremul"),
@@ -537,7 +532,9 @@ class CanvasRenderer: NSObject {
               let tileDirectVertex = library.makeFunction(name: "tileDirectVertexShader"),
               let tileDirectFragment = library.makeFunction(name: "tileDirectFragmentShader"),
               let wetInkCommitFragment = library.makeFunction(name: "wetInkCommitShader"),
-              let wetInkEraserCommitFragment = library.makeFunction(name: "wetInkEraserCommitShader") else {
+              let wetInkCommitFragmentLinear = library.makeFunction(name: "wetInkCommitShaderLinear"),
+              let wetInkEraserCommitFragment = library.makeFunction(name: "wetInkEraserCommitShader"),
+              let wetInkEraserCommitFragmentLinear = library.makeFunction(name: "wetInkEraserCommitShaderLinear") else {
             print("Failed to load shader functions")
             return
         }
@@ -588,7 +585,6 @@ class CanvasRenderer: NSObject {
             return d
         }
         let pencilDescriptor = makeBrushVariantDescriptor(pencilFragment)
-        let inkPenDescriptor = makeBrushVariantDescriptor(inkPenFragment)
         let markerDescriptor = makeBrushVariantDescriptor(markerFragment)
         let airbrushDescriptor = makeBrushVariantDescriptor(airbrushFragment)
         let charcoalDescriptor = makeBrushVariantDescriptor(charcoalFragment)
@@ -613,7 +609,6 @@ class CanvasRenderer: NSObject {
         }
         let brushPremulDescriptor = makeBrushPremulVariantDescriptor(brushFragmentPremul)
         let pencilPremulDescriptor = makeBrushPremulVariantDescriptor(pencilFragmentPremul)
-        let inkPenPremulDescriptor = makeBrushPremulVariantDescriptor(inkPenFragmentPremul)
         let markerPremulDescriptor = makeBrushPremulVariantDescriptor(markerFragmentPremul)
         let airbrushPremulDescriptor = makeBrushPremulVariantDescriptor(airbrushFragmentPremul)
         let charcoalPremulDescriptor = makeBrushPremulVariantDescriptor(charcoalFragmentPremul)
@@ -666,7 +661,6 @@ class CanvasRenderer: NSObject {
         // Phase E: deposit descriptors for the additive brush variants.
         // Each uses its premul fragment + the shared .max/.max blend.
         let pencilScratchDepositDescriptor = makeWetInkAlphaBlendDepositVariantDescriptor(pencilFragmentPremul)
-        let inkPenScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(inkPenFragmentPremul)
         let markerScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(markerFragmentPremul)
         let airbrushScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(airbrushFragmentPremul)
         let charcoalScratchDepositDescriptor = makeWetInkAlphaBlendDepositVariantDescriptor(charcoalFragmentPremul)
@@ -771,12 +765,18 @@ class CanvasRenderer: NSObject {
         tileDirectToDrawableDescriptor.colorAttachments[0].alphaBlendOperation = .add
 
         // Wet-ink commit variants targeting the drawable directly. Pair the
-        // new transform vertex shader with the existing wet-ink commit /
-        // eraser-commit fragment shaders. Blend state mirrors
+        // transform vertex shader with the LINEAR sampler variants of the
+        // wet-ink commit / eraser-commit fragment shaders — preview UVs
+        // pass through pan/zoom/rotation and are not 1:1 with scratch, so
+        // they must match tileDirectFragmentShader's LINEAR sampling to
+        // keep committed pixels visually identical to the live preview
+        // (high-frequency content — pencil tooth, charcoal grain — would
+        // otherwise reshape on stroke release). The 1:1 atlas-commit
+        // pipelines above keep the NEAREST variants. Blend state mirrors
         // wetInkCommit + wetInkEraserCommit (premul-over / dest-out).
         let wetInkCommitToDrawableDescriptor = MTLRenderPipelineDescriptor()
         wetInkCommitToDrawableDescriptor.vertexFunction = tileDirectVertex
-        wetInkCommitToDrawableDescriptor.fragmentFunction = wetInkCommitFragment
+        wetInkCommitToDrawableDescriptor.fragmentFunction = wetInkCommitFragmentLinear
         wetInkCommitToDrawableDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         wetInkCommitToDrawableDescriptor.colorAttachments[0].isBlendingEnabled = true
         wetInkCommitToDrawableDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
@@ -788,7 +788,7 @@ class CanvasRenderer: NSObject {
 
         let wetInkEraserCommitToDrawableDescriptor = MTLRenderPipelineDescriptor()
         wetInkEraserCommitToDrawableDescriptor.vertexFunction = tileDirectVertex
-        wetInkEraserCommitToDrawableDescriptor.fragmentFunction = wetInkEraserCommitFragment
+        wetInkEraserCommitToDrawableDescriptor.fragmentFunction = wetInkEraserCommitFragmentLinear
         wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].isBlendingEnabled = true
         wetInkEraserCommitToDrawableDescriptor.colorAttachments[0].sourceRGBBlendFactor = .zero
@@ -861,17 +861,17 @@ class CanvasRenderer: NSObject {
 
         // Brush-blur deposit — premultiplied source-over into the layer
         // texture, same blend factors as the brush pipeline.
+        // Blending disabled: stampBlurDepositShader uses Metal framebuffer
+        // fetch (`[[color(0)]]`) to read the current destination and
+        // returns `mix(currentColor, blurred, coverage)` directly. The
+        // shader IS the blend — fixed-function blending would compose
+        // again on top and re-introduce the alpha-accumulation bug the
+        // mix() formulation was added to fix.
         let stampBlurDepositDescriptor = MTLRenderPipelineDescriptor()
         stampBlurDepositDescriptor.vertexFunction = brushVertex
         stampBlurDepositDescriptor.fragmentFunction = stampBlurDepositFragment
         stampBlurDepositDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        stampBlurDepositDescriptor.colorAttachments[0].isBlendingEnabled = true
-        stampBlurDepositDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one  // source pre-multiplied
-        stampBlurDepositDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        stampBlurDepositDescriptor.colorAttachments[0].rgbBlendOperation = .add
-        stampBlurDepositDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-        stampBlurDepositDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        stampBlurDepositDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        stampBlurDepositDescriptor.colorAttachments[0].isBlendingEnabled = false
 
         // Smudge patch-update — raw replace into the back patch (no blend).
         // The mix happens inside the shader (sample front patch + layer,
@@ -882,40 +882,30 @@ class CanvasRenderer: NSObject {
         smudgePatchUpdateDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         smudgePatchUpdateDescriptor.colorAttachments[0].isBlendingEnabled = false
 
-        // Smudge deposit — premultiplied source-over into the layer, same
-        // blend factors as the brush-blur deposit (the patch holds
-        // premultiplied content from the layer; the deposit shader returns
-        // patchSample * alpha which composites cleanly).
+        // Smudge deposit — blending disabled, same rationale as the blur
+        // deposit. smudgeDepositShader uses framebuffer fetch and returns
+        // `mix(currentColor, picked, coverage)` directly.
         let smudgeDepositDescriptor = MTLRenderPipelineDescriptor()
         smudgeDepositDescriptor.vertexFunction = brushVertex
         smudgeDepositDescriptor.fragmentFunction = smudgeDepositFragment
         smudgeDepositDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        smudgeDepositDescriptor.colorAttachments[0].isBlendingEnabled = true
-        smudgeDepositDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
-        smudgeDepositDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        smudgeDepositDescriptor.colorAttachments[0].rgbBlendOperation = .add
-        smudgeDepositDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-        smudgeDepositDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        smudgeDepositDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        smudgeDepositDescriptor.colorAttachments[0].isBlendingEnabled = false
 
         do {
             brushPipelineState = try device.makeRenderPipelineState(descriptor: brushDescriptor)
             eraserPipelineState = try device.makeRenderPipelineState(descriptor: eraserDescriptor)
             pencilPipelineState = try device.makeRenderPipelineState(descriptor: pencilDescriptor)
-            inkPenPipelineState = try device.makeRenderPipelineState(descriptor: inkPenDescriptor)
             markerPipelineState = try device.makeRenderPipelineState(descriptor: markerDescriptor)
             airbrushPipelineState = try device.makeRenderPipelineState(descriptor: airbrushDescriptor)
             charcoalPipelineState = try device.makeRenderPipelineState(descriptor: charcoalDescriptor)
             brushPremulPipelineState = try device.makeRenderPipelineState(descriptor: brushPremulDescriptor)
             pencilPremulPipelineState = try device.makeRenderPipelineState(descriptor: pencilPremulDescriptor)
-            inkPenPremulPipelineState = try device.makeRenderPipelineState(descriptor: inkPenPremulDescriptor)
             markerPremulPipelineState = try device.makeRenderPipelineState(descriptor: markerPremulDescriptor)
             airbrushPremulPipelineState = try device.makeRenderPipelineState(descriptor: airbrushPremulDescriptor)
             charcoalPremulPipelineState = try device.makeRenderPipelineState(descriptor: charcoalPremulDescriptor)
             brushScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: brushScratchDepositDescriptor)
             eraserScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: eraserScratchDepositDescriptor)
             pencilScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: pencilScratchDepositDescriptor)
-            inkPenScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: inkPenScratchDepositDescriptor)
             markerScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: markerScratchDepositDescriptor)
             airbrushScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: airbrushScratchDepositDescriptor)
             charcoalScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: charcoalScratchDepositDescriptor)
@@ -1210,6 +1200,13 @@ class CanvasRenderer: NSObject {
     // draw-loop callsite in MetalCanvasView so it can pass the
     // intermediate as the source texture to `renderTextureToScreen`.
     // Writes remain confined to the renderer.
+    //
+    // Still live on the active path under `FEATURE_TILE_DIRECT_RENDERING`:
+    // the move-tool drag-preview carve-out and the eraser wet-ink preview
+    // both need an isolated single-layer texture (drawable composite is
+    // the wrong destination for renderFloatingTexture's translate and for
+    // dest-out erase respectively). Do not delete in a future Slice-6
+    // cleanup without retiring both carve-outs first.
     private(set) var tileDisplayIntermediate: MTLTexture?
 
     /// Per-layer composite cache (Tier B item 6). Holds canvas-sized
@@ -1312,6 +1309,7 @@ class CanvasRenderer: NSObject {
         guard let tex = device.makeTexture(descriptor: desc) else {
             return nil
         }
+        print("[EVE-AUDIT] STROKE_SCRATCH_ALLOC \(targetW)x\(targetH) storageMode=private") // EVE-RENDER-AUDIT-LOG
         strokeScratch = tex
         return tex
     }
@@ -1337,6 +1335,7 @@ class CanvasRenderer: NSObject {
         let bytesPerRow = w * 4
         let bytesPerImage = bytesPerRow * h
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        print("[EVE-AUDIT] STROKE_SCRATCH_CLEAR \(w)x\(h)") // EVE-RENDER-AUDIT-LOG
         blit.copy(
             from: zeros,
             sourceOffset: 0,
@@ -1551,8 +1550,8 @@ class CanvasRenderer: NSObject {
         appendLog("log path: \(logURL?.path ?? "<no docs dir>")")
     }
 
-    /// Phase A.5 shader-equivalence pre-flight. For each of the 6
-    /// additive-family tools (brush, pencil, inkPen, marker, airbrush,
+    /// Phase A.5 shader-equivalence pre-flight. For each of the 5
+    /// additive-family tools (brush, pencil, marker, airbrush,
     /// charcoal), render one stamp via the OLD shader+pipeline pair
     /// (non-premultiplied output + `.sourceAlpha`/`.oneMinusSourceAlpha`
     /// RGB blend), then render the same stamp via the NEW shader+pipeline
@@ -1608,7 +1607,6 @@ class CanvasRenderer: NSObject {
         let testTools: [(String, MTLRenderPipelineState?, MTLRenderPipelineState?)] = [
             ("brush",    brushPipelineState,    brushPremulPipelineState),
             ("pencil",   pencilPipelineState,   pencilPremulPipelineState),
-            ("inkPen",   inkPenPipelineState,   inkPenPremulPipelineState),
             ("marker",   markerPipelineState,   markerPremulPipelineState),
             ("airbrush", airbrushPipelineState, airbrushPremulPipelineState),
             ("charcoal", charcoalPipelineState, charcoalPremulPipelineState),
@@ -2478,6 +2476,15 @@ class CanvasRenderer: NSObject {
         return activeWetInkSession?.layerId
     }
 
+    /// Tool of the active wet-ink session, or nil when no stroke is in
+    /// progress. Read by the live-display path to take the eraser-isolation
+    /// carve-out (dest-out only produces the right pixels against a layer-
+    /// isolated intermediate; the standard tile-direct preview path writes
+    /// onto the fully-composited drawable).
+    var activeWetInkTool: DrawingTool? {
+        return activeWetInkSession?.tool
+    }
+
     /// Begin a wet-ink stroke session.
     ///
     /// 1. Clears `strokeScratch` synchronously via blit-from-zero.
@@ -2553,8 +2560,6 @@ class CanvasRenderer: NSObject {
             depositPipeline = eraserScratchDepositPipelineState
         case .pencil:
             depositPipeline = pencilScratchDepositPipelineState
-        case .inkPen:
-            depositPipeline = inkPenScratchDepositPipelineState
         case .marker:
             depositPipeline = markerScratchDepositPipelineState
         case .airbrush:
@@ -2597,6 +2602,7 @@ class CanvasRenderer: NSObject {
             return
         }
         enc.setRenderPipelineState(pipeline)
+        print("[EVE-AUDIT] WETINK_DEPOSIT tool=\(session.tool) stamps=\(stamps.count) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
         enc.setFragmentTexture(session.selectionMask, index: 2)
 
         var uniforms = BrushUniforms(
@@ -2734,6 +2740,7 @@ class CanvasRenderer: NSObject {
         rp.colorAttachments[0].storeAction = .store
         if let enc = cb.makeRenderCommandEncoder(descriptor: rp) {
             enc.setRenderPipelineState(commitPipeline)
+            print("[EVE-AUDIT] WETINK_COMMIT tool=\(session.tool) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
             enc.setFragmentTexture(scratch, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             enc.endEncoding()
@@ -2795,14 +2802,22 @@ class CanvasRenderer: NSObject {
     }
 
     /// Composite `strokeScratch` on top of `tileDisplayIntermediate` using
-    /// the wet-ink commit pipeline (premul-over). Called from the
-    /// `draw(in:)` per-layer composite loop AFTER
-    /// `encodeLayerTileCompositeOntoIntermediate` and BEFORE the layer's
-    /// draw to the drawable. The result is that the user sees the
-    /// in-progress wet-ink stroke composited correctly over the layer's
-    /// committed tile state — bit-exact with the eventual touchesEnded
-    /// commit (modulo the bbox limitation at commit, which is a no-op
-    /// since scratch is zero outside the bbox).
+    /// the wet-ink commit pipeline (premul-over for additive tools,
+    /// dest-out for eraser). Called from the `draw(in:)` per-layer
+    /// composite loop AFTER `encodeLayerTileCompositeOntoIntermediate`
+    /// and BEFORE the layer's draw to the drawable. The result is that
+    /// the user sees the in-progress wet-ink stroke composited correctly
+    /// over the layer's committed tile state — bit-exact with the eventual
+    /// touchesEnded commit (modulo the bbox limitation at commit, which
+    /// is a no-op since scratch is zero outside the bbox).
+    ///
+    /// Under `FEATURE_TILE_DIRECT_RENDERING` this is still live on the
+    /// active path for the eraser tool only. Additive tools render their
+    /// preview directly onto the drawable via
+    /// `encodeWetInkPreviewOntoDrawable` (premul-over is target-agnostic,
+    /// works on the composite); eraser dest-out requires layer isolation
+    /// and goes through this function. See the eraser carve-out at
+    /// `MetalCanvasView.swift:draw(in:)`.
     func encodeWetInkPreviewCompositeOntoIntermediate(on commandBuffer: MTLCommandBuffer) {
         guard let session = activeWetInkSession,
               let intermediate = tileDisplayIntermediate,
@@ -3010,7 +3025,6 @@ class CanvasRenderer: NSObject {
             switch stroke.tool {
             case .eraser:   return eraserPipelineState
             case .pencil:   return pencilPipelineState
-            case .inkPen:   return inkPenPipelineState
             case .marker:   return markerPipelineState
             case .airbrush: return airbrushPipelineState
             case .charcoal: return charcoalPipelineState
@@ -3913,6 +3927,7 @@ class CanvasRenderer: NSObject {
         let canvasH = Int(canvasSize.height)
 
         renderEncoder.setRenderPipelineState(pipeline)
+        print("[EVE-AUDIT] WETINK_PREVIEW_DRAWABLE tool=\(session.tool)") // EVE-RENDER-AUDIT-LOG
         // Treat the full-canvas scratch as a single tile covering the
         // entire canvas. tileDirectVertexShader's math handles the
         // canvas-fraction → drawable-NDC chain identically to a tile.
@@ -4891,7 +4906,6 @@ class CanvasRenderer: NSObject {
         let previewPipeline: MTLRenderPipelineState? = {
             switch stroke.tool {
             case .pencil:   return pencilPipelineState
-            case .inkPen:   return inkPenPipelineState
             case .marker:   return markerPipelineState
             case .airbrush: return airbrushPipelineState
             case .charcoal: return charcoalPipelineState
@@ -5993,6 +6007,75 @@ class CanvasRenderer: NSObject {
         }
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+
+        // EMPTY-LAYER-DIAG (Part A): one-shot diagnostic prints + center-tile
+        // content readback. Pure logging — allocates a transient .shared 256²
+        // scratch, blits one tile into it, scans alpha, then drops the scratch.
+        // No persistent state change.
+        let __diagAllocated = tileGrid.allocatedKeys().count
+        let __diagExpected  = tileGrid.gridWidth * tileGrid.gridHeight
+        print("📥 LOADIMG-A1 allocatedKeys=\(__diagAllocated)/\(__diagExpected) grid=\(tileGrid.gridWidth)×\(tileGrid.gridHeight) tileSize=\(tileGrid.tileSize) canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+        do {
+            let __probeKey = TileKey(x: min(4, tileGrid.gridWidth - 1),
+                                     y: min(4, tileGrid.gridHeight - 1))
+            if let __probeTile = tileGrid.tile(at: __probeKey) {
+                let __pw = __probeTile.texture.width
+                let __ph = __probeTile.texture.height
+                let __scratchDesc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .bgra8Unorm,
+                    width: __pw, height: __ph,
+                    mipmapped: false
+                )
+                __scratchDesc.storageMode = .shared
+                __scratchDesc.usage = [.shaderRead]
+                if let __scratch = device.makeTexture(descriptor: __scratchDesc),
+                   let __probeCb = commandQueue.makeCommandBuffer(),
+                   let __probeBlit = __probeCb.makeBlitCommandEncoder() {
+                    __probeBlit.copy(
+                        from: __probeTile.texture,
+                        sourceSlice: 0, sourceLevel: 0,
+                        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                        sourceSize: MTLSize(width: __pw, height: __ph, depth: 1),
+                        to: __scratch,
+                        destinationSlice: 0, destinationLevel: 0,
+                        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                    )
+                    __probeBlit.endEncoding()
+                    __probeCb.commit()
+                    __probeCb.waitUntilCompleted()
+                    let __rowBytes = __pw * 4
+                    var __buf = [UInt8](repeating: 0, count: __rowBytes * __ph)
+                    __buf.withUnsafeMutableBytes { __raw in
+                        guard let __base = __raw.baseAddress else { return }
+                        __scratch.getBytes(
+                            __base,
+                            bytesPerRow: __rowBytes,
+                            from: MTLRegion(
+                                origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                size: MTLSize(width: __pw, height: __ph, depth: 1)
+                            ),
+                            mipmapLevel: 0
+                        )
+                    }
+                    // BGRA byte order; alpha is the 4th byte per pixel.
+                    var __nonzeroAlpha = 0
+                    var __maxAlpha: UInt8 = 0
+                    var __i = 3
+                    while __i < __buf.count {
+                        let __a = __buf[__i]
+                        if __a > 0 { __nonzeroAlpha += 1 }
+                        if __a > __maxAlpha { __maxAlpha = __a }
+                        __i += 4
+                    }
+                    let __totalPixels = __pw * __ph
+                    print("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) tileSize=\(__pw)×\(__ph) totalPixels=\(__totalPixels) nonzeroAlphaPixels=\(__nonzeroAlpha) maxAlpha=\(__maxAlpha) wasCleared=\(__probeTile.wasCleared) dirtyVersion=\(__probeTile.dirtyVersion)")
+                } else {
+                    print("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) ERROR: failed to allocate scratch / cb / blit")
+                }
+            } else {
+                print("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) ERROR: tile not allocated — A1 told the story already")
+            }
+        }
 
         #if DEBUG
         print("✅ Image loaded successfully into tile grid")

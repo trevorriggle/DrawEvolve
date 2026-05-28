@@ -281,6 +281,18 @@ private struct GalleryContent: View {
     // state propagation.
     @AppStorage("selectedPresetID") private var selectedPresetID: String = "studio_mentor"
 
+    // Tutorial v1 — Gallery 3-tab tour. Sequenced coach-marks on first
+    // Gallery open for users who completed/skipped the intro cards.
+    // activeGalleryMark drives which of the three callouts is visible;
+    // onDismiss advances to the next, and the third dismiss flips the
+    // hasSeenGalleryTourV1 flag so the sequence is one-shot. Skip on
+    // intro cards sets this flag too — opted-out users don't get the
+    // tour either.
+    @AppStorage("hasSeenTutorialV1") private var hasSeenTutorialV1 = false
+    @AppStorage("hasSeenGalleryTourV1") private var hasSeenGalleryTourV1 = false
+    @State private var activeGalleryMark: CoachMarkID? = nil
+    @State private var hasArmedGalleryTour = false
+
     let columns = [
         GridItem(.flexible(), spacing: 16),
         GridItem(.flexible(), spacing: 16)
@@ -389,6 +401,111 @@ private struct GalleryContent: View {
                 Text("Delete all \(storageManager.drawings.count) drawings? This cannot be undone.")
             }
         }
+        .coachMark(
+            isPresented: galleryMarkBinding(for: .galleryDrawings),
+            anchor: .galleryDrawings,
+            title: "My Drawings",
+            message: "Every drawing you save lives here. Tap one to keep working on it or to revisit its critiques.",
+            onDismiss: { advanceGalleryTour(from: .galleryDrawings) }
+        )
+        .coachMark(
+            isPresented: galleryMarkBinding(for: .galleryPrompts),
+            anchor: .galleryPrompts,
+            title: "My Prompts",
+            message: "Your critique voices live here. The current voice writes every critique you request. Four built-in voices (Studio Mentor, The Crit, Fundamentals Coach, Renaissance Master) or write your own — pick the one whose opinion you trust.",
+            onDismiss: { advanceGalleryTour(from: .galleryPrompts) }
+        )
+        .coachMark(
+            isPresented: galleryMarkBinding(for: .galleryEvolution),
+            anchor: .galleryEvolution,
+            title: "My Evolution",
+            message: "Your skill radar fills in over time, and the Studio Wall plots every critique you've ever received. Tap a column to revisit any past drawing with its critique. Every Get Feedback tap is also a measurement.",
+            onDismiss: { advanceGalleryTour(from: .galleryEvolution) }
+        )
+        .onAppear { armGalleryTourIfNeeded() }
+        // Replay path 1: Settings → Replay Tutorial reset the tour flag
+        // while the gallery was already on screen. .onAppear already
+        // fired; reset the hasArmed guard and re-fire the armer
+        // (queues 0.5s settle then starts the sequence over).
+        .onChange(of: hasSeenGalleryTourV1) { _, newValue in
+            if !newValue {
+                hasArmedGalleryTour = false
+                armGalleryTourIfNeeded()
+            }
+        }
+        // Replay path 2: cards dismissed → hasSeenTutorialV1 flipped
+        // true. The armer's guard requires that, so re-fire now that
+        // the replay cards are out of the way.
+        .onChange(of: hasSeenTutorialV1) { _, newValue in
+            if newValue {
+                hasArmedGalleryTour = false
+                armGalleryTourIfNeeded()
+            }
+        }
+    }
+
+    // MARK: - Gallery tour sequencing
+
+    /// Arms the 3-callout tour on first Gallery open for users who
+    /// completed/skipped the intro cards. One-shot via hasArmedGalleryTour
+    /// so repeat .onAppear fires don't re-trigger. The fire-event
+    /// analytics fires ONCE on tour start, not per callout — keeps the
+    /// event count sane.
+    private func armGalleryTourIfNeeded() {
+        guard hasSeenTutorialV1,
+              !hasSeenGalleryTourV1,
+              !hasArmedGalleryTour else {
+            return
+        }
+        hasArmedGalleryTour = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard !hasSeenGalleryTourV1 else { return }
+            EventLogService.shared.log(
+                event: "coach_mark_seen",
+                payload: ["mark": "gallery_tour"]
+            )
+            withAnimation(.easeIn(duration: 0.25)) {
+                activeGalleryMark = .galleryDrawings
+            }
+        }
+    }
+
+    /// Binding for one of the three sequenced coach-marks. True iff
+    /// activeGalleryMark matches this id; setter advances the tour on
+    /// dismiss (matches the CoachMarkOverlay's behavior of setting
+    /// isPresented = false to dismiss).
+    private func galleryMarkBinding(for id: CoachMarkID) -> Binding<Bool> {
+        Binding(
+            get: { activeGalleryMark == id },
+            set: { newValue in
+                if !newValue && activeGalleryMark == id {
+                    // Dismiss path. advanceGalleryTour runs from the
+                    // .coachMark's onDismiss closure too — both paths
+                    // converge on the same advance logic. Calling
+                    // advance from the binding setter would double-fire;
+                    // we no-op the binding setter and let the explicit
+                    // onDismiss closure drive the sequence.
+                }
+            }
+        )
+    }
+
+    private func advanceGalleryTour(from current: CoachMarkID) {
+        switch current {
+        case .galleryDrawings:
+            withAnimation(.easeIn(duration: 0.25)) {
+                activeGalleryMark = .galleryPrompts
+            }
+        case .galleryPrompts:
+            withAnimation(.easeIn(duration: 0.25)) {
+                activeGalleryMark = .galleryEvolution
+            }
+        case .galleryEvolution:
+            activeGalleryMark = nil
+            hasSeenGalleryTourV1 = true
+        default:
+            activeGalleryMark = nil
+        }
     }
 
     // MARK: - Tab Strip — iPad
@@ -407,6 +524,12 @@ private struct GalleryContent: View {
     // MARK: - Tab Strip — iPhone
 
     private var phoneTabStrip: some View {
+        // The segmented Picker is one composite control on iPhone, so all
+        // three coach-mark IDs anchor to the same rect (the Picker's
+        // frame). Each callout's text identifies which tab it's pointing
+        // at; the picker segments are in the same Drawings / Prompts /
+        // Evolution order as the callout sequence so the user can map by
+        // position even without a per-segment anchor.
         Picker("Section", selection: $selectedTab) {
             Text("Drawings").tag(Tab.drawings)
             Text("Prompts").tag(Tab.prompts)
@@ -415,6 +538,9 @@ private struct GalleryContent: View {
         .pickerStyle(.segmented)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+        .coachMarkAnchor(.galleryDrawings)
+        .coachMarkAnchor(.galleryPrompts)
+        .coachMarkAnchor(.galleryEvolution)
     }
 
     private func tabButton(_ tab: Tab, label: String) -> some View {
@@ -425,6 +551,15 @@ private struct GalleryContent: View {
                 .foregroundColor(isSelected ? .accentColor : .primary)
         }
         .buttonStyle(.plain)
+        .coachMarkAnchor(coachMarkID(for: tab))
+    }
+
+    private func coachMarkID(for tab: Tab) -> CoachMarkID {
+        switch tab {
+        case .drawings:  return .galleryDrawings
+        case .prompts:   return .galleryPrompts
+        case .evolution: return .galleryEvolution
+        }
     }
 
     // MARK: - My Prompts (preset voice picker)

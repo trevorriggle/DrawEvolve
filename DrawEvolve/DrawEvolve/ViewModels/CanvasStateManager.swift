@@ -1848,6 +1848,47 @@ class CanvasStateManager: ObservableObject {
         isTransformingSelection = false
     }
 
+    /// Hit-test for the floating selection's transformed bounding box.
+    /// Returns true when `point` (doc space) lies inside the displayed
+    /// rect of the active floating selection — the original bbox
+    /// translated by `selectionOffset`, scaled by `selectionScale`,
+    /// rotated by `selectionRotation` around the displayed-rect center.
+    ///
+    /// Used by `touchesBegan` to distinguish "user is grabbing the
+    /// existing float for another drag" from "user is starting a new
+    /// gesture outside the float" under the deferred-commit model
+    /// (where the float persists between touches until Apply).
+    ///
+    /// Mirrors the rotated-rect math the transform-handle overlays use
+    /// to lay out handles around the displayed rect; the body grab is
+    /// the same rect minus the handle hit-targets. Returns false when
+    /// no floating selection exists.
+    func isPointInsideTransformedFloat(_ point: CGPoint) -> Bool {
+        guard floatingSelectionTexture != nil,
+              let original = selectionOriginalRect else {
+            return false
+        }
+        let displayedW = original.width  * selectionScale.width
+        let displayedH = original.height * selectionScale.height
+        let cx = original.origin.x + selectionOffset.x + displayedW / 2
+        let cy = original.origin.y + selectionOffset.y + displayedH / 2
+        let dx = point.x - cx
+        let dy = point.y - cy
+        let theta = selectionRotation.radians
+        if theta == 0 {
+            return abs(dx) <= displayedW / 2 && abs(dy) <= displayedH / 2
+        }
+        let cosT = cos(theta)
+        let sinT = sin(theta)
+        // R(+θ) on Y-down doc coords — same inverse the existing
+        // isPointInSelection helper in MetalCanvasView uses for the
+        // image-import (marqueeless) float.
+        let localX = dx * cosT - dy * sinT
+        let localY = dx * sinT + dy * cosT
+        return abs(localX) <= displayedW / 2 &&
+               abs(localY) <= displayedH / 2
+    }
+
     func deleteSelectedPixels() {
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,

@@ -22,7 +22,6 @@ enum DrawingTool {
     // automatically because they mutate `stroke.points` upstream of the
     // render dispatch.
     case pencil
-    case inkPen
     case marker
     case airbrush
     case charcoal
@@ -64,7 +63,6 @@ enum DrawingTool {
         case .paintBucket: return "drop.fill"
         case .eyeDropper: return "eyedropper"
         case .pencil: return "pencil"
-        case .inkPen: return "fountainpen.tip"
         case .marker: return "highlighter"
         case .airbrush: return "wind"
         case .charcoal: return "scribble.variable"
@@ -91,14 +89,17 @@ enum DrawingTool {
     /// ignore it — surfaces honest control to the user instead of an
     /// inert slider that does nothing.
     ///
-    /// Brush + eraser + charcoal use hardness directly. Pencil USES the
-    /// uniform but floors it at 0.85 (so the slider is effectively a
-    /// no-op across most of its range — we hide it to avoid lying
-    /// about responsiveness). InkPen, marker, airbrush have fixed disc
+    /// Brush + eraser + charcoal + blur use hardness directly. For blur
+    /// it shapes the stamp's edge falloff (how sharply the blur-vs-
+    /// original mix ramps down at the perimeter), not the Gaussian
+    /// kernel width — kernel width is driven by `size`. Pencil USES
+    /// the uniform but floors it at 0.85 (so the slider is effectively
+    /// a no-op across most of its range — we hide it to avoid lying
+    /// about responsiveness). Marker and airbrush have fixed disc
     /// profiles and ignore the uniform entirely.
     var usesHardness: Bool {
         switch self {
-        case .brush, .eraser, .charcoal:
+        case .brush, .eraser, .charcoal, .blur:
             return true
         default:
             return false
@@ -112,7 +113,6 @@ enum DrawingTool {
         case .paintBucket: return "Fill"
         case .eyeDropper: return "Pick Color"
         case .pencil: return "Pencil"
-        case .inkPen: return "Ink Pen"
         case .marker: return "Marker"
         case .airbrush: return "Airbrush"
         case .charcoal: return "Charcoal"
@@ -242,11 +242,6 @@ struct BrushSettings: Codable {
             s.opacity = 0.85      // a hard stroke reads as dark graphite, not gray
             s.hardness = 0.95     // sharp edge
             s.spacing = 0.08      // looser overlap so grain gaps aren't saturated out
-        case .inkPen:
-            s.size = 7            // medium-thin
-            s.opacity = 1.0       // confident solid lines
-            s.hardness = 1.0      // hard edge (the shader enforces this too)
-            s.spacing = 0.04      // very tight spacing — no gaps in a line
         case .marker:
             s.size = 14           // wider than brush
             s.opacity = 0.65      // saturated color with paper subtly visible — chisel-tip marker, not Sharpie

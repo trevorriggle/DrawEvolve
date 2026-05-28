@@ -19,6 +19,13 @@ struct PromptInputView: View {
     /// on the questionnaire to confirm and proceed.
     @State private var showRecommendations = false
 
+    /// First-open inline banner gate. Lands the "why we ask all this"
+    /// framing — honest input = sharper critique. Dismissible via the
+    /// "Got it" button; flag persists across sessions. Not a coach-mark;
+    /// the banner scrolls with the form and disappears with animation
+    /// on dismiss.
+    @AppStorage("hasSeenPromptInputBannerV1") private var hasSeenPromptInputBannerV1 = false
+
     var body: some View {
         Group {
             if DeviceIdiom.isPhone {
@@ -65,6 +72,8 @@ struct PromptInputView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.bottom, 8)
+
+                bannerSection
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Name your drawing")
@@ -256,9 +265,12 @@ struct PromptInputView: View {
 
             // Form
             ScrollView {
-                promptFormFieldsSingleColumn
-                    .padding(24)
-                    .padding(.bottom, 100) // Extra space for keyboard + button
+                VStack(alignment: .leading, spacing: 20) {
+                    bannerSection
+                    promptFormFieldsSingleColumn
+                }
+                .padding(24)
+                .padding(.bottom, 100) // Extra space for keyboard + button
             }
             .scrollDismissesKeyboard(.interactively)
 
@@ -341,6 +353,8 @@ struct PromptInputView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.bottom, 8)
+
+                bannerSection
 
                 promptFormFieldsGrid
             }
@@ -519,6 +533,62 @@ struct PromptInputView: View {
             techniquesField
             focusField
         }
+    }
+
+    // MARK: - First-open banner
+
+    /// Inline banner shown on first PromptInputView open. Lands the
+    /// "why we ask all this" framing per v3 proposal. Card-style, lives
+    /// at the top of the form (above the Name field), dismissible via
+    /// the "Got it" button. Flag persists across sessions so the banner
+    /// doesn't re-fire on every drawing setup.
+    ///
+    /// Per Phase A audit §G1: this banner deliberately does NOT claim
+    /// the user is picking a critique voice in this form — voice
+    /// selection lives in Gallery → My Prompts. The Gallery 3-tab tour
+    /// (separate coach-mark) handles the voice-location pointing.
+    @ViewBuilder
+    private var bannerSection: some View {
+        if !hasSeenPromptInputBannerV1 {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "info.bubble.fill")
+                        .foregroundStyle(Color.accentColor)
+                    Text("Why we ask all this")
+                        .font(.headline)
+                    Spacer(minLength: 0)
+                    Button {
+                        dismissBanner()
+                    } label: {
+                        Text("Got it")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+
+                Text("Honest input makes your critique sharper. The more accurately you describe what you're trying to do, the more your critique voice has to work with.")
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("You can change any of this later.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .background(Color.accentColor.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.25), lineWidth: 1)
+            )
+        }
+    }
+
+    private func dismissBanner() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            hasSeenPromptInputBannerV1 = true
+        }
+        EventLogService.shared.log(event: "prompt_input_banner_dismissed")
     }
 
     /// Two-column grid used by padLandscapeBody. Short-height pad layouts

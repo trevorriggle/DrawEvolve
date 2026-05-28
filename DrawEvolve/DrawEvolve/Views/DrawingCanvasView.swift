@@ -1040,7 +1040,7 @@ struct DrawingCanvasView: View {
                 } else {
                     VStack(spacing: 8) {
                         phoneSelectionContextBar
-                        if phoneBrushSizeRailVisible {
+                        if brushSizeRailVisible {
                             BrushSizeRailHorizontal(
                                 size: $canvasState.brushSettings.size,
                                 // Hide hardness track for tools whose shader
@@ -1063,7 +1063,7 @@ struct DrawingCanvasView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 4)
                     .background(.regularMaterial)
-                    .animation(.easeInOut(duration: 0.18), value: phoneBrushSizeRailVisible)
+                    .animation(.easeInOut(duration: 0.18), value: brushSizeRailVisible)
                 }
             }
             // iPhone Phase 4: half-sheet for FloatingFeedbackPanel.
@@ -1982,11 +1982,12 @@ struct DrawingCanvasView: View {
                             .disabled(canvasState.isEmpty)
 
                             // Color picker swatch. Grayed (not hidden) when
-                            // blur, blurAdjustment, or smudge is the active
-                            // tool — those tools don't read brush color.
+                            // blurAdjustment or smudge is the active tool —
+                            // those tools don't read brush color. Blur is
+                            // pickable: the brush doesn't consume color, but
+                            // the user may want to set it for the next tool.
                             Button(action: {
-                                guard canvasState.currentTool != .blur,
-                                      canvasState.currentTool != .blurAdjustment,
+                                guard canvasState.currentTool != .blurAdjustment,
                                       canvasState.currentTool != .smudge else { return }
                                 // Stash the active tool BEFORE flipping the
                                 // sheet on so the .onChange(of: showColorPicker)
@@ -2002,12 +2003,11 @@ struct DrawingCanvasView: View {
                                     .overlay(Circle().stroke(Color.white, lineWidth: 3))
                                     .shadow(radius: 2)
                                     .opacity(
-                                        (canvasState.currentTool == .blur ||
-                                         canvasState.currentTool == .blurAdjustment ||
+                                        (canvasState.currentTool == .blurAdjustment ||
                                          canvasState.currentTool == .smudge) ? 0.4 : 1.0
                                     )
                             }
-                            .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
+                            .disabled(canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
 
                             // Brush settings
                             ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
@@ -2484,7 +2484,12 @@ struct DrawingCanvasView: View {
                 // safety. Procreate keeps the size slider flush against
                 // the canvas edge — matching that.
                 VStack(alignment: .trailing, spacing: 12) {
-                    if !isToolbarCollapsed {
+                    // Same allow-list gate as the iPhone horizontal rail —
+                    // brushSizeRailVisible. Selection tools, move, fill,
+                    // eyedropper, text, pose, and blurAdjustment all ignore
+                    // the rail's values, so they hide the rail entirely
+                    // rather than render a control that does nothing.
+                    if !isToolbarCollapsed, brushSizeRailVisible {
                         BrushSizeRail(
                             size: $canvasState.brushSettings.size,
                             // See horizontal-rail comment above — hide
@@ -3123,15 +3128,19 @@ struct DrawingCanvasView: View {
         }
     }
 
-    /// True when the active tool actually consumes `brushSettings.size`.
-    /// The horizontal brush-size rail hugs the action row when this is
-    /// true and collapses out when the user picks a tool that ignores
-    /// size (fill, eyedropper, select / move, text, pose, blur
-    /// adjustment) — those tools don't benefit from a size affordance,
-    /// and giving the canvas the row back reads better on a narrow
-    /// phone. The list matches the doc-comment on
-    /// `BrushSizeRail.swift`; keep them in sync when adding tools.
-    private var phoneBrushSizeRailVisible: Bool {
+    /// True when the active tool actually consumes `brushSettings.size`
+    /// / `hardness` / `opacity` — i.e., when the brush rail's controls
+    /// are meaningful for what the user is about to do. Allow-list so
+    /// future non-brush tools (selection, text variants, transform
+    /// affordances) default to hidden without needing a deny-list edit.
+    /// Tools omitted (fill, eyedropper, rectangleSelect, lasso, move,
+    /// text, textOnPath, pose, blurAdjustment) ignore the rail's values
+    /// at the shader / no-op tool level, so the rail is hidden for them
+    /// on both iPhone (horizontal rail) and iPad (vertical rail) — the
+    /// floating size affordance only appears when it does something.
+    /// The list matches the doc-comment on `BrushSizeRail.swift`; keep
+    /// them in sync when adding tools.
+    private var brushSizeRailVisible: Bool {
         switch canvasState.currentTool {
         case .brush, .pencil, .marker, .airbrush, .charcoal,
              .eraser, .blur, .smudge,
@@ -3756,8 +3765,7 @@ struct DrawingCanvasView: View {
                 }
                 .disabled(canvasState.feedback == nil && critiqueHistory.isEmpty)
                 Button(action: {
-                    guard canvasState.currentTool != .blur,
-                          canvasState.currentTool != .blurAdjustment,
+                    guard canvasState.currentTool != .blurAdjustment,
                           canvasState.currentTool != .smudge else { return }
                     // Stash the active tool BEFORE flipping the sheet on
                     // so the .onChange(of: showColorPicker) dismissal
@@ -3774,12 +3782,11 @@ struct DrawingCanvasView: View {
                         .overlay(Circle().stroke(Color.white, lineWidth: 3))
                         .shadow(radius: 2)
                         .opacity(
-                            (canvasState.currentTool == .blur ||
-                             canvasState.currentTool == .blurAdjustment ||
+                            (canvasState.currentTool == .blurAdjustment ||
                              canvasState.currentTool == .smudge) ? 0.4 : 1.0
                         )
                 }
-                .disabled(canvasState.currentTool == .blur || canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
+                .disabled(canvasState.currentTool == .blurAdjustment || canvasState.currentTool == .smudge)
                 ToolButton(icon: "slider.horizontal.3", isSelected: showBrushSettings) {
                     showBrushSettings.toggle()
                     collapsePhoneToolPanel()

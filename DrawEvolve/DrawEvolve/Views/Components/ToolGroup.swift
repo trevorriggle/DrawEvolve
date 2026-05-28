@@ -68,7 +68,6 @@ extension DrawingTool {
         case .paintBucket: return "paintBucket"
         case .eyeDropper: return "eyeDropper"
         case .pencil: return "pencil"
-        case .inkPen: return "inkPen"
         case .marker: return "marker"
         case .airbrush: return "airbrush"
         case .charcoal: return "charcoal"
@@ -97,7 +96,6 @@ extension DrawingTool {
         case "paintBucket": self = .paintBucket
         case "eyeDropper": self = .eyeDropper
         case "pencil": self = .pencil
-        case "inkPen": self = .inkPen
         case "marker": self = .marker
         case "airbrush": self = .airbrush
         case "charcoal": self = .charcoal
@@ -130,7 +128,7 @@ struct ToolGroup {
     let storageKey: String
     let defaultVariant: ToolVariant
 
-    /// Brush category — six paint variants behind a long-press popover.
+    /// Brush category — five paint variants behind a long-press popover.
     /// Default `.brush` preserves first-launch muscle memory; users who
     /// settled on a different variant get their last selection back via
     /// `storageKey`. Eraser stays a separate top-level slot (audit §6).
@@ -139,7 +137,6 @@ struct ToolGroup {
         variants: [
             .tool(.pencil),
             .tool(.brush),
-            .tool(.inkPen),
             .tool(.marker),
             .tool(.airbrush),
             .tool(.charcoal),

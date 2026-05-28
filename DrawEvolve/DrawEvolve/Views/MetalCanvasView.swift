@@ -2353,12 +2353,23 @@ struct MetalCanvasView: UIViewRepresentable {
             //       non-destructive selection model.
             if let canvasState = canvasState {
                 let shouldStartDragging = MainActor.assumeIsolated {
-                    // Already lifted: drag the floating texture.
+                    // Already lifted: hit-test the float's TRANSFORMED bounds.
+                    // Under the deferred-commit model the float persists
+                    // between touches and may already have a non-identity
+                    // (offset, scale, rotation). The raw selectionPath /
+                    // activeSelection in isPointInSelection ignore those —
+                    // so a tap inside the visually-translated float would
+                    // miss and fall through to the new-marquee branch,
+                    // clearing the float. isPointInsideTransformedFloat
+                    // applies the transform, matching what the user sees.
                     if canvasState.floatingSelectionTexture != nil {
                         if currentTool == .move { return true }
-                        return isPointInSelection(location)
+                        return canvasState.isPointInsideTransformedFloat(location)
                     }
                     // Polygon-only: lift then drag if touch lands in the polygon.
+                    // No float yet → transform is identity by construction
+                    // (setSelectionPolygon resets deltas), so raw polygon
+                    // test is correct.
                     if canvasState.selectionPath != nil {
                         if currentTool == .move { return true }
                         return isPointInSelection(location)
@@ -2969,10 +2980,24 @@ struct MetalCanvasView: UIViewRepresentable {
             // doc-space offset here — the draw loop renders the floating
             // texture (or the active layer, for whole-layer move) at offset
             // each frame on the GPU. No CPU pixel work per touch event.
+            //
+            // Cumulative offset: when this drag started on a PRE-EXISTING
+            // lifted selection (deferred-commit model — float persists
+            // between touches with a non-identity offset), we need to add
+            // this drag's delta to the prior offset, not replace it.
+            // preDragTransformSnapshot.offset holds the prior value
+            // (captured in touchesBegan when !liftedInCurrentTouch). On a
+            // first-touch lift it's nil, base is .zero, and we recover the
+            // original "offset = delta" behavior.
             if isDraggingSelection, let dragStart = selectionDragStart, let canvasState = canvasState {
-                let offset = CGPoint(
+                let dragDelta = CGPoint(
                     x: latestLocation.x - dragStart.x,
                     y: latestLocation.y - dragStart.y
+                )
+                let baseOffset = preDragTransformSnapshot?.offset ?? .zero
+                let offset = CGPoint(
+                    x: baseOffset.x + dragDelta.x,
+                    y: baseOffset.y + dragDelta.y
                 )
 
                 MainActor.assumeIsolated {
@@ -2982,8 +3007,8 @@ struct MetalCanvasView: UIViewRepresentable {
                 // floating-text drag above.
                 requestThrottledRedraw()
 
-                if hypot(offset.x, offset.y) > 5 {
-                    print("Dragging selection with offset: \(offset)")
+                if hypot(dragDelta.x, dragDelta.y) > 5 {
+                    print("Dragging selection with offset: \(offset) (delta: \(dragDelta), base: \(baseOffset))")
                 }
                 return
             }

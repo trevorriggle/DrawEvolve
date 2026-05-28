@@ -15,7 +15,7 @@ import SwiftUI
 
 struct EveInputBar: View {
     @ObservedObject var manager: EveConversationManager
-    @FocusState private var isFocused: Bool
+    @State private var isFocused: Bool = false
 
     var body: some View {
         // Single send entry point so the keyboard return key and the corner
@@ -52,22 +52,25 @@ struct EveInputBar: View {
             Divider()
 
             HStack(alignment: .bottom, spacing: 10) {
-                // Single-line on purpose: SwiftUI's vertical-axis TextField
-                // doesn't fire `.onSubmit` on return (return is hard-bound
-                // to newline insertion), so return-to-send only works on
-                // the default horizontal axis. Long messages scroll
-                // horizontally rather than growing the field. `sendDraft()`'s
-                // `!trimmed.isEmpty` guard catches an accidental empty-return.
-                TextField("Ask Eve…", text: $manager.draft)
-                    .focused($isFocused)
-                    .keyboardType(.default)
+                // UIViewRepresentable wrapping UITextField — lets us
+                // strip the iPadOS shortcut bar (mic / undo / redo /
+                // dictation) above the keyboard for this field only.
+                // Return-as-send is wired through UIKit's
+                // editingDidEndOnExit, which is more reliable on the
+                // iPad floating keyboard than SwiftUI's .onSubmit.
+                // sendDraft()'s empty/in-flight guards stay
+                // authoritative — see EveTextField.swift for why.
+                EveTextField(
+                    text: $manager.draft,
+                    isFocused: $isFocused,
+                    isEnabled: manager.sendState != .sending && manager.conversation != nil,
+                    placeholder: "Ask Eve…",
+                    onSubmit: submit,
+                )
+                    .frame(height: 40)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
                     .background(Color(uiColor: .secondarySystemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .disabled(manager.sendState == .sending || manager.conversation == nil)
-                    .submitLabel(.send)
-                    .onSubmit { submit() }
 
                 Button {
                     submit()
