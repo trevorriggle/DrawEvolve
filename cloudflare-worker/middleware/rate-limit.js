@@ -440,6 +440,29 @@ export function readEveMaxTurnsPerConversation(env) {
   return readEveLimit(env, 'EVE_MAX_TURNS_PER_CONVERSATION', 100);
 }
 
+/**
+ * Per-conversation raw-tail message count hydrated on each send. Default
+ * 20 messages = 10 turns. Backs the rolling-summary proposal §2 — the
+ * tail is the recent verbatim window, everything older is represented
+ * by conversations.rolling_summary. Env override:
+ * EVE_RAW_TAIL_MESSAGES=<int>.
+ */
+export function readEveRawTailMessages(env) {
+  return readEveLimit(env, 'EVE_RAW_TAIL_MESSAGES', 20);
+}
+
+/**
+ * Stride at which rolling_summary regenerates, in messages. Default 10
+ * messages = 5 turns. MUST satisfy `stride <= tailLimit` — see
+ * proposal R1: the constraint is what keeps the staleness window
+ * inside the tail's reach (so the dropped middle never opens up
+ * between summary boundary and raw tail). Env override:
+ * EVE_SUMMARY_REGEN_STRIDE=<int>.
+ */
+export function readEveSummaryRegenStride(env) {
+  return readEveLimit(env, 'EVE_SUMMARY_REGEN_STRIDE', 10);
+}
+
 function eveDailyMessage(tier, limit, retryAfterSeconds) {
   const reset = formatDuration(retryAfterSeconds);
   if (tier === 'pro') {

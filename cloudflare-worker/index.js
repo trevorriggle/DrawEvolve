@@ -176,6 +176,8 @@ export {
   appendMessage,
   bumpConversationCounters,
   getConversationHistory,
+  getConversationTail,
+  updateConversationRollingSummary,
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
   fetchCoachingContext,
@@ -187,6 +189,14 @@ export {
 } from './lib/supabase.js';
 
 export {
+  SUMMARY_MODEL,
+  SUMMARY_PROMPT_VERSION,
+  SUMMARY_MAX_OUTPUT_TOKENS,
+  SUMMARY_SYSTEM_PROMPT,
+  generateRollingSummary,
+} from './lib/eve-summary.js';
+
+export {
   EVE_PERSONA,
   EVE_PERSONA_VERSION,
   EVE_PRODUCT_CONTEXT,
@@ -195,17 +205,20 @@ export {
   buildEveSystemPrompt,
   buildEveMessages,
   renderCoachingContextBlock,
+  renderRollingSummaryBlock,
 } from './lib/eve-prompt.js';
 
 export {
   EVE_TIER_LIMITS,
   readEveTierLimits,
   readEveMaxTurnsPerConversation,
+  readEveRawTailMessages,
+  readEveSummaryRegenStride,
   enforceEveRateLimits,
   recordSuccessfulEveTurn,
 } from './middleware/rate-limit.js';
 
-export { handleEve, deriveTitleFromMessage } from './routes/eve.js';
+export { handleEve, deriveTitleFromMessage, maybeRegenerateRollingSummary } from './routes/eve.js';
 
 export {
   handleRecommendations,

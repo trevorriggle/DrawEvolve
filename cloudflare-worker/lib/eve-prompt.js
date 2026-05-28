@@ -1,26 +1,37 @@
 // Eve system-prompt + OpenAI-messages assembly.
 //
-// The system prompt has five load-bearing sections in fixed order:
+// The system prompt has six load-bearing sections in fixed order:
 //   1. EVE_PERSONA — who Eve is, what she's not (the critique voices)
 //   2. EVE_PRODUCT_CONTEXT — what the app can and cannot do
 //   3. COACHING CONTEXT block — preloaded portfolio data (drawings +
 //      critique summaries). Always present when coachingContext is
 //      non-empty; lets Eve coach across the user's body of work without
 //      tool calls. NEVER includes full critique bodies, only summaries.
-//   4. CURRENT CONTEXT block — only when scope='drawing' AND a critique
+//   4. CONVERSATION SO FAR block — rolling summary of the in-conversation
+//      turns that fell behind the raw-tail window. Present when
+//      conversation.rolling_summary is non-empty. Eve's WITHIN-conversation
+//      continuity; framed as her own memory of earlier turns so the
+//      model doesn't quote-meta-cite the summary back at the student.
+//   5. CURRENT CONTEXT block — only when scope='drawing' AND a critique
 //      was hydrated server-side. Frames the critique as shared history
 //      the coach has already read. INCLUDES the full critique body —
 //      this is the conversation anchor and needs full nuance for
 //      follow-up questions.
-//   5. CURRENT CANVAS block — only when the student attached their live
+//   6. CURRENT CANVAS block — only when the student attached their live
 //      canvas this turn. Sits last so the per-turn override of the
 //      "you haven't seen the drawings" rule is the freshest instruction
 //      in model recall. Also defends Eve persona against slipping into
 //      critique register just because an image is attached.
 //
-// COACHING CONTEXT sits BEFORE CURRENT CONTEXT so the current critique
-// stays the freshest thing in the model's recall. CURRENT CANVAS sits
-// after both for the same reason.
+// Ordering rationale: portfolio (cross-drawing) before per-conversation
+// memory before per-critique anchor before per-turn override. Each step
+// down the list is more proximate to "what the student just said,"
+// keeping the freshest context closest to the model's response slot.
+// COACHING CONTEXT sits BEFORE CONVERSATION SO FAR because portfolio
+// data is more stable; in-conversation memory is more dynamic and
+// should be closer to the bottom. CURRENT CONTEXT (the critique anchor)
+// sits last in the non-canvas case so the critique stays freshest.
+// CURRENT CANVAS sits after everything for the same reason.
 //
 // The date line is intentionally omitted from CURRENT CONTEXT — relative
 // recency doesn't sharpen the coaching, and the absolute ISO date in a
@@ -72,11 +83,18 @@ export const EVE_CANVAS_BLOCK_VERSION = 1;
  * hydrated), the CURRENT CONTEXT block is omitted; COACHING CONTEXT
  * remains.
  */
-export function buildEveSystemPrompt({ scope, critique, coachingContext, attachedCanvas } = {}) {
+export function buildEveSystemPrompt({ scope, critique, coachingContext, rollingSummary, attachedCanvas } = {}) {
   const sections = [EVE_PERSONA, EVE_PRODUCT_CONTEXT];
 
   const coachingBlock = renderCoachingContextBlock(coachingContext);
   if (coachingBlock) sections.push(coachingBlock);
+
+  // CONVERSATION SO FAR — per-conversation rolling memory. Renders null
+  // when no summary exists yet (brand-new conversation OR a backfill
+  // case where the first weak-first-send hasn't regenerated yet). See
+  // proposal §6 + lib/eve-summary.js.
+  const summaryBlock = renderRollingSummaryBlock(rollingSummary);
+  if (summaryBlock) sections.push(summaryBlock);
 
   if (scope === 'drawing' && critique && typeof critique.content === 'string') {
     const title = (typeof critique.drawing_title === 'string' && critique.drawing_title.trim())
@@ -137,6 +155,33 @@ You can see what they're working on right now. The "you haven't seen the actual 
 Stay in your normal voice. This is not a critique request. You're glancing over their shoulder, not delivering an assessment. No numbered lists, no category headers, no "here are three things to fix" structure. Conversational length, conversational shape. React the way a coach who happens to be nearby would: one observation, maybe a question back, the casual register of mid-session help.
 
 The student typed something specific to go with this canvas. Focus on what they actually asked. Don't volunteer a tour of everything you notice — they didn't ask for a full read-out.`;
+
+// =============================================================================
+// CONVERSATION SO FAR (rolling summary) renderer
+// =============================================================================
+//
+// Renders the per-conversation rolling summary as Eve's own memory of
+// earlier turns. The "treat as your own recall" framing is load-bearing:
+// without it the model either (a) ignores the summary because it's not a
+// "real" user message or (b) quotes it back to the student as a meta-
+// comment about the conversation. Both regress continuity.
+//
+// Returns null when summary is null, undefined, non-string, or empty
+// after trim — block omitted entirely. Brand-new conversations and the
+// weak-first-send backfill case (proposal §5) both land here.
+//
+// Lives between COACHING CONTEXT and CURRENT CONTEXT in the section
+// ordering — see the top-of-file comment for the rationale.
+
+export function renderRollingSummaryBlock(summary) {
+  if (typeof summary !== 'string') return null;
+  const trimmed = summary.trim();
+  if (trimmed.length === 0) return null;
+  return `CONVERSATION SO FAR (summarized — treat as your own memory of earlier turns):
+${trimmed}
+
+This summary is your memory of the conversation up through earlier turns you don't see here in full. Reference it the way you'd reference your own recall — "we were working on..." or "you mentioned earlier..." — never as "according to the summary" or by quoting from it verbatim. The verbatim turns you see below are the most recent ones; everything before them lives in this summary.`;
+}
 
 // =============================================================================
 // COACHING CONTEXT renderer

@@ -36,6 +36,8 @@ import {
   enforceEveRateLimits,
   recordSuccessfulEveTurn,
   readEveMaxTurnsPerConversation,
+  readEveRawTailMessages,
+  readEveSummaryRegenStride,
   enforceCostCeilings,
   recordRequestUsage,
 } from '../middleware/rate-limit.js';
@@ -47,6 +49,8 @@ import {
   appendMessage,
   bumpConversationCounters,
   getConversationHistory,
+  getConversationTail,
+  updateConversationRollingSummary,
   findMessageByClientRequestId,
   fetchCritiqueForConversation,
   fetchCoachingContext,
@@ -63,6 +67,7 @@ import {
   EVE_PERSONA_VERSION,
   EVE_PRODUCT_CONTEXT_VERSION,
 } from '../lib/eve-prompt.js';
+import { generateRollingSummary } from '../lib/eve-summary.js';
 import { jsonResponse, unauthorized } from '../lib/http.js';
 
 // =============================================================================
@@ -788,11 +793,18 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     ? conversation.scope_critique_sequence
     : null;
 
+  // Phase 2A.x — bounded raw tail. Was getConversationHistory(limit=100),
+  // which scaled per-send input tokens linearly with conversation length.
+  // Now: rolling_summary on the conversation row carries continuity for
+  // turns past the tail; this fetch is bounded to the last `tailLimit`
+  // messages past the summary boundary. See proposal §2 + lib/eve-summary.js.
+  const tailLimit = readEveRawTailMessages(env);
+
   let critique = null;
   let coachingContext = { drawings: [], summaries: [] };
   let history = [];
   try {
-    const [critiqueResult, coachingResult, historyResult] = await Promise.all([
+    const [critiqueResult, coachingResult, tailResult] = await Promise.all([
       scopeDrawingId && scopeCritiqueSeq !== null
         ? fetchCritiqueForConversation({
             env, userId,
@@ -807,11 +819,23 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
         excludeDrawingId: scopeDrawingId,
         excludeCritiqueSequence: scopeCritiqueSeq,
       }),
-      getConversationHistory({ env, conversationId }),
+      // afterCreatedAt is null in two cases — both handled by getConversationTail:
+      //   1. Brand-new conversation. No summary yet. Tail returns whatever
+      //      messages exist (up to limit).
+      //   2. Weak-first-send backfill on an existing >tailLimit-message
+      //      conversation. Tail returns the last `limit` messages; this
+      //      one send loses continuity beyond that, and post-turn regen
+      //      populates rolling_summary for next time (see proposal §5).
+      getConversationTail({
+        env,
+        conversationId,
+        afterCreatedAt: conversation.rolling_summary_through_created_at ?? null,
+        limit: tailLimit,
+      }),
     ]);
     critique = critiqueResult;
     coachingContext = coachingResult;
-    history = historyResult;
+    history = tailResult;
   } catch (err) {
     console.error('[eve] parallel hydration failed', err?.message);
     return jsonResponse({ error: 'Internal server error' }, 500);
@@ -831,12 +855,25 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     summaryCount: coachingContext?.summaries?.length ?? 0,
     scope: conversation.scope,
     canvasAttached: canvasImageB64 !== null,
+    // Phase 2A.x — observability for the rolling summary path. Both
+    // fields read from the just-fetched conversation row; zero added
+    // cost. Lets a future "Eve quality dipped" investigation correlate
+    // to whether the user had a summary loaded and how much raw tail
+    // accompanied it.
+    rollingSummaryPresent: typeof conversation.rolling_summary === 'string'
+      && conversation.rolling_summary.length > 0,
+    rawTailLength: historyWithoutCurrent.length,
   });
 
   const systemPrompt = buildEveSystemPrompt({
     scope: conversation.scope,
     critique,
     coachingContext,
+    // Phase 2A.x — render the CONVERSATION SO FAR block when present.
+    // null on brand-new conversations and during the weak-first-send
+    // backfill case; renderRollingSummaryBlock returns null and the
+    // block is omitted in those cases.
+    rollingSummary: conversation.rolling_summary ?? null,
     attachedCanvas: canvasImageB64 !== null,
   });
   const messages = buildEveMessages({
@@ -931,6 +968,26 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
   recordRequestUsage({ env, userId, dayKey: todayKey, usage })
     .catch((err) => console.error('[eve] recordRequestUsage', err?.message));
 
+  // Phase 2A.x — rolling summary regen. Off the critical path: the user's
+  // response has already been sent. ctx.waitUntil keeps the worker alive
+  // past response return without delaying it. Failure is logged and
+  // swallowed — proposal R3 documents the sustained-failure mode (raw
+  // tail keeps Eve functional; coaching continuity over the gap between
+  // frozen summary boundary and tail start degrades until regen recovers).
+  ctx.waitUntil(
+    maybeRegenerateRollingSummary({
+      env,
+      conversationId,
+      conversation,
+      // conversation.message_count was snapshotted at the start of this
+      // request. After this turn lands 2 new rows (user + assistant).
+      // bumpConversationCounters runs fire-and-forget at the same time;
+      // we pass the logical post-turn count explicitly so we don't race
+      // against its database write.
+      newMessageCount: (conversation.message_count ?? 0) + 2,
+    }).catch((err) => console.error('[eve.summary] regen failed', err?.message)),
+  );
+
   // Refresh conversation snapshot for the response. Cheap re-read so the
   // client sees the post-bump counters / last_message_at. Best-effort —
   // if the read fails we just return the pre-bump version.
@@ -946,6 +1003,119 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
     conversation: freshConversation,
     evicted_conversation_id: evictedConversationId,
   });
+}
+
+// =============================================================================
+// Rolling-summary regen orchestrator — Phase 2A.x
+// =============================================================================
+//
+// Composes lib/eve-summary.js (the model call) and lib/supabase.js (the
+// PostgREST reads/writes). Called via ctx.waitUntil from handleSendMessage's
+// fire-and-forget block — NEVER on the critical path of a user-visible
+// send. Failures resolve quietly (logged); the conversation row stays at
+// whatever rolling_summary state it was in.
+//
+// Threshold rules (must hold simultaneously to fire a regen pass):
+//   1. newMessageCount >= tailLimit + regenStride. First regen waits
+//      until there are enough messages past the tail window to make a
+//      worthwhile summary. With tailLimit=20 and regenStride=10, this
+//      means the first regen happens at message_count >= 30.
+//   2. rolling_summary_generated_at is null OR more than 30s ago.
+//      Defense against concurrent send regen races (proposal R2 tier 1
+//      — "accept it, log it"). Two simultaneous sends still might both
+//      fire if they cross the 30s line; we accept the rare wasted call.
+//   3. After fetching messages past the prior summary boundary, the
+//      count to-summarize (messages older than the tail window) must
+//      be >= regenStride. Belt-and-suspenders with rule (1) for the
+//      case where rules differ due to messages outside the boundary.
+//
+// On failure (any step throws or returns null), the function returns
+// without throwing. The caller's .catch() may log but never throws past it.
+//
+// Dependency-injected `fetcher` + `generate` make this unit-testable
+// against stubbed Postgres + stubbed OpenAI without env or network.
+
+const REGEN_FETCH_CAP = 250; // 200 = max conversation length × 2 messages/turn, plus headroom.
+const REGEN_RECENCY_WINDOW_MS = 30_000;
+
+export async function maybeRegenerateRollingSummary({
+  env,
+  conversationId,
+  conversation,
+  newMessageCount,
+  fetcher = fetch,
+  generate = generateRollingSummary,
+  now = Date.now(),
+} = {}) {
+  if (!conversation || typeof newMessageCount !== 'number') return;
+
+  const tailLimit = readEveRawTailMessages(env);
+  const regenStride = readEveSummaryRegenStride(env);
+
+  // Rule 1 — cheap short-circuit before any I/O.
+  if (newMessageCount < tailLimit + regenStride) return;
+
+  // Rule 2 — recency guard against concurrent regen races.
+  if (typeof conversation.rolling_summary_generated_at === 'string') {
+    const lastGen = Date.parse(conversation.rolling_summary_generated_at);
+    if (Number.isFinite(lastGen) && now - lastGen < REGEN_RECENCY_WINDOW_MS) return;
+  }
+
+  // Fetch all messages past the prior summary boundary (everything when
+  // no summary exists yet, which is the brand-new + weak-first-send
+  // backfill case). REGEN_FETCH_CAP bounds the fetch so a future
+  // conversation cap bump doesn't silently truncate.
+  let messagesPastBoundary;
+  try {
+    messagesPastBoundary = await getConversationTail({
+      env,
+      conversationId,
+      afterCreatedAt: conversation.rolling_summary_through_created_at ?? null,
+      limit: REGEN_FETCH_CAP,
+      fetcher,
+    });
+  } catch (err) {
+    console.error('[eve.summary] regen fetch failed', err?.message);
+    return;
+  }
+
+  // Decide what to summarize. The newest `tailLimit` messages stay raw
+  // in the next hydration (they're the tail). Everything older among
+  // the post-boundary messages gets summarized.
+  if (messagesPastBoundary.length <= tailLimit) return;
+  const toSummarize = messagesPastBoundary.slice(0, messagesPastBoundary.length - tailLimit);
+
+  // Rule 3 — stride check after we know exactly how many new messages
+  // would fold in. Skips the OpenAI call when we already covered most
+  // of them in a prior regen.
+  if (toSummarize.length < regenStride) return;
+
+  const lastMsg = toSummarize[toSummarize.length - 1];
+  const newThroughCreatedAt = lastMsg?.created_at;
+  if (typeof newThroughCreatedAt !== 'string') return;
+
+  const result = await generate({
+    env,
+    priorSummary: conversation.rolling_summary ?? null,
+    messages: toSummarize.map((m) => ({ role: m.role, content: m.content })),
+    throughCreatedAt: newThroughCreatedAt,
+    fetcher,
+  });
+  if (!result) return; // failure already logged by generateRollingSummary
+
+  try {
+    await updateConversationRollingSummary({
+      env,
+      conversationId,
+      summary: result.text,
+      throughCreatedAt: result.throughCreatedAt,
+      generatedAt: new Date(now).toISOString(),
+      promptVersion: result.promptVersion,
+      fetcher,
+    });
+  } catch (err) {
+    console.error('[eve.summary] persist failed', err?.message);
+  }
 }
 
 // =============================================================================

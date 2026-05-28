@@ -156,6 +156,18 @@ import {
   getAttestedKey,
   updateAttestedKeyCounter,
   readAppAttestHeaders,
+  // Phase 2A.x — rolling per-conversation summary surface.
+  getConversationTail,
+  updateConversationRollingSummary,
+  generateRollingSummary,
+  SUMMARY_MODEL,
+  SUMMARY_PROMPT_VERSION,
+  SUMMARY_MAX_OUTPUT_TOKENS,
+  SUMMARY_SYSTEM_PROMPT,
+  renderRollingSummaryBlock,
+  readEveRawTailMessages,
+  readEveSummaryRegenStride,
+  maybeRegenerateRollingSummary,
 } from './index.js';
 import handler from './index.js';
 // Drawing version history — imported directly from lib/ rather than via
@@ -9410,4 +9422,593 @@ test('handleEve POST /:id/messages — non-first message at 50 active NEVER evic
       'no eviction on non-first-message turns');
     assert.equal(body.evicted_conversation_id, null);
   } finally { restore(); }
+});
+
+// =============================================================================
+// Phase 2A.x — Rolling per-conversation summary
+// =============================================================================
+//
+// Covers:
+//   - lib/supabase.js: getConversationTail (afterCreatedAt null vs set, limit
+//     overshoot).
+//   - lib/eve-summary.js: generateRollingSummary prompt shape with stubbed
+//     OpenAI fetch.
+//   - lib/eve-prompt.js: renderRollingSummaryBlock null vs populated;
+//     buildEveSystemPrompt section ordering across COACHING / SUMMARY /
+//     CURRENT CONTEXT / CANVAS.
+//   - middleware/rate-limit.js: readEveRawTailMessages + readEveSummaryRegenStride
+//     defaults + env overrides.
+//   - routes/eve.js: maybeRegenerateRollingSummary short-circuits + happy path.
+
+const ROLLING_CONVERSATION_ID = 'eeeeeeee-aaaa-bbbb-cccc-dddddddddddd';
+const ROLLING_USER = FREE_USER;
+
+// ---- getConversationTail ---------------------------------------------------
+
+test('getConversationTail with afterCreatedAt=null requests DESC + reverses to chronological', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const captured = [];
+  const fetcher = async (url) => {
+    captured.push(url);
+    return {
+      ok: true,
+      json: async () => [
+        // Returned in DESC order by Postgres (newest first); helper reverses.
+        { id: 'm3', role: 'assistant', content: 'third',  created_at: '2026-05-28T12:03:00Z' },
+        { id: 'm2', role: 'user',      content: 'second', created_at: '2026-05-28T12:02:00Z' },
+        { id: 'm1', role: 'user',      content: 'first',  created_at: '2026-05-28T12:01:00Z' },
+      ],
+    };
+  };
+  const rows = await getConversationTail({
+    env,
+    conversationId: ROLLING_CONVERSATION_ID,
+    afterCreatedAt: null,
+    limit: 3,
+    fetcher,
+  });
+  assert.equal(captured.length, 1);
+  assert.ok(captured[0].includes('order=created_at.desc'),
+    'no-boundary path orders DESC so LIMIT bounds to the tail');
+  assert.ok(!captured[0].includes('created_at=gt.'),
+    'no-boundary path omits the gt filter');
+  assert.deepEqual(rows.map((r) => r.id), ['m1', 'm2', 'm3'],
+    'caller receives chronological order regardless of fetch direction');
+});
+
+test('getConversationTail with afterCreatedAt set requests ASC + gt filter', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const captured = [];
+  const fetcher = async (url) => {
+    captured.push(url);
+    return {
+      ok: true,
+      json: async () => [
+        { id: 'm1', role: 'user',      content: 'first',  created_at: '2026-05-28T12:05:00Z' },
+        { id: 'm2', role: 'assistant', content: 'second', created_at: '2026-05-28T12:06:00Z' },
+      ],
+    };
+  };
+  const rows = await getConversationTail({
+    env,
+    conversationId: ROLLING_CONVERSATION_ID,
+    afterCreatedAt: '2026-05-28T12:04:00Z',
+    limit: 50,
+    fetcher,
+  });
+  assert.equal(captured.length, 1);
+  assert.ok(captured[0].includes('order=created_at.asc'),
+    'boundary path orders ASC');
+  assert.ok(captured[0].includes('created_at=gt.'),
+    'boundary path uses gt filter on created_at');
+  assert.ok(captured[0].includes(encodeURIComponent('2026-05-28T12:04:00Z')),
+    'boundary timestamp is URL-encoded into the query');
+  // Already chronological from the ASC fetch — helper passes through.
+  assert.deepEqual(rows.map((r) => r.id), ['m1', 'm2']);
+});
+
+test('getConversationTail with limit overshoot passes the limit through unchanged', async () => {
+  const { env } = makeEnv(TEST_SUPABASE);
+  const captured = [];
+  const fetcher = async (url) => {
+    captured.push(url);
+    return { ok: true, json: async () => [] };
+  };
+  await getConversationTail({
+    env,
+    conversationId: ROLLING_CONVERSATION_ID,
+    afterCreatedAt: null,
+    limit: 250,
+    fetcher,
+  });
+  assert.ok(captured[0].includes('limit=250'),
+    'caller-provided limit is passed verbatim — no client-side cap');
+});
+
+// ---- generateRollingSummary ------------------------------------------------
+
+test('generateRollingSummary returns null when env lacks OPENAI_API_KEY', async () => {
+  const result = await generateRollingSummary({
+    env: {},
+    priorSummary: null,
+    messages: [{ role: 'user', content: 'hi' }],
+    throughCreatedAt: '2026-05-28T12:00:00Z',
+    fetcher: async () => { throw new Error('should not be called'); },
+  });
+  assert.equal(result, null);
+});
+
+test('generateRollingSummary returns null when messages array is empty', async () => {
+  const result = await generateRollingSummary({
+    env: { OPENAI_API_KEY: 'sk-test' },
+    priorSummary: null,
+    messages: [],
+    throughCreatedAt: '2026-05-28T12:00:00Z',
+    fetcher: async () => { throw new Error('should not be called'); },
+  });
+  assert.equal(result, null);
+});
+
+test('generateRollingSummary builds [system, prior-as-assistant, messages..., final user instruction]', async () => {
+  let capturedBody = null;
+  const fetcher = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'summary text here' } }],
+        usage: { prompt_tokens: 100, completion_tokens: 200 },
+      }),
+    };
+  };
+
+  const result = await generateRollingSummary({
+    env: { OPENAI_API_KEY: 'sk-test' },
+    priorSummary: 'old summary text',
+    messages: [
+      { role: 'user',      content: 'user one' },
+      { role: 'assistant', content: 'eve one' },
+      { role: 'user',      content: 'user two' },
+    ],
+    throughCreatedAt: '2026-05-28T12:30:00Z',
+    fetcher,
+  });
+
+  assert.ok(result, 'returns a non-null result on success');
+  assert.equal(result.text, 'summary text here');
+  assert.equal(result.throughCreatedAt, '2026-05-28T12:30:00Z',
+    'round-trips the boundary timestamp for the caller to persist');
+  assert.equal(result.promptVersion, SUMMARY_PROMPT_VERSION);
+  assert.equal(result.usage.prompt_tokens, 100);
+
+  // Body shape.
+  assert.equal(capturedBody.model, SUMMARY_MODEL);
+  assert.equal(capturedBody.model, 'gpt-5-mini',
+    'production model name (not gpt-5.1-mini, which does not exist)');
+  assert.equal(capturedBody.reasoning_effort, 'minimal');
+  assert.equal(capturedBody.max_completion_tokens, SUMMARY_MAX_OUTPUT_TOKENS);
+  assert.equal(capturedBody.temperature, undefined,
+    'gpt-5 series rejects non-default temperature; field must be omitted');
+  assert.equal(capturedBody.seed, undefined,
+    'gpt-5 series rejects seed; field must be omitted');
+
+  // Message shape: system first, then prior-as-assistant, then turns, then final user.
+  const msgs = capturedBody.messages;
+  assert.equal(msgs[0].role, 'system');
+  assert.equal(msgs[0].content, SUMMARY_SYSTEM_PROMPT);
+  assert.equal(msgs[1].role, 'assistant',
+    'prior summary rides as an assistant turn so the model treats it as its own prior output');
+  assert.ok(msgs[1].content.includes('PRIOR SUMMARY'));
+  assert.ok(msgs[1].content.includes('old summary text'));
+  assert.equal(msgs[2].role, 'user');
+  assert.equal(msgs[2].content, 'user one');
+  assert.equal(msgs[3].role, 'assistant');
+  assert.equal(msgs[3].content, 'eve one');
+  assert.equal(msgs[4].role, 'user');
+  assert.equal(msgs[4].content, 'user two');
+  assert.equal(msgs[5].role, 'user',
+    'final user instruction tells the model when input ends');
+  assert.ok(msgs[5].content.includes('Produce the updated summary'));
+});
+
+test('generateRollingSummary omits the prior-summary turn when priorSummary is null', async () => {
+  let capturedBody = null;
+  const fetcher = async (_url, init) => {
+    capturedBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'first summary' } }] }),
+    };
+  };
+  await generateRollingSummary({
+    env: { OPENAI_API_KEY: 'sk-test' },
+    priorSummary: null,
+    messages: [{ role: 'user', content: 'hi' }],
+    throughCreatedAt: '2026-05-28T12:00:00Z',
+    fetcher,
+  });
+  const msgs = capturedBody.messages;
+  // [system, user 'hi', user 'Produce...']  — no assistant prior block.
+  assert.equal(msgs[0].role, 'system');
+  assert.equal(msgs[1].role, 'user');
+  assert.equal(msgs[1].content, 'hi');
+  assert.equal(msgs[2].role, 'user');
+  assert.ok(msgs[2].content.includes('Produce the updated summary'));
+  assert.ok(!msgs.some((m) => m.role === 'assistant'),
+    'no prior summary → no assistant-role turn in the input');
+});
+
+test('generateRollingSummary returns null on non-ok OpenAI status', async () => {
+  const fetcher = async () => ({
+    ok: false,
+    status: 429,
+    text: async () => '{"error":"rate_limited"}',
+  });
+  const result = await generateRollingSummary({
+    env: { OPENAI_API_KEY: 'sk-test' },
+    priorSummary: null,
+    messages: [{ role: 'user', content: 'hi' }],
+    throughCreatedAt: '2026-05-28T12:00:00Z',
+    fetcher,
+  });
+  assert.equal(result, null,
+    'non-ok status surfaces as null (failure swallowed; never throws past caller)');
+});
+
+test('generateRollingSummary returns null on empty content', async () => {
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: '' } }] }),
+  });
+  const result = await generateRollingSummary({
+    env: { OPENAI_API_KEY: 'sk-test' },
+    priorSummary: null,
+    messages: [{ role: 'user', content: 'hi' }],
+    throughCreatedAt: '2026-05-28T12:00:00Z',
+    fetcher,
+  });
+  assert.equal(result, null);
+});
+
+// ---- renderRollingSummaryBlock ---------------------------------------------
+
+test('renderRollingSummaryBlock returns null for null / undefined / non-string / empty / whitespace', () => {
+  assert.equal(renderRollingSummaryBlock(null), null);
+  assert.equal(renderRollingSummaryBlock(undefined), null);
+  assert.equal(renderRollingSummaryBlock(42), null);
+  assert.equal(renderRollingSummaryBlock(''), null);
+  assert.equal(renderRollingSummaryBlock('   \n\t  '), null);
+});
+
+test('renderRollingSummaryBlock renders the CONVERSATION SO FAR block + memory framing', () => {
+  const block = renderRollingSummaryBlock('Student is working on a still life of pears.');
+  assert.ok(block, 'returns a non-null block for populated summaries');
+  assert.ok(block.startsWith('CONVERSATION SO FAR'),
+    'header is the load-bearing tag the system prompt uses');
+  assert.ok(block.includes('Student is working on a still life of pears.'),
+    'summary text appears verbatim in the block');
+  assert.ok(block.includes('treat as your own memory'),
+    'memory framing prevents the model from quoting the summary back at the student');
+  assert.ok(block.includes('never as "according to the summary"'),
+    'explicit anti-meta-cite instruction is present');
+});
+
+// ---- buildEveSystemPrompt section ordering ---------------------------------
+
+test('buildEveSystemPrompt orders COACHING > SUMMARY > CURRENT CONTEXT > CANVAS', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'drawing',
+    critique: {
+      drawing_title: 'Anchor Drawing',
+      drawing_subject: 'still life',
+      sequence_number: 3,
+      content: 'critique body',
+    },
+    coachingContext: {
+      drawings: [{
+        drawing_id: 'd1',
+        title: 'Other Drawing',
+        subject: 'portrait',
+        relative_time: 'yesterday',
+        total_critiques: 2,
+        last_critique: {
+          relative_time: 'yesterday',
+          focus_area_text: 'value structure',
+          primary_category: 'value',
+          severity: 3,
+        },
+      }],
+      summaries: [],
+    },
+    rollingSummary: 'Student and Eve covered value contrast last conversation.',
+    attachedCanvas: true,
+  });
+
+  const iCoaching = sys.indexOf('YOUR DRAWING JOURNEY');
+  const iSummary  = sys.indexOf('CONVERSATION SO FAR');
+  const iCurrent  = sys.indexOf('CURRENT CONTEXT:');
+  const iCanvas   = sys.indexOf('CURRENT CANVAS');
+
+  assert.ok(iCoaching > -1, 'COACHING block present');
+  assert.ok(iSummary  > -1, 'SUMMARY block present');
+  assert.ok(iCurrent  > -1, 'CURRENT CONTEXT block present');
+  assert.ok(iCanvas   > -1, 'CANVAS block present');
+  assert.ok(iCoaching < iSummary,
+    'COACHING precedes SUMMARY (portfolio context before per-conversation memory)');
+  assert.ok(iSummary  < iCurrent,
+    'SUMMARY precedes CURRENT CONTEXT (per-conversation memory before per-critique anchor)');
+  assert.ok(iCurrent  < iCanvas,
+    'CURRENT CONTEXT precedes CANVAS (per-critique anchor before per-turn override)');
+});
+
+test('buildEveSystemPrompt with rollingSummary set but no coaching context still renders SUMMARY', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'general',
+    critique: null,
+    coachingContext: { drawings: [], summaries: [] },
+    rollingSummary: 'Earlier in this conversation, the student asked about composition.',
+  });
+  assert.ok(!sys.includes('YOUR DRAWING JOURNEY'),
+    'COACHING omitted when no drawings/summaries');
+  assert.ok(sys.includes('CONVERSATION SO FAR'),
+    'SUMMARY still renders independently of coaching context');
+  assert.ok(sys.includes('asked about composition'),
+    'summary text rides through verbatim');
+});
+
+test('buildEveSystemPrompt omits SUMMARY when rollingSummary is null (back-compat with brand-new conversations)', () => {
+  const sys = buildEveSystemPrompt({
+    scope: 'general',
+    critique: null,
+    coachingContext: { drawings: [], summaries: [] },
+    rollingSummary: null,
+  });
+  assert.ok(!sys.includes('CONVERSATION SO FAR'),
+    'no SUMMARY block when no summary exists yet');
+});
+
+// ---- readEveRawTailMessages / readEveSummaryRegenStride --------------------
+
+test('readEveRawTailMessages defaults to 20, respects EVE_RAW_TAIL_MESSAGES override', () => {
+  assert.equal(readEveRawTailMessages({}), 20);
+  assert.equal(readEveRawTailMessages({ EVE_RAW_TAIL_MESSAGES: '40' }), 40);
+  assert.equal(readEveRawTailMessages({ EVE_RAW_TAIL_MESSAGES: 'garbage' }), 20,
+    'unparseable override falls back to default');
+  assert.equal(readEveRawTailMessages({ EVE_RAW_TAIL_MESSAGES: '0' }), 20,
+    'zero/negative override falls back to default (env helper rejects non-positive)');
+});
+
+test('readEveSummaryRegenStride defaults to 10, respects EVE_SUMMARY_REGEN_STRIDE override', () => {
+  assert.equal(readEveSummaryRegenStride({}), 10);
+  assert.equal(readEveSummaryRegenStride({ EVE_SUMMARY_REGEN_STRIDE: '5' }), 5);
+  assert.equal(readEveSummaryRegenStride({ EVE_SUMMARY_REGEN_STRIDE: 'garbage' }), 10);
+});
+
+// ---- maybeRegenerateRollingSummary short-circuits + happy path -------------
+
+function makeRegenEnv() {
+  return {
+    QUOTA_KV: new FakeKV(),
+    SUPABASE_URL: 'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role-key',
+    OPENAI_API_KEY: 'sk-test',
+  };
+}
+
+test('maybeRegenerateRollingSummary short-circuits when newMessageCount < tailLimit + regenStride', async () => {
+  // Defaults: tailLimit=20, regenStride=10 → threshold=30. Pass 25; should skip.
+  let generateCalled = false;
+  let fetcherCalled  = false;
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 23,
+      rolling_summary: null,
+      rolling_summary_through_created_at: null,
+      rolling_summary_generated_at: null,
+    },
+    newMessageCount: 25,
+    fetcher: async () => { fetcherCalled = true; return { ok: true, json: async () => [] }; },
+    generate: async () => { generateCalled = true; return { text: 'x' }; },
+  });
+  assert.equal(generateCalled, false, 'no OpenAI call below threshold');
+  assert.equal(fetcherCalled, false, 'no Postgres call below threshold');
+});
+
+test('maybeRegenerateRollingSummary short-circuits when last regen was within 30s', async () => {
+  let generateCalled = false;
+  const now = Date.parse('2026-05-28T12:00:00Z');
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 38,
+      rolling_summary: 'prior summary text',
+      rolling_summary_through_created_at: '2026-05-28T11:55:00Z',
+      // 15s before `now` — inside the 30s lockout.
+      rolling_summary_generated_at: '2026-05-28T11:59:45Z',
+    },
+    newMessageCount: 40,
+    fetcher: async () => ({ ok: true, json: async () => [] }),
+    generate: async () => { generateCalled = true; return { text: 'x' }; },
+    now,
+  });
+  assert.equal(generateCalled, false,
+    'recency guard prevents concurrent regen double-fire within 30s');
+});
+
+test('maybeRegenerateRollingSummary skips when fetched messages-past-boundary <= tailLimit (nothing to summarize)', async () => {
+  let generateCalled = false;
+  // newMessageCount passes the threshold, but the actual messages past the
+  // boundary fit entirely in the tail window — nothing to fold in yet.
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => Array.from({ length: 15 }, (_, i) => ({
+      id: `m${i}`, role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `msg ${i}`, created_at: `2026-05-28T12:${String(i).padStart(2, '0')}:00Z`,
+    })),
+  });
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 33,
+      rolling_summary: null,
+      rolling_summary_through_created_at: null,
+      rolling_summary_generated_at: null,
+    },
+    newMessageCount: 35,
+    fetcher,
+    generate: async () => { generateCalled = true; return { text: 'x' }; },
+  });
+  assert.equal(generateCalled, false,
+    'when post-boundary tail is at or below tailLimit, nothing has aged out of the window yet');
+});
+
+test('maybeRegenerateRollingSummary skips when toSummarize.length < regenStride', async () => {
+  let generateCalled = false;
+  // 25 messages past boundary, tailLimit=20 → toSummarize is 5; stride=10 → skip.
+  const fetcher = async () => ({
+    ok: true,
+    json: async () => Array.from({ length: 25 }, (_, i) => ({
+      id: `m${i}`, role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `msg ${i}`, created_at: `2026-05-28T12:${String(i).padStart(2, '0')}:00Z`,
+    })),
+  });
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 43,
+      rolling_summary: null,
+      rolling_summary_through_created_at: null,
+      rolling_summary_generated_at: null,
+    },
+    newMessageCount: 45,
+    fetcher,
+    generate: async () => { generateCalled = true; return { text: 'x' }; },
+  });
+  assert.equal(generateCalled, false,
+    'stride gate: only regenerate when at least regenStride messages would fold in');
+});
+
+test('maybeRegenerateRollingSummary happy path generates + PATCHes the conversation row', async () => {
+  // 30 messages past boundary, tailLimit=20 → toSummarize=10 (matches stride).
+  // Should fire generate + PATCH.
+  const patches = [];
+  const fetcher = async (url, init) => {
+    if (init?.method === 'PATCH') {
+      patches.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 204, text: async () => '' };
+    }
+    // GET messages-past-boundary
+    return {
+      ok: true,
+      json: async () => Array.from({ length: 30 }, (_, i) => ({
+        id: `m${i}`,
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        content: `msg ${i}`,
+        created_at: `2026-05-28T12:${String(i).padStart(2, '0')}:00Z`,
+      })),
+    };
+  };
+  let generateArgs = null;
+  const generate = async (args) => {
+    generateArgs = args;
+    return {
+      text: 'newly generated summary',
+      usage: { prompt_tokens: 500, completion_tokens: 400 },
+      throughCreatedAt: args.throughCreatedAt,
+      promptVersion: SUMMARY_PROMPT_VERSION,
+    };
+  };
+
+  const now = Date.parse('2026-05-28T13:00:00Z');
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 48,
+      rolling_summary: 'old summary',
+      rolling_summary_through_created_at: '2026-05-28T11:00:00Z',
+      rolling_summary_generated_at: '2026-05-28T11:00:30Z', // > 30s ago vs `now`
+    },
+    newMessageCount: 50,
+    fetcher,
+    generate,
+    now,
+  });
+
+  assert.ok(generateArgs, 'generate was called');
+  assert.equal(generateArgs.priorSummary, 'old summary',
+    'prior summary is threaded through so the model can extend rather than rewrite');
+  assert.equal(generateArgs.messages.length, 10,
+    'toSummarize is the oldest 10 of the 30 post-boundary messages (the newest 20 stay in the tail)');
+  assert.equal(generateArgs.messages[0].content, 'msg 0',
+    'oldest in toSummarize is the earliest post-boundary message');
+  assert.equal(generateArgs.messages[9].content, 'msg 9',
+    'newest in toSummarize is the message just before the tail window');
+  assert.equal(generateArgs.throughCreatedAt, '2026-05-28T12:09:00Z',
+    'boundary advances to the created_at of the last summarized message');
+
+  assert.equal(patches.length, 1, 'exactly one PATCH lands the new summary');
+  assert.ok(patches[0].url.includes(`id=eq.${ROLLING_CONVERSATION_ID}`),
+    'PATCH targets the right conversation row');
+  assert.equal(patches[0].body.rolling_summary, 'newly generated summary');
+  assert.equal(patches[0].body.rolling_summary_through_created_at, '2026-05-28T12:09:00Z');
+  assert.equal(patches[0].body.rolling_summary_version, SUMMARY_PROMPT_VERSION);
+  assert.equal(patches[0].body.rolling_summary_generated_at, '2026-05-28T13:00:00.000Z',
+    'generated_at uses the injected `now` for deterministic testing');
+});
+
+test('maybeRegenerateRollingSummary swallows fetch failures without throwing', async () => {
+  const fetcher = async () => { throw new Error('postgres unreachable'); };
+  // Should NOT throw past the caller — the proposal R3 contract.
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 48,
+      rolling_summary: null,
+      rolling_summary_through_created_at: null,
+      rolling_summary_generated_at: null,
+    },
+    newMessageCount: 50,
+    fetcher,
+    generate: async () => { throw new Error('should not reach OpenAI'); },
+  });
+  // No assertion needed — reaching here = test passes (no thrown exception).
+});
+
+test('maybeRegenerateRollingSummary swallows generate failures (returns null) without PATCH', async () => {
+  const patches = [];
+  const fetcher = async (url, init) => {
+    if (init?.method === 'PATCH') {
+      patches.push(url);
+      return { ok: true };
+    }
+    return {
+      ok: true,
+      json: async () => Array.from({ length: 30 }, (_, i) => ({
+        id: `m${i}`, role: 'user', content: `msg ${i}`,
+        created_at: `2026-05-28T12:${String(i).padStart(2, '0')}:00Z`,
+      })),
+    };
+  };
+  await maybeRegenerateRollingSummary({
+    env: makeRegenEnv(),
+    conversationId: ROLLING_CONVERSATION_ID,
+    conversation: {
+      message_count: 48,
+      rolling_summary: null,
+      rolling_summary_through_created_at: null,
+      rolling_summary_generated_at: null,
+    },
+    newMessageCount: 50,
+    fetcher,
+    generate: async () => null, // simulate provider failure → null
+  });
+  assert.equal(patches.length, 0,
+    'PATCH is skipped when generate returns null — old summary stays in place for next retry');
 });

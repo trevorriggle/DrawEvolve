@@ -143,6 +143,14 @@ const CONVERSATION_BASE_COLUMNS = [
   'total_input_tokens',
   'total_output_tokens',
   'deleted_at',
+  // Phase 2A.x — rolling summary (per-conversation continuity).
+  // See supabase/migrations/0020_eve_rolling_summary.sql + lib/eve-summary.js.
+  // Selecting these on the existing getConversation fetch means hydration
+  // pays zero added round-trips for the new summary path.
+  'rolling_summary',
+  'rolling_summary_through_created_at',
+  'rolling_summary_generated_at',
+  'rolling_summary_version',
 ].join(',');
 
 const MESSAGE_BASE_COLUMNS = [
@@ -454,6 +462,106 @@ export async function getConversationHistory({
   }
   const rows = await res.json();
   return Array.isArray(rows) ? rows : [];
+}
+
+/**
+ * Returns the most recent `limit` messages whose created_at is strictly
+ * greater than `afterCreatedAt`. When `afterCreatedAt` is null/undefined,
+ * returns the most recent `limit` messages overall — used during the
+ * weak-first-send backfill path described in the rolling-summary
+ * proposal §5 (existing conversations with no summary yet).
+ *
+ * Always returns rows in chronological (asc) order to match what
+ * buildEveMessages expects. The two query shapes:
+ *   - afterCreatedAt set: ORDER BY created_at ASC, filter `gt`. Index
+ *     does the work directly via
+ *     conversation_messages_conversation_idx (conversation_id, created_at asc).
+ *   - afterCreatedAt null: ORDER BY created_at DESC + LIMIT, then reverse
+ *     client-side to get chronological order. PostgREST has no native
+ *     `last N` primitive, so the DESC fetch is the only way to bound the
+ *     scan to the tail without pulling all rows.
+ *
+ * `limit` is a hard cap on rows returned, not a window-after-summary
+ * count. Callers pick the value (hydration uses readEveRawTailMessages;
+ * post-turn regen passes a generous cap so it sees everything past the
+ * summary boundary).
+ */
+export async function getConversationTail({
+  env,
+  conversationId,
+  afterCreatedAt,
+  limit,
+  fetcher = fetch,
+}) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('getConversationTail: env not configured');
+  }
+  const hasBoundary = typeof afterCreatedAt === 'string' && afterCreatedAt.length > 0;
+  const params = [
+    `conversation_id=eq.${encodeURIComponent(conversationId)}`,
+    `select=${MESSAGE_BASE_COLUMNS}`,
+    `limit=${limit}`,
+  ];
+  if (hasBoundary) {
+    params.push(`created_at=gt.${encodeURIComponent(afterCreatedAt)}`);
+    params.push('order=created_at.asc');
+  } else {
+    params.push('order=created_at.desc');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/conversation_messages?${params.join('&')}`;
+  const res = await fetcher(url, { headers: supabaseHeaders(env) });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`getConversationTail HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+  const rows = await res.json();
+  if (!Array.isArray(rows)) return [];
+  // DESC fetch needs reversing to give the caller chronological order.
+  // ASC fetch is already chronological.
+  return hasBoundary ? rows : [...rows].reverse();
+}
+
+/**
+ * PATCH the four rolling_summary_* columns on a conversation row in a
+ * single write. Caller fire-and-forgets via ctx.waitUntil so a failure
+ * here doesn't block the user's response (see proposal §3 + R3).
+ *
+ * Last-write-wins under concurrent regen — the proposal's R2 tier 1
+ * accepts this for v1. If we add the conditional-PATCH lock (R2 tier 2)
+ * later, the gate goes on the URL as a `rolling_summary_generated_at=lt.<t>`
+ * filter, not inside this helper.
+ */
+export async function updateConversationRollingSummary({
+  env,
+  conversationId,
+  summary,
+  throughCreatedAt,
+  generatedAt,
+  promptVersion,
+  fetcher = fetch,
+}) {
+  if (!env?.SUPABASE_URL || !env?.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('updateConversationRollingSummary: env not configured');
+  }
+  const url = `${env.SUPABASE_URL}/rest/v1/conversations`
+    + `?id=eq.${encodeURIComponent(conversationId)}`;
+  const res = await fetcher(url, {
+    method: 'PATCH',
+    headers: supabaseHeaders(env, {
+      'Content-Type': 'application/json',
+      Prefer: 'return=minimal',
+    }),
+    body: JSON.stringify({
+      rolling_summary: summary,
+      rolling_summary_through_created_at: throughCreatedAt,
+      rolling_summary_generated_at: generatedAt,
+      rolling_summary_version: promptVersion,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`updateConversationRollingSummary HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
 }
 
 /**
