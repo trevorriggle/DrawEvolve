@@ -90,9 +90,24 @@ struct EvolutionView: View {
             .padding(.top, 8)
     }
 
+    /// Broadest "this user has real evolution data worth showing" signal.
+    /// Render the panel whenever ANY of these holds and let each section
+    /// (header, radar, wall, stats) handle its own empty sub-state. The old
+    /// gate keyed off `feed.reel` — the deprecated v2 field the v3 worker
+    /// leaves unpopulated — so healthy v3 data fell through to the empty
+    /// state. `totalCritiques > 0` also keeps the panel (and its Refresh
+    /// button) reachable when the classifier missed some critiques, which
+    /// is exactly how the user backfills the missing tags.
+    private func feedHasContent(_ feed: EvolutionFeed) -> Bool {
+        feed.stats.totalCritiques > 0
+            || !feed.taggedCritiques.isEmpty
+            || feed.summary.drawingsThisMonth > 0
+            || feed.summary.critiquesThisMonth > 0
+    }
+
     @ViewBuilder
     private func loadedView(_ feed: EvolutionFeed) -> some View {
-        if feed.reel.isEmpty && !showingPreview {
+        if !feedHasContent(feed) && !showingPreview {
             EvolutionEmptyStateView(
                 showingPreview: $showingPreview,
                 onDismiss: { dismiss() }
