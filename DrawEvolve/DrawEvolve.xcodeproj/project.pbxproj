@@ -68,6 +68,7 @@
 		DE000068 /* FloatingText.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100068 /* FloatingText.swift */; };
 		DE000070 /* CodableColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100070 /* CodableColor.swift */; };
 		DE000071 /* PathSmoothing.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100071 /* PathSmoothing.swift */; };
+		DE000099 /* ShapeClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100099 /* ShapeClassifier.swift */; };
 		DE000072 /* TextOnPathRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100072 /* TextOnPathRenderer.swift */; };
 		DE000073 /* PathStartHandle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100073 /* PathStartHandle.swift */; };
 		DE000074 /* ToolGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100074 /* ToolGroup.swift */; };
@@ -203,6 +204,7 @@
 		DE100068 /* FloatingText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingText.swift; sourceTree = "<group>"; };
 		DE100070 /* CodableColor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodableColor.swift; sourceTree = "<group>"; };
 		DE100071 /* PathSmoothing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathSmoothing.swift; sourceTree = "<group>"; };
+		DE100099 /* ShapeClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShapeClassifier.swift; sourceTree = "<group>"; };
 		DE100072 /* TextOnPathRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextOnPathRenderer.swift; sourceTree = "<group>"; };
 		DE100073 /* PathStartHandle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathStartHandle.swift; sourceTree = "<group>"; };
 		DE100074 /* ToolGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolGroup.swift; sourceTree = "<group>"; };
@@ -415,6 +417,7 @@
 				DE100054 /* EvolutionService.swift */,
 				DE100066 /* DeviceIdiom.swift */,
 				DE100071 /* PathSmoothing.swift */,
+				DE100099 /* ShapeClassifier.swift */,
 				DE100072 /* TextOnPathRenderer.swift */,
 				DE100105 /* EveService.swift */,
 				DE100114 /* RecommendationsService.swift */,
@@ -700,6 +703,7 @@
 				DE000068 /* FloatingText.swift in Sources */,
 				DE000070 /* CodableColor.swift in Sources */,
 				DE000071 /* PathSmoothing.swift in Sources */,
+				DE000099 /* ShapeClassifier.swift in Sources */,
 				DE000072 /* TextOnPathRenderer.swift in Sources */,
 				DE000073 /* PathStartHandle.swift in Sources */,
 				DE000074 /* ToolGroup.swift in Sources */,

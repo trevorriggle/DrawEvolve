@@ -827,6 +827,33 @@ struct MetalCanvasView: UIViewRepresentable {
         private static let snapToLineAngleIncrement: CGFloat = 15.0     // degrees
         private static let snapToLineAngleTolerance: CGFloat = 3.0      // degrees
 
+        // Perfect Shapes (punch list 5.2). SUBSUMES snap-to-line: the same
+        // 600ms stationary dwell (reusing `snapToLineTimer` + the stationarity
+        // tracking above) now fires `engagePerfectShapeDetection` instead of
+        // `engageSnapToLine`. When the in-progress freehand is *confidently*
+        // classified as a line / rectangle / ellipse, this holds the
+        // synthesized clean-shape stroke used both for the overlay preview
+        // (during the hold) and for the post-commit replacement (on lift, in
+        // the wet-ink commit completion in `touchesEnded`). nil ⇒ no confident
+        // detection ⇒ the stroke stays freehand and the hold does nothing.
+        // (Line is just the simplest detected shape — "hold to straighten" and
+        // "hold to snap to shape" are one mechanism.)
+        //
+        // The old snap-to-line fire path (`engageSnapToLine`, the
+        // `isSnappedToLine` branch in touchesMoved, the never-reset
+        // `wetInkCommittedPointCount`) is left DORMANT and UNTOUCHED so the
+        // separate snap-to-line scratch-gap fix stays independent / bisectable.
+        private var perfectShapePending: PerfectShapePending?
+
+        private struct PerfectShapePending {
+            /// The touch whose stroke this detection covers — matched in
+            /// `touchesEnded` so the swap lands on the right lifting touch.
+            let touchID: ObjectIdentifier
+            /// Synthesized clean shape (current brush color/size), reused for
+            /// both the overlay preview and the post-commit recommit.
+            let previewStroke: BrushStroke
+        }
+
         /// Weak ref to the MTKView, captured in `makeUIView`. Used by the
         /// background/foreground notification handlers to flip `isPaused`
         /// without depending on a per-touch view reference. Weak so the
@@ -1821,6 +1848,27 @@ struct MetalCanvasView: UIViewRepresentable {
                       !isWetInkTool(stroke.tool) else { continue }
                 renderer?.renderStrokePreview(
                     stroke,
+                    to: overlayEnc,
+                    viewportSize: view.bounds.size,
+                    drawableSize: view.drawableSize,
+                    zoomScale: zoomScale,
+                    panOffset: panOffset,
+                    canvasRotation: rotation,
+                    flipHorizontal: flipH,
+                    flipVertical: flipV
+                )
+            }
+
+            // Perfect Shapes (5.2): once the dwell has confidently detected a
+            // shape, preview the synthesized clean shape as an overlay on top of
+            // the still-wet freehand. The wet wobble stays visible underneath
+            // for the hold — suppressing it would require touching the wet-ink
+            // composite (the fence), so it's deliberately left (v1 trade; full
+            // wobble-suppression is a logged polish item). Eraser is skipped to
+            // match the existing "eraser has no live preview" design.
+            if let pending = perfectShapePending, pending.previewStroke.tool != .eraser {
+                renderer?.renderStrokePreview(
+                    pending.previewStroke,
                     to: overlayEnc,
                     viewportSize: view.bounds.size,
                     drawableSize: view.drawableSize,
@@ -3237,6 +3285,11 @@ struct MetalCanvasView: UIViewRepresentable {
                         let dist = hypot(lastSampleScreen.x - anchor.x, lastSampleScreen.y - anchor.y)
                         if dist >= Self.snapToLineMovementThreshold {
                             snapToLineAnchorScreen = lastSampleScreen
+                            // Perfect Shapes (5.2): moving on after a detection
+                            // means the user resumed drawing — drop the pending
+                            // shape/preview and let the freehand continue. Next
+                            // settle re-arms and re-classifies.
+                            perfectShapePending = nil
                             armStationaryTimer()
                         }
                         // else: leave the timer running — the user is still settling.
@@ -4090,6 +4143,13 @@ struct MetalCanvasView: UIViewRepresentable {
                 let capturedCanvasState = canvasState
                 strokeSessions.removeValue(forKey: touchID)
 
+                // Perfect Shapes (5.2): snapshot the pending detection NOW,
+                // before the synchronous resetSnapToLineState() below clears the
+                // property, so the async completion can act on it. Only honour a
+                // detection that belongs to this lifting touch.
+                let pendingPerfectShape: PerfectShapePending? =
+                    (perfectShapePending?.touchID == touchID) ? perfectShapePending : nil
+
                 renderer.commitWetInkStroke { [weak self] in
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if let before = beforeSnapshot,
@@ -4101,6 +4161,27 @@ struct MetalCanvasView: UIViewRepresentable {
                             afterSnapshot: after
                         ))
                     }
+
+                    // Perfect Shapes (5.2): if the dwell confidently detected a
+                    // shape for this touch, replace the just-committed freehand
+                    // with the synthesized clean shape (Option A, post-commit).
+                    // Needs both snapshots: before = pre-freehand (to clear the
+                    // wobble), after = freehand (recorded so one undo → freehand).
+                    if let pending = pendingPerfectShape,
+                       let before = beforeSnapshot,
+                       let after = afterSnapshot {
+                        self?.commitPerfectShapeReplacement(
+                            cleanStroke: pending.previewStroke,
+                            preFreehandSnapshot: before,
+                            freehandSnapshot: after,
+                            tileGrid: capturedTileGrid,
+                            layerId: strokeLayerId,
+                            layerIndex: strokeLayerIndex,
+                            canvasState: capturedCanvasState,
+                            renderer: renderer
+                        )
+                    }
+
                     // Mark drawing dirty so the 30s autosave timer picks
                     // up the change. Mirrors the bumpLayerMutation that
                     // the OLD dispatchStroke path runs below.
@@ -4693,7 +4774,10 @@ struct MetalCanvasView: UIViewRepresentable {
         private func armStationaryTimer() {
             cancelStationaryTimer()
             let timer = Timer(timeInterval: Self.snapToLineHoldDuration, repeats: false) { [weak self] _ in
-                self?.engageSnapToLine()
+                // Perfect Shapes (5.2) subsumes snap-to-line: the dwell now
+                // classifies the stroke instead of unconditionally straightening
+                // it. `engageSnapToLine` is intentionally no longer called.
+                self?.engagePerfectShapeDetection()
             }
             RunLoop.main.add(timer, forMode: .common)
             snapToLineTimer = timer
@@ -4712,6 +4796,10 @@ struct MetalCanvasView: UIViewRepresentable {
             snapToLineStartDoc = nil
             snapToLineAnchorScreen = nil
             snapToLineTouchID = nil
+            // Perfect Shapes (5.2): drop any pending detection/preview. The
+            // post-commit swap in touchesEnded captures the pending value into
+            // a local BEFORE this teardown runs, so clearing here is race-free.
+            perfectShapePending = nil
         }
 
         /// Fired by `snapToLineTimer` after 600ms of stationary touch.
@@ -4735,6 +4823,132 @@ struct MetalCanvasView: UIViewRepresentable {
             stroke.points = buildSnapLineGeometry(start: start, target: snapLatestDoc)
             session.stroke = stroke
             strokeSessions[touchID] = session
+        }
+
+        // MARK: - Perfect Shapes (punch list 5.2)
+
+        /// Fired by the stationary dwell timer (600ms held still) — the single
+        /// dwell handler that subsumes snap-to-line. Classify the in-progress
+        /// freehand stroke; if it is *confidently* a line / rectangle / ellipse,
+        /// stash a synthesized clean-shape preview. The actual swap is
+        /// POST-COMMIT (Option A) in the wet-ink commit completion in
+        /// `touchesEnded`. Below threshold / ambiguous ⇒ nothing happens; the
+        /// stroke stays freehand (never force-correct).
+        ///
+        /// Scoped to wet-ink tools — blur commits through a different path
+        /// (`renderBlurStroke`) than the wet-ink completion we hook, so it is
+        /// out of v1. Detection runs on the full point list; under active
+        /// symmetry the appended mirror points make a clean single-shape fit
+        /// unlikely, so symmetric strokes generally won't snap (acceptable v1;
+        /// symmetry + perfect-shapes interaction is deferred).
+        private func engagePerfectShapeDetection() {
+            snapToLineTimer = nil
+            guard let touchID = snapToLineTouchID,
+                  let session = strokeSessions[touchID],
+                  let stroke = session.stroke,
+                  isWetInkTool(stroke.tool) else { return }
+
+            let docPoints = stroke.points.map { $0.location }
+            guard let shape = ShapeClassifier.classify(docPoints),
+                  let cleanPoints = buildPerfectShapeGeometry(shape),
+                  !cleanPoints.isEmpty else { return }
+
+            var previewStroke = stroke
+            previewStroke.points = cleanPoints
+            perfectShapePending = PerfectShapePending(touchID: touchID, previewStroke: previewStroke)
+
+            // The dwell timer fires off the run loop, not a touch event; if the
+            // finger is perfectly still there may be no further touchesMoved to
+            // drive a redraw, so request one explicitly to show the preview.
+            metalView?.setNeedsDisplay()
+        }
+
+        /// Map a detected shape to a synthesized stroke-point list using the
+        /// SAME generators the line/rect/circle shape tools use, so brush
+        /// spacing/scaling matches a manual stroke. Rectangles/ellipses are
+        /// axis-aligned and inscribed in the detected bbox ("at proportions
+        /// drawn"). Uses the latest sampled pressure/input metadata (the same
+        /// `snapLatest*` fields snap-to-line samples in touchesMoved).
+        private func buildPerfectShapeGeometry(_ shape: DetectedShape) -> [BrushStroke.StrokePoint]? {
+            switch shape {
+            case .line(let a, let b):
+                return generateLinePoints(
+                    from: a, to: b,
+                    pressure: snapLatestPressure, pressureAlpha: snapLatestPressureAlpha,
+                    inputType: snapLatestInputType,
+                    rawTouchForce: snapLatestRawTouchForce, rawTouchMaxForce: snapLatestRawTouchMaxForce,
+                    timestamp: snapLatestTimestamp
+                )
+            case .rectangle(let rect):
+                return generateRectanglePoints(
+                    from: CGPoint(x: rect.minX, y: rect.minY), to: CGPoint(x: rect.maxX, y: rect.maxY),
+                    pressure: snapLatestPressure, pressureAlpha: snapLatestPressureAlpha,
+                    inputType: snapLatestInputType,
+                    rawTouchForce: snapLatestRawTouchForce, rawTouchMaxForce: snapLatestRawTouchMaxForce,
+                    timestamp: snapLatestTimestamp
+                )
+            case .ellipse(let rect):
+                return generateCirclePoints(
+                    from: CGPoint(x: rect.minX, y: rect.minY), to: CGPoint(x: rect.maxX, y: rect.maxY),
+                    pressure: snapLatestPressure, pressureAlpha: snapLatestPressureAlpha,
+                    inputType: snapLatestInputType,
+                    rawTouchForce: snapLatestRawTouchForce, rawTouchMaxForce: snapLatestRawTouchMaxForce,
+                    timestamp: snapLatestTimestamp
+                )
+            }
+        }
+
+        /// Perfect Shapes (5.2) post-commit replacement (Option A). The freehand
+        /// stroke has just committed normally through the wet-ink path and its
+        /// undo entry (pre→freehand) is already recorded. Here we, using only
+        /// pre-existing external renderer entry points (no wet-ink deposit/blend
+        /// contact):
+        ///   1. restore the pre-freehand pixels — the same synchronous snapshot
+        ///      restore `undo()` uses — to remove the wobble;
+        ///   2. deposit the synthesized clean shape via the legacy `renderStroke`
+        ///      path (the geometry-agnostic path the shape tools already use);
+        ///   3. record a SECOND undo entry with before = the freehand snapshot,
+        ///      so a single undo returns to the freehand stroke (undo-twice →
+        ///      pre-stroke blank). See spec 5.2 "undo once → freehand".
+        private func commitPerfectShapeReplacement(
+            cleanStroke: BrushStroke,
+            preFreehandSnapshot: CanvasRenderer.LayerSnapshot,
+            freehandSnapshot: CanvasRenderer.LayerSnapshot,
+            tileGrid: TileGrid,
+            layerId: UUID,
+            layerIndex: Int,
+            canvasState: CanvasStateManager?,
+            renderer: CanvasRenderer
+        ) {
+            let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? .zero }
+            let selectionPath = MainActor.assumeIsolated { canvasState?.selectionPath }
+
+            // 1. Remove the just-committed freehand pixels (synchronous restore).
+            renderer.restoreSnapshot(preFreehandSnapshot, tileGrid: tileGrid)
+
+            // 2. Deposit the clean shape from the cleared state.
+            renderer.renderStroke(cleanStroke, tileGrid: tileGrid, screenSize: documentSize, selectionPath: selectionPath) { [weak self] in
+                // 3. Record undo entry: before = freehand ⇒ one undo → freehand.
+                let cleanSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
+                if let after = cleanSnapshot, let canvasState = canvasState {
+                    canvasState.historyManager.record(.stroke(
+                        layerId: layerId,
+                        beforeSnapshot: freehandSnapshot,
+                        afterSnapshot: after
+                    ))
+                }
+                if let canvasState = canvasState {
+                    DispatchQueue.main.async { canvasState.bumpLayerMutation() }
+                }
+                DispatchQueue.global(qos: .utility).async {
+                    if let thumbnail = renderer.generateThumbnail(fromTileGrid: tileGrid, size: CGSize(width: 44, height: 44)) {
+                        DispatchQueue.main.async {
+                            guard let self = self, layerIndex < self.layers.count else { return }
+                            self.layers[layerIndex].updateThumbnail(thumbnail)
+                        }
+                    }
+                }
+            }
         }
 
         /// Build the snapped-line stroke point list, including symmetry mirrors.
@@ -5129,58 +5343,9 @@ struct MetalCanvasView: UIViewRepresentable {
             return inside
         }
 
-        /// Ramer–Douglas–Peucker path simplification. Drops near-collinear
-        /// points whose perpendicular distance to the chord between two
-        /// kept neighbors is below `epsilon`. Iterative-with-explicit-stack
-        /// so a degenerate spiral can't blow the recursion limit on a
-        /// 5k-point Pencil-coalesced sample. Preserves first and last
-        /// points (essential — caller relies on path[0] for the close).
-        private func simplifyPathRDP(_ pts: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
-            guard pts.count > 2 else { return pts }
-            let epsSq = epsilon * epsilon
-            var keep = [Bool](repeating: false, count: pts.count)
-            keep[0] = true
-            keep[pts.count - 1] = true
-
-            // Explicit stack of (start, end) index pairs to process.
-            var stack: [(Int, Int)] = [(0, pts.count - 1)]
-            while let (start, end) = stack.popLast() {
-                if end <= start + 1 { continue }
-                let a = pts[start], b = pts[end]
-                let dx = b.x - a.x, dy = b.y - a.y
-                let lenSq = dx * dx + dy * dy
-                var maxDistSq: CGFloat = 0
-                var maxIndex = start
-                for i in (start + 1)..<end {
-                    let p = pts[i]
-                    let distSq: CGFloat
-                    if lenSq == 0 {
-                        let ex = p.x - a.x, ey = p.y - a.y
-                        distSq = ex * ex + ey * ey
-                    } else {
-                        // |cross(b-a, p-a)|² / |b-a|² = perp-dist²
-                        let cross = dx * (a.y - p.y) - dy * (a.x - p.x)
-                        distSq = cross * cross / lenSq
-                    }
-                    if distSq > maxDistSq {
-                        maxDistSq = distSq
-                        maxIndex = i
-                    }
-                }
-                if maxDistSq > epsSq {
-                    keep[maxIndex] = true
-                    stack.append((start, maxIndex))
-                    stack.append((maxIndex, end))
-                }
-            }
-
-            var out: [CGPoint] = []
-            out.reserveCapacity(pts.count)
-            for i in 0..<pts.count where keep[i] {
-                out.append(pts[i])
-            }
-            return out
-        }
+        // `simplifyPathRDP` was lifted to a free function in ShapeClassifier.swift
+        // (Perfect Shapes 5.2) so the lasso path and the shape classifier share
+        // one implementation. The call site above resolves to that free function.
 
         // MARK: - Eyedropper Helper
 
