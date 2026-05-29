@@ -318,14 +318,7 @@ struct DrawingDetailView: View {
         let parsed = CritiqueSummary.parse(entry.feedback)
         let isExpanded = expandedCritiqueIDs.contains(entry.id)
 
-        HStack(alignment: .top, spacing: 12) {
-            // Thumbnail of the drawing's state at the time this critique
-            // was generated. Sits across from the bullets so a user can
-            // scan a finding while seeing the visual context that prompted
-            // it. Muted placeholder for pre-snapshot legacy entries and
-            // any row whose worker promote step failed.
-            CritiqueSnapshotThumbnail(entry: entry, size: 72)
-
+        HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Image(systemName: "clock")
@@ -390,6 +383,15 @@ struct DrawingDetailView: View {
                 }
                 .buttonStyle(.plain)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Thumbnail of the drawing's state at the time this critique
+            // was generated. Sits on the trailing edge, vertically centered,
+            // across from the bullets so a user can scan a finding while
+            // seeing the visual context that prompted it. Muted placeholder
+            // for pre-snapshot legacy entries and any row whose worker
+            // promote step failed.
+            CritiqueSnapshotThumbnail(entry: entry, size: 72)
         }
         .padding()
         .background(Color(uiColor: .secondarySystemBackground))
