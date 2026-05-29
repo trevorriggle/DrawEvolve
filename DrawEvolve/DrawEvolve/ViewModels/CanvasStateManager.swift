@@ -242,7 +242,7 @@ class CanvasStateManager: ObservableObject {
     func stampScreenDiameter(forBrushSize docSize: CGFloat) -> CGFloat {
         let docWidth = documentSize.width
         guard docWidth > 0 else { return docSize }
-        return docSize * (screenSize.width / docWidth) * zoomScale
+        return docSize * (max(screenSize.width, screenSize.height) / docWidth) * zoomScale
     }
     @Published var hasLoadedExistingImage = false // Track if we've loaded an existing drawing
 

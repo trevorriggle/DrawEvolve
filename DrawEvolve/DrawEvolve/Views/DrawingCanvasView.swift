@@ -319,6 +319,7 @@ struct DrawingCanvasView: View {
                 padBody
             }
         }
+        // typingPathOverlay carries the same latent safe-area offset bug fixed on hoverCursorOverlay (no .ignoresSafeArea, positions doc-space points via documentToScreen) — left as-is, deferred to the 5.1 type-tool rework.
         .overlay(typingPathOverlay)
         .overlay(typeBarOverlay)
         .overlay(hoverCursorOverlay)
@@ -2155,6 +2156,11 @@ struct DrawingCanvasView: View {
                 .allowsHitTesting(false)
             }
         }
+        // Hover point is captured in the MTKView's full-window space
+        // (UIHoverGestureRecognizer location-in-view; MTKView ignoresSafeArea).
+        // Match that space — same pattern as :1003/:1005 and :941/:1388 — so
+        // .position() isn't shifted down by the top safe-area inset.
+        .ignoresSafeArea()
     }
 
     /// Tools that paint with a brush size — the only ones where a

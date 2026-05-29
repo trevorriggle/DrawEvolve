@@ -4664,10 +4664,10 @@ struct MetalCanvasView: UIViewRepresentable {
         private func stampScreenDiameter(forSize docSize: CGFloat) -> CGFloat {
             guard let cs = canvasState else { return docSize }
             let docWidth = MainActor.assumeIsolated { cs.documentSize.width }
-            let screenWidth = MainActor.assumeIsolated { cs.screenSize.width }
+            let fitSize = MainActor.assumeIsolated { max(cs.screenSize.width, cs.screenSize.height) }
             let zoom = MainActor.assumeIsolated { cs.zoomScale }
             guard docWidth > 0 else { return docSize }
-            return docSize * (screenWidth / docWidth) * zoom
+            return docSize * (fitSize / docWidth) * zoom
         }
 
         // MARK: - Snap-to-Line
