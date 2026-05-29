@@ -20,11 +20,23 @@ struct PromptInputView: View {
     @State private var showRecommendations = false
 
     /// First-open inline banner gate. Lands the "why we ask all this"
-    /// framing — honest input = sharper critique. Dismissible via the
-    /// "Got it" button; flag persists across sessions. Not a coach-mark;
-    /// the banner scrolls with the form and disappears with animation
-    /// on dismiss.
+    /// framing — honest input = sharper critique. Not a coach-mark; the
+    /// banner scrolls with the form and disappears with animation on dismiss.
+    ///
+    /// `hasSeenPromptInputBannerV1` persists across sessions and is now
+    /// marked seen the moment the banner first appears (body .onAppear) —
+    /// NOT only when "Got it" is tapped. The old "Got it"-only mark left the
+    /// flag false for anyone who proceeded through the form without tapping
+    /// the small button, so the banner re-fired on every new-drawing setup.
+    /// In-session visibility is driven by `bannerVisible` so persisting the
+    /// flag on appear doesn't make the card flash-and-vanish. Fresh install =
+    /// UserDefaults key absent → shows once; delete-and-reinstall clears it
+    /// and re-shows; Settings → Replay Tutorial re-arms it. All intended.
     @AppStorage("hasSeenPromptInputBannerV1") private var hasSeenPromptInputBannerV1 = false
+
+    /// In-session visibility for the first-open banner. Seeded once from
+    /// `hasSeenPromptInputBannerV1` in body .onAppear; set false by "Got it".
+    @State private var bannerVisible = false
 
     var body: some View {
         Group {
@@ -32,6 +44,15 @@ struct PromptInputView: View {
                 phoneBody
             } else {
                 padBody
+            }
+        }
+        .onAppear {
+            // Mark the first-open banner seen the moment it would first show,
+            // so it fires exactly once on fresh install regardless of how the
+            // form is dismissed (not only when "Got it" is tapped).
+            if !hasSeenPromptInputBannerV1 {
+                bannerVisible = true
+                hasSeenPromptInputBannerV1 = true
             }
         }
         .fullScreenCover(isPresented: $showGallery) {
@@ -549,7 +570,7 @@ struct PromptInputView: View {
     /// (separate coach-mark) handles the voice-location pointing.
     @ViewBuilder
     private var bannerSection: some View {
-        if !hasSeenPromptInputBannerV1 {
+        if bannerVisible {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "info.bubble.fill")
@@ -570,9 +591,10 @@ struct PromptInputView: View {
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("You can change any of this later.")
+                Text("Your answers here shape every critique and can't be edited afterward, so be as accurate as you can. (You can always rename the drawing later.)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(14)
             .background(Color.accentColor.opacity(0.08))
@@ -586,7 +608,7 @@ struct PromptInputView: View {
 
     private func dismissBanner() {
         withAnimation(.easeOut(duration: 0.2)) {
-            hasSeenPromptInputBannerV1 = true
+            bannerVisible = false
         }
         EventLogService.shared.log(event: "prompt_input_banner_dismissed")
     }
