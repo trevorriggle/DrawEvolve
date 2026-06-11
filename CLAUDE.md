@@ -1,12 +1,12 @@
 # CLAUDE.md — DrawEvolve
 
-Onboarding doc for Claude (or any new contributor). Code-derivable facts are deliberately kept brief here — read the source. This file captures **what isn't obvious from reading the code**.
+Onboarding doc for Claude (or any new contributor). Code-derivable facts are deliberately kept brief here — read the source. This file captures **what isn't obvious from reading the code**. Last full refresh: 2026-06-11.
 
 ---
 
 ## What DrawEvolve is
 
-iOS drawing app — Universal target (iPad and iPhone), iPad-primary by design — with AI feedback. The user draws on a Metal-backed canvas, fills out a short questionnaire (subject, style, skill level, focus areas), and receives an iterative GPT-4o Vision critique that **remembers prior critiques on the same drawing** and continues a coaching relationship rather than re-critiquing from scratch.
+iOS drawing app — Universal target (iPad and iPhone), iPad-primary by design — with AI coaching. The user draws on a Metal-backed canvas, fills out a short questionnaire, and receives an iterative critique that **remembers prior critiques on the same drawing**. Around that core: per-critique canvas snapshots (version history + "Watch It Evolve" timelapse), critique pointers grounded on the drawing (ghost layer), Eve (a separate conversational coach), and a cross-drawing Evolution dashboard.
 
 The "iterative coaching" behavior is the core product differentiator. Don't break it without reading `MEMORY.md` first.
 
@@ -17,29 +17,37 @@ The "iterative coaching" behavior is the core product differentiator. Don't brea
 ```
 DrawEvolve/                     ← iOS app (SwiftUI + Metal). Open DrawEvolve.xcodeproj here.
 cloudflare-worker/              ← Cloudflare Worker. Sits between iOS and OpenAI.
-                                  Owns: JWT validation, rate limiting, prompt assembly,
-                                  OpenAI call, critique persistence.
-supabase/                       ← Postgres migrations + Deno edge functions.
-                                  Migrations run via Supabase SQL Editor.
+                                  Owns: JWT validation, rate limiting/quotas, prompt assembly,
+                                  OpenAI calls (critique + classifier + annotator + Eve),
+                                  critique persistence, snapshot promotion.
+supabase/                       ← Postgres migrations + Deno edge functions (account deletion).
+                                  Migrations run via Supabase SQL Editor. 0001–0020 applied
+                                  as of 2026-06-11 (0017 is an optional one-time purge).
+docs/archive/                   ← Superseded plans/audits, kept for history. Don't trust
+                                  their line numbers or status claims.
 images/                         ← static assets / screenshots
 ```
 
-The three pieces ship independently. iOS app talks to Worker (HTTPS) and Supabase (auth + storage + Postgres). Worker talks to Supabase (service-role) and OpenAI. iOS never calls OpenAI directly.
+The three pieces ship independently. iOS talks to Worker (HTTPS) and Supabase (auth + storage + Postgres). Worker talks to Supabase (service-role) and OpenAI. iOS never calls OpenAI directly.
 
 ### iOS app structure (`DrawEvolve/DrawEvolve/`)
 
 ```
-DrawEvolveApp.swift          @main entry point
+DrawEvolveApp.swift          @main entry point + dbgLog() (debug-only logging shim)
 Views/                       SwiftUI views; no business logic, calls into Services
 Services/                    singletons: AuthManager, SupabaseManager, OpenAIManager,
-                             DrawingStorageManager (CloudDrawingStorageManager),
-                             CanvasRenderer, HistoryManager, CrashReporter
+                             DrawingStorageManager (class CloudDrawingStorageManager),
+                             CanvasRenderer, HistoryManager, CrashReporter,
+                             EventLogService, FeedbackService, ShapeClassifier
 Models/                      Codable structs: Drawing, DrawingContext, DrawingLayer,
-                             DrawingTool, CritiqueHistory
-ViewModels/                  CanvasStateManager (canvas tool state, undo/redo)
+                             DrawingTool, CritiqueHistory (+ CritiqueAnnotation,
+                             SnapshotPointer), FloatingText, TextSettings, TileGrid
+ViewModels/                  CanvasStateManager (canvas state, undo/redo, transforms),
+                             EveConversationManager, EvolutionViewModel
 Config/                      Config.plist (public values only — committed)
-Shaders.metal                Metal shaders for brush/eraser/fill
-DrawEvolve.entitlements      Sign in with Apple capability
+Shaders.metal                Metal stamp/composite/wet-ink shaders
+DrawEvolve.entitlements      Sign in with Apple + App Attest (environment: development —
+                             flip to production with the App Attest re-enable)
 ```
 
 ---
@@ -49,16 +57,16 @@ DrawEvolve.entitlements      Sign in with Apple capability
 | Layer | Tech |
 |---|---|
 | iOS UI | SwiftUI, iOS 17+ deployment target, Universal device family (1,2) |
-| Canvas | Metal + MetalKit (MTKView), 2048² texture (4096² on iPad Pro) |
+| Canvas | Metal + MetalKit (MTKView), tile-based (256² tiles), 2048² doc (4096² on iPad Pro), wet-ink stroke pipeline, **event-driven rendering** (see Gotchas #1) |
 | Auth | Supabase Auth — Sign in with Apple + email magic-link OTP |
-| Storage | Supabase Storage (private `drawings` bucket) + local `Documents/DrawEvolveCache/` |
-| DB | Supabase Postgres — tables: `drawings`, `feedback_requests`, `account_deletions` |
+| Storage | Supabase Storage (private `drawings` bucket, public `avatars`) + local `Documents/DrawEvolveCache/` |
+| DB | Supabase Postgres — drawings, feedback_requests, profiles, user_preferences, custom_prompts, user_palettes, conversations(+messages), feature_flags, user_event_log, feedback_submissions, account_deletions |
 | Backend proxy | Cloudflare Worker (`drawevolve-backend.trevorriggle.workers.dev`) |
-| AI | OpenAI `gpt-5.1` for critiques, `gpt-5.1-mini` for the classifier. `reasoning_effort: 'none'` is wired on the chat/completions body. |
+| AI | OpenAI `gpt-5.1` for critiques (+ Eve chat); `gpt-5-mini` for the tag classifier, the ghost-layer annotator, and Eve rolling summaries. **`gpt-5.1-mini` does not exist** — see Gotchas #6 for the reasoning_effort split. |
 | iOS deps (SPM) | supabase-swift 2.34.0, swift-asn1, swift-crypto |
-| Worker tests | Node `--test` (`cloudflare-worker/test.mjs`) |
+| Worker tests | Node `--test` (`cloudflare-worker/test.mjs`, 488 tests) |
 
-No XCTest suite for the iOS app. Manual testing on device/simulator.
+No XCTest suite for the iOS app. Manual testing on device/simulator. Build verification: `xcodebuild` needs `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` on this machine.
 
 ---
 
@@ -71,83 +79,78 @@ cd DrawEvolve/
 open DrawEvolve.xcodeproj
 # Edit Config/Config.plist with Supabase URL + anon key, then ⌘R
 ```
-Single scheme: `DrawEvolve`.
+Single scheme: `DrawEvolve`. New Swift files need four pbxproj entries (PBXBuildFile, PBXFileReference, PBXGroup children, PBXSourcesBuildPhase — DE000NNN/DE100NNN id pattern; last used: 912).
 
 ### Cloudflare Worker
 ```bash
 cd cloudflare-worker/
-wrangler login
+npm test                         # 488 tests, ~30s — run before every deploy
+npx wrangler deploy              # auth via CLOUDFLARE_API_TOKEN env or wrangler login
 # Required secrets (set once via `wrangler secret put`):
 #   OPENAI_API_KEY, SUPABASE_URL, SUPABASE_JWT_ISSUER, SUPABASE_SERVICE_ROLE_KEY
-# Optional: ANOMALY_ALERT_WEBHOOK
-wrangler deploy
-npm test                         # run PromptConfig unit tests
 ```
 KV namespace `QUOTA_KV` must exist; binding id is in `wrangler.toml`. See `cloudflare-worker/DEPLOYMENT.md`.
 
 ### Supabase migrations
-Paste `supabase/migrations/000X_*.sql` into the Supabase SQL Editor and Run. Migrations are written to be idempotent.
+Paste `supabase/migrations/000X_*.sql` into the Supabase SQL Editor and Run. Written to be idempotent. Numbering gap: 0007/0008 were reserved and never claimed — not missing.
 
 ---
 
-## How auth + a feedback request flows end-to-end
+## How a feedback request flows end-to-end
 
-1. iOS user signs in via Sign in with Apple or email OTP (`AuthManager.swift`).
-2. Supabase issues an ES256-signed JWT; `AuthManager` publishes `signedIn(User)`.
-3. User draws and taps "Get feedback". `OpenAIManager` sends `POST` to the Worker with `Authorization: Bearer <jwt>`, `drawingId`, JPEG-base64 image, and `client_request_id` (for idempotency).
-4. Worker validates JWT against Supabase JWKS, checks drawing ownership, checks rate-limit/quota in KV, then calls OpenAI.
-5. Worker writes the critique to `drawings.critique_history` via `append_critique(uuid, jsonb)` RPC and logs a `feedback_requests` row.
-6. iOS displays the critique and refreshes the drawing on next hydrate.
+1. iOS user signs in (`AuthManager.swift`); Supabase issues an ES256 JWT.
+2. User draws, taps "Get feedback". iOS uploads a pending snapshot bundle to storage in parallel and `POST`s to the Worker with `Authorization: Bearer <jwt>`, `drawingId`, JPEG-base64 image, and `client_request_id` (idempotency).
+3. Worker: JWT → ownership check → rate/quota gates (KV) → gpt-5.1 critique call.
+4. Worker then runs **in parallel**: the tag classifier and the ghost-layer annotator (both gpt-5-mini, both null-on-any-failure), promotes the pending snapshot bundle to `snapshots/<sequence>/`, and appends the entry (content + tags + annotations + snapshot pointer) to `drawings.critique_history` via the `append_critique` RPC. Logs a `feedback_requests` row.
+5. iOS displays the critique; ghost markers render over the canvas (toggle chip); the snapshot powers version history and the timelapse.
 
-**Worker is the sole writer of `critique_history`.** iOS reads it but never sends it in PATCH bodies — `DrawingUpsertPayload` deliberately omits the field. Don't change this; it's the lock against append races.
+**Worker is the sole writer of `critique_history`.** iOS reads it but never sends it in PATCH bodies — `DrawingUpsertPayload` deliberately omits the field. This is the lock against append races. (A DB-level trigger enforcing this is designed but not applied — see the 2026-06-11 ship audit.)
 
 ---
 
 ## Configuration & secrets
 
-- `DrawEvolve/DrawEvolve/Config/Config.plist` — Supabase URL + anon key. Public values, **committed by design**. Anon key is RLS-protected.
-- Cloudflare Worker secrets — set via `wrangler secret put`, never committed.
-- Supabase service role key — Worker only. Bypasses RLS. Treat as god-mode credential.
-- `Config.plist` is gitignored at the iOS subdirectory level but committed at root — this is intentional. Read `.gitignore` comments.
-
-`AppConfig.swift` returns nil when keys still contain placeholder values, which surfaces as a "Couldn't configure Supabase" error rather than a crash.
+- `DrawEvolve/DrawEvolve/Config/Config.plist` — Supabase URL + anon key. Public values, **committed by design** (RLS-protected).
+- Cloudflare Worker secrets — `wrangler secret put`, never committed.
+- Supabase service role key — Worker only. Bypasses RLS. God-mode credential.
 
 ### App Attest is currently DISABLED end-to-end
 
-Two coordinated kill-switches:
+Two coordinated kill-switches: iOS `AppAttestManager.isEnforcementEnabled = false` and Worker `APP_ATTEST_REQUIRED = "false"` (wrangler.toml). Per-user + global OpenAI spend caps plus JWT auth cover the threat model meanwhile.
 
-- iOS: `AppAttestManager.isEnforcementEnabled = false` in `Services/AppAttestManager.swift`. `attestedHeaders(...)` short-circuits to `[:]` — no Apple round-trip, no register, no assertions.
-- Worker: `APP_ATTEST_REQUIRED = "false"` in `cloudflare-worker/wrangler.toml`. `routes/feedback.js` and `routes/prompts.js` skip the assertion gate when this is `"false"` (or any value other than `"true"`).
-
-Why disabled: cert-chain validation against real-device attestations hit a dead-end on the initial real-hardware test pass. The Worker side fixed two real bugs (PR #64 bundle-ID mismatch, PR #65 leaf-cert hash inferred from issuer curve) before we cut bait. Per-user + global OpenAI spend caps (`PER_USER_DAILY_TOKEN_CAP`, `OPENAI_DAILY_SPEND_CAP_USD`) plus Supabase JWT auth cover the threat model while disabled.
-
-Re-enable: flip BOTH flags to true (or remove `APP_ATTEST_REQUIRED` from wrangler.toml — defaults to required when missing), `wrangler deploy`, ship a new iOS build. Pre-flight: `wrangler tail` should show a clean register round-trip on a real device before flipping enforcement back on. Worker required + iOS off → all requests blocked, so iOS must flip first OR both at once.
+Re-enable checklist: pin the real Apple App Attest root CA pubkey in `middleware/app-attest.js` (currently a placeholder), flip the entitlement environment to `production`, flip BOTH kill-switches (iOS first or both at once — Worker-required + iOS-off blocks all requests), `wrangler deploy`, ship a new iOS build, verify a clean register round-trip via `wrangler tail`.
 
 ---
 
 ## Conventions worth knowing
 
-- **Postgres is snake_case; Swift models use CodingKeys to map to camelCase.** When adding a column, both sides must change.
-- **Storage paths:** `<user_id>/<drawing_id>.jpg`, thumbnails get `_thumb.jpg`. UUIDs are normalized to lowercase on decode (`Drawing.swift` line ~54) — older local-cache files used uppercase.
-- **State management:** Three `@MainActor ObservableObject` singletons drive most UI: `AuthManager`, `CloudDrawingStorageManager`, `CanvasStateManager`. Views observe them via `@EnvironmentObject` / `@ObservedObject`.
-- **Local-first storage:** `DrawingStorageManager` saves to local cache + in-memory array first, then queues cloud upload. NWPathMonitor triggers retries. Save UI shows ✓ before cloud upload completes — this is by design but can mask delayed failures.
-- **Worker prompt config:** `cloudflare-worker/index.js` has four hard-coded voice presets (`VOICE_STUDIO_MENTOR`, `VOICE_THE_CRIT`, `VOICE_FUNDAMENTALS_COACH`, `VOICE_RENAISSANCE_MASTER`) and a `selectConfig(tier, prefs)` function. The iterative-coaching rule lives in `SHARED_SYSTEM_RULES` (system prompt), **not** in the user-role framing — see MEMORY.md for why.
-- **Debug bypass:** AuthManager has an `isDebugBypassed` path that skips Supabase entirely (synthetic user `DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF`). Cloud operations no-op for that user. Compiled-out of release.
+- **Postgres is snake_case; Swift models use CodingKeys.** New column = both sides change.
+- **Storage paths:** legacy flat `<user_id>/<drawing_id>.jpg`; layered `<user>/<drawing>/{manifest.json,layer-N.png,composite.jpg,thumb.jpg}`; snapshots `<user>/<drawing>/snapshots/<sequence>/`. UUIDs lowercase everywhere.
+- **State management:** `@MainActor ObservableObject` singletons (`AuthManager`, `CloudDrawingStorageManager`, `CanvasStateManager`) observed via `@EnvironmentObject` / `@ObservedObject`.
+- **Local-first storage:** save to local cache + memory first, then queue cloud upload (NWPathMonitor retries). Save UI shows ✓ before cloud completes — by design.
+- **Canvas transforms:** ALL presentation consumers (documentToScreen, screenToDocument wrappers, both Metal draw snapshots) read `CanvasStateManager.effectivePanOffset` — gesture pan plus the transient keyboard-avoidance pan. Gesture math reads/writes raw `panOffset`. Never mix them.
+- **Metal stroke paths:** any code that async-commits a command buffer MUST hold a `strokeCommandSlots` semaphore slot (wait before makeCommandBuffer, signal on early exits + in the completed handler). The blur crash was a path that skipped this.
+- **BrushUniforms:** trailing-append only (C-ABI prefix stability for shaders that don't read new fields). `strokeDir` landed in tail padding — stride is still 64 on both MSL and Swift sides; verify layout math before the next append.
+- **Wet-ink deposit blends:** brush/marker/airbrush/watercolor use `.max/.max` (a stroke's cross-section = the stamp profile; pressure terms are per-stroke value CEILINGS that overlap can't rebuild — keep pressure tapers shallow). Pencil/charcoal use premul-over accumulation (shade by scribbling).
+- **Logging:** diagnostic logging goes through `dbgLog()` (compiled out of Release). Don't add raw `print` to hot paths.
+- **Worker prompt config:** voice presets + `selectConfig(tier, prefs)` live in `cloudflare-worker/lib/prompt.js` (modular worker — `index.js` is mostly routing + re-exports for tests). The iterative-coaching rule lives in `SHARED_SYSTEM_RULES` (system prompt), **not** user-role framing — see MEMORY.md for why.
+- **Debug bypass:** AuthManager `isDebugBypassed` (synthetic user `DEADBEEF-…`), compiled out of Release.
 
 ---
 
-## Other docs in this repo (read these instead of duplicating)
+## Other docs in this repo
 
 | File | What's in it |
 |---|---|
-| `MEMORY.md` | Non-obvious decisions log: iterative-coaching prompt placement, gpt-5.1 attempt rollback, where things live |
-| `authandratelimitingandsecurity.md` | The auth + rate-limiting master plan, in 6 phases. Source of truth for what's landed vs. pending. iPad verification runbook. |
-| `KNOWN_ISSUES.md` | Punch list of small bugs not blocking v1 (save-as UX, no-op updateDrawing, skillLevel default divergence, missing rename) |
-| `PERF_ISSUES.md` | Perf audit dated 2026-04-30. Highest priorities: full-texture `getBytes` reads in `CanvasRenderer`, paint bucket / aggregate texture I/O |
-| `CUSTOM_PROMPTS_PLAN.md` | Later-phase design for per-drawing custom prompts. Not started. |
-| `PIPELINE_FEATURES.md` | Feature roadmap. MVP+ done; Phase-1 analytics next; social phase not started. |
-| `cloudflare-worker/DEPLOYMENT.md` | Worker deploy runbook (secrets, KV, manual steps) |
-| `DrawEvolve, April 27th` | Older broad dev plan; mostly superseded but has device-targeting notes |
+| `MEMORY.md` | Non-obvious decisions log, append-style. Read before touching coaching, prompts, storage formats. |
+| `authandratelimitingandsecurity.md` | Auth + rate-limiting master plan (all phases shipped except the skipped legacy migration). App Attest re-enable runbook lives here. |
+| `KNOWN_ISSUES.md` | Punch list. Empty as of 2026-06-11 — add new ones here, not in code comments. |
+| `PERF_ISSUES.md` | Perf audit history. Authoritative status table at top (re-audited 2026-06-10/11). Remaining: paint-bucket before-snapshot, floodFillKernel rewrite. |
+| `PIPELINE_FEATURES.md` | Long-term roadmap with status snapshot. Next major phase: monetization/tiers. |
+| `cloudflare-worker/DEPLOYMENT.md` | Worker deploy runbook (secrets, KV, manual steps). |
+| `RATELIMITSPLAN.md` | Credit-system / monetization design — NOT built yet; input for the tier sprint. |
+| `ONLINEIMPLEMENTATIONPLANS.md` | Social Phases B–G design — deferred, not started. |
+| `docs/archive/*` | SHIPPED or superseded plans/audits (April–May 2026): critique audit, both custom-prompts plans, layered-storage plan, the April 27th dev plan. Historical context only — stale line numbers, stale status claims. |
 
 When the user asks about anything in those buckets, **read the doc** rather than guessing.
 
@@ -155,31 +158,37 @@ When the user asks about anything in those buckets, **read the doc** rather than
 
 ## Gotchas that have bitten before
 
-1. **Simulator HTTP/3 hang on Supabase.** The iOS Simulator's QUIC upgrade causes `signInWithOTP` to hang. `SupabaseManager` builds an ephemeral URLSession with `httpMaximumConnectionsPerHost = 2` to bias toward HTTP/2. Real devices don't hit this. Don't "clean up" that session config.
-2. **`critique_history` is read-only from iOS.** Worker is sole writer. If you start sending it in PATCH bodies you'll clobber concurrent appends.
-3. **Sign in with Apple entitlements.** `DrawEvolve.entitlements` and the Xcode "Signing & Capabilities" UI must stay in sync. Removing in one place but not the other = runtime crash on auth attempt.
-4. **`skillLevel` default divergence.** iOS defaults to `"Beginner"`, Worker fallback uses `"Intermediate"`. Harmless today (UI always sets a value) but a trap for future API consumers. See `KNOWN_ISSUES.md`.
-5. **Don't migrate legacy `Documents/Drawings/*.json` yet.** That's Phase 4 work. Phase 3 ignores those files on purpose; deleting them now would lose pre-auth drawings.
-6. **`CanvasRenderer.getBytes` reads the full 4096² texture in 7 places** even when the work region is small (~64MB per call). Logged in `PERF_ISSUES.md`. If you touch the renderer, fix this in passing only with sign-off — brush/canvas/Metal pipeline is release-blocker territory.
-7. **gpt-5.1 wants `reasoning_effort` flat, not nested.** Chat/completions takes `reasoning_effort: 'none' | 'low' | 'medium' | 'high'` as a top-level body field; the nested `reasoning: { effort: ... }` shape is the /v1/responses endpoint's API and OpenAI 400s if you send it to /v1/chat/completions. `'minimal'` is also rejected (gpt-5.1-specific). Current production: `OPENAI_REASONING_EFFORT = 'none'`, wired at `routes/feedback.js:720`.
+1. **The canvas MTKView is event-driven — never set `isPaused = false`.** Both `enableSetNeedsDisplay = true` AND `isPaused = true` are required; with `isPaused = false` the display link free-runs draw() at 120 Hz on an idle canvas (the 2026-06 battery/thermal bug, shipped for weeks). If the canvas shows a stale frame after a state change, a field is missing from `CanvasRenderSnapshot` — add the field; don't un-pause. The foreground observer deliberately does NOT un-pause.
+2. **`critique_history` is read-only from iOS.** Worker is sole writer. Sending it in PATCH bodies clobbers concurrent appends.
+3. **Simulator HTTP/3 hang on Supabase.** `SupabaseManager` biases to HTTP/2 via an ephemeral URLSession (`httpMaximumConnectionsPerHost = 2`). Real devices don't hit this. Don't "clean up" that session config.
+4. **Sign in with Apple entitlements** must stay in sync between `DrawEvolve.entitlements` and Xcode's Signing & Capabilities UI — removing one side = runtime crash on auth.
+5. **Don't migrate or delete legacy `Documents/Drawings/*.json`.** Phase 4 work, deliberately deferred; deleting loses pre-auth drawings.
+6. **reasoning_effort is FLAT on chat/completions and model-specific:** `gpt-5.1` takes `'none'|'low'|'medium'|'high'`; `gpt-5-mini` takes `'minimal'|'low'|'medium'|'high'` (`'none'` 400s on mini, `'minimal'` 400s on 5.1). The nested `reasoning: { effort }` shape belongs to /v1/responses and 400s on chat/completions. Also: gpt-5-series needs `max_completion_tokens` big enough for reasoning + output (300 starves it; use ~2000) and rejects `temperature`/`seed`.
+7. **MTLCommandQueue caps in-flight buffers (~64).** That's what `strokeCommandSlots` (60) is for — see Conventions. Exceeding it traps the queue's dispatch thread (`com.Metal.CommandQueueDispatch` EXC_BREAKPOINT + libxpc "Malformed Mach message").
+8. **Position-keyed vs profile-keyed shader effects under `.max` deposit:** layer-space modulation (streaks, grain) survives; per-stamp radial features (edge rims) wash out to the stroke cross-section. Design stamp profiles AS the desired stroke cross-section.
 
 ---
 
 ## Things to ask before doing
 
-- Touching `AuthManager`, `SupabaseManager`, or `AppConfig` — Phase 1 is stable and verified.
-- Touching the Metal pipeline / `CanvasRenderer` / `Shaders.metal` / brush code — release-blocker risk.
-- Touching `Services/AnonymousUserManager.swift` — legacy but still imported by `CrashReporter`. Don't delete without checking.
-- Pushing to remote, force-pushing, or opening PRs — always confirm first.
-- Committing anything that looks like a secret. The repo's `.gitignore` is comprehensive but not infallible.
+- Touching `AuthManager`, `SupabaseManager`, or `AppConfig` — auth is stable and verified.
+- Touching the Metal pipeline / `CanvasRenderer` / `Shaders.metal` / brush code — release-blocker risk; changes here have shipped recently with verification debt, don't add more silently.
+- Touching `Services/AnonymousUserManager.swift` — legacy but still imported by `CrashReporter`.
+- Pushing to remote, force-pushing, or opening PRs — confirm first (standing exception: Trevor has been in explicit ship-everything mode; re-confirm if context is older than a few days).
+- Committing anything that looks like a secret.
 
 ---
 
 ## Quick orientation for new tasks
 
-- Bug in auth flow → start in `Services/AuthManager.swift` + `authandratelimitingandsecurity.md`.
-- Bug in saving/loading drawings → `Services/DrawingStorageManager.swift`. Local-first + retry queue.
-- Bug in feedback / AI critique → `Services/OpenAIManager.swift` (iOS side) + `cloudflare-worker/index.js` (server side). Check `wrangler tail` for OpenAI errors.
-- Bug in rendering / brush / canvas → `Views/MetalCanvasView.swift` + `Services/CanvasRenderer.swift` + `Shaders.metal`. Tread carefully.
-- New Postgres column → migration in `supabase/migrations/`, then update `Models/Drawing.swift` + `DrawingUpsertPayload`.
-- New voice preset / prompt change → `cloudflare-worker/index.js`, then update `cloudflare-worker/test.mjs`.
+- Auth flow bug → `Services/AuthManager.swift` + `authandratelimitingandsecurity.md`.
+- Save/load bug → `Services/DrawingStorageManager.swift` (local-first + retry queue + layered manifest paths).
+- Critique/AI bug → `cloudflare-worker/routes/feedback.js` + `lib/prompt.js`; iOS side `Services/OpenAIManager.swift`. `wrangler tail` for OpenAI errors (`[classifier]`, `[annotator]`, `[persistence]` prefixes).
+- Eve bug → `routes/eve.js` + `lib/eve-prompt.js` / `eve-summary.js`; iOS `EveConversationManager` + `Views/Eve/`.
+- Rendering/brush/canvas bug → `Views/MetalCanvasView.swift` + `Services/CanvasRenderer.swift` + `Shaders.metal`. Tread carefully.
+- Text tool → `Views/Components/InlineTextEditorView.swift` (visible editor), `TextEntryOverlay.swift` (path text), `TypeBarView.swift` (keyboard accessory), `CanvasStateManager` FloatingText lifecycle.
+- Ghost layer → worker `lib/annotations.js`; iOS `Views/GhostAnnotationOverlay.swift` + `CritiqueAnnotation` in `Models/CritiqueHistory.swift`.
+- Version history / timelapse → `lib/snapshots.js` (worker), `SnapshotPointer`, `Views/EvolutionTimelapseView.swift`, `SnapshotCanvasOverlay.swift`.
+- Quotas/tiers → `middleware/rate-limit.js` (TIER_LIMITS, KV key shapes) — daily windows only today; monthly windows are the first monetization build item.
+- New Postgres column → migration in `supabase/migrations/` (next free: 0021), then `Models/Drawing.swift` + `DrawingUpsertPayload`.
+- New voice preset / prompt change → `cloudflare-worker/lib/prompt.js`, then update `test.mjs`.

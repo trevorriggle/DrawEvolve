@@ -3,7 +3,7 @@ main = "index.js"
 compatibility_date = "2024-01-01"
 
 # Required secrets (set via `wrangler secret put <NAME>`):
-#   OPENAI_API_KEY              — OpenAI API key for GPT-4o Vision
+#   OPENAI_API_KEY              — OpenAI API key (gpt-5.1 critiques, gpt-5-mini classifier/annotator)
 #   SUPABASE_URL                — e.g. https://<project-ref>.supabase.co
 #                                 (used for JWKS endpoint + PostgREST queries)
 #   SUPABASE_JWT_ISSUER         — e.g. https://<project-ref>.supabase.co/auth/v1

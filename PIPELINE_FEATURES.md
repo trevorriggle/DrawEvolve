@@ -1,12 +1,33 @@
 # DrawEvolve - Pipeline Features & Roadmap
 
 **Last meaningful update of this doc:** 2025-11-06.
-**Refreshed against code state:** 2026-05-05 — see "Status snapshot" below.
-**Status:** MVP+ complete; auth, layered storage, custom prompts, social Phase A, and My Evolution Phase 1/1b/2 shipped. Phase 3 Evolution UI deferred. Social Phases B–G deferred.
+**Refreshed against code state:** 2026-06-11 — see "Status snapshot" below.
+**Status:** v1 feature-complete and on `main`. Next major phase: monetization/tiers.
 
 ---
 
-## ✅ Status snapshot (2026-05-05)
+## ✅ Status snapshot (2026-06-11)
+
+Everything in the 2026-05-05 snapshot below still holds, plus the May–June wave on top:
+
+| Area | Code state |
+|---|---|
+| **Evolution UI (old "Phase 3 deferred")** | ✅ SHIPPED — EvolutionView/EvolutionPanelView (studio wall, skill radar, stats, streak), v3 tagged-critique feed. No longer deferred. |
+| **Drawing version history** | ✅ SHIPPED — per-critique snapshot bundles promoted by the Worker, time-machine canvas overlay, "Watch It Evolve" timelapse player + video export. |
+| **Ghost layer** | ✅ SHIPPED (v1) — critique pointers grounded on the drawing (Worker annotator + toggleable iOS overlay). v1.1: markers on historical snapshots. |
+| **Eve coach** | ✅ SHIPPED — conversations, rolling summaries, critique-anchored chats, list previews. |
+| **Drawing tools** | ✅ Tool inventory COMPLETE for v1: 6 brush variants (incl. new Watercolor), revamped marker, type-tool rework (in-place editor, keyboard-docked bar), perfect shapes + multi-touch constraints, HSV disc picker, smudge/blur, symmetry, pose overlays, references. The "8 tools unimplemented" claim below is dead. |
+| **Onboarding/tutorial** | ✅ SHIPPED — TutorialCardsView + coach marks + Settings replay. |
+| **Feedback + analytics plumbing** | ✅ SHIPPED — feedback_submissions, user_event_log (EventLogService). |
+| **Perf/battery** | ✅ Event-driven canvas rendering (idle = zero render work), release logging silenced. Remaining items in PERF_ISSUES.md. |
+| **Phase 5 — Monetization** | ☐ NEXT UP. Tier plumbing ~75% present (tier-keyed limits, JWT tier claim, per-request usage logging). Missing: monthly quota windows, StoreKit entitlements, GET /v1/me/quota. See RATELIMITSPLAN.md + the 2026-06-11 ship audit. |
+| **Social Phases B–G** | ☐ Deferred (Phase A profiles shipped). See ONLINEIMPLEMENTATIONPLANS.md. |
+
+Superseded planning docs now live in `docs/archive/`.
+
+---
+
+## ✅ Status snapshot (2026-05-05 — historical)
 
 This roadmap pre-dates a lot of what's now landed. Cross-walking against PRs on `main`:
 

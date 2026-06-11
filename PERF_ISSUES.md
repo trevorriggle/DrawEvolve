@@ -4,6 +4,12 @@ Original audit run 2026-04-30 against `main`; PR #8 (`ccf910a`) applied a first 
 
 ---
 
+## 2026-06-11 addendum — the actual battery/thermal fix
+
+The biggest burner wasn't in the original audit at all: the canvas MTKView shipped with `isPaused = false`, free-running `draw(in:)` at 120 Hz on an idle canvas and silently defeating the snapshot-gate/throttle architecture built around it. Fixed in `549ec94` — event-driven rendering (idle = zero render work) + ~330 release-build `print` calls routed through the compiled-out `dbgLog()`. Rule going forward: never un-pause; a stale frame means a missing `CanvasRenderSnapshot` field. Remaining open items below are unchanged (paint-bucket before-snapshot, floodFillKernel rewrite).
+
+---
+
 ## Status snapshot (re-audit 2026-06-10, post-tiling + wet-ink)
 
 | Item | State | Evidence |

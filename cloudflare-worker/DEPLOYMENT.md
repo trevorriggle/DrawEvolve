@@ -8,7 +8,7 @@ Worker via `wrangler secret put <NAME>`:
 
 | Secret | Where to find it | Purpose |
 |---|---|---|
-| `OPENAI_API_KEY` | OpenAI dashboard → API Keys | GPT-4o Vision call |
+| `OPENAI_API_KEY` | OpenAI dashboard → API Keys | gpt-5.1 critique + gpt-5-mini classifier/annotator calls |
 | `SUPABASE_URL` | Supabase dashboard → Project Settings → API → Project URL (e.g. `https://jkjfcjptzvieaonrmkzd.supabase.co`) | JWKS endpoint + PostgREST queries |
 | `SUPABASE_JWT_ISSUER` | Same URL with `/auth/v1` appended (e.g. `https://jkjfcjptzvieaonrmkzd.supabase.co/auth/v1`) | Verified against every JWT's `iss` claim |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase dashboard → Project Settings → API → `service_role` key | Ownership check + critique-history fetch (bypasses RLS) |
