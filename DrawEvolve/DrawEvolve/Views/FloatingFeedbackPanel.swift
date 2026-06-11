@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct FloatingFeedbackPanel: View {
     // MARK: - Drawing version history phase 2
@@ -40,6 +41,12 @@ struct FloatingFeedbackPanel: View {
     var onActiveEntryChange: ((CritiqueEntry?, _ isLatest: Bool) -> Void)? = nil
     var initialSelectedEntryId: UUID? = nil
 
+    /// "Watch It Evolve" — captures the live canvas as the timelapse's
+    /// final frame at the moment the player is presented. nil suppresses
+    /// the play button (caller has no canvas to capture, or feature
+    /// intentionally disabled on that surface).
+    var currentCanvasImage: (() -> UIImage?)? = nil
+
     /// True when the canvas underneath is rendering a historical snapshot.
     /// When this flips on, the panel auto-collapses to its pill so the
     /// user can see the snapshot. When they re-expand the pill in this
@@ -48,6 +55,12 @@ struct FloatingFeedbackPanel: View {
     /// Default false — outside snapshot mode the panel behaves exactly
     /// as before this change.
     var isInSnapshotMode: Bool = false
+
+    /// Presents the "Watch It Evolve" timelapse player. The live canvas
+    /// is captured once at present time (not per frame) so the player
+    /// works even if the user keeps drawing underneath.
+    @State private var showTimelapse = false
+    @State private var timelapseLiveImage: UIImage? = nil
 
     @State private var isExpanded = true
     /// Sub-state of `isExpanded`. When true (default), the expanded panel
@@ -190,6 +203,14 @@ struct FloatingFeedbackPanel: View {
                 armAskEveCoachMarkIfNeeded()
             }
         }
+        // "Watch It Evolve" timelapse player. Body-level so both the
+        // iPad floating panel and the iPhone half-sheet can present it.
+        .sheet(isPresented: $showTimelapse) {
+            EvolutionTimelapseView(
+                critiqueHistory: critiqueHistory,
+                currentCanvasImage: timelapseLiveImage
+            )
+        }
     }
 
     /// Snapshot of "what entry is the panel showing right now" delivered
@@ -262,6 +283,18 @@ struct FloatingFeedbackPanel: View {
         }
     }
 
+    /// "Watch It Evolve" is offered when there's at least one snapshot-
+    /// bearing critique to animate from and a caller-supplied way to
+    /// capture the live canvas as the final frame.
+    private var timelapseAvailable: Bool {
+        currentCanvasImage != nil && critiqueHistory.contains { $0.snapshot != nil }
+    }
+
+    private func presentTimelapse() {
+        timelapseLiveImage = currentCanvasImage?()
+        showTimelapse = true
+    }
+
     private var phoneHeader: some View {
         HStack {
             // History Menu (left). Disabled when there's nothing to pick.
@@ -277,6 +310,16 @@ struct FloatingFeedbackPanel: View {
                     .font(.title3)
             }
             .disabled(critiqueHistory.isEmpty)
+
+            // "Watch It Evolve" — same affordance as the iPad header.
+            if timelapseAvailable {
+                Button(action: { presentTimelapse() }) {
+                    Image(systemName: "play.circle.fill")
+                        .foregroundColor(.accentColor)
+                        .font(.title3)
+                }
+                .accessibilityLabel("Watch it evolve")
+            }
 
             Spacer()
 
@@ -551,6 +594,18 @@ struct FloatingFeedbackPanel: View {
                                             .foregroundColor(.secondary)
                                     }
                                     .help("Shrink to compact")
+                                }
+
+                                // "Watch It Evolve" — timelapse through the
+                                // drawing's snapshot history. Needs at least
+                                // one snapshot-bearing critique plus a way
+                                // to capture the live canvas.
+                                if timelapseAvailable {
+                                    Button(action: { presentTimelapse() }) {
+                                        Image(systemName: "play.circle.fill")
+                                            .foregroundColor(.accentColor)
+                                    }
+                                    .help("Watch it evolve")
                                 }
 
                                 // Reset position button

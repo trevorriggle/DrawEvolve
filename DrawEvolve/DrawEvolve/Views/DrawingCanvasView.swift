@@ -1107,7 +1107,8 @@ struct DrawingCanvasView: View {
                                 timestamp: entry.timestamp
                             )
                         },
-                        initialSelectedEntryId: preselectedCritique?.id
+                        initialSelectedEntryId: preselectedCritique?.id,
+                        currentCanvasImage: { canvasState.exportImage() }
                     )
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
@@ -1526,6 +1527,7 @@ struct DrawingCanvasView: View {
                         )
                     },
                     initialSelectedEntryId: preselectedCritique?.id,
+                    currentCanvasImage: { canvasState.exportImage() },
                     isInSnapshotMode: canvasState.viewingSnapshot != nil
                 )
             }
