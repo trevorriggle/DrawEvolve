@@ -23,7 +23,11 @@ class AnonymousUserManager {
         // Generate new UUID
         let newID = UUID().uuidString
         UserDefaults.standard.set(newID, forKey: userIDKey)
+        #if DEBUG
+        // DEBUG-only: a device-tracking identifier doesn't belong in the
+        // release syslog (readable via sysdiagnose / console capture).
         print("✅ Generated new anonymous user ID: \(newID)")
+        #endif
         return newID
     }
 

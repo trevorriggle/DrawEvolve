@@ -1320,7 +1320,9 @@ class CanvasRenderer: NSObject {
         guard let tex = device.makeTexture(descriptor: desc) else {
             return nil
         }
+        #if DEBUG
         print("[EVE-AUDIT] STROKE_SCRATCH_ALLOC \(targetW)x\(targetH) storageMode=private") // EVE-RENDER-AUDIT-LOG
+        #endif
         strokeScratch = tex
         return tex
     }
@@ -1346,7 +1348,9 @@ class CanvasRenderer: NSObject {
         let bytesPerRow = w * 4
         let bytesPerImage = bytesPerRow * h
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        #if DEBUG
         print("[EVE-AUDIT] STROKE_SCRATCH_CLEAR \(w)x\(h)") // EVE-RENDER-AUDIT-LOG
+        #endif
         blit.copy(
             from: zeros,
             sourceOffset: 0,
@@ -2615,7 +2619,9 @@ class CanvasRenderer: NSObject {
             return
         }
         enc.setRenderPipelineState(pipeline)
+        #if DEBUG
         print("[EVE-AUDIT] WETINK_DEPOSIT tool=\(session.tool) stamps=\(stamps.count) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
+        #endif
         enc.setFragmentTexture(session.selectionMask, index: 2)
 
         var uniforms = BrushUniforms(
@@ -2754,7 +2760,9 @@ class CanvasRenderer: NSObject {
         rp.colorAttachments[0].storeAction = .store
         if let enc = cb.makeRenderCommandEncoder(descriptor: rp) {
             enc.setRenderPipelineState(commitPipeline)
+            #if DEBUG
             print("[EVE-AUDIT] WETINK_COMMIT tool=\(session.tool) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
+            #endif
             enc.setFragmentTexture(scratch, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             enc.endEncoding()
@@ -3970,7 +3978,9 @@ class CanvasRenderer: NSObject {
         let canvasH = Int(canvasSize.height)
 
         renderEncoder.setRenderPipelineState(pipeline)
+        #if DEBUG
         print("[EVE-AUDIT] WETINK_PREVIEW_DRAWABLE tool=\(session.tool)") // EVE-RENDER-AUDIT-LOG
+        #endif
         // Treat the full-canvas scratch as a single tile covering the
         // entire canvas. tileDirectVertexShader's math handles the
         // canvas-fraction → drawable-NDC chain identically to a tile.

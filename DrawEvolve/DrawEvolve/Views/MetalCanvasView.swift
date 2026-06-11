@@ -13,14 +13,20 @@ import UIKit
 class TouchEnabledMTKView: MTKView {
     weak var touchDelegate: TouchHandling?
 
+    // Touch-phase prints are DEBUG-only: they fire on EVERY touch phase
+    // (240 Hz coalesced Pencil input), and unbuffered print on a release
+    // build is pure overhead on the hottest path in the app.
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        #if DEBUG
         print("TouchEnabledMTKView: touchesBegan received \(touches.count) touches")
+        #endif
         super.touchesBegan(touches, with: event)
         if let delegate = touchDelegate {
-            print("TouchEnabledMTKView: Forwarding to delegate")
             delegate.touchesBegan(touches, in: self, with: event)
         } else {
+            #if DEBUG
             print("TouchEnabledMTKView: WARNING - No touch delegate!")
+            #endif
         }
     }
 
@@ -30,13 +36,17 @@ class TouchEnabledMTKView: MTKView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        #if DEBUG
         print("TouchEnabledMTKView: touchesEnded received")
+        #endif
         super.touchesEnded(touches, with: event)
         touchDelegate?.touchesEnded(touches, in: self, with: event)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        #if DEBUG
         print("TouchEnabledMTKView: touchesCancelled received")
+        #endif
         super.touchesCancelled(touches, with: event)
         touchDelegate?.touchesCancelled(touches, in: self, with: event)
     }
@@ -1566,7 +1576,9 @@ struct MetalCanvasView: UIViewRepresentable {
             // renderer-owned monolithic preview texture (no tile compose).
             for (index, layer) in layers.enumerated() where layer.isVisible {
                 #if FEATURE_TILE_DIRECT_RENDERING
+                #if DEBUG
                 print("[EVE-AUDIT] PATH=tile_direct layer=\(layer.id.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
+                #endif
                 // Tile-direct rendering (Tier C 9). Rasterises each visible
                 // tile directly onto the drawable in a single per-layer pass;
                 // no canvas-sized tileDisplayIntermediate is materialised.

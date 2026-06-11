@@ -22,6 +22,10 @@ struct DrawingDetailView: View {
     let onContinueDrawing: () -> Void
     @State private var drawingContext: DrawingContext
     @State private var showDeleteAlert = false
+    /// Non-nil presents the "Couldn't Delete" alert — set when
+    /// deleteDrawing throws, so the view doesn't dismiss on a failed
+    /// delete (the drawing is still there; closing would lie about it).
+    @State private var deleteErrorMessage: String?
     @State private var fullImageData: Data?
     @State private var isLoadingImage = true
     /// Editable copy of the drawing's title. INTENTIONALLY a @Binding
@@ -298,12 +302,31 @@ struct DrawingDetailView: View {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
                 Task {
-                    try? await storageManager.deleteDrawing(id: drawing.id)
-                    dismiss()
+                    // Dismiss ONLY on success. The old `try?` + always-
+                    // dismiss combo meant a failed delete closed the view
+                    // anyway — the user watched it "delete" while the
+                    // drawing quietly survived in the cloud.
+                    do {
+                        try await storageManager.deleteDrawing(id: drawing.id)
+                        dismiss()
+                    } catch {
+                        deleteErrorMessage = error.localizedDescription
+                    }
                 }
             }
         } message: {
             Text("Are you sure you want to delete '\(drawing.title)'? This cannot be undone.")
+        }
+        .alert(
+            "Couldn't Delete",
+            isPresented: Binding(
+                get: { deleteErrorMessage != nil },
+                set: { if !$0 { deleteErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(deleteErrorMessage ?? "Something went wrong. Please try again.")
         }
     }
 

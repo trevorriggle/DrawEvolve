@@ -43,6 +43,8 @@
 	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>DrawEvolve saves your finished drawings to Photos when you tap Download.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>DrawEvolve lets you pick reference images from your Photo Library to draw alongside on the canvas.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
