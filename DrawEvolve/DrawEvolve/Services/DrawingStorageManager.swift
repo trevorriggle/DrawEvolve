@@ -378,7 +378,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // so future decode bugs are diagnosable from the Xcode console
             // instead of just "data couldn't be read".
             let detail = Self.describeDecodeFailure(error)
-            print("☁️ fetchDrawings cloud query failed: \(detail) — falling back to local cache")
+            dbgLog("☁️ fetchDrawings cloud query failed: \(detail) — falling back to local cache")
             error.log(context: "CloudDrawingStorageManager.fetchDrawings: \(detail)")
             errorMessage = "Couldn't reach the cloud — showing cached drawings"
             await hydrateFromLocalCache(for: activeUserID)
@@ -398,7 +398,7 @@ final class CloudDrawingStorageManager: ObservableObject {
                 guard drawing.userId == userID else { continue }
                 loaded.append(drawing)
             } catch {
-                print("⚠️ Local cache decode failed for \(url.lastPathComponent): \(Self.describeDecodeFailure(error))")
+                dbgLog("⚠️ Local cache decode failed for \(url.lastPathComponent): \(Self.describeDecodeFailure(error))")
             }
         }
         drawings = loaded.sorted { $0.updatedAt > $1.updatedAt }
@@ -521,7 +521,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         }.value
         try persistArtifactsLocally(drawing: drawing, artifacts: artifacts)
         drawings.insert(drawing, at: 0)
-        print("💾 Saved drawing locally: \(drawing.id) '\(title)' (\(critiqueHistory.count) critiques)")
+        dbgLog("💾 Saved drawing locally: \(drawing.id) '\(title)' (\(critiqueHistory.count) critiques)")
 
         enqueueUpload(for: drawing)
         return drawing
@@ -571,7 +571,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         drawing.updatedAt = Date()
         try persistLocally(drawing: drawing, imageData: nil)
         drawings[index] = drawing
-        print("💾 Renamed drawing locally: \(id) → '\(trimmed)'")
+        dbgLog("💾 Renamed drawing locally: \(id) → '\(trimmed)'")
 
         guard let client = SupabaseManager.shared.client else {
             throw DrawingStorageError.saveFailed
@@ -596,7 +596,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             .update(patch)
             .eq("id", value: id.uuidString.lowercased())
             .execute()
-        print("☁️ Renamed drawing on cloud: \(id) → '\(trimmed)'")
+        dbgLog("☁️ Renamed drawing on cloud: \(id) → '\(trimmed)'")
     }
 
     /// Set or clear the Composition / "Eye Test" intent marker on a
@@ -622,7 +622,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         drawing.updatedAt = Date()
         try persistLocally(drawing: drawing, imageData: nil)
         drawings[index] = drawing
-        print("💾 Updated intent marker locally: \(id) → \(marker.map { "(\($0.x), \($0.y))" } ?? "nil")")
+        dbgLog("💾 Updated intent marker locally: \(id) → \(marker.map { "(\($0.x), \($0.y))" } ?? "nil")")
 
         guard let client = SupabaseManager.shared.client else {
             throw DrawingStorageError.saveFailed
@@ -653,7 +653,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             .update(patch)
             .eq("id", value: id.uuidString.lowercased())
             .execute()
-        print("☁️ Updated intent marker on cloud: \(id)")
+        dbgLog("☁️ Updated intent marker on cloud: \(id)")
     }
 
     func updateDrawing(
@@ -674,7 +674,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // races an in-flight cloud upload). Surfacing an explicit error
             // lets the caller decide how to recover instead of silently
             // dropping the save.
-            print("❌ updateDrawing: drawing \(id) not in memory")
+            dbgLog("❌ updateDrawing: drawing \(id) not in memory")
             throw DrawingStorageError.drawingNotFound
         }
 
@@ -705,7 +705,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             try persistLocally(drawing: drawing, imageData: nil)
         }
         drawings[index] = drawing
-        print("💾 Updated drawing locally: \(id) '\(drawing.title)'")
+        dbgLog("💾 Updated drawing locally: \(id) '\(drawing.title)'")
 
         enqueueUpload(for: drawing)
     }
@@ -773,7 +773,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         try writeLayeredThumbnailLocally(drawingID: drawingID, jpeg: normalized.thumbnailJPEG)
         writeMetadataToCache(drawing)
         drawings.insert(drawing, at: 0)
-        print("💾 Saved layered drawing locally: \(drawingID) '\(title)' (\(normalized.layerPNGs.count) layers)")
+        dbgLog("💾 Saved layered drawing locally: \(drawingID) '\(title)' (\(normalized.layerPNGs.count) layers)")
 
         enqueueLayeredUpload(for: drawing, payload: normalized, legacy: nil)
         return drawing
@@ -797,7 +797,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         errorMessage = nil
 
         guard let index = drawings.firstIndex(where: { $0.id == id }) else {
-            print("❌ updateLayeredDrawing: drawing \(id) not in memory")
+            dbgLog("❌ updateLayeredDrawing: drawing \(id) not in memory")
             throw DrawingStorageError.drawingNotFound
         }
 
@@ -850,7 +850,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         }
 
         drawings[index] = drawing
-        print("💾 Updated layered drawing locally: \(id) '\(drawing.title)' (\(normalized.layerPNGs.count) layers)")
+        dbgLog("💾 Updated layered drawing locally: \(id) '\(drawing.title)' (\(normalized.layerPNGs.count) layers)")
 
         enqueueLayeredUpload(for: drawing, payload: normalized, legacy: legacyCleanup)
     }
@@ -899,7 +899,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             let (data, _) = try await URLSession.shared.data(from: signed)
             manifestData = data
         } catch {
-            print("☁️ loadLayeredDrawing manifest fetch failed for \(drawingID): \(error.localizedDescription)")
+            dbgLog("☁️ loadLayeredDrawing manifest fetch failed for \(drawingID): \(error.localizedDescription)")
             return nil
         }
 
@@ -910,7 +910,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // A decode failure may signal a format-version bump older clients
             // can't read; surface as nil so the canvas can show the
             // "please update" UX (sprint 2 wires the messaging).
-            print("☁️ loadLayeredDrawing manifest decode failed for \(drawingID): \(error.localizedDescription)")
+            dbgLog("☁️ loadLayeredDrawing manifest decode failed for \(drawingID): \(error.localizedDescription)")
             return nil
         }
 
@@ -998,7 +998,7 @@ final class CloudDrawingStorageManager: ObservableObject {
                 .from(storageBucketID)
                 .remove(paths: cloudObjectPaths(for: drawing))
         } catch {
-            print("☁️ deleteDrawing cloud delete failed (kept local delete): \(error.localizedDescription)")
+            dbgLog("☁️ deleteDrawing cloud delete failed (kept local delete): \(error.localizedDescription)")
         }
     }
 
@@ -1059,7 +1059,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         defer { isLoading = false }
         errorMessage = nil
 
-        print("🗑️ Clearing all drawings (local + cloud)")
+        dbgLog("🗑️ Clearing all drawings (local + cloud)")
 
         for (_, task) in activeUploadTasks { task.cancel() }
         activeUploadTasks.removeAll()
@@ -1093,7 +1093,7 @@ final class CloudDrawingStorageManager: ObservableObject {
                     .from(storageBucketID)
                     .remove(paths: cloudObjectPaths(for: drawing))
             } catch {
-                print("☁️ clearAllDrawings cloud delete failed for \(drawing.id): \(error.localizedDescription)")
+                dbgLog("☁️ clearAllDrawings cloud delete failed for \(drawing.id): \(error.localizedDescription)")
             }
         }
     }
@@ -1244,7 +1244,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // a 404. Without this branch, the gallery would cache the 4xx
             // body and try to render it as an image.
             if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                print("☁️ loadFullImage \(id): signed URL returned \(http.statusCode) — reconciling orphan")
+                dbgLog("☁️ loadFullImage \(id): signed URL returned \(http.statusCode) — reconciling orphan")
                 await reconcileOrphanStoragePath(for: drawing)
                 return nil
             }
@@ -1258,7 +1258,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             try? data.write(to: cacheURL)
             return data
         } catch {
-            print("☁️ loadFullImage failed for \(id): \(error.localizedDescription)")
+            dbgLog("☁️ loadFullImage failed for \(id): \(error.localizedDescription)")
             return nil
         }
     }
@@ -1290,22 +1290,22 @@ final class CloudDrawingStorageManager: ObservableObject {
         let hasLocalLayered = fileManager.fileExists(atPath: layeredComposite.path)
 
         if hasLocalFlat || hasLocalLayered {
-            print("☁️ reconcile \(id): local bytes present, re-enqueuing upload")
+            dbgLog("☁️ reconcile \(id): local bytes present, re-enqueuing upload")
             enqueueUpload(for: drawing)
             return
         }
 
         if drawing.manifestPath != nil {
-            print("☁️ reconcile \(id): no local composite, but manifest_path is set — clearing dangling storage_path on the row")
+            dbgLog("☁️ reconcile \(id): no local composite, but manifest_path is set — clearing dangling storage_path on the row")
             do {
                 try await clearStoragePath(id: id)
             } catch {
-                print("☁️ reconcile \(id): clearStoragePath failed: \(error.localizedDescription)")
+                dbgLog("☁️ reconcile \(id): clearStoragePath failed: \(error.localizedDescription)")
             }
             return
         }
 
-        print("☁️ reconcile \(id): no local bytes AND no manifest — drawing has no recoverable data. Row left untouched; surface to user via future broken-drawing UI.")
+        dbgLog("☁️ reconcile \(id): no local bytes AND no manifest — drawing has no recoverable data. Row left untouched; surface to user via future broken-drawing UI.")
     }
 
     /// Returns the on-disk path where a layered drawing's composite JPEG
@@ -1364,7 +1364,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             .update(patch)
             .eq("id", value: id.uuidString.lowercased())
             .execute()
-        print("☁️ Cleared dangling storage_path on \(id)")
+        dbgLog("☁️ Cleared dangling storage_path on \(id)")
     }
 
     // MARK: - D2: proactive orphan sweep
@@ -1406,7 +1406,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             return
         }
 
-        print("☁️ orphan sweep: checking \(candidates.count) drawing(s) for user \(userID.uuidString.lowercased())")
+        dbgLog("☁️ orphan sweep: checking \(candidates.count) drawing(s) for user \(userID.uuidString.lowercased())")
         let chunkSize = 4
         var index = 0
         while index < candidates.count {
@@ -1427,7 +1427,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         // cancelled / failed sweep should not satisfy the throttle, so
         // the next fetchDrawings still gets a chance to retry.
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: throttleKey)
-        print("☁️ orphan sweep complete for user \(userID.uuidString.lowercased())")
+        dbgLog("☁️ orphan sweep complete for user \(userID.uuidString.lowercased())")
     }
 
     /// Per-drawing existence check. Routes through the existing
@@ -1436,13 +1436,13 @@ final class CloudDrawingStorageManager: ObservableObject {
     private func reconcileSingleDrawingIfOrphan(_ drawing: Drawing) async {
         if let storagePath = drawing.storagePath {
             if await isCloudObjectMissing(path: storagePath) {
-                print("☁️ orphan sweep: storage_path missing for \(drawing.id) — reconciling")
+                dbgLog("☁️ orphan sweep: storage_path missing for \(drawing.id) — reconciling")
                 await reconcileOrphanStoragePath(for: drawing)
             }
         }
         if let manifestPath = drawing.manifestPath {
             if await isCloudObjectMissing(path: manifestPath) {
-                print("☁️ orphan sweep: manifest_path missing for \(drawing.id) — reconciling")
+                dbgLog("☁️ orphan sweep: manifest_path missing for \(drawing.id) — reconciling")
                 await reconcileOrphanManifestPath(for: drawing)
             }
         }
@@ -1493,7 +1493,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         let manifestURL = layerDir.appendingPathComponent(LayeredDrawingFilenames.manifest)
         guard let manifestData = try? Data(contentsOf: manifestURL),
               let manifest = try? JSONDecoder().decode(LayeredDrawingManifest.self, from: manifestData) else {
-            print("☁️ reconcile-manifest \(id): no local manifest — cannot heal. Row left untouched.")
+            dbgLog("☁️ reconcile-manifest \(id): no local manifest — cannot heal. Row left untouched.")
             return
         }
 
@@ -1501,7 +1501,7 @@ final class CloudDrawingStorageManager: ObservableObject {
         for layer in manifest.layers {
             let url = layerDir.appendingPathComponent(layer.asset)
             guard let bytes = try? Data(contentsOf: url) else {
-                print("☁️ reconcile-manifest \(id): layer \(layer.ordinal) bytes missing locally — cannot heal. Row left untouched.")
+                dbgLog("☁️ reconcile-manifest \(id): layer \(layer.ordinal) bytes missing locally — cannot heal. Row left untouched.")
                 return
             }
             layerPNGs.append(bytes)
@@ -1516,7 +1516,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             thumbnailJPEG: try? Data(contentsOf: thumbURL)
         )
 
-        print("☁️ reconcile-manifest \(id): local bundle complete — re-enqueuing layered upload")
+        dbgLog("☁️ reconcile-manifest \(id): local bundle complete — re-enqueuing layered upload")
         enqueueLayeredUpload(for: drawing, payload: payload, legacy: nil)
     }
 
@@ -1606,7 +1606,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             let data = try Self.makeEncoder().encode(drawing)
             try data.write(to: url)
         } catch {
-            print("⚠️ Failed to write metadata cache for \(drawing.id): \(error)")
+            dbgLog("⚠️ Failed to write metadata cache for \(drawing.id): \(error)")
         }
     }
 
@@ -1733,7 +1733,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // local artifact never will, and the stalled-attempt threshold
             // (slice 2) is what surfaces that case to the user.
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            print("☁️ Flat upload missing local image bytes for \(id) (attempt \(attempts)) — scheduling retry")
+            dbgLog("☁️ Flat upload missing local image bytes for \(id) (attempt \(attempts)) — scheduling retry")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
             return
@@ -1769,10 +1769,10 @@ final class CloudDrawingStorageManager: ObservableObject {
             nextRetryAt[id] = nil
             activeUploadTasks[id] = nil
             refreshPendingState()
-            print("☁️ Uploaded \(drawing.id) '\(drawing.title)'")
+            dbgLog("☁️ Uploaded \(drawing.id) '\(drawing.title)'")
         } catch {
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            print("☁️ Upload failed for \(drawing.id) (attempt \(attempts)) — keeping pending: \(error.localizedDescription)")
+            dbgLog("☁️ Upload failed for \(drawing.id) (attempt \(attempts)) — keeping pending: \(error.localizedDescription)")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
@@ -1864,7 +1864,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             // and the stalled-attempt threshold (slice 2) is what surfaces
             // that case to the user.
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            print("☁️ Layered upload missing local manifest for \(id) (attempt \(attempts)) — scheduling retry")
+            dbgLog("☁️ Layered upload missing local manifest for \(id) (attempt \(attempts)) — scheduling retry")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
             return
@@ -2032,12 +2032,12 @@ final class CloudDrawingStorageManager: ObservableObject {
             nextRetryAt[id] = nil
             activeUploadTasks[id] = nil
             refreshPendingState()
-            print("☁️ Uploaded layered \(drawing.id) '\(drawing.title)' (\(layerCount) layers)")
+            dbgLog("☁️ Uploaded layered \(drawing.id) '\(drawing.title)' (\(layerCount) layers)")
         } catch {
             // Persist whatever we got done so the next retry resumes correctly.
             updatePendingEntry(entry)
             let attempts = (incrementPendingAttempts(id: id) ?? 1)
-            print("☁️ Layered upload failed for \(drawing.id) (attempt \(attempts)) — keeping pending: \(error.localizedDescription)")
+            dbgLog("☁️ Layered upload failed for \(drawing.id) (attempt \(attempts)) — keeping pending: \(error.localizedDescription)")
             scheduleBackoff(for: id, attempts: attempts)
             activeUploadTasks[id] = nil
         }
@@ -2307,7 +2307,7 @@ final class CloudDrawingStorageManager: ObservableObject {
             let data = try Self.makeEncoder().encode(entry)
             try data.write(to: url)
         } catch {
-            print("⚠️ Failed to write pending entry for \(entry.drawingID): \(error)")
+            dbgLog("⚠️ Failed to write pending entry for \(entry.drawingID): \(error)")
         }
     }
 

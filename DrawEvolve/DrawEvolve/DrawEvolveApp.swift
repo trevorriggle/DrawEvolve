@@ -7,6 +7,21 @@
 
 import SwiftUI
 
+/// Debug-only console logging. `print` is synchronous, unbuffered I/O —
+/// at the volume this codebase logs (hundreds of lines per drawing
+/// session), it's measurable battery/CPU on Release builds and exposes
+/// internal state to the device syslog. All diagnostic call sites route
+/// through here (2026-06-11 perf pass); the body compiles to nothing in
+/// Release. Variadic args still evaluate in Release — acceptable, the
+/// dominant cost is the I/O — so keep anything EXPENSIVE (big string
+/// dumps, image describes) behind an explicit `#if DEBUG` block instead.
+@inline(__always)
+func dbgLog(_ items: Any...) {
+    #if DEBUG
+    print(items.map { "\($0)" }.joined(separator: " "))
+    #endif
+}
+
 @main
 struct DrawEvolveApp: App {
     @StateObject private var authManager = AuthManager.shared

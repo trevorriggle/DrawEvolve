@@ -18,14 +18,14 @@ class TouchEnabledMTKView: MTKView {
     // build is pure overhead on the hottest path in the app.
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         #if DEBUG
-        print("TouchEnabledMTKView: touchesBegan received \(touches.count) touches")
+        dbgLog("TouchEnabledMTKView: touchesBegan received \(touches.count) touches")
         #endif
         super.touchesBegan(touches, with: event)
         if let delegate = touchDelegate {
             delegate.touchesBegan(touches, in: self, with: event)
         } else {
             #if DEBUG
-            print("TouchEnabledMTKView: WARNING - No touch delegate!")
+            dbgLog("TouchEnabledMTKView: WARNING - No touch delegate!")
             #endif
         }
     }
@@ -37,7 +37,7 @@ class TouchEnabledMTKView: MTKView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         #if DEBUG
-        print("TouchEnabledMTKView: touchesEnded received")
+        dbgLog("TouchEnabledMTKView: touchesEnded received")
         #endif
         super.touchesEnded(touches, with: event)
         touchDelegate?.touchesEnded(touches, in: self, with: event)
@@ -45,7 +45,7 @@ class TouchEnabledMTKView: MTKView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         #if DEBUG
-        print("TouchEnabledMTKView: touchesCancelled received")
+        dbgLog("TouchEnabledMTKView: touchesCancelled received")
         #endif
         super.touchesCancelled(touches, with: event)
         touchDelegate?.touchesCancelled(touches, in: self, with: event)
@@ -334,16 +334,16 @@ struct MetalCanvasView: UIViewRepresentable {
     func makeUIView(context: Context) -> MTKView {
         let metalView = TouchEnabledMTKView()
 
-        print("MetalCanvasView: Creating MTKView")
+        dbgLog("MetalCanvasView: Creating MTKView")
 
         guard let device = MTLCreateSystemDefaultDevice() else {
-            print("MetalCanvasView: FATAL - Metal not supported!")
+            dbgLog("MetalCanvasView: FATAL - Metal not supported!")
             // Return a basic view that just shows white instead of crashing
             metalView.backgroundColor = .white
             return metalView
         }
 
-        print("MetalCanvasView: Metal device created: \(device.name)")
+        dbgLog("MetalCanvasView: Metal device created: \(device.name)")
 
         metalView.device = device
         metalView.delegate = context.coordinator
@@ -351,10 +351,21 @@ struct MetalCanvasView: UIViewRepresentable {
         // explicitly calls setNeedsDisplay() — touch handlers do so after each
         // dispatch (touchesBegan/Moved/Ended/Cancelled), and updateUIView
         // already calls it on SwiftUI state changes (line below). Idle canvas
-        // = no per-frame work. Background pause is handled by the Coordinator's
-        // didEnterBackground / willEnterForeground observers (Fix 1.2).
+        // = no per-frame work.
+        //
+        // BOTH flags must be true for event-driven mode. This shipped for
+        // weeks as `isPaused = false`, which keeps MTKView's internal
+        // display link free-running — draw(in:) fired at 120 Hz
+        // (acquiring a drawable + building DrawFrameSnapshot + encoding
+        // the full composite every tick) even on a completely idle
+        // canvas, silently defeating the entire snapshot-gate /
+        // throttled-redraw architecture around it. That was the
+        // idle-battery / iPad-runs-hot burner (2026-06-11 perf pass).
+        // If the canvas ever appears frozen after a state change, the
+        // fix is adding the missed field to CanvasRenderSnapshot — NOT
+        // flipping this back to false.
         metalView.enableSetNeedsDisplay = true
-        metalView.isPaused = false
+        metalView.isPaused = true
         // framebufferOnly = true lets Metal optimise the drawable as
         // write-only — on TBDR Apple GPUs the drawable's tile memory
         // doesn't have to be materialised back to DRAM between frames,
@@ -419,7 +430,7 @@ struct MetalCanvasView: UIViewRepresentable {
         let hoverGesture = UIHoverGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleHover(_:)))
         metalView.addGestureRecognizer(hoverGesture)
 
-        print("MetalCanvasView: MTKView configured successfully with gesture recognizers (pinch, pan, rotation, hover)")
+        dbgLog("MetalCanvasView: MTKView configured successfully with gesture recognizers (pinch, pan, rotation, hover)")
 
         return metalView
     }
@@ -1028,11 +1039,15 @@ struct MetalCanvasView: UIViewRepresentable {
                 object: nil,
             )
 
-            print("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
+            dbgLog("Coordinator: Initialized with \(layers.wrappedValue.count) layers")
         }
 
         @objc private func handleAppDidEnterBackground() {
             DispatchQueue.main.async { [weak self] in
+                // Redundant under event-driven rendering (isPaused is
+                // already true for life) but kept as belt-and-suspenders:
+                // if some future change un-pauses the view, backgrounding
+                // still stops the display link.
                 self?.metalView?.isPaused = true
             }
         }
@@ -1040,9 +1055,11 @@ struct MetalCanvasView: UIViewRepresentable {
         @objc private func handleAppWillEnterForeground() {
             DispatchQueue.main.async { [weak self] in
                 guard let view = self?.metalView else { return }
-                // Order matters: un-pause the display link first so the
-                // setNeedsDisplay call below has somewhere to land.
-                view.isPaused = false
+                // Event-driven rendering (2026-06-11 perf pass): the view
+                // stays PAUSED for life — un-pausing here was what
+                // silently re-enabled the free-running 120 Hz display
+                // link after the first backgrounding. One explicit
+                // redraw refreshes the frame iOS may have purged.
                 view.setNeedsDisplay()
             }
         }
@@ -1163,13 +1180,13 @@ struct MetalCanvasView: UIViewRepresentable {
             view.preferredFramesPerSecond = target
             view.setNeedsDisplay()
             #if DEBUG
-            print("🌡️ Thermal state \(state) — preferredFramesPerSecond → \(target)")
+            dbgLog("🌡️ Thermal state \(state) — preferredFramesPerSecond → \(target)")
             #endif
         }
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
             // Handle view size changes (e.g., rotation)
-            print("MTKView: Drawable size changed to \(size)")
+            dbgLog("MTKView: Drawable size changed to \(size)")
 
             // Update screen size in canvas state (use bounds, not drawable size)
             // Touch coordinates are in bounds space (logical points), not pixels
@@ -1187,8 +1204,8 @@ struct MetalCanvasView: UIViewRepresentable {
                     // blocky/low-res stroke edges. Doc coord system scales
                     // with texture size; brush defaults compensated below.
                     renderer.updateCanvasSize(for: view.drawableSize)
-                    print("  - Updated canvasState.screenSize to \(view.bounds.size) (bounds, not drawable size)")
-                    print("  - Canvas size updated to \(renderer.canvasSize)")
+                    dbgLog("  - Updated canvasState.screenSize to \(view.bounds.size) (bounds, not drawable size)")
+                    dbgLog("  - Canvas size updated to \(renderer.canvasSize)")
                 }
             }
         }
@@ -1371,7 +1388,7 @@ struct MetalCanvasView: UIViewRepresentable {
                   let drawable = view.currentDrawable,
                   let descriptor = view.currentRenderPassDescriptor else {
                 #if DEBUG
-                print("MetalCanvasView.draw: Failed to get device/drawable/descriptor")
+                dbgLog("MetalCanvasView.draw: Failed to get device/drawable/descriptor")
                 #endif
                 return
             }
@@ -1379,7 +1396,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Initialize renderer if needed
             if renderer == nil {
                 #if DEBUG
-                print("MetalCanvasView.draw: Initializing renderer")
+                dbgLog("MetalCanvasView.draw: Initializing renderer")
                 #endif
                 renderer = CanvasRenderer(metalDevice: device)
 
@@ -1397,9 +1414,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     // with texture size; brush defaults compensated below.
                     renderer.updateCanvasSize(for: view.drawableSize)
                     #if DEBUG
-                    print("MetalCanvasView.draw: Shared renderer with canvas state")
-                    print("  - Screen size: \(view.bounds.size)")
-                    print("  - Canvas size: \(renderer.canvasSize)")
+                    dbgLog("MetalCanvasView.draw: Shared renderer with canvas state")
+                    dbgLog("  - Screen size: \(view.bounds.size)")
+                    dbgLog("  - Canvas size: \(renderer.canvasSize)")
                     #endif
 
                     #if DEBUG
@@ -1577,7 +1594,7 @@ struct MetalCanvasView: UIViewRepresentable {
             for (index, layer) in layers.enumerated() where layer.isVisible {
                 #if FEATURE_TILE_DIRECT_RENDERING
                 #if DEBUG
-                print("[EVE-AUDIT] PATH=tile_direct layer=\(layer.id.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
+                dbgLog("[EVE-AUDIT] PATH=tile_direct layer=\(layer.id.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
                 #endif
                 // Tile-direct rendering (Tier C 9). Rasterises each visible
                 // tile directly onto the drawable in a single per-layer pass;
@@ -1952,7 +1969,7 @@ struct MetalCanvasView: UIViewRepresentable {
             for i in 0..<layers.count {
                 if layers[i].tileGrid == nil {
                     #if DEBUG
-                    print("⚠️ Layer \(i) '\(layers[i].name)' has NIL tileGrid - creating new one. Layer ID: \(layers[i].id)")
+                    dbgLog("⚠️ Layer \(i) '\(layers[i].name)' has NIL tileGrid - creating new one. Layer ID: \(layers[i].id)")
                     #endif
                     layers[i].tileGrid = renderer.makeEmptyTileGrid()
                     if layers[i].tileGrid != nil {
@@ -1963,10 +1980,10 @@ struct MetalCanvasView: UIViewRepresentable {
 
             if created {
                 #if DEBUG
-                print("📋 Current layer state:")
+                dbgLog("📋 Current layer state:")
                 for (i, layer) in layers.enumerated() {
                     let gridState = layer.tileGrid != nil ? "tileGrid ready" : "❌ NO GRID"
-                    print("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: \(gridState)")
+                    dbgLog("  Layer \(i) '\(layer.name)' [ID: \(layer.id)]: \(gridState)")
                 }
                 #endif
             }
@@ -2048,9 +2065,9 @@ struct MetalCanvasView: UIViewRepresentable {
 
         // Touch handling for drawing
         func touchesBegan(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
-            print("👆 === TOUCH BEGAN ===")
+            dbgLog("👆 === TOUCH BEGAN ===")
             guard let touch = touches.first else {
-                print("ERROR: No touch in set")
+                dbgLog("ERROR: No touch in set")
                 return
             }
 
@@ -2063,7 +2080,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // here — touches with no valid active layer are no-ops.
             guard !layers.isEmpty,
                   layers.indices.contains(selectedLayerIndex) else {
-                print("⚠️ touchesBegan ignored: no valid active layer (layers.count=\(layers.count), selectedLayerIndex=\(selectedLayerIndex))")
+                dbgLog("⚠️ touchesBegan ignored: no valid active layer (layers.count=\(layers.count), selectedLayerIndex=\(selectedLayerIndex))")
                 return
             }
 
@@ -2143,23 +2160,23 @@ struct MetalCanvasView: UIViewRepresentable {
                 coordDiagLogsRemaining -= 1
                 let bounds = view.bounds.size
                 let drawable = view.drawableSize
-                print("🧭 COORD DIAG [\(3 - coordDiagLogsRemaining)/3]")
-                print("  screenLocation (UIKit pts): \(screenLocation)")
-                print("  document (after screenToDocument): \(location)")
-                print("  view.bounds.size (pts): \(bounds)")
-                print("  view.drawableSize (px): \(drawable)")
-                print("  canvasState.screenSize: \(cs.screenSize)")
-                print("  canvasState.documentSize: \(cs.documentSize)")
-                print("  zoomScale: \(cs.zoomScale)  panOffset: \(cs.panOffset)  rotation: \(cs.canvasRotation.degrees)°")
-                print("  touch.type: \(touch.type.rawValue)  force: \(touch.force)/\(touch.maximumPossibleForce)")
+                dbgLog("🧭 COORD DIAG [\(3 - coordDiagLogsRemaining)/3]")
+                dbgLog("  screenLocation (UIKit pts): \(screenLocation)")
+                dbgLog("  document (after screenToDocument): \(location)")
+                dbgLog("  view.bounds.size (pts): \(bounds)")
+                dbgLog("  view.drawableSize (px): \(drawable)")
+                dbgLog("  canvasState.screenSize: \(cs.screenSize)")
+                dbgLog("  canvasState.documentSize: \(cs.documentSize)")
+                dbgLog("  zoomScale: \(cs.zoomScale)  panOffset: \(cs.panOffset)  rotation: \(cs.canvasRotation.degrees)°")
+                dbgLog("  touch.type: \(touch.type.rawValue)  force: \(touch.force)/\(touch.maximumPossibleForce)")
             }
 
-            print("Touch began at screen: \(screenLocation) → document: \(location) with pressure \(pressure), tool: \(currentTool)")
-            print("📍 Selected layer INDEX: \(selectedLayerIndex) of \(layers.count) total layers")
+            dbgLog("Touch began at screen: \(screenLocation) → document: \(location) with pressure \(pressure), tool: \(currentTool)")
+            dbgLog("📍 Selected layer INDEX: \(selectedLayerIndex) of \(layers.count) total layers")
             if let layer = layers[safe: selectedLayerIndex] {
-                print("   Will draw to: '\(layer.name)' - has tile grid: \(layer.tileGrid != nil)")
+                dbgLog("   Will draw to: '\(layer.name)' - has tile grid: \(layer.tileGrid != nil)")
             } else {
-                print("   ❌ ERROR: selectedLayerIndex \(selectedLayerIndex) is OUT OF BOUNDS!")
+                dbgLog("   ❌ ERROR: selectedLayerIndex \(selectedLayerIndex) is OUT OF BOUNDS!")
             }
 
             // Handle blur adjustment tool — horizontal-drag scrubber for sigma.
@@ -2184,7 +2201,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 guard selectedLayerIndex < layers.count,
                       layers[selectedLayerIndex].tileGrid != nil,
                       let renderer = renderer else {
-                    print("Smudge: cannot begin stroke — invalid layer or tile grid")
+                    dbgLog("Smudge: cannot begin stroke — invalid layer or tile grid")
                     return
                 }
                 // Single-active-stroke discipline: if any stroke session is
@@ -2193,7 +2210,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // a transform gesture, in which case touchesCancelled tears
                 // down the active session — that path is unchanged.
                 guard strokeSessions.isEmpty else {
-                    print("Smudge: skip touchesBegan, stroke session already active")
+                    dbgLog("Smudge: skip touchesBegan, stroke session already active")
                     return
                 }
                 let layerId = layers[selectedLayerIndex].id
@@ -2207,7 +2224,7 @@ struct MetalCanvasView: UIViewRepresentable {
                                                layerId: layerId,
                                                selectionPath: smudgeSelectionPath,
                                                documentSize: smudgeDocSize) {
-                    print("Smudge: renderer failed to allocate patch textures")
+                    dbgLog("Smudge: renderer failed to allocate patch textures")
                     return
                 }
                 let touchID = ObjectIdentifier(touch)
@@ -2238,7 +2255,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         cs.stampCursorDiameter = diameter
                     }
                 }
-                print("Smudge: began stroke on layer \(selectedLayerIndex) at \(location)")
+                dbgLog("Smudge: began stroke on layer \(selectedLayerIndex) at \(location)")
                 #if DEBUG
                 CanvasStrokeDiagnostics.log("stroke begin stroke=\(CanvasStrokeDiagnostics.shortID(strokeID)) tool=smudge input=\(inputType.diagnosticName) slider{\(CanvasStrokeDiagnostics.format(brushSettings))} pressure=\(CanvasStrokeDiagnostics.format(pressure)) pressureAlpha=\(CanvasStrokeDiagnostics.format(pressureAlpha)) start=\(CanvasStrokeDiagnostics.format(location))")
                 #endif
@@ -2271,7 +2288,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             floatingTextDragStartDoc = location
                             floatingTextDragOriginAnchor = ft.anchor
                             floatingTextDragStartScreen = screenLocation
-                            print("Text tool: began body drag at \(location)")
+                            dbgLog("Text tool: began body drag at \(location)")
                         }
                         return
                     } else {
@@ -2287,14 +2304,14 @@ struct MetalCanvasView: UIViewRepresentable {
                         // Tap outside the float bakes it into the layer.
                         // The tap itself is consumed — the user has to tap
                         // again to start a new text.
-                        print("Text tool: tap outside floating text → commit")
+                        dbgLog("Text tool: tap outside floating text → commit")
                         if let cs = canvasState {
                             MainActor.assumeIsolated { cs.commitFloatingText() }
                         }
                         return
                     }
                 }
-                print("Text tool: requesting text input at \(location)")
+                dbgLog("Text tool: requesting text input at \(location)")
                 onTextRequest?(location)
                 return
             }
@@ -2325,7 +2342,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         if (event?.allTouches?.count ?? 1) > 1 {
                             return
                         }
-                        print("Text-on-path: tap outside → commit")
+                        dbgLog("Text-on-path: tap outside → commit")
                         if let cs = canvasState {
                             MainActor.assumeIsolated { cs.commitFloatingText() }
                         }
@@ -2393,14 +2410,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 // single-finger touchdown.
                 if (touches.count > 1) || ((event?.allTouches?.count ?? 1) > 1) {
                     pendingPaintBucketFill = nil
-                    print("Paint bucket: multi-touch detected on begin, suppressing pending fill")
+                    dbgLog("Paint bucket: multi-touch detected on begin, suppressing pending fill")
                     return
                 }
                 guard selectedLayerIndex < layers.count,
                       layers[selectedLayerIndex].tileGrid != nil,
                       let renderer = renderer,
                       let canvasState = canvasState else {
-                    print("ERROR: Cannot prepare paint-bucket fill - invalid layer or tile grid")
+                    dbgLog("ERROR: Cannot prepare paint-bucket fill - invalid layer or tile grid")
                     pendingPaintBucketFill = nil
                     return
                 }
@@ -2409,7 +2426,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // canvas also blocks hits, but this is the authoritative
                 // check.
                 if canvasState.isFilling {
-                    print("Paint bucket: ignoring tap, fill already in progress")
+                    dbgLog("Paint bucket: ignoring tap, fill already in progress")
                     pendingPaintBucketFill = nil
                     return
                 }
@@ -2419,7 +2436,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     layerId: layers[selectedLayerIndex].id,
                     beforeSnapshot: layers[selectedLayerIndex].tileGrid.flatMap { renderer.captureSnapshot(tileGrid: $0) }
                 )
-                print("Paint bucket: pending fill captured at \(location) (awaiting touchesEnded)")
+                dbgLog("Paint bucket: pending fill captured at \(location) (awaiting touchesEnded)")
                 return
             }
 
@@ -2427,10 +2444,10 @@ struct MetalCanvasView: UIViewRepresentable {
             // composite of visible layers (not just the active layer) so the
             // user picks the color they actually see.
             if currentTool == .eyeDropper {
-                print("Eyedropper: picking color at \(location)")
+                dbgLog("Eyedropper: picking color at \(location)")
                 guard let renderer = renderer,
                       let composite = renderer.compositeLayersToTexture(layers: layers) else {
-                    print("ERROR: Cannot pick color - composite unavailable")
+                    dbgLog("ERROR: Cannot pick color - composite unavailable")
                     return
                 }
 
@@ -2446,7 +2463,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     MainActor.assumeIsolated {
                         PaletteManager.shared.addRecentColor(pickedColor)
                     }
-                    print("Picked color: \(pickedColor)")
+                    dbgLog("Picked color: \(pickedColor)")
                 }
 
                 return
@@ -2468,7 +2485,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                     isDraggingSelection = true
                     selectionDragStart = location
-                    print("Move tool: began whole-layer translation drag")
+                    dbgLog("Move tool: began whole-layer translation drag")
                     return
                 }
             }
@@ -2546,7 +2563,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     MainActor.assumeIsolated {
                         canvasState.isTransformingSelection = true
                     }
-                    print("Started dragging selection at \(location)")
+                    dbgLog("Started dragging selection at \(location)")
                     return
                 }
 
@@ -2572,12 +2589,12 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Store screen-space start too — the marquee needs this to build a
                 // screen-axis-aligned quad that survives canvas rotation.
                 marqueeStartScreen = screenLocation
-                print("Selection tool: stored start point \(location) (screen: \(screenLocation))")
+                dbgLog("Selection tool: stored start point \(location) (screen: \(screenLocation))")
 
                 // For lasso, start building the path
                 if currentTool == .lasso {
                     lassoPath = [location]
-                    print("Lasso: started path with point \(location)")
+                    dbgLog("Lasso: started path with point \(location)")
                 }
 
                 // Clear previous selection when starting new one
@@ -2610,7 +2627,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // constraint path instead of starting a competing stroke.
                 shapePrimaryTouchID = ObjectIdentifier(touch)
                 shapeConstraintTouchIDs.removeAll()
-                print("Shape tool: stored start point \(location) (screen: \(screenLocation))")
+                dbgLog("Shape tool: stored start point \(location) (screen: \(screenLocation))")
             }
 
             // Single-active-stroke discipline: bail before creating a new
@@ -2620,7 +2637,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // blur, additive variants) that would otherwise clobber the
             // active session's state under the old single-valued model.
             guard strokeSessions.isEmpty else {
-                print("Drawing tool: skip touchesBegan, stroke session already active")
+                dbgLog("Drawing tool: skip touchesBegan, stroke session already active")
                 return
             }
 
@@ -2738,7 +2755,7 @@ struct MetalCanvasView: UIViewRepresentable {
             session.lastPoint = location
             session.lastTimestamp = timestamp
             strokeSessions[touchID] = session
-            print("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
+            dbgLog("Created stroke with \(initialPoints.count) point(s) (1 + \(initialMirrors.count) mirror)")
             #if DEBUG
             CanvasStrokeDiagnostics.log("stroke begin stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(currentTool) input=\(inputType.diagnosticName) slider{\(CanvasStrokeDiagnostics.format(brushSettings))} pressure=\(CanvasStrokeDiagnostics.format(pressure)) pressureAlpha=\(CanvasStrokeDiagnostics.format(pressureAlpha)) start=\(CanvasStrokeDiagnostics.format(location))")
             #endif
@@ -2900,7 +2917,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 return touches.first
             }()
             guard let touch = touch else {
-                print("touchesMoved: No touch in set")
+                dbgLog("touchesMoved: No touch in set")
                 return
             }
 
@@ -3148,7 +3165,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 requestThrottledRedraw()
 
                 if hypot(dragDelta.x, dragDelta.y) > 5 {
-                    print("Dragging selection with offset: \(offset) (delta: \(dragDelta), base: \(baseOffset))")
+                    dbgLog("Dragging selection with offset: \(offset) (delta: \(dragDelta), base: \(baseOffset))")
                 }
                 return
             }
@@ -3209,7 +3226,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
 
                 if lassoPath.count % 5 == 0 { // Log every 5th point to reduce spam
-                    print("Lasso: path now has \(lassoPath.count) points")
+                    dbgLog("Lasso: path now has \(lassoPath.count) points")
                 }
                 return
             }
@@ -3265,7 +3282,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Regular tools need a current stroke session.
             guard var session = strokeSessions[touchID],
                   var stroke = session.stroke else {
-                print("touchesMoved: No current stroke session for touch")
+                dbgLog("touchesMoved: No current stroke session for touch")
                 return
             }
 
@@ -3535,7 +3552,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
                 // Print every 10th point to avoid spam
                 if stroke.points.count % 10 == 0 {
-                    print("touchesMoved: stroke has \(stroke.points.count) points (coalesced samples: \(samples.count))")
+                    dbgLog("touchesMoved: stroke has \(stroke.points.count) points (coalesced samples: \(samples.count))")
                 }
             }
 
@@ -3634,7 +3651,7 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         func touchesEnded(_ touches: Set<UITouch>, in view: MTKView, with event: UIEvent?) {
-            print("=== TOUCH ENDED ===")
+            dbgLog("=== TOUCH ENDED ===")
 
             // Hover-cursor suppression flag rides every early return in
             // this function. defer covers them all from one place.
@@ -3728,7 +3745,7 @@ struct MetalCanvasView: UIViewRepresentable {
                       let tileGrid = layers[pending.layerIndex].tileGrid,
                       let renderer = renderer,
                       let canvasState = canvasState else {
-                    print("Paint bucket: pending fill abandoned — layer changed before lift")
+                    dbgLog("Paint bucket: pending fill abandoned — layer changed before lift")
                     return
                 }
                 if canvasState.isFilling {
@@ -3813,7 +3830,7 @@ struct MetalCanvasView: UIViewRepresentable {
                                 beforeSnapshot: before,
                                 afterSnapshot: after
                             ))
-                            print("Smudge: recorded stroke undo (before: \(before.totalByteCount)B, after: \(after.totalByteCount)B)")
+                            dbgLog("Smudge: recorded stroke undo (before: \(before.totalByteCount)B, after: \(after.totalByteCount)B)")
                         }
                         // Refresh thumbnail off-thread.
                         let smudgeTileGrid: TileGrid? = layers[li].tileGrid
@@ -3915,7 +3932,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Handle ending a selection drag
             if isDraggingSelection {
-                print("Finished dragging selection — transform now pending (await Apply/Cancel)")
+                dbgLog("Finished dragging selection — transform now pending (await Apply/Cancel)")
                 isDraggingSelection = false
                 selectionDragStart = nil
                 // Drag finished cleanly via touchesEnded — the lift (if it
@@ -3941,7 +3958,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Handle selection tools
             guard let touch = touches.first else {
-                print("ERROR: No touch in set")
+                dbgLog("ERROR: No touch in set")
                 return
             }
 
@@ -3963,7 +3980,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let docSize = canvasState?.documentSize ?? .zero
                 let maybeCorners: [CGPoint?] = corners.map { canvasState?.screenToDocumentOrNil($0) }
                 guard maybeCorners.allSatisfy({ $0 != nil }) else {
-                    print("Rectangle select: corner conversion failed (NaN) — ignoring selection")
+                    dbgLog("Rectangle select: corner conversion failed (NaN) — ignoring selection")
                     if let canvasState = canvasState {
                         Task { @MainActor in
                             canvasState.previewSelection = nil
@@ -3976,7 +3993,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let docCorners: [CGPoint] = maybeCorners.compactMap { $0 }.map {
                     CanvasStateManager.clampToCanvas($0, documentSize: docSize)
                 }
-                print("Rectangle select: creating polygon selection with corners \(docCorners)")
+                dbgLog("Rectangle select: creating polygon selection with corners \(docCorners)")
 
                 // Rect min-size validation — parity with the lasso's
                 // existing <10×10 reject (audit §7.2 #1). A 1×1 invisible
@@ -3988,7 +4005,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let height = (ys.max() ?? 0) - (ys.min() ?? 0)
                 let minSelectionSize: CGFloat = 10
                 if width < minSelectionSize || height < minSelectionSize {
-                    print("Rectangle select: too small (\(width)x\(height)), ignoring")
+                    dbgLog("Rectangle select: too small (\(width)x\(height)), ignoring")
                     if let canvasState = canvasState {
                         Task { @MainActor in
                             canvasState.previewSelection = nil
@@ -4009,7 +4026,7 @@ struct MetalCanvasView: UIViewRepresentable {
                         canvasState.previewSelection = nil
                         canvasState.previewLassoPath = nil
                         canvasState.setSelectionPolygon(docCorners)
-                        print("Rectangle selection created as polygon: \(docCorners)")
+                        dbgLog("Rectangle selection created as polygon: \(docCorners)")
                         view.setNeedsDisplay()
                     }
                 }
@@ -4019,12 +4036,12 @@ struct MetalCanvasView: UIViewRepresentable {
             }
 
             if currentTool == .lasso {
-                print("Lasso: creating selection from path with \(lassoPath.count) points")
+                dbgLog("Lasso: creating selection from path with \(lassoPath.count) points")
 
                 // IMPORTANT: Need at least 3 unique points for a valid lasso selection
                 // (After closing the path with the first point, we need at least 4 total)
                 if lassoPath.count < 3 {
-                    print("Lasso: path too short (\(lassoPath.count) points), ignoring selection")
+                    dbgLog("Lasso: path too short (\(lassoPath.count) points), ignoring selection")
                     // Clear lasso path and preview
                     lassoPath = []
                     resetShapeToolState()
@@ -4046,7 +4063,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 let minSelectionSize: CGFloat = 10 // Minimum 10x10 pixel area
 
                 if width < minSelectionSize || height < minSelectionSize {
-                    print("Lasso: selection too small (\(width)x\(height)), ignoring")
+                    dbgLog("Lasso: selection too small (\(width)x\(height)), ignoring")
                     // Clear lasso path and preview
                     lassoPath = []
                     resetShapeToolState()
@@ -4074,7 +4091,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // ring in doc space.
                 let preSimplifyCount = lassoPath.count
                 lassoPath = simplifyPathRDP(lassoPath, epsilon: 1.0)
-                print("Lasso: simplified \(preSimplifyCount) → \(lassoPath.count) points")
+                dbgLog("Lasso: simplified \(preSimplifyCount) → \(lassoPath.count) points")
 
                 // Close the path by connecting back to start
                 lassoPath.append(lassoPath[0])
@@ -4087,7 +4104,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     Task { @MainActor in
                         canvasState.previewLassoPath = nil // Clear preview
                         canvasState.setSelectionPolygon(pathCopy)
-                        print("Lasso selection created with \(pathCopy.count) points")
+                        dbgLog("Lasso selection created with \(pathCopy.count) points")
                         view.setNeedsDisplay()
                     }
                 }
@@ -4134,11 +4151,11 @@ struct MetalCanvasView: UIViewRepresentable {
             guard let touchID = endingTouchID,
                   let session = strokeSessions[touchID],
                   let stroke = session.stroke else {
-                print("ERROR: No current stroke to commit")
+                dbgLog("ERROR: No current stroke to commit")
                 return
             }
 
-            print("Committing stroke with \(stroke.points.count) points")
+            dbgLog("Committing stroke with \(stroke.points.count) points")
 
             // Ensure textures are initialized before committing
             ensureLayerTextures()
@@ -4173,7 +4190,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             beforeSnapshot: before,
                             afterSnapshot: after
                         ))
-                        print("Recorded eraser stroke in history (before: \(before.totalByteCount) bytes, after: \(after.totalByteCount) bytes)")
+                        dbgLog("Recorded eraser stroke in history (before: \(before.totalByteCount) bytes, after: \(after.totalByteCount) bytes)")
                     }
                     DispatchQueue.global(qos: .utility).async {
                         if let thumbnail = renderer.generateThumbnail(fromTileGrid: capturedTileGrid, size: CGSize(width: 44, height: 44)) {
@@ -4200,7 +4217,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Commit stroke to layer
             guard selectedLayerIndex < layers.count else {
-                print("ERROR: Invalid layer index \(selectedLayerIndex)")
+                dbgLog("ERROR: Invalid layer index \(selectedLayerIndex)")
                 strokeSessions.removeValue(forKey: touchID)
                 renderer?.endPreviewMask()
                 return
@@ -4366,14 +4383,14 @@ struct MetalCanvasView: UIViewRepresentable {
                 // Stroke points are in document space which matches canvas space
                 // IMPORTANT: Pass document size to ensure 1:1 coordinate mapping
                 let documentSize = MainActor.assumeIsolated { canvasState?.documentSize ?? view.bounds.size }
-                print("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)'")
-                print("  Document size: \(documentSize.width)x\(documentSize.height)")
+                dbgLog("✏️ Drawing to Layer \(selectedLayerIndex) '\(layer.name)'")
+                dbgLog("  Document size: \(documentSize.width)x\(documentSize.height)")
 
                 // Capture snapshot BEFORE rendering stroke
-                print("Capturing BEFORE snapshot...")
+                dbgLog("Capturing BEFORE snapshot...")
                 let beforeSnapshot = renderer.captureSnapshot(tileGrid: tileGrid)
                 if beforeSnapshot == nil {
-                    print("WARNING: Failed to capture before snapshot")
+                    dbgLog("WARNING: Failed to capture before snapshot")
                 }
 
                 let currentLayerIndex = selectedLayerIndex
@@ -4399,12 +4416,12 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
                 dispatchStroke { [weak self] in
-                    print("Stroke committed successfully - texture should now contain the stroke")
+                    dbgLog("Stroke committed successfully - texture should now contain the stroke")
 
-                    print("Capturing AFTER snapshot...")
+                    dbgLog("Capturing AFTER snapshot...")
                     let afterSnapshot = renderer.captureSnapshot(tileGrid: capturedTileGrid)
                     if afterSnapshot == nil {
-                        print("WARNING: Failed to capture after snapshot")
+                        dbgLog("WARNING: Failed to capture after snapshot")
                     }
 
                     if let before = beforeSnapshot, let after = afterSnapshot,
@@ -4414,7 +4431,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             beforeSnapshot: before,
                             afterSnapshot: after
                         ))
-                        print("Recorded stroke in history (before: \(before.totalByteCount) bytes, after: \(after.totalByteCount) bytes)")
+                        dbgLog("Recorded stroke in history (before: \(before.totalByteCount) bytes, after: \(after.totalByteCount) bytes)")
                     }
 
                     // Mark the drawing dirty for auto-save. Stroke commit
@@ -4439,9 +4456,9 @@ struct MetalCanvasView: UIViewRepresentable {
                     }
                 }
             } else {
-                print("ERROR: Could not render stroke")
-                print("  - Tile grid exists: \(layer.tileGrid != nil)")
-                print("  - Renderer exists: \(renderer != nil)")
+                dbgLog("ERROR: Could not render stroke")
+                dbgLog("  - Tile grid exists: \(layer.tileGrid != nil)")
+                dbgLog("  - Renderer exists: \(renderer != nil)")
             }
 
             // Remove the session — preview stops compositing this stroke.
@@ -4462,7 +4479,7 @@ struct MetalCanvasView: UIViewRepresentable {
                     cs.stampCursorDiameter = 0
                 }
             }
-            print("Stroke cleared from preview, should now be visible in layer texture")
+            dbgLog("Stroke cleared from preview, should now be visible in layer texture")
             view.setNeedsDisplay()
         }
 
@@ -4501,7 +4518,7 @@ struct MetalCanvasView: UIViewRepresentable {
                let tileGrid = layers[selectedLayerIndex].tileGrid,
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
-                print("Eraser cancelled — restored layer to pre-stroke snapshot")
+                dbgLog("Eraser cancelled — restored layer to pre-stroke snapshot")
             }
 
             // Real-time blur stroke: same rollback semantics as eraser.
@@ -4516,7 +4533,7 @@ struct MetalCanvasView: UIViewRepresentable {
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
                 renderer.cancelBlurStroke()
-                print("Blur cancelled — restored layer to pre-stroke snapshot")
+                dbgLog("Blur cancelled — restored layer to pre-stroke snapshot")
             }
             blurStrokeActive = false
             blurStrokeLayerIndex = nil
@@ -4535,7 +4552,7 @@ struct MetalCanvasView: UIViewRepresentable {
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
                 renderer.cancelWetInkStroke()
-                print("Wet-ink brush cancelled — restored layer to pre-stroke snapshot")
+                dbgLog("Wet-ink brush cancelled — restored layer to pre-stroke snapshot")
             } else if let renderer = renderer {
                 renderer.cancelWetInkStroke()
             }
@@ -5577,7 +5594,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             // Bounds check
             guard x >= 0, y >= 0, x < texture.width, y < texture.height else {
-                print("Eyedropper: point \(point) out of bounds")
+                dbgLog("Eyedropper: point \(point) out of bounds")
                 return nil
             }
 
@@ -5606,7 +5623,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Bail on transparent pixels — picking "nothing" should be a no-op,
             // not silently set the brush to fully transparent black.
             guard a > 0.01 else {
-                print("Eyedropper: pixel at \(point) is transparent, ignoring")
+                dbgLog("Eyedropper: pixel at \(point) is transparent, ignoring")
                 return nil
             }
 
@@ -5647,7 +5664,7 @@ struct MetalCanvasView: UIViewRepresentable {
             switch gesture.state {
             case .began:
                 captureTransformAnchorIfNeeded(gesture, at: location)
-                print("Pinch began at \(location), scale: \(gesture.scale)")
+                dbgLog("Pinch began at \(location), scale: \(gesture.scale)")
 
             case .changed:
                 // CRITICAL: capture `gesture.scale` synchronously BEFORE resetting and
@@ -5673,7 +5690,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             case .ended, .cancelled:
                 releaseTransformAnchor(gesture)
-                print("Pinch ended, final zoom: \(canvasState.zoomScale)")
+                dbgLog("Pinch ended, final zoom: \(canvasState.zoomScale)")
 
             default:
                 break
@@ -5691,7 +5708,7 @@ struct MetalCanvasView: UIViewRepresentable {
                 // centroid if it happens to fire first.
                 let location = gesture.location(in: view)
                 captureTransformAnchorIfNeeded(gesture, at: location)
-                print("Two-finger pan began")
+                dbgLog("Two-finger pan began")
 
             case .changed:
                 let translation = gesture.translation(in: view)
@@ -5705,7 +5722,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
             case .ended, .cancelled:
                 releaseTransformAnchor(gesture)
-                print("Two-finger pan ended")
+                dbgLog("Two-finger pan ended")
 
             default:
                 break
@@ -5770,7 +5787,7 @@ struct MetalCanvasView: UIViewRepresentable {
             switch gesture.state {
             case .began:
                 captureTransformAnchorIfNeeded(gesture, at: location)
-                print("Rotation began at \(location)")
+                dbgLog("Rotation began at \(location)")
 
             case .changed:
                 // Capture delta BEFORE resetting. Do NOT snap during `.changed`: the
@@ -5806,11 +5823,11 @@ struct MetalCanvasView: UIViewRepresentable {
                         let snapDelta = Angle(degrees: nearest90 - currentDegrees)
                         let snapAnchor = self.transformAnchor ?? location
                         canvasState.rotate(by: snapDelta, around: snapAnchor, snapToGrid: false)
-                        print("Snapped to nearest 90°: \(nearest90)°")
+                        dbgLog("Snapped to nearest 90°: \(nearest90)°")
                     }
                 }
                 releaseTransformAnchor(gesture)
-                print("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
+                dbgLog("Rotation ended, final rotation: \(canvasState.canvasRotation.degrees)°")
 
             case .cancelled:
                 releaseTransformAnchor(gesture)

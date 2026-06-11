@@ -515,7 +515,7 @@ class CanvasStateManager: ObservableObject {
         let layer = DrawingLayer(name: "Layer \(layers.count + 1)")
         layers.append(layer)
         selectedLayerIndex = layers.count - 1
-        print("➕ Added '\(layer.name)' - selectedLayerIndex now = \(selectedLayerIndex), total layers = \(layers.count)")
+        dbgLog("➕ Added '\(layer.name)' - selectedLayerIndex now = \(selectedLayerIndex), total layers = \(layers.count)")
         historyManager.record(.layerAdded(layer))
         bumpLayerMutation()
     }
@@ -739,7 +739,7 @@ class CanvasStateManager: ObservableObject {
         if let texture = renderer.makeTexture(from: liftState.liftedPixels) {
             floatingSelectionTexture = texture
         } else {
-            print("⚠️ restoreLiftedState: makeTexture(from:) returned nil — floating texture not rebuilt")
+            dbgLog("⚠️ restoreLiftedState: makeTexture(from:) returned nil — floating texture not rebuilt")
         }
 
         selectionPath = liftState.sourcePath
@@ -782,7 +782,7 @@ class CanvasStateManager: ObservableObject {
                let tileGrid = layer.tileGrid,
                let renderer = renderer {
                 renderer.restoreSnapshot(beforeSnapshot, tileGrid: tileGrid)
-                print("Undo stroke - restored tile grid from snapshot (\(beforeSnapshot.totalByteCount) bytes)")
+                dbgLog("Undo stroke - restored tile grid from snapshot (\(beforeSnapshot.totalByteCount) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
@@ -863,7 +863,7 @@ class CanvasStateManager: ObservableObject {
                let tileGrid = layer.tileGrid,
                let renderer = renderer {
                 renderer.restoreSnapshot(afterSnapshot, tileGrid: tileGrid)
-                print("Redo stroke - restored tile grid from snapshot (\(afterSnapshot.totalByteCount) bytes)")
+                dbgLog("Redo stroke - restored tile grid from snapshot (\(afterSnapshot.totalByteCount) bytes)")
 
                 // Update thumbnail (avoid Sendable warnings by not capturing directly)
                 nonisolated(unsafe) let unsafeRenderer = renderer
@@ -972,7 +972,7 @@ class CanvasStateManager: ObservableObject {
     func exportImage() -> UIImage? {
         // Export all layers as single composited image
         guard let renderer = renderer else {
-            print("ERROR: Renderer not available for export")
+            dbgLog("ERROR: Renderer not available for export")
             return nil
         }
         return renderer.exportImage(layers: layers)
@@ -1073,7 +1073,7 @@ class CanvasStateManager: ObservableObject {
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let cachedTexture = ft.cachedTexture else {
-            print("⚠️ commitFloatingText: missing layer/tile-grid/cached image — discarding")
+            dbgLog("⚠️ commitFloatingText: missing layer/tile-grid/cached image — discarding")
             return
         }
 
@@ -1352,7 +1352,7 @@ class CanvasStateManager: ObservableObject {
         guard let renderer = renderer,
               selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid else {
-            print("ERROR: Cannot load image - renderer or tile grid not available")
+            dbgLog("ERROR: Cannot load image - renderer or tile grid not available")
             return
         }
 
@@ -1360,7 +1360,7 @@ class CanvasStateManager: ObservableObject {
 
         // IMPORTANT: Mark that we've loaded an existing image so buttons enable
         hasLoadedExistingImage = true
-        print("  - hasLoadedExistingImage set to true (buttons should now be enabled)")
+        dbgLog("  - hasLoadedExistingImage set to true (buttons should now be enabled)")
 
         // Update thumbnail
         nonisolated(unsafe) let unsafeRenderer = renderer
@@ -1487,14 +1487,14 @@ class CanvasStateManager: ObservableObject {
     @discardableResult
     func loadLayered(_ payload: LayeredDrawingPayload) -> LayeredLoadResult {
         guard let renderer = renderer else {
-            print("ERROR: Cannot load layered drawing - renderer not available")
+            dbgLog("ERROR: Cannot load layered drawing - renderer not available")
             return .loaded
         }
 
         let manifest = payload.manifest
 
         if manifest.formatVersion > Self.supportedManifestVersion {
-            print("⚠️ Layered manifest format_version \(manifest.formatVersion) > supported \(Self.supportedManifestVersion); refusing to load")
+            dbgLog("⚠️ Layered manifest format_version \(manifest.formatVersion) > supported \(Self.supportedManifestVersion); refusing to load")
             return .formatTooNew(
                 savedVersion: manifest.formatVersion,
                 supportedVersion: Self.supportedManifestVersion
@@ -1591,9 +1591,9 @@ class CanvasStateManager: ObservableObject {
             let __ts = __layer.tileGrid?.tileSize ?? 0
             __a3Lines.append("layer[\(__idx)] id=\(__layer.id.uuidString.prefix(8)) name=\(__layer.name) allocatedKeys=\(__keys)/\(__gw * __gh) grid=\(__gw)×\(__gh) tile=\(__ts) tileGrid=\(__layer.tileGrid == nil ? "NIL" : "set")")
         }
-        print("📥 LOADLAYERED-A3 finished. layers.count=\(layers.count) hasLoadedExistingImage=\(hasLoadedExistingImage) selectedLayerIndex=\(selectedLayerIndex)")
+        dbgLog("📥 LOADLAYERED-A3 finished. layers.count=\(layers.count) hasLoadedExistingImage=\(hasLoadedExistingImage) selectedLayerIndex=\(selectedLayerIndex)")
         for __line in __a3Lines { print("📥 LOADLAYERED-A3   \(__line)") }
-        print("📥 LOADLAYERED-A3 redrawTrigger=NONE_EXPLICIT — relies on @Published layers mutation → CanvasRenderSnapshot mismatch → MetalCanvasView.updateUIView setNeedsDisplay")
+        dbgLog("📥 LOADLAYERED-A3 redrawTrigger=NONE_EXPLICIT — relies on @Published layers mutation → CanvasRenderSnapshot mismatch → MetalCanvasView.updateUIView setNeedsDisplay")
 
         // Document-size sanity check is informational — we don't resample.
         let saved = CGSize(width: manifest.document.width, height: manifest.document.height)
@@ -1652,7 +1652,7 @@ class CanvasStateManager: ObservableObject {
                 layer.tileGrid = grid
             }
             guard let png = renderer.layerPNGData(fromTileGrid: grid) else {
-                print("⚠️ exportLayeredPayload: failed to read layer \(idx) '\(layer.name)' — dropping from save")
+                dbgLog("⚠️ exportLayeredPayload: failed to read layer \(idx) '\(layer.name)' — dropping from save")
                 continue
             }
             layerPNGs.append(png)
@@ -1672,7 +1672,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         guard !layerPNGs.isEmpty else {
-            print("❌ exportLayeredPayload: every layer readback failed")
+            dbgLog("❌ exportLayeredPayload: every layer readback failed")
             return nil
         }
 
@@ -1725,7 +1725,7 @@ class CanvasStateManager: ObservableObject {
     /// (Corner scale/rotate handles are deferred — see audit doc.)
     func importImage(_ image: UIImage) {
         guard let renderer = renderer else {
-            print("ERROR: Cannot import image - renderer not ready")
+            dbgLog("ERROR: Cannot import image - renderer not ready")
             return
         }
 
@@ -1741,7 +1741,7 @@ class CanvasStateManager: ObservableObject {
 
         addLayer()
         guard selectedLayerIndex < layers.count else {
-            print("ERROR: Cannot import image - selectedLayerIndex out of range")
+            dbgLog("ERROR: Cannot import image - selectedLayerIndex out of range")
             return
         }
 
@@ -1755,7 +1755,7 @@ class CanvasStateManager: ObservableObject {
             layers[selectedLayerIndex].tileGrid = renderer.makeEmptyTileGrid()
         }
         guard layers[selectedLayerIndex].tileGrid != nil else {
-            print("ERROR: Cannot import image - failed to create tile grid")
+            dbgLog("ERROR: Cannot import image - failed to create tile grid")
             return
         }
 
@@ -1805,7 +1805,7 @@ class CanvasStateManager: ObservableObject {
         floatingSelectionTexture = renderer.makeTexture(from: resized)
 
         if floatingSelectionTexture == nil {
-            print("⚠️ Failed to upload imported image to a Metal texture; falling back to direct composite")
+            dbgLog("⚠️ Failed to upload imported image to a Metal texture; falling back to direct composite")
             if let tileGrid = layers[selectedLayerIndex].tileGrid {
                 renderer.renderImage(resized, at: rect, tileGrid: tileGrid, screenSize: documentSize)
             }
@@ -1813,7 +1813,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         hasLoadedExistingImage = true
-        print("📷 Imported image as floating selection at \(rect) (texture \(displayPixelSize))")
+        dbgLog("📷 Imported image as floating selection at \(rect) (texture \(displayPixelSize))")
     }
 
     /// Aspect-fill resample at scale 1.0 so 1 UIImage point = 1 backing pixel
@@ -1909,7 +1909,7 @@ class CanvasStateManager: ObservableObject {
                 do {
                     try await uploadResult
                 } catch {
-                    print("[snapshot] upload failed for \(clientRequestId): \(error.localizedDescription)")
+                    dbgLog("[snapshot] upload failed for \(clientRequestId): \(error.localizedDescription)")
                 }
             } else {
                 // Legacy non-layered drawing, no layers, or unauthenticated
@@ -2004,7 +2004,7 @@ class CanvasStateManager: ObservableObject {
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer else {
-            print("ERROR: Cannot delete selection - invalid layer or tile grid")
+            dbgLog("ERROR: Cannot delete selection - invalid layer or tile grid")
             return
         }
 
@@ -2106,20 +2106,20 @@ class CanvasStateManager: ObservableObject {
 
         // 1. Pre-lift snapshot — for undo restore + selectionBeforeSnapshot.
         guard let preLiftSnapshot = renderer.captureSnapshot(tileGrid: tileGrid) else {
-            print("⚠️ liftSelectionIfNeeded: captureSnapshot(pre-lift) returned nil")
+            dbgLog("⚠️ liftSelectionIfNeeded: captureSnapshot(pre-lift) returned nil")
             return false
         }
 
         // 2. CPU extraction via point-in-polygon mask.
         guard let pixels = renderer.extractPixels(fromPath: path, tileGrid: tileGrid, screenSize: documentSize) else {
-            print("⚠️ liftSelectionIfNeeded: extractPixels(fromPath:) returned nil")
+            dbgLog("⚠️ liftSelectionIfNeeded: extractPixels(fromPath:) returned nil")
             return false
         }
 
         // 3. Punch the hole in the live layer, then capture with-hole snapshot.
         renderer.clearPath(path, tileGrid: tileGrid, screenSize: documentSize)
         guard let layerWithHoleSnapshot = renderer.captureSnapshot(tileGrid: tileGrid) else {
-            print("⚠️ liftSelectionIfNeeded: captureSnapshot(with-hole) returned nil")
+            dbgLog("⚠️ liftSelectionIfNeeded: captureSnapshot(with-hole) returned nil")
             // We've already modified the layer; restore from pre-lift to
             // keep the user's pixels intact and bail.
             renderer.restoreSnapshot(preLiftSnapshot, tileGrid: tileGrid)
@@ -2128,7 +2128,7 @@ class CanvasStateManager: ObservableObject {
 
         // 4. Upload the lifted pixels to the GPU as the floating texture.
         guard let floatingTexture = renderer.makeTexture(from: pixels) else {
-            print("⚠️ liftSelectionIfNeeded: makeTexture(from:) returned nil")
+            dbgLog("⚠️ liftSelectionIfNeeded: makeTexture(from:) returned nil")
             renderer.restoreSnapshot(preLiftSnapshot, tileGrid: tileGrid)
             return false
         }
@@ -2161,7 +2161,7 @@ class CanvasStateManager: ObservableObject {
         ))
 
         bumpLayerMutation()
-        print("✂️ Lifted selection, bounding rect: \(boundingRect)")
+        dbgLog("✂️ Lifted selection, bounding rect: \(boundingRect)")
         return true
     }
 
@@ -2221,7 +2221,7 @@ class CanvasStateManager: ObservableObject {
               let pixels = selectionPixels,
               let originalRect = selectionOriginalRect,
               let sourcePath = selectionPath else {
-            print("ERROR: Cannot commit selection - missing data (likely commit called without lift)")
+            dbgLog("ERROR: Cannot commit selection - missing data (likely commit called without lift)")
             return
         }
 
@@ -2253,7 +2253,7 @@ class CanvasStateManager: ObservableObject {
             // Fallback: floating texture wasn't built (e.g. extraction failed
             // to upload). Use the legacy CPU path so we still commit *something*
             // rather than losing the user's drag entirely.
-            print("⚠️ Selection commit falling back to CPU composite (no floating texture)")
+            dbgLog("⚠️ Selection commit falling back to CPU composite (no floating texture)")
             renderSelectionInRealTime()
         }
 
@@ -2297,7 +2297,7 @@ class CanvasStateManager: ObservableObject {
 
         // Clear all selection data (pixels, rects, floating texture, etc.)
         clearSelection()
-        print("✅ Selection committed to texture")
+        dbgLog("✅ Selection committed to texture")
     }
 
     /// Throw away the active floating selection and restore the layer
@@ -2331,7 +2331,7 @@ class CanvasStateManager: ObservableObject {
             //
             // For deliberately silent restore (e.g. touchesCancelled
             // cleanup), use cancelSelectionSilently() — landing in commit 5.
-            print("⚠️ cancelSelection: called without complete lifted state — no-op (wiring bug)")
+            dbgLog("⚠️ cancelSelection: called without complete lifted state — no-op (wiring bug)")
             return
         }
 
@@ -2363,7 +2363,7 @@ class CanvasStateManager: ObservableObject {
 
         clearSelection()
         bumpLayerMutation()
-        print("✂️ Cancelled selection — pixels restored, .selectionCancel recorded")
+        dbgLog("✂️ Cancelled selection — pixels restored, .selectionCancel recorded")
     }
 
     /// Single dispatch for the Cancel pill (lands in commit 3). Routes
@@ -2460,7 +2460,7 @@ class CanvasStateManager: ObservableObject {
         guard selectedLayerIndex < layers.count,
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer else {
-            print("ERROR: Cannot begin layer translation - invalid layer or tile grid")
+            dbgLog("ERROR: Cannot begin layer translation - invalid layer or tile grid")
             return
         }
 
@@ -2484,7 +2484,7 @@ class CanvasStateManager: ObservableObject {
               let tileGrid = layers[selectedLayerIndex].tileGrid,
               let renderer = renderer,
               let beforeSnapshot = selectionBeforeSnapshot else {
-            print("ERROR: Cannot commit layer translation - missing data")
+            dbgLog("ERROR: Cannot commit layer translation - missing data")
             return
         }
 
@@ -2514,7 +2514,7 @@ class CanvasStateManager: ObservableObject {
         }
 
         clearSelection()  // resets selectionOffset, isTranslatingActiveLayer, snapshots
-        print("✅ Layer translation committed")
+        dbgLog("✅ Layer translation committed")
     }
 
     /// Revert a pending move-tool whole-layer translation. Restores the
@@ -2535,7 +2535,7 @@ class CanvasStateManager: ObservableObject {
         isTranslatingActiveLayer = false
         selectionBeforeSnapshot = nil
         bumpLayerMutation()
-        print("✂️ Cancelled layer translation — restored")
+        dbgLog("✂️ Cancelled layer translation — restored")
     }
 
     /// True when there is something the Apply button can bake into pixels:
@@ -3189,7 +3189,7 @@ class CanvasStateManager: ObservableObject {
         guard let renderer = renderer,
               let layer = layers[safe: selectedLayerIndex],
               let tileGrid = layer.tileGrid else {
-            print("⚠️ beginBlurAdjustment: missing renderer or layer tile grid; skipping")
+            dbgLog("⚠️ beginBlurAdjustment: missing renderer or layer tile grid; skipping")
             return
         }
         blurAdjustmentSigma = 0.0

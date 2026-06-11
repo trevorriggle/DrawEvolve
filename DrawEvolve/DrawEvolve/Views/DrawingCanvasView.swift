@@ -581,7 +581,7 @@ struct DrawingCanvasView: View {
         .onChange(of: showGallery) { _, isShowing in
             if !isShowing {
                 // Gallery was dismissed - refresh to show any changes
-                print("Gallery dismissed, canvas state preserved")
+                dbgLog("Gallery dismissed, canvas state preserved")
             }
         }
         .alert("Clear Canvas", isPresented: $showClearConfirmation) {
@@ -2649,7 +2649,7 @@ struct DrawingCanvasView: View {
         do {
             try await storageManager.setIntentMarker(id: id, marker: marker)
         } catch {
-            print("⚠️ setIntentMarker failed: \(error.localizedDescription)")
+            dbgLog("⚠️ setIntentMarker failed: \(error.localizedDescription)")
         }
     }
 
@@ -2659,7 +2659,7 @@ struct DrawingCanvasView: View {
         do {
             try await storageManager.setIntentMarker(id: id, marker: nil)
         } catch {
-            print("⚠️ clearIntentMarker failed: \(error.localizedDescription)")
+            dbgLog("⚠️ clearIntentMarker failed: \(error.localizedDescription)")
         }
     }
 
@@ -3915,7 +3915,7 @@ struct DrawingCanvasView: View {
 
     private func loadExistingDrawing() {
         guard let drawing = existingDrawing else {
-            print("DrawingCanvasView: No existing drawing to load")
+            dbgLog("DrawingCanvasView: No existing drawing to load")
             // Pre-populate the save-dialog title from the questionnaire's
             // name field so the user doesn't enter it twice. Only seed
             // when still empty so a mid-session retitle isn't clobbered.
@@ -3933,23 +3933,23 @@ struct DrawingCanvasView: View {
         currentDrawingID = drawing.id
         drawingTitle = drawing.title
 
-        print("DrawingCanvasView: Loading existing drawing")
-        print("  - Drawing ID: \(drawing.id)")
-        print("  - Title: \(drawing.title)")
-        print("  - Storage path: \(drawing.storagePath ?? "<layered/manifest-only>")")
+        dbgLog("DrawingCanvasView: Loading existing drawing")
+        dbgLog("  - Drawing ID: \(drawing.id)")
+        dbgLog("  - Title: \(drawing.title)")
+        dbgLog("  - Storage path: \(drawing.storagePath ?? "<layered/manifest-only>")")
 
         // Load feedback if exists (but keep panel collapsed - user can tap sparkles to view)
         if let feedback = drawing.feedback {
             canvasState.feedback = feedback
             // Don't auto-show panel - let user tap sparkles button to view
-            print("  - Has feedback: YES (loaded, panel collapsed)")
+            dbgLog("  - Has feedback: YES (loaded, panel collapsed)")
         } else {
-            print("  - Has feedback: NO")
+            dbgLog("  - Has feedback: NO")
         }
 
         // Load critique history
         critiqueHistory = drawing.critiqueHistory
-        print("  - Critique history: \(critiqueHistory.count) entries")
+        dbgLog("  - Critique history: \(critiqueHistory.count) entries")
 
         // Async-load the drawing from the cloud-aware storage manager.
         // ONLINELAYERSTORE.md §6.1: prefer the layered path; if the storage
@@ -3964,7 +3964,7 @@ struct DrawingCanvasView: View {
                 attempts += 1
             }
             guard canvasState.renderer != nil else {
-                print("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
+                dbgLog("❌ ERROR: Failed to load drawing - renderer not initialized after \(attempts) attempts")
                 return
             }
 
@@ -3973,7 +3973,7 @@ struct DrawingCanvasView: View {
             do {
                 layered = try await storageManager.loadLayeredDrawing(for: drawing.id)
             } catch {
-                print("⚠️ loadLayeredDrawing threw \(error.localizedDescription) — falling back to flat composite")
+                dbgLog("⚠️ loadLayeredDrawing threw \(error.localizedDescription) — falling back to flat composite")
                 layered = nil
             }
 
@@ -3982,13 +3982,13 @@ struct DrawingCanvasView: View {
                     let result = canvasState.loadLayered(payload)
                     switch result {
                     case .loaded:
-                        print("✅ Successfully loaded layered drawing (\(payload.layerPNGs.count) layers)")
+                        dbgLog("✅ Successfully loaded layered drawing (\(payload.layerPNGs.count) layers)")
                     case .loadedWithIntegrityWarning(let missing):
-                        print("⚠️ Loaded layered drawing with \(missing.count) damaged layer(s): ordinals \(missing) replaced with empty layers")
+                        dbgLog("⚠️ Loaded layered drawing with \(missing.count) damaged layer(s): ordinals \(missing) replaced with empty layers")
                     case .loadedWithSizeMismatch(let w, let h):
-                        print("⚠️ Loaded layered drawing at saved document size \(w)×\(h); current canvas size differs")
+                        dbgLog("⚠️ Loaded layered drawing at saved document size \(w)×\(h); current canvas size differs")
                     case .formatTooNew(let saved, let supported):
-                        print("❌ Layered manifest version \(saved) is newer than supported \(supported); please update")
+                        dbgLog("❌ Layered manifest version \(saved) is newer than supported \(supported); please update")
                     }
                 }
                 return
@@ -3999,35 +3999,35 @@ struct DrawingCanvasView: View {
             do {
                 imageData = try await storageManager.loadFullImage(for: drawing.id)
             } catch {
-                print("❌ ERROR: loadFullImage threw: \(error)")
+                dbgLog("❌ ERROR: loadFullImage threw: \(error)")
                 return
             }
 
             guard let bytes = imageData, let uiImage = UIImage(data: bytes) else {
-                print("❌ ERROR: Failed to obtain image bytes for \(drawing.id)")
+                dbgLog("❌ ERROR: Failed to obtain image bytes for \(drawing.id)")
                 return
             }
-            print("  - UIImage loaded: \(uiImage.size), \(bytes.count) bytes")
+            dbgLog("  - UIImage loaded: \(uiImage.size), \(bytes.count) bytes")
 
             await MainActor.run {
                 canvasState.loadImage(uiImage)
-                print("✅ Successfully loaded existing drawing image onto canvas")
+                dbgLog("✅ Successfully loaded existing drawing image onto canvas")
             }
         }
     }
 
     private func saveDrawing() async {
         guard !drawingTitle.isEmpty else {
-            print("❌ Save cancelled: Title is empty")
+            dbgLog("❌ Save cancelled: Title is empty")
             return
         }
 
         isSaving = true
 
-        print("💾 Saving drawing...")
-        print("  - Title: \(drawingTitle)")
-        print("  - Current Drawing ID: \(currentDrawingID?.uuidString ?? "nil (new drawing)")")
-        print("  - Is editing existing: \(isEditingExisting)")
+        dbgLog("💾 Saving drawing...")
+        dbgLog("  - Title: \(drawingTitle)")
+        dbgLog("  - Current Drawing ID: \(currentDrawingID?.uuidString ?? "nil (new drawing)")")
+        dbgLog("  - Is editing existing: \(isEditingExisting)")
 
         // Layered save path (ONLINELAYERSTORE.md §3, §8.2). The producer reads
         // every layer's MTLTexture back as a lossless RGBA PNG and bundles the
@@ -4036,12 +4036,12 @@ struct DrawingCanvasView: View {
         // that started life as a flat composite.
         let payloadDrawingID = currentDrawingID ?? UUID()
         guard let payload = canvasState.exportLayeredPayload(drawingID: payloadDrawingID) else {
-            print("❌ ERROR: Failed to build layered payload from canvas state")
+            dbgLog("❌ ERROR: Failed to build layered payload from canvas state")
             isSaving = false
             return
         }
 
-        print("  - Layered payload built: \(payload.layerPNGs.count) layer PNG(s), composite=\(payload.compositeJPEG?.count ?? 0) bytes, thumb=\(payload.thumbnailJPEG?.count ?? 0) bytes")
+        dbgLog("  - Layered payload built: \(payload.layerPNGs.count) layer PNG(s), composite=\(payload.compositeJPEG?.count ?? 0) bytes, thumb=\(payload.thumbnailJPEG?.count ?? 0) bytes")
 
         var didSucceed = false
         do {
@@ -4050,7 +4050,7 @@ struct DrawingCanvasView: View {
                 // so the storage manager replaces (not appends to) the stored list.
                 // The storage manager used to synthesize a new CritiqueEntry on every
                 // save-with-feedback, which duplicated the list indefinitely.
-                print("  - Updating existing drawing with ID: \(drawingID)")
+                dbgLog("  - Updating existing drawing with ID: \(drawingID)")
                 try await storageManager.updateLayeredDrawing(
                     id: drawingID,
                     title: drawingTitle,
@@ -4059,11 +4059,11 @@ struct DrawingCanvasView: View {
                     context: context,
                     critiqueHistory: critiqueHistory
                 )
-                print("✅ Drawing updated successfully!")
+                dbgLog("✅ Drawing updated successfully!")
             } else {
                 // Create new drawing. Include any critique entries the user already
                 // accumulated in this session before the first save.
-                print("  - Creating new drawing")
+                dbgLog("  - Creating new drawing")
                 let savedDrawing = try await storageManager.saveLayeredDrawing(
                     title: drawingTitle,
                     payload: payload,
@@ -4074,12 +4074,12 @@ struct DrawingCanvasView: View {
                 // IMPORTANT: Set the currentDrawingID so subsequent saves update instead of creating new
                 currentDrawingID = savedDrawing.id
                 isEditingExisting = true
-                print("✅ Drawing saved successfully with ID: \(savedDrawing.id)")
-                print("  - Future saves will UPDATE this drawing, not create new ones")
+                dbgLog("✅ Drawing saved successfully with ID: \(savedDrawing.id)")
+                dbgLog("  - Future saves will UPDATE this drawing, not create new ones")
             }
             didSucceed = true
         } catch {
-            print("❌ ERROR: Failed to save drawing: \(error)")
+            dbgLog("❌ ERROR: Failed to save drawing: \(error)")
         }
 
         isSaving = false
@@ -4116,7 +4116,7 @@ struct DrawingCanvasView: View {
         defer { isAutoSaving = false }
 
         guard let payload = canvasState.exportLayeredPayload(drawingID: drawingID) else {
-            print("⚠️ Auto-save: failed to build layered payload")
+            dbgLog("⚠️ Auto-save: failed to build layered payload")
             return
         }
         do {
@@ -4143,7 +4143,7 @@ struct DrawingCanvasView: View {
                 }
             }
         } catch {
-            print("⚠️ Auto-save failed (storage queue will retry next tick): \(error)")
+            dbgLog("⚠️ Auto-save failed (storage queue will retry next tick): \(error)")
         }
     }
 
@@ -4244,7 +4244,7 @@ struct DrawingCanvasView: View {
                     compositionFindings: compositionFindings
                 )
             } catch {
-                print("❌ requestFeedback prerequisites failed: \(error.localizedDescription)")
+                dbgLog("❌ requestFeedback prerequisites failed: \(error.localizedDescription)")
                 canvasState.errorMessage = error.localizedDescription
                 canvasState.showError = true
             }
@@ -4262,7 +4262,7 @@ struct DrawingCanvasView: View {
                     context: context
                 )
                 critiqueHistory.append(critiqueEntry)
-                print("Added critique to history (now \(critiqueHistory.count) entries)")
+                dbgLog("Added critique to history (now \(critiqueHistory.count) entries)")
 
                 // Show floating panel after feedback is received
                 withAnimation {

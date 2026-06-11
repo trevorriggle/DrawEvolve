@@ -27,7 +27,7 @@ enum CanvasStrokeDiagnostics {
 
     static func log(_ message: @autoclosure () -> String) {
         guard isEnabled else { return }
-        print("🧪 CANVAS \(message())")
+        dbgLog("🧪 CANVAS \(message())")
     }
 
     static func shortID(_ id: UUID) -> String {
@@ -413,7 +413,7 @@ class CanvasRenderer: NSObject {
         let wssMB = wss / (1024 * 1024)
         let cap = maxCanvasDimension
         let idiom = DeviceIdiom.isPhone ? "phone" : "pad"
-        print("📐 Canvas cap: \(Int(cap))² — idiom=\(idiom), WSS=\(wssMB) MB")
+        dbgLog("📐 Canvas cap: \(Int(cap))² — idiom=\(idiom), WSS=\(wssMB) MB")
     }
 
     /// Update canvas size based on screen dimensions
@@ -432,7 +432,7 @@ class CanvasRenderer: NSObject {
 
         // Only update if size actually changed
         if newSize != _canvasSize {
-            print("📐 Canvas size updated from \(_canvasSize) to \(newSize) based on screen \(screenSize)")
+            dbgLog("📐 Canvas size updated from \(_canvasSize) to \(newSize) based on screen \(screenSize)")
             _canvasSize = newSize
             // Layer composite cache entries are sized to the old canvas;
             // drop them so new entries allocate at the new size. The
@@ -476,7 +476,7 @@ class CanvasRenderer: NSObject {
         let h2 = pow(2, ceil(log2(h)))
         let newSize = CGSize(width: w2, height: h2)
         if newSize != _canvasSize {
-            print("📐 Canvas size set to \(newSize) matching loaded doc (saved=\(savedSize), cap=\(Int(cap))²)")
+            dbgLog("📐 Canvas size set to \(newSize) matching loaded doc (saved=\(savedSize), cap=\(Int(cap))²)")
             _canvasSize = newSize
             layerCompositeCache.updateCanvasSize(newSize)
         }
@@ -502,7 +502,7 @@ class CanvasRenderer: NSObject {
 
     private func setupPipeline() {
         guard let library = device.makeDefaultLibrary() else {
-            print("Failed to create Metal library")
+            dbgLog("Failed to create Metal library")
             return
         }
 
@@ -539,7 +539,7 @@ class CanvasRenderer: NSObject {
               let wetInkCommitFragmentLinear = library.makeFunction(name: "wetInkCommitShaderLinear"),
               let wetInkEraserCommitFragment = library.makeFunction(name: "wetInkEraserCommitShader"),
               let wetInkEraserCommitFragmentLinear = library.makeFunction(name: "wetInkEraserCommitShaderLinear") else {
-            print("Failed to load shader functions")
+            dbgLog("Failed to load shader functions")
             return
         }
 
@@ -937,7 +937,7 @@ class CanvasRenderer: NSObject {
             smudgePatchUpdatePipelineState = try device.makeRenderPipelineState(descriptor: smudgePatchUpdateDescriptor)
             smudgeDepositPipelineState = try device.makeRenderPipelineState(descriptor: smudgeDepositDescriptor)
         } catch {
-            print("Failed to create pipeline states: \(error)")
+            dbgLog("Failed to create pipeline states: \(error)")
         }
 
         // Create a 1x1 opaque white texture for the canvas background quad
@@ -1321,7 +1321,7 @@ class CanvasRenderer: NSObject {
             return nil
         }
         #if DEBUG
-        print("[EVE-AUDIT] STROKE_SCRATCH_ALLOC \(targetW)x\(targetH) storageMode=private") // EVE-RENDER-AUDIT-LOG
+        dbgLog("[EVE-AUDIT] STROKE_SCRATCH_ALLOC \(targetW)x\(targetH) storageMode=private") // EVE-RENDER-AUDIT-LOG
         #endif
         strokeScratch = tex
         return tex
@@ -1349,7 +1349,7 @@ class CanvasRenderer: NSObject {
         let bytesPerImage = bytesPerRow * h
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
         #if DEBUG
-        print("[EVE-AUDIT] STROKE_SCRATCH_CLEAR \(w)x\(h)") // EVE-RENDER-AUDIT-LOG
+        dbgLog("[EVE-AUDIT] STROKE_SCRATCH_CLEAR \(w)x\(h)") // EVE-RENDER-AUDIT-LOG
         #endif
         blit.copy(
             from: zeros,
@@ -1390,7 +1390,7 @@ class CanvasRenderer: NSObject {
         let logURL = docsDir?.appendingPathComponent("wetink_phase_a.log")
 
         func appendLog(_ text: String) {
-            print("🧪 WETINK-A \(text)")
+            dbgLog("🧪 WETINK-A \(text)")
             guard let logURL = logURL else { return }
             let line = text + "\n"
             guard let data = line.data(using: .utf8) else { return }
@@ -1590,7 +1590,7 @@ class CanvasRenderer: NSObject {
         let logURL = docsDir?.appendingPathComponent("wetink_phase_a5.log")
 
         func appendLog(_ text: String) {
-            print("🧪 WETINK-A5 \(text)")
+            dbgLog("🧪 WETINK-A5 \(text)")
             guard let logURL = logURL else { return }
             let line = text + "\n"
             guard let data = line.data(using: .utf8) else { return }
@@ -1764,7 +1764,7 @@ class CanvasRenderer: NSObject {
         let logURL = docsDir?.appendingPathComponent("wetink_phase_b.log")
 
         func appendLog(_ text: String) {
-            print("🧪 WETINK-B \(text)")
+            dbgLog("🧪 WETINK-B \(text)")
             guard let logURL = logURL else { return }
             let line = text + "\n"
             guard let data = line.data(using: .utf8) else { return }
@@ -1973,7 +1973,7 @@ class CanvasRenderer: NSObject {
         let logURL = docsDir?.appendingPathComponent("wetink_phase_c.log")
 
         func appendLog(_ text: String) {
-            print("🧪 WETINK-C \(text)")
+            dbgLog("🧪 WETINK-C \(text)")
             guard let logURL = logURL else { return }
             let line = text + "\n"
             guard let data = line.data(using: .utf8) else { return }
@@ -2214,7 +2214,7 @@ class CanvasRenderer: NSObject {
         let logURL = docsDir?.appendingPathComponent("wetink_phase_d.log")
 
         func appendLog(_ text: String) {
-            print("🧪 WETINK-D \(text)")
+            dbgLog("🧪 WETINK-D \(text)")
             guard let logURL = logURL else { return }
             let line = text + "\n"
             guard let data = line.data(using: .utf8) else { return }
@@ -2521,7 +2521,7 @@ class CanvasRenderer: NSObject {
 
         guard ensureStrokeScratch() != nil,
               let cb = commandQueue.makeCommandBuffer() else {
-            print("⚠️ beginWetInkStroke: scratch or command buffer unavailable")
+            dbgLog("⚠️ beginWetInkStroke: scratch or command buffer unavailable")
             return false
         }
         clearStrokeScratch(on: cb)
@@ -2530,7 +2530,7 @@ class CanvasRenderer: NSObject {
 
         let mask = selectionMaskTexture(for: selectionPath, documentSize: documentSize) ?? noMaskTexture
         guard let selectionMask = mask else {
-            print("⚠️ beginWetInkStroke: selection mask unavailable")
+            dbgLog("⚠️ beginWetInkStroke: selection mask unavailable")
             return false
         }
 
@@ -2620,7 +2620,7 @@ class CanvasRenderer: NSObject {
         }
         enc.setRenderPipelineState(pipeline)
         #if DEBUG
-        print("[EVE-AUDIT] WETINK_DEPOSIT tool=\(session.tool) stamps=\(stamps.count) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
+        dbgLog("[EVE-AUDIT] WETINK_DEPOSIT tool=\(session.tool) stamps=\(stamps.count) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
         #endif
         enc.setFragmentTexture(session.selectionMask, index: 2)
 
@@ -2761,7 +2761,7 @@ class CanvasRenderer: NSObject {
         if let enc = cb.makeRenderCommandEncoder(descriptor: rp) {
             enc.setRenderPipelineState(commitPipeline)
             #if DEBUG
-            print("[EVE-AUDIT] WETINK_COMMIT tool=\(session.tool) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
+            dbgLog("[EVE-AUDIT] WETINK_COMMIT tool=\(session.tool) stroke=\(session.strokeID.uuidString.prefix(8))") // EVE-RENDER-AUDIT-LOG
             #endif
             enc.setFragmentTexture(scratch, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -2943,16 +2943,16 @@ class CanvasRenderer: NSObject {
                       stampIndexBase: Int = 0,
                       completion: (() -> Void)? = nil) {
         #if DEBUG
-        print("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
-        print("  Screen size: \(screenSize.width)x\(screenSize.height)")
-        print("  Canvas size: \(canvasSize.width)x\(canvasSize.height)")
-        print("  Tool: \(stroke.tool)")
-        print("  Brush color: \(stroke.settings.color)")
-        print("  Brush size: \(stroke.settings.size)")
+        dbgLog("🎨 CanvasRenderer: Rendering stroke with \(stroke.points.count) points")
+        dbgLog("  Screen size: \(screenSize.width)x\(screenSize.height)")
+        dbgLog("  Canvas size: \(canvasSize.width)x\(canvasSize.height)")
+        dbgLog("  Tool: \(stroke.tool)")
+        dbgLog("  Brush color: \(stroke.settings.color)")
+        dbgLog("  Brush size: \(stroke.settings.size)")
         #endif
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: renderStroke — failed to ensure staging atlas")
+            dbgLog("ERROR: renderStroke — failed to ensure staging atlas")
             completion?()
             return
         }
@@ -2981,7 +2981,7 @@ class CanvasRenderer: NSObject {
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             #if DEBUG
-            print("CanvasRenderer: Failed to create command buffer")
+            dbgLog("CanvasRenderer: Failed to create command buffer")
             #endif
             strokeCommandSlots.signal()
             completion?()
@@ -3031,7 +3031,7 @@ class CanvasRenderer: NSObject {
 
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             #if DEBUG
-            print("CanvasRenderer: Failed to create render encoder")
+            dbgLog("CanvasRenderer: Failed to create render encoder")
             #endif
             strokeCommandSlots.signal()
             completion?()
@@ -3056,7 +3056,7 @@ class CanvasRenderer: NSObject {
         }()
         guard let pipelineState = pipeline else {
             #if DEBUG
-            print("CanvasRenderer: No pipeline state available")
+            dbgLog("CanvasRenderer: No pipeline state available")
             #endif
             renderEncoder.endEncoding()
             strokeCommandSlots.signal()
@@ -3066,7 +3066,7 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipelineState)
         #if DEBUG
-        print("CanvasRenderer: Pipeline set, rendering points...")
+        dbgLog("CanvasRenderer: Pipeline set, rendering points...")
         #endif
 
         // Selection mask binding (PR 3). Rasterized once at stroke start and
@@ -3090,14 +3090,14 @@ class CanvasRenderer: NSObject {
         // The screenSize parameter is documentSize (which equals canvas size).
         // Points are already scaled correctly from screenToDocument(), so NO SCALING should be applied.
         #if DEBUG
-        print("  Canvas size: \(canvasSize.width)x\(canvasSize.height)")
-        print("  Document size passed: \(screenSize.width)x\(screenSize.height)")
+        dbgLog("  Canvas size: \(canvasSize.width)x\(canvasSize.height)")
+        dbgLog("  Document size passed: \(screenSize.width)x\(screenSize.height)")
         #endif
 
         // Document size and canvas size should be identical (both are the same square canvas)
         if abs(screenSize.width - canvasSize.width) > 1.0 || abs(screenSize.height - canvasSize.height) > 1.0 {
-            print("  ⚠️ WARNING: Document size (\(screenSize)) doesn't match canvas size (\(canvasSize))")
-            print("  This will cause stroke misalignment!")
+            dbgLog("  ⚠️ WARNING: Document size (\(screenSize)) doesn't match canvas size (\(canvasSize))")
+            dbgLog("  This will cause stroke misalignment!")
         }
 
         // NO SCALING - points are already in canvas-pixel coordinate space
@@ -3697,7 +3697,7 @@ class CanvasRenderer: NSObject {
         // Always use the transform pipeline for consistency
         // Pass identity transform when zoom/pan/rotation is not active
         guard let pipelineState = textureDisplayWithTransformPipelineState else {
-            print("ERROR: Transform pipeline state not available")
+            dbgLog("ERROR: Transform pipeline state not available")
             return
         }
 
@@ -3762,7 +3762,7 @@ class CanvasRenderer: NSObject {
                                                   visibleDocRect: CGRect? = nil,
                                                   on commandBuffer: MTLCommandBuffer) {
         guard let intermediate = ensureTileDisplayIntermediate() else {
-            print("⚠️ encodeLayerTileCompositeOntoIntermediate: intermediate unavailable")
+            dbgLog("⚠️ encodeLayerTileCompositeOntoIntermediate: intermediate unavailable")
             return
         }
         encodeLayerCompositeIntoTexture(tileGrid,
@@ -3797,7 +3797,7 @@ class CanvasRenderer: NSObject {
                                          visibleDocRect: CGRect? = nil,
                                          on commandBuffer: MTLCommandBuffer) {
         guard let tilePipeline = compositeTilePipelineState else {
-            print("⚠️ encodeLayerCompositeIntoTexture: pipeline unavailable")
+            dbgLog("⚠️ encodeLayerCompositeIntoTexture: pipeline unavailable")
             return
         }
 
@@ -3808,7 +3808,7 @@ class CanvasRenderer: NSObject {
         composeDesc.colorAttachments[0].storeAction = .store
 
         guard let composeEnc = commandBuffer.makeRenderCommandEncoder(descriptor: composeDesc) else {
-            print("⚠️ encodeLayerCompositeIntoTexture: failed to create encoder")
+            dbgLog("⚠️ encodeLayerCompositeIntoTexture: failed to create encoder")
             return
         }
         composeEnc.setRenderPipelineState(tilePipeline)
@@ -3896,7 +3896,7 @@ class CanvasRenderer: NSObject {
         visibleDocRect: CGRect? = nil
     ) {
         guard let pipeline = tileDirectToDrawablePipelineState else {
-            print("⚠️ encodeLayerTilesDirectlyToDrawable: pipeline unavailable")
+            dbgLog("⚠️ encodeLayerTilesDirectlyToDrawable: pipeline unavailable")
             return
         }
 
@@ -3979,7 +3979,7 @@ class CanvasRenderer: NSObject {
 
         renderEncoder.setRenderPipelineState(pipeline)
         #if DEBUG
-        print("[EVE-AUDIT] WETINK_PREVIEW_DRAWABLE tool=\(session.tool)") // EVE-RENDER-AUDIT-LOG
+        dbgLog("[EVE-AUDIT] WETINK_PREVIEW_DRAWABLE tool=\(session.tool)") // EVE-RENDER-AUDIT-LOG
         #endif
         // Treat the full-canvas scratch as a single tile covering the
         // entire canvas. tileDirectVertexShader's math handles the
@@ -4120,7 +4120,7 @@ class CanvasRenderer: NSObject {
         to renderEncoder: MTLRenderCommandEncoder,
     ) {
         guard let pipelineState = referenceQuadPipelineState else {
-            print("⚠️ renderReferenceBehindLayers: pipeline state missing")
+            dbgLog("⚠️ renderReferenceBehindLayers: pipeline state missing")
             return
         }
 
@@ -4178,7 +4178,7 @@ class CanvasRenderer: NSObject {
         flipState: SIMD2<Float> = SIMD2<Float>(0, 0)
     ) {
         guard let pipelineState = floatingTexturePipelineState else {
-            print("ERROR: Floating texture pipeline state not available")
+            dbgLog("ERROR: Floating texture pipeline state not available")
             return
         }
 
@@ -4228,7 +4228,7 @@ class CanvasRenderer: NSObject {
         guard let pipelineState = floatingTexturePipelineState,
               let atlas = ensureCanvasStagingAtlas(),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
-            print("ERROR: Cannot composite floating texture")
+            dbgLog("ERROR: Cannot composite floating texture")
             return
         }
 
@@ -4405,7 +4405,7 @@ class CanvasRenderer: NSObject {
         screenSize: CGSize
     ) {
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: translate-in-place failed to ensure staging atlas")
+            dbgLog("ERROR: translate-in-place failed to ensure staging atlas")
             return
         }
         let atlasW = atlas.width
@@ -4435,7 +4435,7 @@ class CanvasRenderer: NSObject {
 
         guard let temp = device.makeTexture(descriptor: descriptor),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
-            print("ERROR: translate-in-place failed to allocate temp/command buffer")
+            dbgLog("ERROR: translate-in-place failed to allocate temp/command buffer")
             return
         }
 
@@ -4609,7 +4609,7 @@ class CanvasRenderer: NSObject {
         if !flipHorizontal && !flipVertical { return }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: flip-in-place failed to ensure staging atlas")
+            dbgLog("ERROR: flip-in-place failed to ensure staging atlas")
             return
         }
 
@@ -4630,7 +4630,7 @@ class CanvasRenderer: NSObject {
         guard let temp = device.makeTexture(descriptor: descriptor),
               let pipelineState = textureDisplayWithTransformPipelineState,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
-            print("ERROR: flip-in-place failed to allocate temp/pipeline/command buffer")
+            dbgLog("ERROR: flip-in-place failed to allocate temp/pipeline/command buffer")
             return
         }
 
@@ -4855,7 +4855,7 @@ class CanvasRenderer: NSObject {
     ) {
         // Create a temporary texture from the selection image
         guard let cgImage = image.cgImage else {
-            print("ERROR: Failed to get CGImage from selection")
+            dbgLog("ERROR: Failed to get CGImage from selection")
             return
         }
 
@@ -4872,7 +4872,7 @@ class CanvasRenderer: NSObject {
         descriptor.usage = [.shaderRead]
 
         guard let texture = device.makeTexture(descriptor: descriptor) else {
-            print("ERROR: Failed to create texture for selection overlay")
+            dbgLog("ERROR: Failed to create texture for selection overlay")
             return
         }
 
@@ -4890,14 +4890,14 @@ class CanvasRenderer: NSObject {
             space: colorSpace,
             bitmapInfo: bitmapInfo
         ) else {
-            print("ERROR: Failed to create CGContext for selection overlay")
+            dbgLog("ERROR: Failed to create CGContext for selection overlay")
             return
         }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         guard let data = context.data else {
-            print("ERROR: Failed to get context data")
+            dbgLog("ERROR: Failed to get context data")
             return
         }
 
@@ -4911,7 +4911,7 @@ class CanvasRenderer: NSObject {
         // Now render this texture at the specified rect with transforms applied
         // Use the same transform pipeline as regular texture rendering
         guard let pipelineState = textureDisplayWithTransformPipelineState else {
-            print("ERROR: Transform pipeline state not available")
+            dbgLog("ERROR: Transform pipeline state not available")
             return
         }
 
@@ -5137,11 +5137,11 @@ class CanvasRenderer: NSObject {
         completion: @escaping () -> Void
     ) -> Bool {
         #if DEBUG
-        print("CanvasRenderer: Flood fill at \(point) with color")
+        dbgLog("CanvasRenderer: Flood fill at \(point) with color")
         #endif
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: floodFill — failed to ensure staging atlas")
+            dbgLog("ERROR: floodFill — failed to ensure staging atlas")
             return false
         }
 
@@ -5155,7 +5155,7 @@ class CanvasRenderer: NSObject {
 
         // Validate coordinates
         guard startX >= 0, startY >= 0, startX < atlas.width, startY < atlas.height else {
-            print("ERROR: Point outside canvas bounds")
+            dbgLog("ERROR: Point outside canvas bounds")
             return false
         }
 
@@ -5191,7 +5191,7 @@ class CanvasRenderer: NSObject {
         // early-out fires for a transparent fill.
         if !allocated.isEmpty {
             guard let prereadCB = commandQueue.makeCommandBuffer() else {
-                print("ERROR: floodFill — failed to create pre-read command buffer")
+                dbgLog("ERROR: floodFill — failed to create pre-read command buffer")
                 return false
             }
             if let blit = prereadCB.makeBlitCommandEncoder() {
@@ -5248,7 +5248,7 @@ class CanvasRenderer: NSObject {
         // Get target color at click point
         let targetIndex = (startY * width + startX) * 4
         guard targetIndex + 3 < pixelData.count else {
-            print("ERROR: Invalid pixel index")
+            dbgLog("ERROR: Invalid pixel index")
             return false
         }
 
@@ -5272,7 +5272,7 @@ class CanvasRenderer: NSObject {
            abs(Int(targetR) - Int(fillR)) <= tolerance &&
            abs(Int(targetA) - Int(fillA)) <= tolerance {
             #if DEBUG
-            print("Target and fill colors are the same, skipping fill")
+            dbgLog("Target and fill colors are the same, skipping fill")
             #endif
             return false
         }
@@ -5344,7 +5344,7 @@ class CanvasRenderer: NSObject {
             }
 
             #if DEBUG
-            print("Filled \(fillCount) pixels")
+            dbgLog("Filled \(fillCount) pixels")
             #endif
 
             DispatchQueue.main.async { [weak self] in
@@ -5489,7 +5489,7 @@ class CanvasRenderer: NSObject {
         let canvasW = Int(canvasSize.width)
         let canvasH = Int(canvasSize.height)
         guard canvasW > 0, canvasH > 0 else {
-            print("ERROR: captureSnapshot — invalid canvas dimensions (\(canvasW)×\(canvasH))")
+            dbgLog("ERROR: captureSnapshot — invalid canvas dimensions (\(canvasW)×\(canvasH))")
             return nil
         }
 
@@ -5509,12 +5509,12 @@ class CanvasRenderer: NSObject {
         }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: captureSnapshot — failed to ensure staging atlas")
+            dbgLog("ERROR: captureSnapshot — failed to ensure staging atlas")
             return nil
         }
 
         guard let cb = commandQueue.makeCommandBuffer() else {
-            print("ERROR: captureSnapshot — failed to create command buffer")
+            dbgLog("ERROR: captureSnapshot — failed to create command buffer")
             return nil
         }
 
@@ -5689,7 +5689,7 @@ class CanvasRenderer: NSObject {
         }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: restoreSnapshot — failed to ensure staging atlas")
+            dbgLog("ERROR: restoreSnapshot — failed to ensure staging atlas")
             return
         }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -5967,15 +5967,15 @@ class CanvasRenderer: NSObject {
     /// Synchronous (waits on the GPU before returning). Safe to call
     /// after any prior dual-write completes.
     func loadImage(_ image: UIImage, tileGrid: TileGrid) {
-        print("CanvasRenderer: Loading image into tile grid via staging atlas")
+        dbgLog("CanvasRenderer: Loading image into tile grid via staging atlas")
 
         guard let cgImage = image.cgImage else {
-            print("ERROR: Failed to get CGImage from UIImage")
+            dbgLog("ERROR: Failed to get CGImage from UIImage")
             return
         }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: Failed to ensure canvas staging atlas for loadImage")
+            dbgLog("ERROR: Failed to ensure canvas staging atlas for loadImage")
             return
         }
 
@@ -5995,14 +5995,14 @@ class CanvasRenderer: NSObject {
             space: colorSpace,
             bitmapInfo: bitmapInfo
         ) else {
-            print("ERROR: Failed to create CGContext")
+            dbgLog("ERROR: Failed to create CGContext")
             return
         }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         guard let data = context.data else {
-            print("ERROR: Failed to get context data")
+            dbgLog("ERROR: Failed to get context data")
             return
         }
 
@@ -6069,7 +6069,7 @@ class CanvasRenderer: NSObject {
         // No persistent state change.
         let __diagAllocated = tileGrid.allocatedKeys().count
         let __diagExpected  = tileGrid.gridWidth * tileGrid.gridHeight
-        print("📥 LOADIMG-A1 allocatedKeys=\(__diagAllocated)/\(__diagExpected) grid=\(tileGrid.gridWidth)×\(tileGrid.gridHeight) tileSize=\(tileGrid.tileSize) canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
+        dbgLog("📥 LOADIMG-A1 allocatedKeys=\(__diagAllocated)/\(__diagExpected) grid=\(tileGrid.gridWidth)×\(tileGrid.gridHeight) tileSize=\(tileGrid.tileSize) canvasSize=\(Int(canvasSize.width))×\(Int(canvasSize.height))")
         do {
             let __probeKey = TileKey(x: min(4, tileGrid.gridWidth - 1),
                                      y: min(4, tileGrid.gridHeight - 1))
@@ -6123,17 +6123,17 @@ class CanvasRenderer: NSObject {
                         __i += 4
                     }
                     let __totalPixels = __pw * __ph
-                    print("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) tileSize=\(__pw)×\(__ph) totalPixels=\(__totalPixels) nonzeroAlphaPixels=\(__nonzeroAlpha) maxAlpha=\(__maxAlpha) wasCleared=\(__probeTile.wasCleared) dirtyVersion=\(__probeTile.dirtyVersion)")
+                    dbgLog("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) tileSize=\(__pw)×\(__ph) totalPixels=\(__totalPixels) nonzeroAlphaPixels=\(__nonzeroAlpha) maxAlpha=\(__maxAlpha) wasCleared=\(__probeTile.wasCleared) dirtyVersion=\(__probeTile.dirtyVersion)")
                 } else {
-                    print("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) ERROR: failed to allocate scratch / cb / blit")
+                    dbgLog("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) ERROR: failed to allocate scratch / cb / blit")
                 }
             } else {
-                print("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) ERROR: tile not allocated — A1 told the story already")
+                dbgLog("📥 LOADIMG-A2 probeKey=(\(__probeKey.x),\(__probeKey.y)) ERROR: tile not allocated — A1 told the story already")
             }
         }
 
         #if DEBUG
-        print("✅ Image loaded successfully into tile grid")
+        dbgLog("✅ Image loaded successfully into tile grid")
         #endif
     }
 
@@ -6166,11 +6166,11 @@ class CanvasRenderer: NSObject {
 
     func clearRect(_ rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) {
         #if DEBUG
-        print("CanvasRenderer: Clearing rect \(rect)")
+        dbgLog("CanvasRenderer: Clearing rect \(rect)")
         #endif
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: Failed to ensure canvas staging atlas for clearRect")
+            dbgLog("ERROR: Failed to ensure canvas staging atlas for clearRect")
             return
         }
 
@@ -6179,7 +6179,7 @@ class CanvasRenderer: NSObject {
         // clearRect and extractPixels MUST use identical integer rects or
         // extracted/cleared regions drift and leave ghost pixels on move.
         guard let (x, y, w, h) = texturePixelRect(for: rect, in: atlas, screenSize: screenSize) else {
-            print("ERROR: Rect outside canvas bounds or empty")
+            dbgLog("ERROR: Rect outside canvas bounds or empty")
             return
         }
 
@@ -6247,20 +6247,20 @@ class CanvasRenderer: NSObject {
         }
         // === End atlas → tile blit block =================================
 
-        print("Rect cleared successfully")
+        dbgLog("Rect cleared successfully")
     }
 
     /// Clear pixels along a path (for lasso selection)
     func clearPath(_ path: [CGPoint], tileGrid: TileGrid, screenSize: CGSize) {
-        print("CanvasRenderer: Clearing path with \(path.count) points")
+        dbgLog("CanvasRenderer: Clearing path with \(path.count) points")
 
         guard path.count >= 3 else {
-            print("ERROR: Path must have at least 3 points")
+            dbgLog("ERROR: Path must have at least 3 points")
             return
         }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: Failed to ensure canvas staging atlas for clearPath")
+            dbgLog("ERROR: Failed to ensure canvas staging atlas for clearPath")
             return
         }
 
@@ -6297,7 +6297,7 @@ class CanvasRenderer: NSObject {
         let regionW = maxX - minX + 1
         let regionH = maxY - minY + 1
         guard regionW > 0, regionH > 0 else {
-            print("Path bbox empty, nothing to clear")
+            dbgLog("Path bbox empty, nothing to clear")
             return
         }
 
@@ -6428,14 +6428,14 @@ class CanvasRenderer: NSObject {
         }
         // === End atlas → tile blit block =================================
 
-        print("Path cleared successfully (\(clearedCount) pixels)")
+        dbgLog("Path cleared successfully (\(clearedCount) pixels)")
     }
 
     // MARK: - Export Image
 
     /// Exports all visible layers composited into a single image
     func exportImage(layers: [DrawingLayer]) -> UIImage? {
-        print("CanvasRenderer: Exporting image with \(layers.count) layers")
+        dbgLog("CanvasRenderer: Exporting image with \(layers.count) layers")
         return compositeLayersToImage(layers: layers)
     }
 
@@ -6443,16 +6443,16 @@ class CanvasRenderer: NSObject {
 
     /// Extract pixels from a rectangular selection
     func extractPixels(from rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) -> UIImage? {
-        print("CanvasRenderer: Extracting pixels from rect \(rect)")
+        dbgLog("CanvasRenderer: Extracting pixels from rect \(rect)")
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: extractPixels — failed to ensure staging atlas")
+            dbgLog("ERROR: extractPixels — failed to ensure staging atlas")
             return nil
         }
 
         // Must use identical integer rect as clearRect — see note there.
         guard let (x, y, w, h) = texturePixelRect(for: rect, in: atlas, screenSize: screenSize) else {
-            print("ERROR: Rect outside canvas bounds or empty")
+            dbgLog("ERROR: Rect outside canvas bounds or empty")
             return nil
         }
 
@@ -6525,7 +6525,7 @@ class CanvasRenderer: NSObject {
             space: colorSpace,
             bitmapInfo: bitmapInfo
         ) else {
-            print("ERROR: Failed to create CGContext for selection")
+            dbgLog("ERROR: Failed to create CGContext for selection")
             return nil
         }
 
@@ -6537,25 +6537,25 @@ class CanvasRenderer: NSObject {
         }
 
         guard let cgImage = context.makeImage() else {
-            print("ERROR: Failed to create CGImage from selection")
+            dbgLog("ERROR: Failed to create CGImage from selection")
             return nil
         }
 
-        print("✂️ Extracted selection: \(w)x\(h) pixels")
+        dbgLog("✂️ Extracted selection: \(w)x\(h) pixels")
         return UIImage(cgImage: cgImage)
     }
 
     /// Extract pixels from a lasso/path selection with alpha masking
     func extractPixels(fromPath path: [CGPoint], tileGrid: TileGrid, screenSize: CGSize) -> UIImage? {
-        print("CanvasRenderer: Extracting pixels from path with \(path.count) points")
+        dbgLog("CanvasRenderer: Extracting pixels from path with \(path.count) points")
 
         guard path.count >= 3 else {
-            print("ERROR: Path must have at least 3 points")
+            dbgLog("ERROR: Path must have at least 3 points")
             return nil
         }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: extractPixels(fromPath:) — failed to ensure staging atlas")
+            dbgLog("ERROR: extractPixels(fromPath:) — failed to ensure staging atlas")
             return nil
         }
 
@@ -6574,7 +6574,7 @@ class CanvasRenderer: NSObject {
         let h = maxY - minY + 1
 
         guard w > 0, h > 0 else {
-            print("ERROR: Invalid bounding box")
+            dbgLog("ERROR: Invalid bounding box")
             return nil
         }
 
@@ -6686,7 +6686,7 @@ class CanvasRenderer: NSObject {
             space: colorSpace,
             bitmapInfo: bitmapInfo
         ) else {
-            print("ERROR: Failed to create CGContext for lasso selection")
+            dbgLog("ERROR: Failed to create CGContext for lasso selection")
             return nil
         }
 
@@ -6698,11 +6698,11 @@ class CanvasRenderer: NSObject {
         }
 
         guard let cgImage = context.makeImage() else {
-            print("ERROR: Failed to create CGImage from lasso selection")
+            dbgLog("ERROR: Failed to create CGImage from lasso selection")
             return nil
         }
 
-        print("✂️ Extracted lasso selection: \(w)x\(h) pixels")
+        dbgLog("✂️ Extracted lasso selection: \(w)x\(h) pixels")
         return UIImage(cgImage: cgImage)
     }
 
@@ -6720,12 +6720,12 @@ class CanvasRenderer: NSObject {
     /// double-multiplying by srcA and shifting edge colors.
     func renderImage(_ image: UIImage, at rect: CGRect, tileGrid: TileGrid, screenSize: CGSize) {
         guard let cgImage = image.cgImage else {
-            print("ERROR: Failed to get CGImage")
+            dbgLog("ERROR: Failed to get CGImage")
             return
         }
 
         guard let atlas = ensureCanvasStagingAtlas() else {
-            print("ERROR: renderImage — failed to ensure staging atlas")
+            dbgLog("ERROR: renderImage — failed to ensure staging atlas")
             return
         }
 
@@ -6758,7 +6758,7 @@ class CanvasRenderer: NSObject {
             space: colorSpace,
             bitmapInfo: bitmapInfo
         ) else {
-            print("ERROR: Failed to create CGContext")
+            dbgLog("ERROR: Failed to create CGContext")
             return
         }
         srcContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
@@ -7211,12 +7211,12 @@ class CanvasRenderer: NSObject {
         guard let snapshot = makeBlurIntermediateTexture(),
               let preview = makeBlurIntermediateTexture(),
               let scratch = makeBlurIntermediateTexture() else {
-            print("⚠️ beginBlurAdjustment: failed to allocate intermediate textures")
+            dbgLog("⚠️ beginBlurAdjustment: failed to allocate intermediate textures")
             return
         }
 
         guard let mask = rasterizeSelectionMask(selectionPath, canvasSize: documentSize) else {
-            print("⚠️ beginBlurAdjustment: failed to rasterize selection mask")
+            dbgLog("⚠️ beginBlurAdjustment: failed to rasterize selection mask")
             return
         }
 
@@ -7446,13 +7446,13 @@ class CanvasRenderer: NSObject {
               let scratchH = makeBlurIntermediateTexture(),
               let scratchV = makeBlurIntermediateTexture(),
               let cb = commandQueue.makeCommandBuffer() else {
-            print("⚠️ beginBlurStroke: pipeline or intermediate textures unavailable")
+            dbgLog("⚠️ beginBlurStroke: pipeline or intermediate textures unavailable")
             return false
         }
 
         let mask = selectionMaskTexture(for: selectionPath, documentSize: screenSize) ?? noMaskTexture
         guard let selectionMask = mask else {
-            print("⚠️ beginBlurStroke: selection mask unavailable")
+            dbgLog("⚠️ beginBlurStroke: selection mask unavailable")
             return false
         }
 
@@ -7796,7 +7796,7 @@ class CanvasRenderer: NSObject {
               let scratchH = makeBlurIntermediateTexture(),
               let scratchV = makeBlurIntermediateTexture(),
               let atlas = ensureCanvasStagingAtlas() else {
-            print("⚠️ renderBlurStroke: pipeline or intermediate textures unavailable")
+            dbgLog("⚠️ renderBlurStroke: pipeline or intermediate textures unavailable")
             completion()
             return
         }
@@ -7807,7 +7807,7 @@ class CanvasRenderer: NSObject {
         strokeCommandSlots.wait()
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             strokeCommandSlots.signal()
-            print("⚠️ renderBlurStroke: command buffer unavailable")
+            dbgLog("⚠️ renderBlurStroke: command buffer unavailable")
             completion()
             return
         }
@@ -8120,7 +8120,7 @@ class CanvasRenderer: NSObject {
         endSmudgeStroke()
         guard let front = makeSmudgePatchTexture(brushSize: brushSize),
               let back  = makeSmudgePatchTexture(brushSize: brushSize) else {
-            print("⚠️ beginSmudgeStroke: failed to allocate patch textures")
+            dbgLog("⚠️ beginSmudgeStroke: failed to allocate patch textures")
             return false
         }
         clearSmudgePatch(front)
@@ -8177,7 +8177,7 @@ class CanvasRenderer: NSObject {
               var front = smudgePatchFront,
               var back = smudgePatchBack,
               let atlas = ensureCanvasStagingAtlas() else {
-            print("⚠️ renderSmudgeStamps: pipeline / patch / atlas unavailable")
+            dbgLog("⚠️ renderSmudgeStamps: pipeline / patch / atlas unavailable")
             return
         }
         // Hard sanity: layer must not change mid-stroke (patch is sized to
@@ -8187,7 +8187,7 @@ class CanvasRenderer: NSObject {
         assert(smudgeStrokeLayerId == layerId,
                "Smudge layer changed mid-stroke (was \(String(describing: smudgeStrokeLayerId)), now \(layerId))")
         guard smudgeStrokeLayerId == layerId else {
-            print("⚠️ renderSmudgeStamps: layerId mismatch — refusing to render")
+            dbgLog("⚠️ renderSmudgeStamps: layerId mismatch — refusing to render")
             return
         }
 

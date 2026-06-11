@@ -332,7 +332,7 @@ final class AuthManager: ObservableObject {
         let redirectURL = Self.callbackURL
         let start = Date()
         #if DEBUG
-        print("🪪 sendMagicLink → \(trimmed) redirectTo=\(redirectURL.absoluteString)")
+        dbgLog("🪪 sendMagicLink → \(trimmed) redirectTo=\(redirectURL.absoluteString)")
         #endif
         do {
             // 30s watchdog: signInWithOTP must return one way or the other so
@@ -359,14 +359,14 @@ final class AuthManager: ObservableObject {
             }
             let elapsed = Date().timeIntervalSince(start)
             #if DEBUG
-            print("✅ sendMagicLink returned in \(String(format: "%.2f", elapsed))s")
+            dbgLog("✅ sendMagicLink returned in \(String(format: "%.2f", elapsed))s")
             #endif
             pendingMagicLinkEmail = trimmed
             lastError = nil
         } catch {
             let elapsed = Date().timeIntervalSince(start)
             #if DEBUG
-            print("❌ sendMagicLink failed after \(String(format: "%.2f", elapsed))s: \(error)")
+            dbgLog("❌ sendMagicLink failed after \(String(format: "%.2f", elapsed))s: \(error)")
             #endif
             lastError = "Couldn't send magic link: \(error.localizedDescription)"
         }
