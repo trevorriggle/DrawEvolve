@@ -117,6 +117,8 @@ struct PromptInputView: View {
                     .pickerStyle(.segmented)
                 }
 
+                canvasSizeField
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("What are you drawing?")
                         .font(.headline)
@@ -461,6 +463,58 @@ struct PromptInputView: View {
             }
             .pickerStyle(.segmented)
         }
+        // padBody mounts the canvas-size chips right below skill level,
+        // mirroring phoneBody's placement.
+    }
+
+    // MARK: - Canvas size (canvas-sizes feature)
+    //
+    // Preset chips writing to @AppStorage; DrawingCanvasView observes the
+    // same key and applies the size to the renderer for NEW drawings only
+    // (guarded on zero strokes — see applyNewCanvasSizePreset there).
+    // Deliberately NOT a DrawingContext field: context is Codable and its
+    // fields are rendered into the critique system prompt by the Worker
+    // (lib/prompt.js renderContextBlock) — canvas dimensions don't belong
+    // in an AI prompt.
+
+    @AppStorage("newCanvasSizePreset") private var canvasSizePresetRaw =
+        CanvasSizePreset.deviceDefault.rawValue
+
+    var canvasSizeField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Canvas")
+                .font(.headline)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(CanvasSizePreset.allCases) { preset in
+                        let selected = preset.rawValue == canvasSizePresetRaw
+                        Button {
+                            canvasSizePresetRaw = preset.rawValue
+                        } label: {
+                            VStack(spacing: 2) {
+                                Text(preset.label)
+                                    .font(.subheadline.weight(.medium))
+                                Text(preset.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(selected ? Color.accentColor.opacity(0.15)
+                                                   : Color(uiColor: .secondarySystemBackground))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
     }
 
     private var subjectField: some View {
@@ -548,6 +602,7 @@ struct PromptInputView: View {
         VStack(alignment: .leading, spacing: 20) {
             nameField
             skillLevelField
+            canvasSizeField
             subjectField
             styleField
             artistsField
@@ -633,6 +688,7 @@ struct PromptInputView: View {
                 subjectField;   styleField
                 artistsField;   techniquesField
             }
+            canvasSizeField
             focusField
         }
     }
@@ -643,4 +699,51 @@ struct PromptInputView: View {
         context: .constant(DrawingContext()),
         isPresented: .constant(true)
     )
+}
+
+// MARK: - Canvas size presets (canvas-sizes feature)
+
+/// Creation-time canvas dimensions. Long side is 2048 for the aspect
+/// presets (matches the iPhone-class square; iPad Pro's 4096 high-res
+/// path stays available via Device default). `nil` size = legacy
+/// device-derived square (diagonal-fit pow2) — the pre-feature behavior
+/// and the default, so users who never touch the picker see zero change.
+enum CanvasSizePreset: String, CaseIterable, Identifiable {
+    case deviceDefault = "default"
+    case square = "square"
+    case portrait34 = "portrait34"
+    case landscape43 = "landscape43"
+    case story916 = "story916"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .deviceDefault: return "Device"
+        case .square:        return "Square"
+        case .portrait34:    return "Portrait"
+        case .landscape43:   return "Landscape"
+        case .story916:      return "Story"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .deviceDefault: return "best fit"
+        case .square:        return "1:1"
+        case .portrait34:    return "3:4"
+        case .landscape43:   return "4:3"
+        case .story916:      return "9:16"
+        }
+    }
+
+    var size: CGSize? {
+        switch self {
+        case .deviceDefault: return nil
+        case .square:        return CGSize(width: 2048, height: 2048)
+        case .portrait34:    return CGSize(width: 1536, height: 2048)
+        case .landscape43:   return CGSize(width: 2048, height: 1536)
+        case .story916:      return CGSize(width: 1152, height: 2048)
+        }
+    }
 }

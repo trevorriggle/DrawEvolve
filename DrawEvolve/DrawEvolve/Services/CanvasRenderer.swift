@@ -467,14 +467,19 @@ class CanvasRenderer: NSObject {
     func setCanvasSize(matchingDoc savedSize: CGSize) {
         logMaxCanvasDimensionOnce()
         let cap = maxCanvasDimension
-        let w = max(256, min(savedSize.width, cap))
-        let h = max(256, min(savedSize.height, cap))
-        // Round to power of 2 to keep texture allocation paths aligned
-        // (atlas, intermediate, scratch all use the same nearest-pow2
-        // assumption baked into the legacy diagonal-fit math).
-        let w2 = pow(2, ceil(log2(w)))
-        let h2 = pow(2, ceil(log2(h)))
-        let newSize = CGSize(width: w2, height: h2)
+        // Canvas-sizes feature: axes clamp + round to EVEN ints, not
+        // power-of-2. The old pow2 rounding would destroy aspect presets
+        // (1536 → 2048 collapses 3:4 back to square). Nothing actually
+        // requires pow2: Metal textures are arbitrary-sized, the tile
+        // grid handles partial edge tiles, and the tile-composite
+        // shader's "bit-exact for pow2 dims" note only concerns sub-ulp
+        // NDC rounding that's consistent across seams (same expression,
+        // same inputs both sides — no cracks). Legacy docs are pow2
+        // already, so their loads are byte-identical through this path.
+        let w = max(256, min(savedSize.width, cap)).rounded()
+        let h = max(256, min(savedSize.height, cap)).rounded()
+        let newSize = CGSize(width: w - w.truncatingRemainder(dividingBy: 2),
+                             height: h - h.truncatingRemainder(dividingBy: 2))
         if newSize != _canvasSize {
             dbgLog("📐 Canvas size set to \(newSize) matching loaded doc (saved=\(savedSize), cap=\(Int(cap))²)")
             _canvasSize = newSize

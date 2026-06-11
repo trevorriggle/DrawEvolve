@@ -250,35 +250,20 @@ vertex VertexOut tileDirectVertexShader(uint vertexID [[vertex_id]],
     float pixelX = float(rect.x) + unit.x * float(rect.z);
     float pixelY = float(rect.y) + unit.y * float(rect.w);
 
-    // Canvas-pixel → canvas-fraction (0..1).
-    float2 frac = float2(pixelX / u.canvasSize.x, pixelY / u.canvasSize.y);
-
-    // Canvas-fraction → equivalent fullscreen-quad NDC position.
-    // Legacy quadVertexShaderWithTransform takes NDC then does
-    // (ndc * 0.5 + 0.5) * viewport. The texCoord convention is UIKit-Y-down
-    // (top of texture = canvas y=0 = NDC y=+1), so frac.y=0 → ndc.y=+1.
-    float2 ndcPos = float2(frac.x * 2.0 - 1.0, 1.0 - 2.0 * frac.y);
-
-    // From here, EXACTLY the legacy quadVertexShaderWithTransform pipeline.
-
     float zoom = u.transform.x;
     float2 pan = float2(u.transform.y, u.transform.z);
     float rotation = u.transform.w;
     float2 viewport = u.viewportSize;
 
-    // Aspect-ratio correction: canvas-square fills the longer viewport axis
-    // at zoom=1.
-    float viewportAspect = viewport.x / viewport.y;
-    float2 scale = float2(1.0, 1.0);
-    if (viewportAspect > 1.0) {
-        scale.y = viewportAspect;
-    } else {
-        scale.x = 1.0 / viewportAspect;
-    }
-    float2 correctedPos = ndcPos * scale;
-
-    // NDC → Y-up pixel space.
-    float2 screenPos = (correctedPos * 0.5 + 0.5) * viewport;
+    // Canvas-sizes feature: doc-aspect-true mapping, replacing the old
+    // frac→NDC→viewport-aspect chain. Same s0 form as the other two
+    // screen-facing vertex shaders and documentToScreen — identical
+    // output for square docs, aspect-true for non-square.
+    float2 docDim = u.canvasSize;
+    float s0 = max(viewport.x, viewport.y) / max(docDim.x, docDim.y);
+    float2 quadLocalYDown = float2(pixelX, pixelY) * s0 - docDim * s0 * 0.5;
+    // Y-flip into Y-up pixel space.
+    float2 screenPos = float2(quadLocalYDown.x, -quadLocalYDown.y) + viewport * 0.5;
 
     // Zoom around viewport center.
     float2 screenCenter = viewport * 0.5;
@@ -387,21 +372,22 @@ vertex VertexOut quadVertexShaderWithTransform(uint vertexID [[vertex_id]],
     float2 finalPos = positions[vertexID];
     float2 finalTexCoord = texCoords[vertexID];  // IDENTITY — no transforms.
 
-    // Aspect-ratio correction: canvas is square, viewport usually isn't. Scale
-    // the quad so the square canvas *fills* (covers) the longer viewport
-    // dimension — at zoom=1 the entire screen is inside the canvas. The shorter
-    // axis gets scaled up past ±1 NDC, clipping outside the viewport.
-    float viewportAspect = viewport.x / viewport.y;
-    float2 scale = float2(1.0, 1.0);
-    if (viewportAspect > 1.0) {
-        scale.y = viewportAspect;        // landscape: extend quad top/bottom
-    } else {
-        scale.x = 1.0 / viewportAspect;  // portrait: extend quad left/right
-    }
-    float2 correctedPos = finalPos * scale;
-
-    // NDC → Y-up pixel space
-    float2 screenPos = (correctedPos * 0.5 + 0.5) * viewport;
+    // Canvas-sizes feature: doc-aspect-true quad. The canvas quad's screen
+    // dims are docDim × s0 where s0 = maxViewportDim / maxDocDim — for a
+    // SQUARE doc this is algebraically identical to the old viewport-
+    // aspect block (quad side = max viewport dim, centered), so every
+    // legacy drawing renders pixel-identically. Non-square docs get a
+    // true-aspect quad instead of being stretched onto a square.
+    // canvasSize (buffer 2) was passed-but-unused for ABI stability —
+    // it's now load-bearing.
+    float2 docDim = canvasSize[0];
+    float s0 = max(viewport.x, viewport.y) / max(docDim.x, docDim.y);
+    // NDC corner → doc unit. texCoord v=0 (doc y=0, canvas top) sits at
+    // NDC y=+1, so v = 0.5 − ndc.y/2; u = ndc.x/2 + 0.5.
+    float2 unit = float2(finalPos.x * 0.5 + 0.5, 0.5 - finalPos.y * 0.5);
+    float2 quadLocalYDown = unit * docDim * s0 - docDim * s0 * 0.5;
+    // Y-flip into the Y-up pixel space the rest of the chain uses.
+    float2 screenPos = float2(quadLocalYDown.x, -quadLocalYDown.y) + viewport * 0.5;
 
     // Zoom around viewport center
     float2 screenCenter = viewport * 0.5;
@@ -493,12 +479,15 @@ vertex VertexOut quadVertexShaderForRect(uint vertexID [[vertex_id]],
     }
 
     float2 viewport = viewportSize[0];
-    float fitSize = max(viewport.x, viewport.y);
     float2 docDim = canvasSize[0];
 
-    // Doc → quad-local pixels (centered at origin, Y-down to start). Match
-    // documentToScreen: pt = (frac * fitSize) - fitSize/2.
-    float2 quadLocalYDown = (docPos / docDim) * fitSize - fitSize * 0.5;
+    // Doc → quad-local pixels (centered at origin, Y-down to start).
+    // Canvas-sizes feature: s0-based per-axis mapping — identical to the
+    // old `(frac × fitSize) − fitSize/2` for square docs (s0 ≡
+    // fitSize/docDim there), aspect-true for non-square. Matches
+    // documentToScreen exactly.
+    float s0 = max(viewport.x, viewport.y) / max(docDim.x, docDim.y);
+    float2 quadLocalYDown = docPos * s0 - docDim * s0 * 0.5;
     // Flip Y to match the layer shader's Y-up screen-pixel space.
     float2 quadLocal = float2(quadLocalYDown.x, -quadLocalYDown.y);
 

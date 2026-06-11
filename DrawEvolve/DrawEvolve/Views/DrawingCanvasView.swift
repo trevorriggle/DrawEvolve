@@ -195,6 +195,14 @@ struct DrawingCanvasView: View {
     /// User's ghost-layer visibility preference, sticky across sessions.
     @AppStorage("ghostLayerVisible") private var ghostLayerVisible = true
 
+    /// Canvas-sizes: the preset PromptInputView's picker writes. Applied
+    /// to NEW drawings only, and only while the canvas is contentless —
+    /// the prompt sheet covers the canvas, so the user can't stroke
+    /// before choosing. Existing drawings ignore this entirely (their
+    /// manifest size wins via loadLayered → setCanvasSize).
+    @AppStorage("newCanvasSizePreset") private var newCanvasSizePresetRaw =
+        CanvasSizePreset.deviceDefault.rawValue
+
     /// Captured at the moment the color picker sheet opens; restored to
     /// `canvasState.currentTool` on dismiss (Done, swipe-down, or any
     /// other path that flips `showColorPicker` back to false). Mirrors
@@ -358,6 +366,12 @@ struct DrawingCanvasView: View {
         .onChange(of: currentDrawingID) { _ in
             hasUnsavedEdits = false
             showAutoSavedToast = false
+        }
+        .onAppear { applyNewCanvasSizePresetIfSafe() }
+        .onChange(of: newCanvasSizePresetRaw) { _ in
+            // User tapped a preset chip in the prompt sheet (which covers
+            // the canvas — no strokes possible yet).
+            applyNewCanvasSizePresetIfSafe()
         }
         .onChange(of: canvasState.currentTool) { newTool in
             // Capture the last non-Type tool so future restoration knows
@@ -2286,6 +2300,21 @@ struct DrawingCanvasView: View {
         // ignore safe area on the container so .move/.addLine coordinates
         // aren't shifted down by the top inset on iPhone.
         .ignoresSafeArea()
+    }
+
+    /// Canvas-sizes: apply the creation preset to a brand-new, contentless
+    /// canvas. Guards: never for loaded/saved drawings, never after the
+    /// first committed stroke. The deviceDefault preset (nil size) keeps
+    /// the legacy device-derived square — note that switching A → B →
+    /// Device mid-sheet leaves B applied (the device square isn't
+    /// computable here); acceptable, the sheet defaults to the last-used
+    /// preset.
+    private func applyNewCanvasSizePresetIfSafe() {
+        guard existingDrawing == nil,
+              currentDrawingID == nil,
+              canvasState.layerMutationCounter == 0,
+              let size = CanvasSizePreset(rawValue: newCanvasSizePresetRaw)?.size else { return }
+        canvasState.setDocumentSizeForNewDrawing(size)
     }
 
     /// End the typing portion of the Type session. The float stays alive

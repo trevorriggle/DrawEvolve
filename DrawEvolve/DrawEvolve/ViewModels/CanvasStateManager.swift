@@ -301,7 +301,60 @@ class CanvasStateManager: ObservableObject {
     // long as the state manager.
     private var historyCancellable: AnyCancellable?
     private var toolChangeCancellable: AnyCancellable?
-    var renderer: CanvasRenderer?
+    var renderer: CanvasRenderer? {
+        didSet { applyPendingDocumentSizeIfNeeded() }
+    }
+
+    // MARK: - Canvas sizes (per-drawing dimensions)
+
+    /// Size chosen at creation for a NEW drawing. The renderer initializes
+    /// inside the MTKView draw loop, and the prompt sheet (where the user
+    /// picks a preset) completes afterward — this stash covers both
+    /// orders. nil for existing drawings (the manifest's saved size wins
+    /// via loadLayered → setCanvasSize(matchingDoc:)).
+    private var pendingDocumentSize: CGSize?
+
+    /// Apply a creation-time canvas size for a NEW drawing. Safe to call
+    /// any time before the first stroke (tile grids allocate lazily at
+    /// first touch); locking after content exists is the caller's guard.
+    func setDocumentSizeForNewDrawing(_ size: CGSize) {
+        pendingDocumentSize = size
+        applyPendingDocumentSizeIfNeeded()
+    }
+
+    private func applyPendingDocumentSizeIfNeeded() {
+        guard let size = pendingDocumentSize, let renderer else { return }
+        pendingDocumentSize = nil
+        renderer.setCanvasSize(matchingDoc: size)
+        #if DEBUG
+        runAspectRoundTripProbe()
+        #endif
+    }
+
+    #if DEBUG
+    /// Canvas-sizes probe: documentToScreen ∘ screenToDocument must be
+    /// identity for ANY document aspect. Runs on size application and
+    /// screen-size changes; asserts in DEBUG so a transform regression
+    /// is loud instead of "strokes land slightly off."
+    func runAspectRoundTripProbe() {
+        guard screenSize.width > 0, screenSize.height > 0,
+              documentSize.width > 0, documentSize.height > 0 else { return }
+        let pts: [CGPoint] = [
+            .zero,
+            CGPoint(x: documentSize.width, y: documentSize.height),
+            CGPoint(x: documentSize.width / 2, y: documentSize.height / 2),
+            CGPoint(x: documentSize.width * 0.123, y: documentSize.height * 0.877),
+            CGPoint(x: documentSize.width * 0.987, y: documentSize.height * 0.054),
+        ]
+        var worst: CGFloat = 0
+        for p in pts {
+            let back = screenToDocument(documentToScreen(p))
+            worst = max(worst, max(abs(back.x - p.x), abs(back.y - p.y)))
+        }
+        print("[ASPECT-PROBE] doc=\(documentSize) screen=\(screenSize) worstErr=\(worst) → \(worst < 0.01 ? "PASS" : "FAIL")")
+        assert(worst < 0.01, "documentToScreen/screenToDocument round-trip broken — transform regression")
+    }
+    #endif
     private var _screenSize: CGSize = .zero
     var screenSize: CGSize {
         get { return _screenSize }
@@ -2779,15 +2832,14 @@ class CanvasStateManager: ObservableObject {
         let zx = rx / zoomScale
         let zy = ry / zoomScale
 
-        // At this point (zx, zy) is the quad-local coordinate centered at origin,
-        // ranging over [-fitSize/2, +fitSize/2] when the touch is inside the
-        // aspect-corrected canvas region. Convert to normalized [0,1] fraction
-        // and scale by document size.
-        let fracX = (zx + fitSize / 2) / fitSize
-        let fracY = (zy + fitSize / 2) / fitSize
-
-        return CGPoint(x: fracX * documentSize.width,
-                       y: fracY * documentSize.height)
+        // At this point (zx, zy) is the quad-local coordinate centered at
+        // origin. Canvas-sizes feature: invert the s0-based per-axis
+        // mapping (docPos × s0 − docDim × s0/2) — identical to the old
+        // fraction math for square docs, aspect-true otherwise. Must stay
+        // the exact inverse of documentToScreen's forward form.
+        let s0 = fitSize / max(documentSize.width, documentSize.height)
+        return CGPoint(x: (zx + documentSize.width * s0 / 2) / s0,
+                       y: (zy + documentSize.height * s0 / 2) / s0)
     }
 
     /// Transform a point from document space to view/screen space (UIKit points).
@@ -2805,11 +2857,14 @@ class CanvasStateManager: ObservableObject {
         let centerX = screenSize.width / 2
         let centerY = screenSize.height / 2
 
-        // doc → normalized fraction → quad-local (centered) pixels.
-        let fracX = point.x / documentSize.width
-        let fracY = point.y / documentSize.height
-        var pt = CGPoint(x: fracX * fitSize - fitSize / 2,
-                         y: fracY * fitSize - fitSize / 2)
+        // doc → quad-local (centered) pixels. Canvas-sizes feature:
+        // s0-based per-axis mapping — for square docs s0 ≡ fitSize/docDim
+        // so this is algebraically identical to the old
+        // `(frac × fitSize) − fitSize/2`; non-square docs map aspect-true.
+        // Mirrors all three screen-facing vertex shaders exactly.
+        let s0 = fitSize / max(documentSize.width, documentSize.height)
+        var pt = CGPoint(x: point.x * s0 - documentSize.width * s0 / 2,
+                         y: point.y * s0 - documentSize.height * s0 / 2)
 
         // Zoom around origin (viewport center).
         pt.x *= zoomScale

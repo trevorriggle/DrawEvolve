@@ -916,7 +916,11 @@ struct DrawingCard: View {
                             if let thumbnail, let uiImage = UIImage(data: thumbnail) {
                                 Image(uiImage: uiImage)
                                     .resizable()
-                                    .scaledToFill()
+                                    // Canvas-sizes: fit, not fill —
+                                    // non-square drawings letterbox in
+                                    // the square card instead of being
+                                    // crop-zoomed.
+                                    .scaledToFit()
                             } else {
                                 Color.secondary.opacity(0.2)
                                     .overlay(
