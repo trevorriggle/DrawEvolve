@@ -121,6 +121,11 @@ import {
   classifyCritique,
   CLASSIFIER_MODEL,
   CLASSIFIER_VERSION,
+  generateAnnotations,
+  validateAnnotation,
+  ANNOTATOR_MODEL,
+  MIN_ANNOTATION_CONFIDENCE,
+  MAX_ANNOTATIONS,
   flattenCritiques,
   selectWindow,
   determineStatus,
@@ -4711,6 +4716,112 @@ test('classifyCritique tolerates empty/non-string feedback by returning null wit
   const { fetcher, calls } = makeClassifierFetcher({ content: '{}' });
   assert.equal(await classifyCritique({ feedback: '', env: CLASSIFIER_ENV, fetcher }), null);
   assert.equal(await classifyCritique({ feedback: null, env: CLASSIFIER_ENV, fetcher }), null);
+  assert.equal(calls.length, 0);
+}));
+
+
+// =============================================================================
+// Ghost layer — critique annotations (lib/annotations.js)
+// =============================================================================
+//
+// Mirrors the classifier harness: same OpenAI-shaped completion fetcher,
+// same null-on-any-failure contract. The annotator additionally receives
+// the image and confidence-filters the model's markers server-side.
+
+const ANNOTATOR_ENV = { OPENAI_API_KEY: 'sk-test-annotator' };
+const ANNOTATOR_IMAGE = 'aGVsbG8='; // any non-empty base64
+
+const VALID_ANNOTATION = {
+  x: 0.42, y: 0.31, radius: 0.08,
+  label: 'Deepen the shadow here',
+  excerpt: 'the cast shadow under the jaw is too light',
+  confidence: 0.9,
+};
+
+test('ANNOTATOR_MODEL is gpt-5-mini (mirrors classifier; 5.1-mini does not exist)', () => {
+  assert.equal(ANNOTATOR_MODEL, 'gpt-5-mini');
+});
+
+test('validateAnnotation accepts a well-formed marker and rejects out-of-range fields', () => {
+  assert.equal(validateAnnotation(VALID_ANNOTATION), true);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, x: 1.2 }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, y: -0.1 }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, radius: 0.01 }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, radius: 0.5 }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, label: '' }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, label: 'x'.repeat(61) }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, excerpt: 'x'.repeat(201) }), false);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, excerpt: null }), true);
+  assert.equal(validateAnnotation({ ...VALID_ANNOTATION, confidence: NaN }), false);
+  assert.equal(validateAnnotation(null), false);
+  assert.equal(validateAnnotation([VALID_ANNOTATION]), false);
+});
+
+test('generateAnnotations returns validated markers and sends the image + critique in one vision message', async () => {
+  const { fetcher, calls } = makeClassifierFetcher({
+    content: JSON.stringify({ annotations: [VALID_ANNOTATION] }),
+  });
+  const result = await generateAnnotations({
+    imageBase64: ANNOTATOR_IMAGE, feedback: 'Critique text', env: ANNOTATOR_ENV, fetcher,
+  });
+  assert.deepEqual(result, [VALID_ANNOTATION]);
+  assert.equal(calls.length, 1);
+  const body = calls[0].body;
+  assert.equal(body.model, ANNOTATOR_MODEL);
+  // Flat reasoning_effort for gpt-5-mini ('minimal', not gpt-5.1's 'none').
+  assert.equal(body.reasoning_effort, 'minimal');
+  assert.equal(body.response_format.type, 'json_schema');
+  // Vision message: image part + text part in the user turn.
+  const userContent = body.messages[1].content;
+  assert.equal(userContent[0].type, 'image_url');
+  assert.ok(userContent[0].image_url.url.startsWith('data:image/jpeg;base64,'));
+  assert.equal(userContent[1].type, 'text');
+  assert.equal(userContent[1].text, 'Critique text');
+});
+
+test('generateAnnotations drops markers below MIN_ANNOTATION_CONFIDENCE and returns null when none survive', () => silentConsoleError(async () => {
+  const low = { ...VALID_ANNOTATION, confidence: MIN_ANNOTATION_CONFIDENCE - 0.01 };
+  const { fetcher } = makeClassifierFetcher({
+    content: JSON.stringify({ annotations: [low] }),
+  });
+  const result = await generateAnnotations({
+    imageBase64: ANNOTATOR_IMAGE, feedback: 'Critique text', env: ANNOTATOR_ENV, fetcher,
+  });
+  assert.equal(result, null);
+}));
+
+test('generateAnnotations caps surviving markers at MAX_ANNOTATIONS', async () => {
+  const many = Array.from({ length: MAX_ANNOTATIONS + 2 }, (_, i) => ({
+    ...VALID_ANNOTATION, x: (i + 1) / 10,
+  }));
+  const { fetcher } = makeClassifierFetcher({
+    content: JSON.stringify({ annotations: many }),
+  });
+  const result = await generateAnnotations({
+    imageBase64: ANNOTATOR_IMAGE, feedback: 'Critique text', env: ANNOTATOR_ENV, fetcher,
+  });
+  // json_schema maxItems should prevent this upstream; the slice is the
+  // belt-and-suspenders layer this asserts.
+  assert.equal(result.length, MAX_ANNOTATIONS);
+});
+
+test('generateAnnotations returns null on non-ok status, bad JSON, empty content, and thrown fetch', () => silentConsoleError(async () => {
+  const args = { imageBase64: ANNOTATOR_IMAGE, feedback: 'Critique text', env: ANNOTATOR_ENV };
+  const bad = makeClassifierFetcher({ ok: false, status: 500, content: 'boom' });
+  assert.equal(await generateAnnotations({ ...args, fetcher: bad.fetcher }), null);
+  const malformed = makeClassifierFetcher({ content: 'not json' });
+  assert.equal(await generateAnnotations({ ...args, fetcher: malformed.fetcher }), null);
+  const empty = makeClassifierFetcher({ content: '' });
+  assert.equal(await generateAnnotations({ ...args, fetcher: empty.fetcher }), null);
+  const thrown = makeClassifierFetcher({ throwErr: new Error('net down') });
+  assert.equal(await generateAnnotations({ ...args, fetcher: thrown.fetcher }), null);
+}));
+
+test('generateAnnotations short-circuits without a network call on missing image, feedback, or key', () => silentConsoleError(async () => {
+  const { fetcher, calls } = makeClassifierFetcher({ content: '{}' });
+  assert.equal(await generateAnnotations({ imageBase64: '', feedback: 'x', env: ANNOTATOR_ENV, fetcher }), null);
+  assert.equal(await generateAnnotations({ imageBase64: ANNOTATOR_IMAGE, feedback: '', env: ANNOTATOR_ENV, fetcher }), null);
+  assert.equal(await generateAnnotations({ imageBase64: ANNOTATOR_IMAGE, feedback: 'x', env: {}, fetcher }), null);
   assert.equal(calls.length, 0);
 }));
 

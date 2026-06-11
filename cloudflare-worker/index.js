@@ -341,6 +341,15 @@ export {
 } from './lib/classifier.js';
 
 export {
+  generateAnnotations,
+  validateAnnotation,
+  ANNOTATOR_MODEL,
+  ANNOTATOR_VERSION,
+  MIN_ANNOTATION_CONFIDENCE,
+  MAX_ANNOTATIONS,
+} from './lib/annotations.js';
+
+export {
   flattenCritiques,
   flattenCritiquesForReel,
   selectWindow,

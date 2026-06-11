@@ -57,6 +57,7 @@ import {
   recordIdempotent,
 } from '../middleware/idempotency.js';
 import { classifyCritique } from '../lib/classifier.js';
+import { generateAnnotations } from '../lib/annotations.js';
 import { jsonResponse, unauthorized } from '../lib/http.js';
 import { promoteSnapshot, incrementSnapshotCounter } from '../lib/snapshots.js';
 
@@ -1013,13 +1014,22 @@ export async function handleFeedback(request, env, ctx) {
       compositionFindings: body.compositionFindings ?? null,
     });
 
-    // My Evolution Phase 1 — classify the critique into structured tags for
-    // future trend analysis. Synchronous (must complete before persistCritique
-    // so tags ride along in the same row append), but never blocking: the
-    // classifier swallows all failures and returns null, and we attach null
-    // to entry.tags in that case. classifier_version on the tag object lets
+    // My Evolution Phase 1 — classify the critique into structured tags.
+    // Ghost layer — ground the critique's localizable feedback onto the
+    // drawing as normalized markers (lib/annotations.js). Both are
+    // synchronous (must complete before persistCritique so they ride along
+    // in the same row append), but never blocking: each swallows all
+    // failures and resolves to null, and we attach null in that case. They
+    // run in PARALLEL — independent calls, and the annotator's vision
+    // round-trip dominates; serializing would stack the added latency for
+    // no ordering benefit. classifier_version on the tag object lets
     // future analytics queries gate on schema generation.
-    entry.tags = await classifyCritique({ feedback, env });
+    const [critiqueTags, critiqueAnnotations] = await Promise.all([
+      classifyCritique({ feedback, env }),
+      generateAnnotations({ imageBase64: image, feedback, env }),
+    ]);
+    entry.tags = critiqueTags;
+    entry.annotations = critiqueAnnotations;
 
     // Drawing version history — promote the pending snapshot bundle iOS
     // uploaded in parallel. Only fires when all three optional fields are

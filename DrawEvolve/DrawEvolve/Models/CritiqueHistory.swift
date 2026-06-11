@@ -42,6 +42,13 @@ struct CritiqueEntry: Codable, Identifiable {
     // promote failed (graceful degradation — see proposal §2.5).
     let snapshot: SnapshotPointer?
 
+    // Ghost layer — critique annotations grounded onto the drawing by the
+    // Worker's annotator (cloudflare-worker/lib/annotations.js). Normalized
+    // image coordinates; iOS renders them as toggleable ghost markers.
+    // Nil for pre-feature entries and whenever the annotator declined
+    // (no localizable feedback, low confidence, or call failure).
+    let annotations: [CritiqueAnnotation]?
+
     struct PromptConfigSnapshot: Codable, Equatable {
         let tier: String
         let includeHistoryCount: Int
@@ -59,7 +66,8 @@ struct CritiqueEntry: Codable, Identifiable {
         completionTokenCount: Int? = nil,
         tags: CritiqueTags? = nil,
         presetId: String? = nil,
-        snapshot: SnapshotPointer? = nil
+        snapshot: SnapshotPointer? = nil,
+        annotations: [CritiqueAnnotation]? = nil
     ) {
         self.id = id
         self.feedback = feedback
@@ -72,6 +80,7 @@ struct CritiqueEntry: Codable, Identifiable {
         self.tags = tags
         self.presetId = presetId
         self.snapshot = snapshot
+        self.annotations = annotations
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -88,6 +97,7 @@ struct CritiqueEntry: Codable, Identifiable {
         case tags
         case presetId = "preset_id"
         case snapshot
+        case annotations
     }
 
     init(from decoder: Decoder) throws {
@@ -118,6 +128,7 @@ struct CritiqueEntry: Codable, Identifiable {
         self.tags = try container.decodeIfPresent(CritiqueTags.self, forKey: .tags)
         self.presetId = try container.decodeIfPresent(String.self, forKey: .presetId)
         self.snapshot = try container.decodeIfPresent(SnapshotPointer.self, forKey: .snapshot)
+        self.annotations = try container.decodeIfPresent([CritiqueAnnotation].self, forKey: .annotations)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -135,7 +146,28 @@ struct CritiqueEntry: Codable, Identifiable {
         try container.encodeIfPresent(tags, forKey: .tags)
         try container.encodeIfPresent(presetId, forKey: .presetId)
         try container.encodeIfPresent(snapshot, forKey: .snapshot)
+        try container.encodeIfPresent(annotations, forKey: .annotations)
     }
+}
+
+/// One ghost-layer marker — the Worker's annotator grounds a critique
+/// point onto the drawing as a normalized circular region. Coordinates
+/// are normalized to the drawing image: x left→right 0..1, y top→bottom
+/// 0..1, radius normalized to the image's max dimension. iOS reads only —
+/// the Worker is the sole writer.
+struct CritiqueAnnotation: Codable, Equatable, Identifiable, Hashable {
+    let x: Double
+    let y: Double
+    let radius: Double
+    let label: String
+    let excerpt: String?
+    let confidence: Double
+
+    /// Annotations carry no server id; synthesize a stable-enough identity
+    /// from position + label for SwiftUI ForEach. Stored entries never
+    /// mutate, so collisions would require two markers at identical
+    /// coordinates with identical labels — harmless if it ever happens.
+    var id: String { "\(x),\(y),\(label)" }
 }
 
 /// Pointer to a promoted snapshot bundle, written by the Worker into the

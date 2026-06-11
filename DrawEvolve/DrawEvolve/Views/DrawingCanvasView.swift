@@ -184,6 +184,17 @@ struct DrawingCanvasView: View {
     // happens on tap-outside / tool change.
     @State private var previousNonTypeTool: DrawingTool = .brush
 
+    // Ghost layer — annotations from the LATEST critique, rendered as
+    // toggleable markers over the live canvas. Set by the feedback
+    // panel's onActiveEntryChange (latest entry only — historical
+    // snapshot viewing skips markers in v1; the snapshot overlay uses
+    // its own letterbox math, not the canvas transform). Persists after
+    // the panel closes so the user can draw against the pointers; the
+    // toggle chip is the always-available off switch.
+    @State private var ghostAnnotations: [CritiqueAnnotation]? = nil
+    /// User's ghost-layer visibility preference, sticky across sessions.
+    @AppStorage("ghostLayerVisible") private var ghostLayerVisible = true
+
     /// Captured at the moment the color picker sheet opens; restored to
     /// `canvasState.currentTool` on dismiss (Done, swipe-down, or any
     /// other path that flips `showColorPicker` back to false). Mirrors
@@ -968,6 +979,11 @@ struct DrawingCanvasView: View {
                     textOnPathCirclePreviewOverlay
                 }
 
+                if !isViewingSnapshot {
+                    ghostLayerOverlay
+                        .ignoresSafeArea()
+                }
+
                 // Text editors + caret. `.ignoresSafeArea()` is REQUIRED
                 // on iPhone — these views position via
                 // `documentToScreen(...)` which returns coordinates in
@@ -1091,6 +1107,11 @@ struct DrawingCanvasView: View {
                             openEveOnNewConversation(scope: .drawing, critiqueSequence: sequence)
                         },
                         onActiveEntryChange: { entry, isLatest in
+                            // Ghost layer: markers track the LATEST
+                            // critique on the live canvas only (v1).
+                            if let entry, isLatest {
+                                ghostAnnotations = entry.annotations
+                            }
                             // Same phase 2 snapshot rule as iPad. On
                             // iPhone the panel is a half-sheet over the
                             // canvas; collapsing or dismissing it returns
@@ -1457,6 +1478,8 @@ struct DrawingCanvasView: View {
                 blurAdjustmentHUDOverlay
 
                 stampCursorOverlay
+
+                ghostLayerOverlay
             }
 
             // Selection action HUD (top of canvas).
@@ -1511,6 +1534,11 @@ struct DrawingCanvasView: View {
                         openEveOnNewConversation(scope: .drawing, critiqueSequence: sequence)
                     },
                     onActiveEntryChange: { entry, isLatest in
+                        // Ghost layer: markers track the LATEST critique
+                        // on the live canvas only (v1).
+                        if let entry, isLatest {
+                            ghostAnnotations = entry.annotations
+                        }
                         // Snapshot mode rule: enter iff the user picked
                         // a HISTORICAL entry that has a snapshot. Most-
                         // recent entries and pre-VH legacy entries
@@ -2120,6 +2148,39 @@ struct DrawingCanvasView: View {
     // The Type Bar now docks above the keyboard as the text editors'
     // inputAccessoryView (TypeBarView.swift / makeTypeBarAccessoryView)
     // — it has no canvas overlay anymore.
+
+    // MARK: - Ghost layer (critique pointers)
+    //
+    // Markers from the latest critique's annotations plus the toggle
+    // chip. The chip renders whenever annotations exist (even with the
+    // layer hidden) so turning pointers back on is always one tap. The
+    // markers themselves are doc-space overlays via documentToScreen,
+    // so they ride zoom/pan/rotation like every other overlay.
+
+    @ViewBuilder
+    private var ghostLayerOverlay: some View {
+        if let annotations = ghostAnnotations, !annotations.isEmpty {
+            ZStack {
+                if ghostLayerVisible {
+                    GhostAnnotationOverlay(
+                        canvasState: canvasState,
+                        annotations: annotations
+                    )
+                }
+                VStack {
+                    GhostLayerToggleChip(
+                        count: annotations.count,
+                        isVisible: $ghostLayerVisible
+                    )
+                    .padding(.top, 112)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(true)
+            }
+            .ignoresSafeArea()
+        }
+    }
 
     /// Apple Pencil hover cursor — a thin circle outline at the
     /// pencil's hover position, sized to the current brush's

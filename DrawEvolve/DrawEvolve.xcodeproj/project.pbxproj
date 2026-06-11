@@ -33,6 +33,7 @@
 		DE000029 /* AnonymousUserManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100029 /* AnonymousUserManager.swift */; };
 		DE000030 /* FloatingFeedbackPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100030 /* FloatingFeedbackPanel.swift */; };
 		DE000911 /* EvolutionTimelapseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100911 /* EvolutionTimelapseView.swift */; };
+		DE000912 /* GhostAnnotationOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100912 /* GhostAnnotationOverlay.swift */; };
 		DE000031 /* DrawingDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100031 /* DrawingDetailView.swift */; };
 		DE000032 /* CritiqueHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100032 /* CritiqueHistory.swift */; };
 		DE000034 /* FormattedMarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE100034 /* FormattedMarkdownView.swift */; };
@@ -172,6 +173,7 @@
 		DE100029 /* AnonymousUserManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnonymousUserManager.swift; sourceTree = "<group>"; };
 		DE100030 /* FloatingFeedbackPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingFeedbackPanel.swift; sourceTree = "<group>"; };
 		DE100911 /* EvolutionTimelapseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EvolutionTimelapseView.swift; sourceTree = "<group>"; };
+		DE100912 /* GhostAnnotationOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhostAnnotationOverlay.swift; sourceTree = "<group>"; };
 		DE100031 /* DrawingDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingDetailView.swift; sourceTree = "<group>"; };
 		DE100032 /* CritiqueHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CritiqueHistory.swift; sourceTree = "<group>"; };
 		DE100034 /* FormattedMarkdownView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattedMarkdownView.swift; sourceTree = "<group>"; };
@@ -354,6 +356,7 @@
 				DE100142 /* DrawEvolveBackground.swift */,
 				DE100030 /* FloatingFeedbackPanel.swift */,
 				DE100911 /* EvolutionTimelapseView.swift */,
+				DE100912 /* GhostAnnotationOverlay.swift */,
 				DE100034 /* FormattedMarkdownView.swift */,
 				DE100031 /* DrawingDetailView.swift */,
 				DE100038 /* SelectionOverlays.swift */,
@@ -675,6 +678,7 @@
 				DE000029 /* AnonymousUserManager.swift in Sources */,
 				DE000030 /* FloatingFeedbackPanel.swift in Sources */,
 				DE000911 /* EvolutionTimelapseView.swift in Sources */,
+				DE000912 /* GhostAnnotationOverlay.swift in Sources */,
 				DE000034 /* FormattedMarkdownView.swift in Sources */,
 				DE000031 /* DrawingDetailView.swift in Sources */,
 				DE000032 /* CritiqueHistory.swift in Sources */,
