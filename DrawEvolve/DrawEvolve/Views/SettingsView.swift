@@ -20,14 +20,22 @@ struct SettingsView: View {
     @State private var showSendFeedback = false
 
     // Tutorial flags. Replay Tutorial resets all five so the cards re-
-    // present AND the surface-specific coach-marks re-arm. ContentView's
-    // onChange(of: hasSeenTutorialV1) picks up the reset and fires the
-    // cards in replay mode over whatever screen the user is on.
+    // present AND the surface-specific coach-marks re-arm. The actual
+    // present is requested via `tutorialReplayRequest` below — a
+    // monotonic counter, NOT a flag edge — so it fires every time.
     @AppStorage("hasSeenTutorialV1") private var hasSeenTutorialV1 = false
     @AppStorage("hasSeenPromptInputBannerV1") private var hasSeenPromptInputBannerV1 = false
     @AppStorage("hasSeenGetFeedbackCoachMarkV1") private var hasSeenGetFeedbackCoachMarkV1 = false
     @AppStorage("hasSeenAskEveCoachMarkV1") private var hasSeenAskEveCoachMarkV1 = false
     @AppStorage("hasSeenGalleryTourV1") private var hasSeenGalleryTourV1 = false
+
+    /// Replay-request token. Each Replay Tutorial tap increments it;
+    /// ContentView listens via onChange. A counter ALWAYS changes, so
+    /// the cards re-present regardless of the tutorial's completion
+    /// state — the previous trigger ("set hasSeenTutorialV1 = false")
+    /// was an edge that never fired when the flag was already false
+    /// (tutorial not yet completed), leaving the button dead.
+    @AppStorage("tutorialReplayRequestV1") private var tutorialReplayRequest = 0
 
     var body: some View {
         NavigationStack {
@@ -198,15 +206,17 @@ struct SettingsView: View {
 
     // MARK: - Actions
 
-    /// Reset all five tutorial flags, then dismiss the Settings sheet.
-    /// The reset triggers ContentView.SignedInRoot's onChange(of:
-    /// hasSeenTutorialV1) which presents the cards in replay mode.
+    /// Reset all five tutorial flags (so the surface coach-marks re-arm),
+    /// bump the replay-request token (so ContentView.SignedInRoot
+    /// presents the cards in replay mode — unconditionally, whether or
+    /// not the tutorial was ever completed), then dismiss the sheet.
     private func replayTutorial() {
         hasSeenTutorialV1 = false
         hasSeenPromptInputBannerV1 = false
         hasSeenGetFeedbackCoachMarkV1 = false
         hasSeenAskEveCoachMarkV1 = false
         hasSeenGalleryTourV1 = false
+        tutorialReplayRequest += 1
         dismiss()
     }
 

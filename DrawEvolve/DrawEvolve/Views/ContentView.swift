@@ -80,6 +80,14 @@ private struct SignedInRoot: View {
     @AppStorage("hasSeenAskEveCoachMarkV1") private var hasSeenAskEveCoachMarkV1 = false
     @AppStorage("hasSeenGalleryTourV1") private var hasSeenGalleryTourV1 = false
 
+    /// Replay-request token bumped by Settings → Replay Tutorial. A
+    /// monotonic counter rather than a flag edge: resetting an
+    /// already-false hasSeenTutorialV1 produced no onChange, which made
+    /// Replay Tutorial a no-op whenever the tutorial hadn't been
+    /// completed. The counter changes on every tap, so the cards
+    /// re-present unconditionally.
+    @AppStorage("tutorialReplayRequestV1") private var tutorialReplayRequest = 0
+
     @State private var drawingContext = DrawingContext()
     @State private var showPromptInput = false
 
@@ -141,12 +149,16 @@ private struct SignedInRoot: View {
             onSkip: handleTutorialSkip
         ))
         .onAppear { handleSignedInAppear() }
-        .onChange(of: hasSeenTutorialV1) { _, newValue in
-            // Settings → Replay Tutorial resets this flag to false. We
-            // pick that up here, switch to replay mode, and present.
-            // Replay overlays whatever screen the user is on (per v3
-            // Q4 decision — do not navigate back to LaunchHome).
-            if !newValue && !showTutorial {
+        .onChange(of: tutorialReplayRequest) { _, _ in
+            // Settings → Replay Tutorial bumped the request token. Present
+            // the cards in replay mode over whatever screen the user is on
+            // (per v3 Q4 decision — do not navigate back to LaunchHome).
+            // Deferred past the Settings sheet's dismissal animation so the
+            // iPhone fullScreenCover isn't requested while another
+            // presentation is still tearing down (iPad uses an overlay,
+            // where the delay is just a beat after the sheet closes).
+            guard !showTutorial else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                 tutorialMode = .replay
                 showTutorial = true
             }
