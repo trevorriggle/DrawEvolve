@@ -14,11 +14,14 @@ Files: `DrawEvolve/DrawEvolve/Views/DrawingCanvasView.swift`.
 
 ---
 
-## Drawing rename via Save button (still open)
+## ✅ Drawing rename (RESOLVED — 2026-06-10, EVE-PATCHES)
 
-Currently no way to rename a saved drawing. Save = overwrite (correct), but no "Rename" affordance is surfaced anywhere. Considered: long-press or context menu on the drawing thumbnail in the Gallery, with a "Rename" action that updates `drawings.title`. Could also live in `DrawingDetailView` as a menu item.
+Two surfaces now exist:
 
-Not blocking v1; users who care can delete + re-save with a new name today.
+1. **DrawingDetailView editable title** (landed earlier) — the title at the top of the detail view is a live TextField; commits via `storageManager.renameDrawing(id:title:)` on "Save and Close" / "Continue Drawing".
+2. **Gallery long-press context menu** (this fix) — long-press a drawing card → Rename (alert with TextField) or Delete (existing confirm flow). Same `renameDrawing` path: local-first cache + in-memory array update, then a direct PostgREST PATCH of `title` + `updated_at` only (no Storage churn, can't clobber Worker-owned columns).
+
+Files: `Views/GalleryView.swift`, `Views/DrawingDetailView.swift`, `Services/DrawingStorageManager.swift` (`renameDrawing`).
 
 ---
 

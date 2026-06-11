@@ -1,26 +1,24 @@
 # Drawing Pipeline Performance Issues
 
-Snapshot of the perf audit run on 2026-04-30 against `main`. **PR #8 (`ccf910a`) applied a batch of these fixes** — see status table below for what's still open.
-
-Canvas texture is **4096² BGRA8** on iPad Pro per `CLAUDE.md`, so any full-texture buffer = **64 MiB**. Several issues compound at that resolution but were invisible at the smaller texture size the code was written against.
+Original audit run 2026-04-30 against `main`; PR #8 (`ccf910a`) applied a first batch of fixes. **Re-audited 2026-06-10 against EVE-PATCHES** — the tiling migration and wet-ink pipeline landed in between and obsoleted most of what remained. The 2026-06-10 table below is authoritative; the older sections further down are kept as historical context and their line numbers are stale.
 
 ---
 
-## Status snapshot (post-PR #8)
+## Status snapshot (re-audit 2026-06-10, post-tiling + wet-ink)
 
-| Item | State |
-|---|---|
-| Paint bucket fill loop on background queue (`8acafb0`) | ✅ landed pre-PR #8 |
-| Region-local `getBytes` for selection-commit paths | ✅ shipped in PR #8 |
-| Text routed through `compositeFloatingTextureIntoLayer` | ✅ shipped in PR #8 |
-| Per-frame `MTLCommandQueue` allocation removed | ✅ shipped in PR #8 |
-| Hot-path `print` gated behind `#if DEBUG` | ✅ shipped in PR #8 |
-| Eyedropper 1×1 region read | ✅ shipped in PR #8 |
-| Paint bucket pre/post `captureSnapshot` full-texture reads | ⚠️ still open — see High row |
-| `floodFillKernel` rewrite as true GPU connected-component fill | ⚠️ deferred (algorithm rework, not a one-liner) |
-| `waitUntilCompleted` after every stroke commit | ⚠️ still open (Low — needs async-snapshot undo path) |
+| Item | State | Evidence |
+|---|---|---|
+| `captureSnapshot` full-texture 64 MiB reads | ✅ **obsoleted by tiling** | Snapshot is now per-allocated-tile, `MTLRegion`-scoped (`LayerSnapshot.tiles: [TileKey: Data]`). Cost scales with painted content, not canvas size. A fully-painted 4096² canvas still totals ~64 MiB — inherent to a full snapshot, no longer a per-call waste. |
+| Aggregate full-texture `getBytes` (7 sites) | ✅ **closed for hot paths** | 13/14 `getBytes` sites are `MTLRegion`-scoped (per-tile or selection-bbox). The one full-texture read left is `textureToUIImage` — user-initiated export, not a hot path. |
+| `waitUntilCompleted` after every stroke commit | ✅ **closed** | `commitWetInkStroke` uses `addCompletedHandler`; post-stroke snapshot/history/thumbnail run in the async completion. A sync fallback exists only for the no-completion legacy path. |
+| Paint bucket fill loop | ✅ **closed** (`8acafb0` + tiling) | Background queue, flat `[UInt8]` mask, dirty-bbox tracking; atlas blit-back is dirty-bbox-scoped. |
+| Paint bucket AFTER-snapshot | ✅ **closed** | Captured in the fill's async completion handler. |
+| Paint bucket BEFORE-snapshot | ⚠️ **still open (last real item)** | `MetalCanvasView` `touchesBegan` paint-bucket branch captures the before-snapshot synchronously on main. Tile-scoped now, so cost is content-proportional (~ms on sparse, tens of ms on dense) — a tap-latency nibble, not a hang. Fix requires capturing it on the fill's background path *before* the mask applies, with care that snapshot reads don't race other queue work. Renderer territory: sign-off + device verify required. |
+| `floodFillKernel` GPU connected-component rewrite | ⚠️ **deferred** (unchanged) | Algorithm rework; CPU path is now background + masked, so urgency is low. |
 
-The remaining open items are all in the "long-term, sign-off required" bucket. Read the rows below for context, but for current state, treat the table above as authoritative.
+---
+
+## Historical sections (2026-04-30 audit — line numbers stale, claims superseded above)
 
 ---
 

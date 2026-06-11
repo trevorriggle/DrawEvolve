@@ -248,6 +248,14 @@ private struct GalleryContent: View {
     @State private var drawingToDelete: Drawing?
     @State private var showClearAllAlert = false
 
+    // Rename via long-press context menu on a card (KNOWN_ISSUES "rename"
+    // item). Mirrors the delete-alert idiom: presenting-based alert with a
+    // TextField, commits through storageManager.renameDrawing (the same
+    // local-first + direct-PATCH path DrawingDetailView's title field uses).
+    @State private var showRenameAlert = false
+    @State private var drawingToRename: Drawing?
+    @State private var renameTitle = ""
+
     // MARK: - Delete-suck animation state
     //
     // Cards currently animating out toward the trash. Each card stays
@@ -389,6 +397,21 @@ private struct GalleryContent: View {
                 }
             } message: { drawing in
                 Text("Are you sure you want to delete '\(drawing.title)'?")
+            }
+            .alert("Rename Drawing", isPresented: $showRenameAlert, presenting: drawingToRename) { drawing in
+                TextField("Title", text: $renameTitle)
+                Button("Cancel", role: .cancel) {}
+                Button("Rename") {
+                    // renameDrawing trims + rejects empty titles and updates
+                    // the @Published drawings array, so the card title
+                    // refreshes immediately; cloud PATCH failures keep the
+                    // local rename (local-first, same as the detail view).
+                    Task {
+                        try? await storageManager.renameDrawing(id: drawing.id, title: renameTitle)
+                    }
+                }
+            } message: { drawing in
+                Text("Enter a new name for '\(drawing.title)'.")
             }
             .alert("Clear All Drawings", isPresented: $showClearAllAlert) {
                 Button("Cancel", role: .cancel) {}
@@ -780,6 +803,23 @@ private struct GalleryContent: View {
                         }
                     }
                     .buttonStyle(PlainButtonStyle())
+                    // Long-press context menu: Rename (KNOWN_ISSUES item) +
+                    // Delete (same confirm flow as the card's ✕ button).
+                    .contextMenu {
+                        Button {
+                            renameTitle = drawing.title
+                            drawingToRename = drawing
+                            showRenameAlert = true
+                        } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            drawingToDelete = drawing
+                            showDeleteAlert = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
                     // Capture this card's frame in global coords so
                     // suckOffset(for:) can compute the translate-to-trash
                     // delta when the user confirms deletion.
