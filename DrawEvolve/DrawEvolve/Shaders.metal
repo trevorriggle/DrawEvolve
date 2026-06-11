@@ -791,15 +791,18 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     float grain = mix(1.0, brushHash(layerPos * 2.0), 0.35);
     alpha *= grain;
 
-    // Pressure modulates opacity, not size. Floor at 0.6 + pow(x, 1.5)
-    // curve so a light Apple Pencil touch still deposits ~36% of full
-    // mist alpha — previously the squared curve through the
-    // [minPressureSize=0.3, maxPressureSize=1.0] remap left light Pencil
-    // strokes at ~14% of finger-touch flow, requiring artists to mash
-    // hard to register any value. Finger fallback returns pressureAlpha=1.0
-    // (see computePressure in MetalCanvasView) so finger input lands at
-    // mix(0.6, 1.0, 1.0) = 1.0 — unchanged. Reads `pressureAlpha` so
-    // non-Pencil input doesn't cap airbrush — see BrushUniforms.
+    // Pressure modulates opacity, not size — but only as a LIGHT taper.
+    // The airbrush deposits through the wet-ink .max/.max pipeline, so
+    // within a stroke this term is a hard per-stroke value CEILING:
+    // overlap can never rebuild what the pressure discount takes away.
+    // The previous mix(0.6, 1.0, pα^1.5) curve capped a light Apple
+    // Pencil stroke (pα ≈ 0.37 at ~10% force) at ~69% of finger flow
+    // (finger pα = 1.0 flat), and the only way to reach true value was
+    // to mash the Pencil. mix(0.85, 1.0, pα) keeps a subtle lift-off
+    // taper (light touch ≈ 90% flow) without starving value. Finger
+    // stays at mix(0.85, 1.0, 1.0) = 1.0 — unchanged. Reads
+    // `pressureAlpha` so non-Pencil input doesn't cap airbrush — see
+    // BrushUniforms.
     //
     // NOTE: this is the non-premul fallback path. Production airbrush
     // strokes route through the wet-ink pipeline (airbrushFragmentShaderPremul
@@ -807,7 +810,7 @@ fragment float4 airbrushFragmentShader(VertexOut in [[stage_in]],
     // This branch only fires on the legacy renderStroke fallback (e.g.
     // scratch allocation failure at touchesBegan). Kept in defensive
     // symmetry with the premul variant so the curves don't drift.
-    float pressureOpacity = mix(0.6, 1.0, uniforms.pressureAlpha * sqrt(uniforms.pressureAlpha));
+    float pressureOpacity = mix(0.85, 1.0, uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
@@ -1000,14 +1003,17 @@ fragment float4 airbrushFragmentShaderPremul(VertexOut in [[stage_in]],
     float grain = mix(1.0, brushHash(layerPos * 2.0), 0.35);
     alpha *= grain;
 
-    // Pressure curve: mix(0.6, 1.0, pow(pressureAlpha, 1.5)). The 0.6 floor
-    // means a light Apple Pencil touch still deposits ~36% of full mist
-    // alpha. The previous squared curve through the
-    // [minPressureSize=0.3, maxPressureSize=1.0] remap left light Pencil
-    // strokes at ~14% of finger-touch flow (finger returns pressureAlpha=1.0,
-    // Pencil at 10% force returns ~0.37). Finger fallback lands at
-    // mix(0.6, 1.0, 1.0) = 1.0 — unchanged behavior on touch input.
-    float pressureOpacity = mix(0.6, 1.0, uniforms.pressureAlpha * sqrt(uniforms.pressureAlpha));
+    // Pressure curve: mix(0.85, 1.0, pressureAlpha) — a LIGHT taper only.
+    // This is the production wet-ink path, and the deposit blend is
+    // .max/.max (airbrushScratchDepositPipelineState): within a stroke a
+    // pixel's alpha is the MAX of stamp alphas, never a sum, so this
+    // term is a hard per-stroke value ceiling that overlap cannot
+    // rebuild. The previous mix(0.6, 1.0, pα^1.5) curve capped light
+    // Pencil strokes (pα ≈ 0.37 at ~10% force) at ~69% of finger flow —
+    // the "have to push hard to get any true value" complaint. With the
+    // 0.85 floor a light touch deposits ~90% flow and a hard press
+    // reaches 100%; finger (pressureAlpha = 1.0) is unchanged at 1.0.
+    float pressureOpacity = mix(0.85, 1.0, uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
