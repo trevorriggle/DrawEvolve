@@ -871,10 +871,28 @@ struct MetalCanvasView: UIViewRepresentable {
             /// The touch whose stroke this detection covers — matched in
             /// `touchesEnded` so the swap lands on the right lifting touch.
             let touchID: ObjectIdentifier
+            /// The classifier's UNCONSTRAINED detection. Kept so the
+            /// second-finger constraint can re-derive the constrained
+            /// variant (circle / square / 15° line) and revert cleanly
+            /// when the constraint finger lifts.
+            let shape: DetectedShape
             /// Synthesized clean shape (current brush color/size), reused for
-            /// both the overlay preview and the post-commit recommit.
+            /// both the overlay preview and the post-commit recommit. Rebuilt
+            /// when the constraint state changes.
             let previewStroke: BrushStroke
         }
+
+        /// Second-finger constraint for HOLD-TO-SNAP perfect shapes (5.3) —
+        /// the multi-touch counterpart to `shapeConstraintTouchIDs` on the
+        /// dedicated shape tools, same muscle memory: while a detected
+        /// shape preview is showing, a second finger held on the canvas
+        /// constrains it (ellipse → circle, rectangle → square, line →
+        /// 15° angle); lifting the finger before the primary reverts.
+        /// Constraint fingers never get a stroke session — they lay no
+        /// ink — and stationary touches aren't claimed by the pan/pinch
+        /// recognizers, so the primary stroke survives. Cleared in
+        /// `resetSnapToLineState`.
+        private var perfectShapeConstraintTouchIDs: Set<ObjectIdentifier> = []
 
         /// Weak ref to the MTKView, captured in `makeUIView`. Used by the
         /// background/foreground notification handlers to flip `isPaused`
@@ -2050,7 +2068,7 @@ struct MetalCanvasView: UIViewRepresentable {
             // Perfect-shape two-finger constraint. A new touch landing on
             // the canvas while a shape stroke is mid-drag is the modifier
             // that snaps the in-progress rectangle/circle/line to a square
-            // /circle/45° line. We don't start a competing stroke for the
+            // /circle/15° line. We don't start a competing stroke for the
             // modifier finger — it's parked in `shapeConstraintTouchIDs`
             // until lift. Force a redraw so the preview reflects the
             // constraint immediately even if the primary touch hasn't moved.
@@ -2062,6 +2080,25 @@ struct MetalCanvasView: UIViewRepresentable {
                 }
                 view.setNeedsDisplay()
                 return
+            }
+
+            // Hold-to-snap perfect-shape constraint (5.3). Same gesture for
+            // the freehand path: a new touch landing while a detected-shape
+            // preview is showing is the modifier that constrains it to the
+            // perfect variant (circle / square / 15° line). The modifier
+            // finger is parked in `perfectShapeConstraintTouchIDs` until
+            // lift — no competing stroke session is created for it.
+            if let pending = perfectShapePending {
+                var captured = false
+                for t in touches where ObjectIdentifier(t) != pending.touchID {
+                    perfectShapeConstraintTouchIDs.insert(ObjectIdentifier(t))
+                    captured = true
+                }
+                if captured {
+                    refreshPerfectShapePreviewForConstraint()
+                    view.setNeedsDisplay()
+                    return
+                }
             }
 
             // Ensure layer textures exist
@@ -2836,6 +2873,17 @@ struct MetalCanvasView: UIViewRepresentable {
                         return primaryTouch
                     }
                     return touches.first(where: { !shapeConstraintTouchIDs.contains(ObjectIdentifier($0)) })
+                }
+                // Same filter for hold-to-snap constraint fingers (5.3):
+                // geometry tracking must follow the stroke's own touch, and
+                // a moved event carrying only constraint touches resolves
+                // to nil (handled by the guard below).
+                if !perfectShapeConstraintTouchIDs.isEmpty {
+                    if let primary = snapToLineTouchID,
+                       let primaryTouch = touches.first(where: { ObjectIdentifier($0) == primary }) {
+                        return primaryTouch
+                    }
+                    return touches.first(where: { !perfectShapeConstraintTouchIDs.contains(ObjectIdentifier($0)) })
                 }
                 return touches.first
             }()
@@ -3616,6 +3664,31 @@ struct MetalCanvasView: UIViewRepresentable {
                     touches.contains(where: { ObjectIdentifier($0) == primary })
                 } ?? false
                 if droppedAny && !primaryEnded {
+                    view.setNeedsDisplay()
+                    return
+                }
+            }
+
+            // Hold-to-snap constraint lifecycle (5.3), mirroring the block
+            // above: a constraint finger lifting while the primary is still
+            // down reverts the pending preview to the unconstrained
+            // detection (if no constraint fingers remain). The primary is
+            // still drawing, so nothing commits here. If the PRIMARY lifted
+            // in this same event, fall through — the wet-ink commit path
+            // below picks up whatever the pending preview currently shows
+            // (constrained or not).
+            if !perfectShapeConstraintTouchIDs.isEmpty {
+                var droppedAny = false
+                for t in touches {
+                    if perfectShapeConstraintTouchIDs.remove(ObjectIdentifier(t)) != nil {
+                        droppedAny = true
+                    }
+                }
+                let primaryEnded = snapToLineTouchID.map { primary in
+                    touches.contains(where: { ObjectIdentifier($0) == primary })
+                } ?? false
+                if droppedAny && !primaryEnded {
+                    refreshPerfectShapePreviewForConstraint()
                     view.setNeedsDisplay()
                     return
                 }
@@ -4863,6 +4936,11 @@ struct MetalCanvasView: UIViewRepresentable {
             // post-commit swap in touchesEnded captures the pending value into
             // a local BEFORE this teardown runs, so clearing here is race-free.
             perfectShapePending = nil
+            // 5.3: drop any second-finger constraint state with it. Fingers
+            // still physically down after this point are inert — their later
+            // lift finds an empty set and falls through harmlessly (same
+            // discipline as the shape tools' constraint set).
+            perfectShapeConstraintTouchIDs.removeAll()
         }
 
         /// Fired by `snapToLineTimer` after 600ms of stationary touch.
@@ -4918,7 +4996,14 @@ struct MetalCanvasView: UIViewRepresentable {
 
             var previewStroke = stroke
             previewStroke.points = cleanPoints
-            perfectShapePending = PerfectShapePending(touchID: touchID, previewStroke: previewStroke)
+            perfectShapePending = PerfectShapePending(touchID: touchID, shape: shape, previewStroke: previewStroke)
+
+            // If constraint fingers are already held (the user resumed
+            // drawing after a constrained detection, then settled again),
+            // re-apply the constraint to the fresh detection immediately.
+            if !perfectShapeConstraintTouchIDs.isEmpty {
+                refreshPerfectShapePreviewForConstraint()
+            }
 
             // The dwell timer fires off the run loop, not a touch event; if the
             // finger is perfectly still there may be no further touchesMoved to
@@ -4959,6 +5044,70 @@ struct MetalCanvasView: UIViewRepresentable {
                     timestamp: snapLatestTimestamp
                 )
             }
+        }
+
+        /// Rebuild the pending preview stroke to match the current
+        /// constraint state — constrained variant while any second finger
+        /// is held, the classifier's original detection otherwise. Called
+        /// when a constraint finger lands or lifts, and after a fresh
+        /// detection fires with constraint fingers already down.
+        private func refreshPerfectShapePreviewForConstraint() {
+            guard let pending = perfectShapePending else { return }
+            let shape = perfectShapeConstraintTouchIDs.isEmpty
+                ? pending.shape
+                : constrainDetectedShape(pending.shape)
+            guard let cleanPoints = buildPerfectShapeGeometry(shape),
+                  !cleanPoints.isEmpty else { return }
+            var previewStroke = pending.previewStroke
+            previewStroke.points = cleanPoints
+            perfectShapePending = PerfectShapePending(
+                touchID: pending.touchID,
+                shape: pending.shape,
+                previewStroke: previewStroke
+            )
+        }
+
+        /// Map a detected shape to its second-finger "perfect" variant:
+        /// ellipse → circle and rectangle → square (diameter/side = the
+        /// larger axis, grown around the detection's center so the shape
+        /// stays where the user drew it); line → angle snapped to the
+        /// nearest 15° increment around its start point, length preserved.
+        /// Matches the dedicated shape tools' constraint semantics
+        /// (`perfectShapeEnd`), which share the same 15° increment.
+        private func constrainDetectedShape(_ shape: DetectedShape) -> DetectedShape {
+            switch shape {
+            case .line(let a, let b):
+                return .line(from: a, to: snapEndpointToAngleIncrement(from: a, to: b))
+            case .rectangle(let rect):
+                let side = max(rect.width, rect.height)
+                return .rectangle(CGRect(
+                    x: rect.midX - side / 2, y: rect.midY - side / 2,
+                    width: side, height: side
+                ))
+            case .ellipse(let rect):
+                let diameter = max(rect.width, rect.height)
+                return .ellipse(CGRect(
+                    x: rect.midX - diameter / 2, y: rect.midY - diameter / 2,
+                    width: diameter, height: diameter
+                ))
+            }
+        }
+
+        /// Rotate `end` around `start` to the nearest 15° increment,
+        /// preserving the segment length. Shared by both second-finger
+        /// constraint systems (hold-to-snap and the dedicated Line tool)
+        /// so the two gestures feel identical. Unlike `applyAngleSnap`
+        /// (the snap-to-line assist, ±3° tolerance), this ALWAYS snaps —
+        /// the second finger is an explicit request, not an assist.
+        private func snapEndpointToAngleIncrement(from start: CGPoint, to end: CGPoint) -> CGPoint {
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            let length = hypot(dx, dy)
+            guard length > 0.0001 else { return end }
+            let step = CGFloat.pi / 12 // 15°
+            let snapped = (atan2(dy, dx) / step).rounded() * step
+            return CGPoint(x: start.x + cos(snapped) * length,
+                           y: start.y + sin(snapped) * length)
         }
 
         /// Perfect Shapes (5.2) post-commit replacement (Option A). The freehand
@@ -5080,7 +5229,7 @@ struct MetalCanvasView: UIViewRepresentable {
 
         /// Generate points for shape tools (line, rectangle, circle).
         /// When `constrainPerfect` is true, the end point is snapped to
-        /// produce a square (rectangle), circle (ellipse), or 45°-snapped
+        /// produce a square (rectangle), circle (ellipse), or 15°-snapped
         /// line — driven by the two-finger constraint gesture.
         private func generateShapePoints(
             from start: CGPoint,
@@ -5110,7 +5259,7 @@ struct MetalCanvasView: UIViewRepresentable {
         }
 
         /// Snap an end-point so the resulting shape is a perfect square /
-        /// circle / 45°-snapped line. Preserves the directional sign of the
+        /// circle / 15°-snapped line. Preserves the directional sign of the
         /// drag so the shape grows in the quadrant the user pulled toward.
         private func perfectShapeEnd(from start: CGPoint, to end: CGPoint, tool: DrawingTool) -> CGPoint {
             let dx = end.x - start.x
@@ -5125,16 +5274,10 @@ struct MetalCanvasView: UIViewRepresentable {
                 let sy: CGFloat = dy >= 0 ? 1 : -1
                 return CGPoint(x: start.x + sx * side, y: start.y + sy * side)
             case .line:
-                // 45° snap: round the drag's angle to the nearest 45° and
-                // keep the drag length. atan2 handles the (0,0) edge case
-                // by returning 0, which collapses to a degenerate point —
-                // generateLinePoints already guards against that.
-                let length = hypot(dx, dy)
-                guard length > 0 else { return end }
-                let step = CGFloat.pi / 4
-                let snapped = (atan2(dy, dx) / step).rounded() * step
-                return CGPoint(x: start.x + cos(snapped) * length,
-                               y: start.y + sin(snapped) * length)
+                // 15° snap, length preserved — unified with the hold-to-snap
+                // second-finger constraint (was 45°; one increment for both
+                // systems so the gesture builds a single muscle memory).
+                return snapEndpointToAngleIncrement(from: start, to: end)
             default:
                 return end
             }
