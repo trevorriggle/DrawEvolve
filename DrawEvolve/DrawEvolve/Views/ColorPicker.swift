@@ -333,29 +333,33 @@ struct AdvancedColorPicker: View {
         return f
     }()
 
-    // MARK: - Section: Simple picker (C1, 2026-05-23)
+    // MARK: - Section: Simple picker (C1, 2026-05-23; disc redesign 5.4)
     //
-    // Default view when the picker opens. Hue ring + brightness slider
-    // only — no swatch, hex, RGB readout, palette, or recents. Saturation
-    // is forced to 1.0 on every interaction in this mode; if the user
-    // wants to desaturate they tap Advanced and use the saturation slider.
+    // Default view when the picker opens. Full HSV disc + brightness
+    // slider — no swatch, hex, RGB readout, palette, or recents. The
+    // disc replaces the old hue RING (which locked saturation at 1.0):
+    // hue sweeps the angle, saturation runs the radius (white center →
+    // saturated rim, per Trevor's reference image), so one drag sets
+    // both. Brightness stays on the slider below.
 
     private var simplePickerSection: some View {
         VStack(spacing: 24) {
-            HueRingView(
+            HSWheelView(
                 hue: hue,
-                innerColor: Color(uiColor: selectedColor),
-                onHueChange: { newHue in
-                    hue = newHue
+                saturation: saturation,
+                thumbFill: Color(uiColor: selectedColor),
+                onChange: { newHue, newSaturation in
                     maybeHueHaptic(newHue: newHue)
+                    hue = newHue
+                    saturation = newSaturation
                     writeBackFromSimple()
                 },
-                ringDragActive: $ringDragActive,
+                wheelDragActive: $ringDragActive,
                 hueHaptic: $hueHaptic
             )
             .accessibilityElement()
-            .accessibilityLabel("Hue")
-            .accessibilityValue("\(Int(hue * 360)) degrees")
+            .accessibilityLabel("Color wheel")
+            .accessibilityValue("Hue \(Int(hue * 360)) degrees, saturation \(Int(saturation * 100)) percent")
             .accessibilityAdjustableAction { direction in
                 let step = 1.0 / 36.0
                 switch direction {
@@ -404,16 +408,14 @@ struct AdvancedColorPicker: View {
         }
     }
 
-    /// Snap saturation to 1.0 and write the resulting color back through
-    /// the binding. Both hue ring drags and brightness slider edits in
-    /// simple mode route through here, so any interaction in simple mode
-    /// produces a fully-saturated color — matching the "saturation locked
-    /// at 100%" rule. selectedColor's .onChange handler will then sync
-    /// state channels (incl. saturation = 1.0) so opening Advanced shows
-    /// the correct state.
+    /// Write the current HSB state back through the binding. Disc drags
+    /// (hue + saturation) and brightness slider edits in simple mode both
+    /// route through here. The old "saturation locked at 100%" rule died
+    /// with the hue ring — the disc's radius IS the saturation control.
+    /// selectedColor's .onChange handler then syncs state channels so
+    /// opening Advanced shows the correct state.
     private func writeBackFromSimple() {
-        saturation = 1.0
-        let newColor = UIColor(hue: hue, saturation: 1.0, brightness: brightness, alpha: alpha)
+        let newColor = UIColor(hue: hue, saturation: saturation, brightness: brightness, alpha: alpha)
         guard newColor != selectedColor else { return }
         selectedColor = newColor
     }
@@ -1039,58 +1041,83 @@ struct AdvancedColorPicker: View {
 /// subsequent locations update hue regardless of distance from center.
 /// This prevents inner-area taps from rotating hue while still allowing
 /// the finger to drift inside or outside mid-drag.
-private struct HueRingView: View {
+/// HSV color disc (5.4 picker redesign, per the reference image): hue
+/// sweeps the angle (red at 12 o'clock, clockwise — same convention as
+/// the retired HueRingView), saturation runs the radius (white center →
+/// fully saturated rim). One drag anywhere inside the disc sets both.
+/// The disc renders at full brightness regardless of the slider — the
+/// standard HSV-wheel presentation; the thumb's fill shows the actual
+/// selected color (brightness applied).
+///
+/// Disc construction: an angular hue sweep under a radial white→clear
+/// overlay. White at opacity (1 − r/R) over a fully saturated hue is
+/// exactly the HSV `S = r/R` color at B = 1, so the overlay isn't an
+/// approximation — modulo sRGB gradient interpolation, it IS the wheel.
+private struct HSWheelView: View {
     let hue: Double
-    let innerColor: Color
-    let onHueChange: (Double) -> Void
-    @Binding var ringDragActive: Bool
+    let saturation: Double
+    /// Fill for the thumb — the selected color with brightness applied.
+    let thumbFill: Color
+    let onChange: (_ hue: Double, _ saturation: Double) -> Void
+    @Binding var wheelDragActive: Bool
     @Binding var hueHaptic: UIImpactFeedbackGenerator
+
+    /// 13 stops (wrap included) keep the angular interpolation close to
+    /// a true conic hue sweep — the 6-stop version visibly banded
+    /// between primaries.
+    private static let hueStops: [Color] = (0...12).map {
+        Color(hue: Double($0) / 12.0, saturation: 1.0, brightness: 1.0)
+    }
 
     var body: some View {
         GeometryReader { geo in
             let size = min(geo.size.width, geo.size.height)
-            let outerRadius = size / 2.0
-            let strokeWidth: CGFloat = 28
-            let innerRadius = outerRadius - strokeWidth
-            let ringCenterRadius = outerRadius - strokeWidth / 2.0
+            let radius = size / 2.0
             let center = CGPoint(x: size / 2.0, y: size / 2.0)
 
-            // Thumb position: hue * 2π, shifted so 0 = 12 o'clock,
-            // clockwise sweep. atan2 convention uses 0 at 3 o'clock, so
-            // subtract π/2 when projecting.
+            // Thumb position: hue → angle (0 = 12 o'clock, clockwise;
+            // atan2 convention is 0 at 3 o'clock, so shift by −π/2),
+            // saturation → radius.
             let thumbAngle = hue * 2.0 * .pi - .pi / 2.0
-            let thumbX = center.x + ringCenterRadius * cos(thumbAngle)
-            let thumbY = center.y + ringCenterRadius * sin(thumbAngle)
+            let thumbRadius = radius * CGFloat(min(max(saturation, 0), 1))
+            let thumbX = center.x + thumbRadius * cos(thumbAngle)
+            let thumbY = center.y + thumbRadius * sin(thumbAngle)
 
             ZStack {
-                // Inner preview disc — shows the currently selected color.
+                // Hue sweep, red at 12 o'clock (startAngle −90°), clockwise.
                 Circle()
-                    .fill(innerColor)
-                    .frame(width: innerRadius * 2.0, height: innerRadius * 2.0)
-                    .overlay(
-                        Circle().stroke(Color(uiColor: .separator), lineWidth: 1)
-                    )
-
-                // Ring: stroke an AngularGradient with red at 12 o'clock
-                // (startAngle: -90°) sweeping clockwise.
-                Circle()
-                    .strokeBorder(
+                    .fill(
                         AngularGradient(
-                            gradient: Gradient(colors: [
-                                .red, .yellow, .green, .cyan, .blue, .purple, .red
-                            ]),
+                            gradient: Gradient(colors: Self.hueStops),
                             center: .center,
                             startAngle: .degrees(-90),
                             endAngle: .degrees(270)
-                        ),
-                        lineWidth: strokeWidth
+                        )
                     )
                     .frame(width: size, height: size)
 
-                // Thumb indicator.
+                // Saturation: white core → clear rim (see doc comment).
                 Circle()
-                    .fill(Color(hue: hue, saturation: 1.0, brightness: 1.0))
-                    .frame(width: strokeWidth + 8, height: strokeWidth + 8)
+                    .fill(
+                        RadialGradient(
+                            gradient: Gradient(colors: [
+                                Color.white,
+                                Color.white.opacity(0.0)
+                            ]),
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: radius
+                        )
+                    )
+                    .frame(width: size, height: size)
+                    .allowsHitTesting(false)
+
+                // Thumb indicator — filled with the ACTUAL selected color
+                // (brightness included) so the user sees what they get
+                // even though the disc itself renders at full brightness.
+                Circle()
+                    .fill(thumbFill)
+                    .frame(width: 32, height: 32)
                     .overlay(
                         Circle().stroke(Color.white, lineWidth: 3)
                     )
@@ -1099,18 +1126,22 @@ private struct HueRingView: View {
                     )
                     .shadow(color: Color.black.opacity(0.2), radius: 2, y: 1)
                     .position(x: thumbX, y: thumbY)
+                    .allowsHitTesting(false)
             }
             .frame(width: size, height: size)
-            .contentShape(Rectangle())
+            .contentShape(Circle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        if !ringDragActive {
+                        if !wheelDragActive {
+                            // Only begin from inside the disc; once the
+                            // drag is live, tracking continues past the
+                            // rim (saturation clamps to 1) — standard
+                            // wheel behavior, no mid-drag dropouts.
                             let dx0 = value.startLocation.x - center.x
                             let dy0 = value.startLocation.y - center.y
-                            let r0 = hypot(dx0, dy0)
-                            guard r0 >= innerRadius && r0 <= outerRadius else { return }
-                            ringDragActive = true
+                            guard hypot(dx0, dy0) <= radius else { return }
+                            wheelDragActive = true
                             hueHaptic.prepare()
                         }
                         let dx = value.location.x - center.x
@@ -1122,10 +1153,11 @@ private struct HueRingView: View {
                         var raw = atan2(dy, dx) + .pi / 2.0
                         if raw < 0 { raw += 2.0 * .pi }
                         let newHue = raw / (2.0 * .pi)
-                        onHueChange(newHue)
+                        let newSaturation = min(1.0, Double(hypot(dx, dy) / radius))
+                        onChange(newHue, newSaturation)
                     }
                     .onEnded { _ in
-                        ringDragActive = false
+                        wheelDragActive = false
                     }
             )
         }
