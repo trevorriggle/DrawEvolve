@@ -52,9 +52,14 @@ struct FloatingTextCaretIndicator: View {
 
     private var shouldShow: Bool {
         guard let ft = canvasState.floatingText else { return false }
-        // Only render the caret while content is empty — once the user
-        // types, the rasterised glyphs are the source of truth and a
-        // separate caret would just visually fight them.
+        // Plain text now edits through the visible InlineTextEditorView,
+        // which has a real native caret — rendering a second one here
+        // would fight it. This indicator survives only for PATH text
+        // (whose editor is invisible) with empty content; once the user
+        // types, the rasterised on-path glyphs take over.
+        if ft.path == nil && canvasState.isTextEditorSessionActive {
+            return false
+        }
         return ft.content.isEmpty
     }
 
@@ -64,20 +69,17 @@ struct FloatingTextCaretIndicator: View {
         return canvasState.documentToScreen(ft.anchor)
     }
 
-    /// Caret height ≈ the font's point size, scaled by the canvas zoom
-    /// so the caret matches what a single line of text will visibly
-    /// occupy. textSettings.size is in font points (matches what
-    /// TypeBarView's size slider writes), so screen height is
-    /// `size * zoomScale * scaleFactor` where scaleFactor maps doc
-    /// pixels → screen points (handled inside documentToScreen for
-    /// positions, but caret height needs explicit math).
-    ///
-    /// Approximation: size at 1× zoom roughly = font points on screen.
-    /// At higher zoom, multiply by zoomScale. Good enough for an
-    /// indicator — the rasterised text will replace it the moment the
-    /// user types.
+    /// Caret height = the font's doc-space size projected through the
+    /// real doc→screen scale (fit-scale × zoom), measured by projecting a
+    /// vertical doc segment of `size` length through documentToScreen.
+    /// The old `size * zoomScale` approximation omitted the fit scale and
+    /// under/over-shot whenever document pixels ≠ screen points at 1×.
     private var caretHeightScreen: CGFloat? {
-        let raw = canvasState.textSettings.size * canvasState.zoomScale
-        return max(12, min(raw, 200))
+        let size = canvasState.textSettings.size
+        let a = canvasState.documentToScreen(CGPoint(x: 0, y: 0))
+        let b = canvasState.documentToScreen(CGPoint(x: 0, y: size))
+        let raw = hypot(b.x - a.x, b.y - a.y)
+        guard raw.isFinite, raw > 0 else { return 12 }
+        return max(12, min(raw, 400))
     }
 }

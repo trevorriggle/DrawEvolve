@@ -127,7 +127,11 @@ struct CanvasRenderSnapshot: Equatable {
     ) {
         if let state = canvasState {
             self.zoomScale = state.zoomScale
-            self.panOffset = state.panOffset
+            // effectivePanOffset = gesture pan + transient keyboard-
+            // avoidance shift. Using it here (rather than raw panOffset)
+            // both renders the shift and makes the Equatable redraw gate
+            // fire as the avoidance animation steps.
+            self.panOffset = state.effectivePanOffset
             self.canvasRotationRadians = state.canvasRotation.radians
             self.flipHorizontal = state.flipHorizontal
             self.flipVertical = state.flipVertical
@@ -146,7 +150,13 @@ struct CanvasRenderSnapshot: Equatable {
             self.selectionOffset = state.selectionOffset
             self.selectionScale = state.selectionScale
             self.selectionRotationRadians = state.selectionRotation.radians
-            if let ft = state.floatingText {
+            // Plain-text floats suppress the rasterised preview while the
+            // visible inline editor owns the session — the editor's own
+            // glyphs are the live preview and double-rendering ghosts.
+            // Path text keeps the rasterised preview (glyphs on a curve
+            // can't be a native text view).
+            if let ft = state.floatingText,
+               !(state.isTextEditorSessionActive && ft.path == nil) {
                 self.floatingTextTextureID = ft.cachedTexture.map(ObjectIdentifier.init)
                 self.floatingTextRect = ft.displayedRect
                 self.floatingTextRotationRadians = ft.rotation.radians
@@ -795,6 +805,18 @@ struct MetalCanvasView: UIViewRepresentable {
         private var isDraggingFloatingText = false
         private var floatingTextDragStartDoc: CGPoint?
         private var floatingTextDragOriginAnchor: CGPoint?
+        /// Screen-point touch-down location for the in-progress body drag.
+        /// touchesEnded compares against it: < tapSlop pt of travel means
+        /// the "drag" was really a stationary tap, which re-enters the
+        /// typing session (keyboard back up, caret restored) instead of
+        /// being a no-op move. The 5.1 rework's re-edit affordance.
+        private var floatingTextDragStartScreen: CGPoint?
+        /// Same tap detection for path-bearing floats — they have no body
+        /// drag, so touchesBegan records the touch-down here and
+        /// touchesEnded resumes typing if the finger didn't travel.
+        private var pathTextTapStartScreen: CGPoint?
+        /// Max screen-point travel for a touch to still count as a tap.
+        private let floatingTextTapSlop: CGFloat = 8
 
         // Snap-to-line state. While a brush/eraser/blur stroke is in progress,
         // a 600ms stationary timer waits for the touch to settle (<2pt screen-
@@ -1197,7 +1219,9 @@ struct MetalCanvasView: UIViewRepresentable {
             @MainActor
             init(canvasState: CanvasStateManager) {
                 self.zoomScale = canvasState.zoomScale
-                self.panOffset = canvasState.panOffset
+                // effectivePanOffset: include the transient keyboard-
+                // avoidance shift so rendered pixels match documentToScreen.
+                self.panOffset = canvasState.effectivePanOffset
                 self.canvasRotation = canvasState.canvasRotation.radians
                 self.flipHorizontal = canvasState.flipHorizontal
                 self.flipVertical = canvasState.flipVertical
@@ -1209,7 +1233,11 @@ struct MetalCanvasView: UIViewRepresentable {
                 self.selectionScale = canvasState.selectionScale
                 self.selectionRotation = canvasState.selectionRotation.radians
                 self.documentSize = canvasState.documentSize
-                if let ft = canvasState.floatingText, let tex = ft.cachedTexture {
+                // Mirror CanvasRenderSnapshot: hide the rasterised preview
+                // for plain-text floats while the visible inline editor is
+                // active (the editor renders the live glyphs).
+                if let ft = canvasState.floatingText, let tex = ft.cachedTexture,
+                   !(canvasState.isTextEditorSessionActive && ft.path == nil) {
                     self.floatingTextTexture = tex
                     self.floatingTextDocRect = ft.displayedRect
                     self.floatingTextRotation = ft.rotation.radians
@@ -2193,6 +2221,7 @@ struct MetalCanvasView: UIViewRepresentable {
                             isDraggingFloatingText = true
                             floatingTextDragStartDoc = location
                             floatingTextDragOriginAnchor = ft.anchor
+                            floatingTextDragStartScreen = screenLocation
                             print("Text tool: began body drag at \(location)")
                         }
                         return
@@ -2229,11 +2258,14 @@ struct MetalCanvasView: UIViewRepresentable {
                     canvasState?.floatingText
                 }
                 if let ft = activeFloat {
-                    // Tap inside the laid-out text bounds → no-op (the user
-                    // shouldn't accidentally redraw the path on the text);
-                    // tap outside commits and consumes. Same outside-commit
-                    // semantics as plain text.
+                    // Tap inside the laid-out text bounds → candidate
+                    // re-edit tap (touchesEnded resumes typing if the
+                    // finger doesn't travel; a drag does nothing — the
+                    // user shouldn't accidentally redraw the path on the
+                    // text). Tap outside commits and consumes. Same
+                    // outside-commit semantics as plain text.
                     if ft.containsDocPoint(location) {
+                        pathTextTapStartScreen = screenLocation
                         return
                     } else {
                         // Same multi-finger guard as the .text branch above —
@@ -3726,10 +3758,39 @@ struct MetalCanvasView: UIViewRepresentable {
             // FloatingText body drag — lift commits the position change but
             // doesn't bake to the layer. Commit happens on tap-outside or
             // tool-change; this branch only resets drag bookkeeping.
+            //
+            // 5.1 re-edit affordance: if the finger never really travelled
+            // (< tapSlop screen pt), this was a stationary tap on the text,
+            // not a move — re-enter the typing session so the keyboard
+            // rises and the user can edit in place.
             if isDraggingFloatingText {
+                let startScreen = floatingTextDragStartScreen
                 isDraggingFloatingText = false
                 floatingTextDragStartDoc = nil
                 floatingTextDragOriginAnchor = nil
+                floatingTextDragStartScreen = nil
+                if let start = startScreen,
+                   let touch = touches.first {
+                    let end = touch.location(in: view)
+                    if hypot(end.x - start.x, end.y - start.y) < floatingTextTapSlop,
+                       let cs = canvasState {
+                        MainActor.assumeIsolated { cs.resumeTextEditorSession() }
+                    }
+                }
+                return
+            }
+
+            // Path-text re-edit tap: same stationary-tap detection for
+            // path-bearing floats (no body drag to piggyback on).
+            if let start = pathTextTapStartScreen {
+                pathTextTapStartScreen = nil
+                if let touch = touches.first {
+                    let end = touch.location(in: view)
+                    if hypot(end.x - start.x, end.y - start.y) < floatingTextTapSlop,
+                       let cs = canvasState {
+                        MainActor.assumeIsolated { cs.resumeTextEditorSession() }
+                    }
+                }
                 return
             }
 
@@ -4436,6 +4497,8 @@ struct MetalCanvasView: UIViewRepresentable {
             isDraggingFloatingText = false
             floatingTextDragStartDoc = nil
             floatingTextDragOriginAnchor = nil
+            floatingTextDragStartScreen = nil
+            pathTextTapStartScreen = nil
             textOnPathRawPoints = []
             circleDrawingCenter = nil
             if let cs = canvasState {

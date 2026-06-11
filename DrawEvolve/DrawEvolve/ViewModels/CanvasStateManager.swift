@@ -13,7 +13,18 @@ import Combine
 @MainActor
 class CanvasStateManager: ObservableObject {
     @Published var layers: [DrawingLayer] = []
-    @Published var selectedLayerIndex = 0
+    @Published var selectedLayerIndex = 0 {
+        // Commit any live floating text BEFORE the active layer changes
+        // (willSet — the old index is still in place, so the composite
+        // lands on the layer the user typed it on). Without this, a
+        // layer switch mid-text-session left the float alive and a later
+        // commit baked it onto whichever layer was now selected.
+        willSet {
+            if newValue != selectedLayerIndex, floatingText != nil {
+                commitFloatingText()
+            }
+        }
+    }
     @Published var currentTool: DrawingTool = .brush
     @Published var brushSettings = BrushSettings() {
         // Phase 3 (Color System Overhaul, 2026-05-13): persist across
@@ -109,6 +120,69 @@ class CanvasStateManager: ObservableObject {
     @Published var panOffset: CGPoint = .zero // Current pan offset in screen space
     @Published var canvasRotation: Angle = .zero // Current rotation angle
 
+    // MARK: - Keyboard-avoidance pan (5.1 type-tool rework)
+    //
+    // Transient, presentation-only vertical pan applied while the soft
+    // keyboard would cover the active FloatingText. Deliberately a SEPARATE
+    // field from `panOffset`: gesture math (anchored zoom/rotate, two-finger
+    // pan) reads and writes `panOffset` and must never see this value —
+    // that's the "transient pan corrupts pinch-zoom state" failure the old
+    // elevated-preview-card hack was avoiding. Rendering and hit-testing
+    // instead read `effectivePanOffset`, which composes the two, so the
+    // Metal draw, every SwiftUI overlay, and every touch→doc conversion
+    // shift together and stay in lockstep.
+    //
+    // Positive values pan the canvas content UP (screen y decreases).
+    // Driven exclusively by `setKeyboardAvoidancePan(_:duration:)` from the
+    // text-tool keyboard driver; always animates back to 0 on keyboard hide
+    // and is force-reset when the float ends.
+    @Published private(set) var keyboardAvoidancePan: CGFloat = 0
+
+    /// The pan offset rendering and coordinate transforms actually use:
+    /// gesture-owned `panOffset` plus the transient keyboard-avoidance
+    /// shift. ALL presentation consumers (documentToScreen, the instance
+    /// screenToDocument wrappers, MetalCanvasView's draw + redraw-gate
+    /// snapshots) must read this, never raw `panOffset`.
+    var effectivePanOffset: CGPoint {
+        CGPoint(x: panOffset.x, y: panOffset.y - keyboardAvoidancePan)
+    }
+
+    /// In-flight animation stepping `keyboardAvoidancePan` toward a target.
+    private var keyboardAvoidanceAnimTask: Task<Void, Never>?
+
+    /// Animate the keyboard-avoidance pan to `target` over `duration`
+    /// seconds (eased, matching the keyboard slide). The MTKView draw loop
+    /// and the SwiftUI overlays both observe the published value, so
+    /// stepping it per-frame moves rendered pixels and overlay chrome
+    /// together.
+    func setKeyboardAvoidancePan(_ target: CGFloat, duration: Double) {
+        keyboardAvoidanceAnimTask?.cancel()
+        let start = keyboardAvoidancePan
+        guard abs(target - start) > 0.5 else {
+            keyboardAvoidancePan = target
+            return
+        }
+        guard duration > 0.01 else {
+            keyboardAvoidancePan = target
+            return
+        }
+        keyboardAvoidanceAnimTask = Task { @MainActor [weak self] in
+            let frames = max(1, Int(duration * 60))
+            for frame in 1...frames {
+                guard !Task.isCancelled else { return }
+                let t = CGFloat(frame) / CGFloat(frames)
+                // easeInOut (smoothstep) to match UIKit's keyboard curve
+                // closely enough that the canvas reads as riding the
+                // keyboard rather than lagging it.
+                let eased = t * t * (3 - 2 * t)
+                self?.keyboardAvoidancePan = start + (target - start) * eased
+                try? await Task.sleep(nanoseconds: 16_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            self?.keyboardAvoidancePan = target
+        }
+    }
+
     // Canvas flip state — display-only mirror around viewport center.
     // Layer textures are unchanged; only the screen composition flips.
     // See documentToScreen / screenToDocument for the transform-chain
@@ -185,6 +259,20 @@ class CanvasStateManager: ObservableObject {
     /// corner handle updates `scale` (uniform), rotation handle updates
     /// `rotation`. Commit/cancel from this side; auto-commit on tool change.
     @Published var floatingText: FloatingText? = nil
+
+    /// True while the user is in the TYPING portion of a text session —
+    /// i.e. the keyboard is (or should be) up and an editor owns input.
+    /// Plain text mounts the visible InlineTextEditorView; path text
+    /// mounts the invisible TextEntryOverlay host. The checkmark on the
+    /// keyboard-docked Type Bar flips this false (float stays alive with
+    /// transform handles, keyboard drops); a stationary tap inside a live
+    /// plain-text float flips it back true (re-edit). Replaces the old
+    /// DrawingCanvasView-local `typeBarSuspended` flag, inverted.
+    ///
+    /// While true for a PLAIN float, the Metal draw loop suppresses the
+    /// rasterised live preview — the visible editor's own glyphs are the
+    /// preview, and double-rendering reads as ghosting.
+    @Published var isTextEditorSessionActive: Bool = false
 
     /// Live preview of the user's in-progress path drawing during the
     /// .textOnPath touch session in **freehand** mode. Doc-space points;
@@ -911,7 +999,24 @@ class CanvasStateManager: ObservableObject {
         }
         let ft = FloatingText(content: content, settings: textSettings, anchor: location)
         floatingText = ft
+        isTextEditorSessionActive = true
         rasterizeFloatingTextNow()
+    }
+
+    /// End the typing portion of the session: the editor unmounts (keyboard
+    /// drops with it) but the float stays alive for transform-handle work.
+    /// Commit-to-layer still happens via tap-outside / tool change.
+    func endTextEditorSession() {
+        isTextEditorSessionActive = false
+        setKeyboardAvoidancePan(0, duration: 0.25)
+    }
+
+    /// Re-enter typing on a live float (stationary tap inside its bounds).
+    /// The editor re-mounts and the keyboard rises with the caret restored
+    /// at the end of the content.
+    func resumeTextEditorSession() {
+        guard floatingText != nil else { return }
+        isTextEditorSessionActive = true
     }
 
     /// Replace the active FloatingText's content. Re-rasterises (debounced).
@@ -928,6 +1033,8 @@ class CanvasStateManager: ObservableObject {
         textRasterizeTask?.cancel()
         textRasterizeTask = nil
         floatingText = nil
+        isTextEditorSessionActive = false
+        setKeyboardAvoidancePan(0, duration: 0.25)
     }
 
     /// Bake the active FloatingText into the active layer. Single GPU pass
@@ -958,6 +1065,8 @@ class CanvasStateManager: ObservableObject {
             // Always clear the float — even if commit failed, leaving the
             // float alive after an intended commit would strand the user.
             floatingText = nil
+            isTextEditorSessionActive = false
+            setKeyboardAvoidancePan(0, duration: 0.25)
         }
 
         guard selectedLayerIndex < layers.count,
@@ -1059,6 +1168,7 @@ class CanvasStateManager: ObservableObject {
         // behaviour can toggle the field — UI surface for the toggle
         // is deferred until the inspector half-sheet returns.
         floatingText = ft
+        isTextEditorSessionActive = true
         rasterizeFloatingTextNow()
     }
 
@@ -1097,6 +1207,7 @@ class CanvasStateManager: ObservableObject {
         ft.pathStartOffset = 0
         ft.baselineOffset = 0
         floatingText = ft
+        isTextEditorSessionActive = true
         rasterizeFloatingTextNow()
     }
 
@@ -2509,7 +2620,10 @@ class CanvasStateManager: ObservableObject {
             screenSize: screenSize,
             documentSize: documentSize,
             zoomScale: zoomScale,
-            panOffset: panOffset,
+            // effectivePanOffset, not panOffset: presentation may be
+            // shifted by the keyboard-avoidance pan, and touch→doc must
+            // invert what's actually on screen.
+            panOffset: effectivePanOffset,
             canvasRotationRadians: canvasRotation.radians,
             flipHorizontal: flipHorizontal,
             flipVertical: flipVertical
@@ -2529,7 +2643,9 @@ class CanvasStateManager: ObservableObject {
             screenSize: screenSize,
             documentSize: documentSize,
             zoomScale: zoomScale,
-            panOffset: panOffset,
+            // effectivePanOffset for the same reason as screenToDocument
+            // above — invert the on-screen (keyboard-shifted) transform.
+            panOffset: effectivePanOffset,
             canvasRotationRadians: canvasRotation.radians,
             flipHorizontal: flipHorizontal,
             flipVertical: flipVertical
@@ -2710,9 +2826,13 @@ class CanvasStateManager: ObservableObject {
         let rx = pt.x * cosT + pt.y * sinT
         let ry = -pt.x * sinT + pt.y * cosT
 
-        // Translate to viewport center, then apply pan.
-        var sx = rx + centerX + panOffset.x
-        var sy = ry + centerY + panOffset.y
+        // Translate to viewport center, then apply pan. Pan includes the
+        // transient keyboard-avoidance shift (effectivePanOffset) so
+        // overlays positioned through this function ride the same shift
+        // the Metal draw applies.
+        let pan = effectivePanOffset
+        var sx = rx + centerX + pan.x
+        var sy = ry + centerY + pan.y
 
         // Apply FLIP last in the forward chain (mirror around viewport
         // center). Pairs with the same flip applied as the LAST step in
