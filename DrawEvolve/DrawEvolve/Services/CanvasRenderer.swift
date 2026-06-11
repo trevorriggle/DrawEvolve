@@ -7460,8 +7460,25 @@ class CanvasRenderer: NSObject {
         guard !points.isEmpty,
               let s = activeBlurStrokeSession,
               let depositPipeline = stampBlurDepositPipelineState,
-              let atlas = ensureCanvasStagingAtlas(),
-              let cb = commandQueue.makeCommandBuffer() else {
+              let atlas = ensureCanvasStagingAtlas() else {
+            return
+        }
+
+        // Back-pressure (blur-crash fix): this is the ONLY per-touchesMoved
+        // stroke path that was async-committing command buffers WITHOUT
+        // holding a strokeCommandSlots slot. Each buffer here carries two
+        // scissored Gaussian passes per stamp — far heavier than a brush
+        // deposit — so a fast 240 Hz Pencil scribble piled up in-flight
+        // buffers past Metal's ~64-per-queue hard cap. Past the cap the
+        // queue's dispatch thread traps (EXC_BREAKPOINT on
+        // com.Metal.CommandQueueDispatch + libxpc "Malformed Mach
+        // message" — the parked blur-brush crash). Same wait/signal
+        // pattern as flushWetInkSubStroke / renderStroke: wait before
+        // makeCommandBuffer, signal on every early exit, signal in the
+        // completed handler.
+        strokeCommandSlots.wait()
+        guard let cb = commandQueue.makeCommandBuffer() else {
+            strokeCommandSlots.signal()
             return
         }
 
@@ -7514,6 +7531,9 @@ class CanvasRenderer: NSObject {
         }
 
         if stampPlans.isEmpty {
+            cb.addCompletedHandler { [weak self] _ in
+                self?.strokeCommandSlots.signal()
+            }
             cb.commit()
             return
         }
@@ -7661,9 +7681,14 @@ class CanvasRenderer: NSObject {
         CanvasStrokeDiagnostics.log("blurRealtime scheduled stroke=\(CanvasStrokeDiagnostics.shortID(s.strokeID)) tool=blur allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(s.tileGrid.allocatedKeys()))")
         #endif
 
+        cb.addCompletedHandler { [weak self] _ in
+            self?.strokeCommandSlots.signal()
+        }
         cb.commit()
         // No waitUntilCompleted — let the GPU pipeline this batch behind
-        // any prior appendBlurStrokeStamps batch on the same queue.
+        // any prior appendBlurStrokeStamps batch on the same queue. The
+        // slot held since the wait above bounds how many of these batches
+        // can be in flight at once.
     }
 
     /// Tear down the session. If `completion` is provided, fires after
@@ -7715,9 +7740,19 @@ class CanvasRenderer: NSObject {
               let snapshot = makeBlurIntermediateTexture(),
               let scratchH = makeBlurIntermediateTexture(),
               let scratchV = makeBlurIntermediateTexture(),
-              let atlas = ensureCanvasStagingAtlas(),
-              let commandBuffer = commandQueue.makeCommandBuffer() else {
+              let atlas = ensureCanvasStagingAtlas() else {
             print("⚠️ renderBlurStroke: pipeline or intermediate textures unavailable")
+            completion()
+            return
+        }
+
+        // Same strokeCommandSlots back-pressure as renderStroke /
+        // appendBlurStrokeStamps — one async buffer per stroke, but it
+        // still counts against Metal's per-queue in-flight cap.
+        strokeCommandSlots.wait()
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            strokeCommandSlots.signal()
+            print("⚠️ renderBlurStroke: command buffer unavailable")
             completion()
             return
         }
@@ -7943,7 +7978,8 @@ class CanvasRenderer: NSObject {
         CanvasStrokeDiagnostics.log("renderBlurStroke scheduled stroke=\(CanvasStrokeDiagnostics.shortID(stroke.id)) tool=\(stroke.tool) allocatedAfter=\(CanvasStrokeDiagnostics.tileSummary(tileGrid.allocatedKeys()))")
         #endif
 
-        commandBuffer.addCompletedHandler { _ in
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.strokeCommandSlots.signal()
             DispatchQueue.main.async { completion() }
         }
         commandBuffer.commit()
