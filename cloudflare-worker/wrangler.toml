@@ -133,6 +133,14 @@ EVE_MAX_TURNS_PER_CONVERSATION = "100"
 # (Pro tier should have a different cap), not a bug.
 PER_USER_DAILY_TOKEN_CAP = "75000"
 
+# Monthly critique quotas (tier sprint part 1, 2026-06-11). Calendar
+# month, UTC. PRICING TBD — these are plumbing placeholders sized to
+# stay out of TestFlight users' way; set the real numbers when the tier
+# design lands. Unset/invalid values fall back to the compiled defaults
+# (free 200 / pro 2000 in middleware/rate-limit.js).
+MONTHLY_CRITIQUES_FREE = "200"
+MONTHLY_CRITIQUES_PRO = "2000"
+
 # Phase 4 — Subject Recommendations kill-switch.
 # When "true", POST /v1/recommendations is live. When "false" or unset,
 # the endpoint returns 503 recommendations_disabled and iOS shows an

@@ -110,6 +110,11 @@ import {
   utcDayKey,
   enforceRateLimits,
   recordSuccessfulCritique,
+  utcMonthKey,
+  secondsUntilNextUtcMonth,
+  readMonthlyCritiqueLimit,
+  MONTHLY_LIMIT_DEFAULTS,
+  readQuotaStatus,
   isValidClientRequestId,
   checkIdempotency,
   recordIdempotent,
@@ -1133,6 +1138,109 @@ test('daily counter is keyed by UTC day — request at next-day 00:00:01Z lands 
   });
   assert.equal(fresh.ok, true, 'next-UTC-day request should pass the daily gate');
   assert.notEqual(utcDayKey(lateNight), utcDayKey(nextDay));
+});
+
+// =============================================================================
+// Monthly quota windows + quota status readout (tier sprint part 1)
+// =============================================================================
+
+test('utcMonthKey and secondsUntilNextUtcMonth roll at the calendar boundary', () => {
+  assert.equal(utcMonthKey(FIXED_NOW), '2026-04');
+  assert.equal(utcMonthKey(Date.UTC(2026, 11, 31, 23, 59, 59)), '2026-12');
+  assert.equal(utcMonthKey(Date.UTC(2027, 0, 1, 0, 0, 0)), '2027-01');
+  // April 29 noon → May 1 midnight = 1.5 days + 12h = 36h. ±2s slack.
+  assert.ok(Math.abs(secondsUntilNextUtcMonth(FIXED_NOW) - 36 * 3600) < 2);
+  // Last second of the year rolls to Jan 1.
+  assert.equal(secondsUntilNextUtcMonth(Date.UTC(2026, 11, 31, 23, 59, 59)), 1);
+});
+
+test('readMonthlyCritiqueLimit prefers env vars and falls back to compiled defaults', () => {
+  assert.equal(readMonthlyCritiqueLimit({}, 'free'), MONTHLY_LIMIT_DEFAULTS.free);
+  assert.equal(readMonthlyCritiqueLimit({}, 'pro'), MONTHLY_LIMIT_DEFAULTS.pro);
+  assert.equal(readMonthlyCritiqueLimit({ MONTHLY_CRITIQUES_FREE: '60' }, 'free'), 60);
+  assert.equal(readMonthlyCritiqueLimit({ MONTHLY_CRITIQUES_PRO: '999' }, 'pro'), 999);
+  // Garbage / non-positive values fall back rather than disabling the gate.
+  assert.equal(readMonthlyCritiqueLimit({ MONTHLY_CRITIQUES_FREE: 'lots' }, 'free'), MONTHLY_LIMIT_DEFAULTS.free);
+  assert.equal(readMonthlyCritiqueLimit({ MONTHLY_CRITIQUES_FREE: '0' }, 'free'), MONTHLY_LIMIT_DEFAULTS.free);
+});
+
+test('monthly gate 429s with monthly scope once the month counter hits the limit', async () => {
+  const { env, kv } = makeEnv({ MONTHLY_CRITIQUES_FREE: '60' });
+  kv.setNow(FIXED_NOW);
+  await kv.put(`quota_month:${FREE_USER}:${utcMonthKey(FIXED_NOW)}`, '60', { expirationTtl: 40 * 24 * 3600 });
+
+  const decision = await enforceRateLimits({
+    env, userId: FREE_USER, ip: '203.0.113.9', tier: 'free', now: FIXED_NOW,
+  });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.status, 429);
+  assert.equal(decision.body.error, 'quota_exceeded');
+  assert.equal(decision.body.scope, 'monthly');
+  assert.equal(decision.body.limit, 60);
+  assert.equal(decision.body.used, 60);
+  // April 29 noon → May 1: 36h.
+  assert.ok(Math.abs(decision.body.retryAfter - 36 * 3600) < 2);
+  assert.match(decision.body.message, /this month/i);
+  assert.match(decision.body.message, /upgrade to pro/i);
+});
+
+test('recordSuccessfulCritique increments daily AND monthly counters together', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+
+  const first = await enforceRateLimits({
+    env, userId: FREE_USER, ip: '203.0.113.9', tier: 'free', now: FIXED_NOW,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.ctx.monthlyCount, 0);
+  await silentConsoleError(() => recordSuccessfulCritique({ env, ctx: first.ctx, now: FIXED_NOW }));
+
+  assert.equal(await kv.get(`quota:${FREE_USER}:${utcDayKey(FIXED_NOW)}`), '1');
+  assert.equal(await kv.get(`quota_month:${FREE_USER}:${utcMonthKey(FIXED_NOW)}`), '1');
+
+  // Next day, same month: daily key is fresh, monthly carries over.
+  const nextDay = Date.UTC(2026, 3, 30, 12, 0, 0);
+  kv.setNow(nextDay);
+  const second = await enforceRateLimits({
+    env, userId: FREE_USER, ip: '203.0.113.9', tier: 'free', now: nextDay,
+  });
+  assert.equal(second.ok, true);
+  assert.equal(second.ctx.dailyCount, 0);
+  assert.equal(second.ctx.monthlyCount, 1);
+});
+
+test('readQuotaStatus aggregates critique/eve/token counters with limits', async () => {
+  const { env, kv } = makeEnv({ MONTHLY_CRITIQUES_FREE: '60', PER_USER_DAILY_TOKEN_CAP: '75000' });
+  kv.setNow(FIXED_NOW);
+  const dayKey = utcDayKey(FIXED_NOW);
+  await kv.put(`quota:${FREE_USER}:${dayKey}`, '3', { expirationTtl: 48 * 3600 });
+  await kv.put(`quota_month:${FREE_USER}:${utcMonthKey(FIXED_NOW)}`, '17', { expirationTtl: 40 * 24 * 3600 });
+  await kv.put(`eve_quota:${FREE_USER}:${dayKey}`, '5', { expirationTtl: 48 * 3600 });
+  await kv.put(`user_tokens:${FREE_USER}:${dayKey}`, '12345', { expirationTtl: 48 * 3600 });
+
+  const status = await readQuotaStatus({ env, userId: FREE_USER, tier: 'free', now: FIXED_NOW });
+  assert.equal(status.tier, 'free');
+  assert.equal(status.critiques.used_today, 3);
+  assert.equal(status.critiques.limit_today, TIER_LIMITS.free.perDay);
+  assert.equal(status.critiques.used_month, 17);
+  assert.equal(status.critiques.limit_month, 60);
+  assert.ok(status.critiques.day_resets_in > 0);
+  assert.ok(status.critiques.month_resets_in > status.critiques.day_resets_in);
+  assert.equal(status.eve_messages.used_today, 5);
+  assert.ok(status.eve_messages.limit_today > 0);
+  assert.equal(status.tokens.used_today, 12345);
+  assert.equal(status.tokens.cap_today, 75000);
+});
+
+test('readQuotaStatus reports null token cap when PER_USER_DAILY_TOKEN_CAP is unset and zeros for a fresh user', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const status = await readQuotaStatus({ env, userId: PRO_USER, tier: 'pro', now: FIXED_NOW });
+  assert.equal(status.critiques.used_today, 0);
+  assert.equal(status.critiques.used_month, 0);
+  assert.equal(status.critiques.limit_month, MONTHLY_LIMIT_DEFAULTS.pro);
+  assert.equal(status.eve_messages.used_today, 0);
+  assert.equal(status.tokens.cap_today, null);
 });
 
 test('anomaly alert fires exactly once on 5× daily quota threshold (no webhook → console.error)', async () => {

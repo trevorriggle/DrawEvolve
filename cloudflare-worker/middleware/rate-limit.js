@@ -44,6 +44,57 @@ export function secondsUntilNextUtcMidnight(now) {
   return Math.max(1, Math.ceil((next - now) / 1000));
 }
 
+// =============================================================================
+// Monthly quota windows — tier sprint part 1 (2026-06-11)
+//
+// Daily windows alone can't express "N critiques per month" pricing (a
+// daily-capped free user could do perDay × ~30 a month). Monthly counters
+// run ALONGSIDE the daily ones: same KV shape, calendar-month UTC key,
+// incremented in the same recordSuccessfulCritique batch.
+//
+//   quota_month:<user_id>:<YYYY-MM>   monthly counter, 40-day TTL
+//
+// Window semantics: CALENDAR month, UTC — the plumbing default. If pricing
+// lands on rolling-30-days-from-purchase instead, the window derivation is
+// the one function to swap (utcMonthKey → an anchor-date key fed from the
+// entitlements table); counters and gates stay as-is.
+//
+// Limits are env vars so pricing changes are a wrangler.toml edit, not a
+// code change. The compiled defaults below are PLUMBING placeholders sized
+// to stay out of TestFlight users' way (looser per-month than the daily
+// caps imply) — real numbers come with the pricing decision.
+
+export const MONTHLY_LIMIT_DEFAULTS = { free: 200, pro: 2000 };
+
+export function utcMonthKey(now) {
+  const d = new Date(now);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+export function secondsUntilNextUtcMonth(now) {
+  const d = new Date(now);
+  const next = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+  return Math.max(1, Math.ceil((next - now) / 1000));
+}
+
+/** Monthly critique limit for `tier`, env-overridable. */
+export function readMonthlyCritiqueLimit(env, tier) {
+  const raw = tier === 'pro' ? env?.MONTHLY_CRITIQUES_PRO : env?.MONTHLY_CRITIQUES_FREE;
+  const parsed = parseInt(raw ?? '', 10);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return MONTHLY_LIMIT_DEFAULTS[tier] ?? MONTHLY_LIMIT_DEFAULTS.free;
+}
+
+function monthlyMessage(tier, limit, retryAfterSeconds) {
+  const reset = formatDuration(retryAfterSeconds);
+  if (tier === 'pro') {
+    return `You've used all ${limit} Pro critiques for this month. Your quota resets on the 1st (in ${reset}).`;
+  }
+  return `You've used all ${limit} free critiques for this month. Your quota resets on the 1st (in ${reset}). Upgrade to Pro for more.`;
+}
+
 function formatDuration(seconds) {
   if (seconds < 60) return `${seconds}s`;
   const h = Math.floor(seconds / 3600);
@@ -89,12 +140,16 @@ export async function enforceRateLimits({ env, userId, ip, tier, now }) {
   const hourKey = utcHourKey(now);
   const ipHash = await sha256Hex(ip || 'unknown');
 
+  const monthKey = utcMonthKey(now);
+
   const dailyKey   = `quota:${userId}:${dayKey}`;
+  const monthlyKey = `quota_month:${userId}:${monthKey}`;
   const minuteKey  = `rate:${userId}`;
   const ipKey      = `ip:${ipHash}:${hourKey}`;
 
-  const [dailyRaw, minuteRaw, ipRaw] = await Promise.all([
+  const [dailyRaw, monthlyRaw, minuteRaw, ipRaw] = await Promise.all([
     env.QUOTA_KV.get(dailyKey),
+    env.QUOTA_KV.get(monthlyKey),
     env.QUOTA_KV.get(minuteKey),
     env.QUOTA_KV.get(ipKey),
   ]);
@@ -113,6 +168,28 @@ export async function enforceRateLimits({ env, userId, ip, tier, now }) {
         used: dailyCount,
         retryAfter,
         message: dailyMessage(tier, limits.perDay, retryAfter),
+      },
+    };
+  }
+
+  // Monthly gate (tier sprint part 1). Checked after daily so the daily
+  // message keeps fronting the common case; both produce `quota_exceeded`
+  // with a distinguishing `scope` the client can map to paywall UX.
+  const monthlyCount = parseInt(monthlyRaw ?? '0', 10) || 0;
+  const monthlyLimit = readMonthlyCritiqueLimit(env, tier);
+  if (monthlyCount >= monthlyLimit) {
+    const retryAfter = secondsUntilNextUtcMonth(now);
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'quota_exceeded',
+        scope: 'monthly',
+        tier,
+        limit: monthlyLimit,
+        used: monthlyCount,
+        retryAfter,
+        message: monthlyMessage(tier, monthlyLimit, retryAfter),
       },
     };
   }
@@ -170,7 +247,10 @@ export async function enforceRateLimits({ env, userId, ip, tier, now }) {
     env.QUOTA_KV.put(ipKey, String(ipCount + 1), { expirationTtl: 3600 }),
   ]);
 
-  return { ok: true, ctx: { dailyKey, dailyCount, tier, userId, hourKey, limits } };
+  return {
+    ok: true,
+    ctx: { dailyKey, dailyCount, monthlyKey, monthlyCount, tier, userId, hourKey, limits },
+  };
 }
 
 /**
@@ -181,18 +261,29 @@ export async function enforceRateLimits({ env, userId, ip, tier, now }) {
  * webhook or falls back to console.error.
  */
 export async function recordSuccessfulCritique({ env, ctx, now }) {
-  const { dailyKey, dailyCount, tier, userId, hourKey, limits } = ctx;
+  const { dailyKey, dailyCount, monthlyKey, monthlyCount, tier, userId, hourKey, limits } = ctx;
   const newDaily = dailyCount + 1;
+  // Monthly counter rides the same success-only increment. ctx fields are
+  // optional for back-compat with any caller built before the monthly gate
+  // (none in-tree, but the guard is free).
+  const newMonthly = (monthlyCount ?? 0) + 1;
 
   const anomalyKey = `hourly:${userId}:${hourKey}`;
   const prevHourlyRaw = await env.QUOTA_KV.get(anomalyKey);
   const prevHourly = parseInt(prevHourlyRaw ?? '0', 10) || 0;
   const newHourly = prevHourly + 1;
 
-  await Promise.all([
+  const puts = [
     env.QUOTA_KV.put(dailyKey, String(newDaily), { expirationTtl: 48 * 3600 }),
     env.QUOTA_KV.put(anomalyKey, String(newHourly), { expirationTtl: 2 * 3600 }),
-  ]);
+  ];
+  if (monthlyKey) {
+    // 40-day TTL: covers the calendar month plus grace for clock skew /
+    // late reads; the key name carries the month so a stale value can
+    // never bleed into the next window.
+    puts.push(env.QUOTA_KV.put(monthlyKey, String(newMonthly), { expirationTtl: 40 * 24 * 3600 }));
+  }
+  await Promise.all(puts);
 
   const threshold = limits.perDay * ANOMALY_MULTIPLIER;
   if (prevHourly < threshold && newHourly >= threshold) {
@@ -563,4 +654,49 @@ export async function recordSuccessfulEveTurn({ env, ctx }) {
   const { dailyKey, dailyCount } = ctx;
   const next = dailyCount + 1;
   await env.QUOTA_KV.put(dailyKey, String(next), { expirationTtl: 48 * 3600 });
+}
+
+// =============================================================================
+// Quota status readout — GET /v1/me/quota (tier sprint part 1, 2026-06-11)
+//
+// Read-only aggregation of the counters above so the iOS app can render
+// "N of M used" and drive upsell UX. Reads the same KV keys the gates
+// read; never writes. limit_month / used_month are the new monthly
+// window; daily fields mirror the existing gates. `tokens.cap_today` is
+// null when PER_USER_DAILY_TOKEN_CAP is unset (cap disabled).
+
+export async function readQuotaStatus({ env, userId, tier, now }) {
+  const dayKey = utcDayKey(now);
+  const monthKey = utcMonthKey(now);
+  const limits = TIER_LIMITS[tier] ?? TIER_LIMITS.free;
+  const monthlyLimit = readMonthlyCritiqueLimit(env, tier);
+  const eveLimits = readEveTierLimits(env)[tier] ?? readEveTierLimits(env).free;
+  const tokenCap = readPerUserDailyTokenCap(env);
+
+  const [dailyRaw, monthlyRaw, eveDailyRaw, tokensToday] = await Promise.all([
+    env.QUOTA_KV.get(`quota:${userId}:${dayKey}`),
+    env.QUOTA_KV.get(`quota_month:${userId}:${monthKey}`),
+    env.QUOTA_KV.get(`eve_quota:${userId}:${dayKey}`),
+    getUserTokensToday(env, userId, dayKey),
+  ]);
+
+  return {
+    tier,
+    critiques: {
+      used_today: parseInt(dailyRaw ?? '0', 10) || 0,
+      limit_today: limits.perDay,
+      used_month: parseInt(monthlyRaw ?? '0', 10) || 0,
+      limit_month: monthlyLimit,
+      day_resets_in: secondsUntilNextUtcMidnight(now),
+      month_resets_in: secondsUntilNextUtcMonth(now),
+    },
+    eve_messages: {
+      used_today: parseInt(eveDailyRaw ?? '0', 10) || 0,
+      limit_today: eveLimits.perDay,
+    },
+    tokens: {
+      used_today: tokensToday,
+      cap_today: Number.isFinite(tokenCap) ? tokenCap : null,
+    },
+  };
 }

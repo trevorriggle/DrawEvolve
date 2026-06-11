@@ -26,6 +26,7 @@ import {
   handleProfileSearch,
 } from './routes/profiles.js';
 import { handlePrompts } from './routes/prompts.js';
+import { handleQuotaStatus } from './routes/quota.js';
 import { handleEvolution, handleEvolutionRefresh } from './routes/evolution.js';
 import { handleEve } from './routes/eve.js';
 import { handleRecommendations } from './routes/recommendations.js';
@@ -50,6 +51,9 @@ export default {
     // resolve as a username lookup.
     if (method === 'GET' && pathname === '/v1/me') {
       return handleGetMe(request, env, ctx);
+    }
+    if (method === 'GET' && pathname === '/v1/me/quota') {
+      return handleQuotaStatus(request, env, ctx);
     }
     if (method === 'GET' && pathname === '/v1/me/evolution') {
       return handleEvolution(request, env, ctx);
@@ -291,7 +295,14 @@ export {
   readPerUserDailyTokenCap,
   enforceCostCeilings,
   recordRequestUsage,
+  MONTHLY_LIMIT_DEFAULTS,
+  utcMonthKey,
+  secondsUntilNextUtcMonth,
+  readMonthlyCritiqueLimit,
+  readQuotaStatus,
 } from './middleware/rate-limit.js';
+
+export { handleQuotaStatus };
 
 export {
   isValidClientRequestId,
