@@ -171,6 +171,7 @@ class CanvasRenderer: NSObject {
     private var markerPipelineState: MTLRenderPipelineState?
     private var airbrushPipelineState: MTLRenderPipelineState?
     private var charcoalPipelineState: MTLRenderPipelineState?
+    private var watercolorPipelineState: MTLRenderPipelineState?
     // Wet-ink premultiplied variants (Phase A.5 onward). Each pairs with a
     // *Premul fragment shader that emits (rgb * finalAlpha, finalAlpha).
     // sourceRGBBlendFactor is .one (not .sourceAlpha) so the blend math
@@ -200,6 +201,7 @@ class CanvasRenderer: NSObject {
     private var markerScratchDepositPipelineState: MTLRenderPipelineState?
     private var airbrushScratchDepositPipelineState: MTLRenderPipelineState?
     private var charcoalScratchDepositPipelineState: MTLRenderPipelineState?
+    private var watercolorScratchDepositPipelineState: MTLRenderPipelineState?
     // Wet-ink commit pipeline (Phase C onward). Reads `strokeScratch` (full-
     // canvas quad), writes to `canvasStagingAtlas` with premul-over blend —
     // standard alpha-over compositing of the pre-baked, premultiplied stroke
@@ -512,11 +514,13 @@ class CanvasRenderer: NSObject {
               let markerFragment = library.makeFunction(name: "markerFragmentShader"),
               let airbrushFragment = library.makeFunction(name: "airbrushFragmentShader"),
               let charcoalFragment = library.makeFunction(name: "charcoalFragmentShader"),
+              let watercolorFragment = library.makeFunction(name: "watercolorFragmentShader"),
               let brushFragmentPremul = library.makeFunction(name: "brushFragmentShaderPremul"),
               let pencilFragmentPremul = library.makeFunction(name: "pencilFragmentShaderPremul"),
               let markerFragmentPremul = library.makeFunction(name: "markerFragmentShaderPremul"),
               let airbrushFragmentPremul = library.makeFunction(name: "airbrushFragmentShaderPremul"),
               let charcoalFragmentPremul = library.makeFunction(name: "charcoalFragmentShaderPremul"),
+              let watercolorFragmentPremul = library.makeFunction(name: "watercolorFragmentShaderPremul"),
               let quadVertex = library.makeFunction(name: "quadVertexShader"),
               let quadVertexWithTransform = library.makeFunction(name: "quadVertexShaderWithTransform"),
               let quadVertexForRect = library.makeFunction(name: "quadVertexShaderForRect"),
@@ -588,6 +592,7 @@ class CanvasRenderer: NSObject {
         let markerDescriptor = makeBrushVariantDescriptor(markerFragment)
         let airbrushDescriptor = makeBrushVariantDescriptor(airbrushFragment)
         let charcoalDescriptor = makeBrushVariantDescriptor(charcoalFragment)
+        let watercolorDescriptor = makeBrushVariantDescriptor(watercolorFragment)
 
         // Wet-ink premul variants (Phase A.5 onward). Same as makeBrushVariantDescriptor
         // but swaps sourceRGBBlendFactor from .sourceAlpha to .one — paired with shaders
@@ -662,6 +667,10 @@ class CanvasRenderer: NSObject {
         // Each uses its premul fragment + the shared .max/.max blend.
         let pencilScratchDepositDescriptor = makeWetInkAlphaBlendDepositVariantDescriptor(pencilFragmentPremul)
         let markerScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(markerFragmentPremul)
+        // Watercolor deposits with the same .max/.max blend as marker:
+        // flat single-value strokes (the stamp profile IS the stroke
+        // cross-section), with cross-stroke overlap deepening at commit.
+        let watercolorScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(watercolorFragmentPremul)
         let airbrushScratchDepositDescriptor = makeWetInkDepositVariantDescriptor(airbrushFragmentPremul)
         let charcoalScratchDepositDescriptor = makeWetInkAlphaBlendDepositVariantDescriptor(charcoalFragmentPremul)
 
@@ -898,6 +907,7 @@ class CanvasRenderer: NSObject {
             markerPipelineState = try device.makeRenderPipelineState(descriptor: markerDescriptor)
             airbrushPipelineState = try device.makeRenderPipelineState(descriptor: airbrushDescriptor)
             charcoalPipelineState = try device.makeRenderPipelineState(descriptor: charcoalDescriptor)
+            watercolorPipelineState = try device.makeRenderPipelineState(descriptor: watercolorDescriptor)
             brushPremulPipelineState = try device.makeRenderPipelineState(descriptor: brushPremulDescriptor)
             pencilPremulPipelineState = try device.makeRenderPipelineState(descriptor: pencilPremulDescriptor)
             markerPremulPipelineState = try device.makeRenderPipelineState(descriptor: markerPremulDescriptor)
@@ -909,6 +919,7 @@ class CanvasRenderer: NSObject {
             markerScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: markerScratchDepositDescriptor)
             airbrushScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: airbrushScratchDepositDescriptor)
             charcoalScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: charcoalScratchDepositDescriptor)
+            watercolorScratchDepositPipelineState = try device.makeRenderPipelineState(descriptor: watercolorScratchDepositDescriptor)
             wetInkCommitPipelineState = try device.makeRenderPipelineState(descriptor: wetInkCommitDescriptor)
             wetInkEraserCommitPipelineState = try device.makeRenderPipelineState(descriptor: wetInkEraserCommitDescriptor)
             compositePipelineState = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
@@ -2566,6 +2577,8 @@ class CanvasRenderer: NSObject {
             depositPipeline = airbrushScratchDepositPipelineState
         case .charcoal:
             depositPipeline = charcoalScratchDepositPipelineState
+        case .watercolor:
+            depositPipeline = watercolorScratchDepositPipelineState
         default:
             depositPipeline = brushScratchDepositPipelineState
         }
@@ -2626,6 +2639,7 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressureAlpha))
             }()
             uniforms.pressureAlpha = Float(safePressureAlpha)
+            uniforms.strokeDir = Self.strokeDirection(stamps, at: i)
 
             var position = SIMD2<Float>(Float(point.location.x), Float(point.location.y))
 
@@ -3028,6 +3042,7 @@ class CanvasRenderer: NSObject {
             case .marker:   return markerPipelineState
             case .airbrush: return airbrushPipelineState
             case .charcoal: return charcoalPipelineState
+            case .watercolor: return watercolorPipelineState
             default:        return brushPipelineState
             }
         }()
@@ -3105,6 +3120,7 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressureAlpha))
             }()
             uniforms.pressureAlpha = Float(safePressureAlpha)
+            uniforms.strokeDir = Self.strokeDirection(stroke.points, at: index)
 
             // Copy position to avoid overlapping access
             var position = positions[index]
@@ -3227,6 +3243,14 @@ class CanvasRenderer: NSObject {
         // position preserves the C-ABI prefix for shaders that don't
         // reference this field (the ink pen, e.g.).
         var pressureAlpha: Float
+        // Unit stroke-travel direction at this stamp (5.4). Marker +
+        // watercolor band their fiber streaks perpendicular to it; all
+        // other shaders ignore it. The float2 aligns to 8 → offset 56,
+        // total size stays 64 — matching the MSL struct exactly, with
+        // the C-ABI prefix unchanged for every existing shader. Stamp
+        // loops set it via central difference over neighbor locations;
+        // (1,0) when degenerate (single-point stroke / zero travel).
+        var strokeDir: SIMD2<Float>
 
         init(color: UIColor,
              size: Float,
@@ -3244,7 +3268,26 @@ class CanvasRenderer: NSObject {
             self.grainDensity = grainDensity
             self.tileOrigin = tileOrigin
             self.pressureAlpha = 1.0
+            self.strokeDir = SIMD2<Float>(1, 0)
         }
+    }
+
+    /// Unit stroke-travel direction at stamp `i`, central difference over
+    /// neighboring stamp locations (doc space). Feeds
+    /// `BrushUniforms.strokeDir` so marker/watercolor fiber streaks run
+    /// along the stroke. (1,0) for degenerate cases (single stamp, zero
+    /// travel). Symmetry-mirrored stamps appended after the originals get
+    /// a wrong direction at the originals/mirror boundary — one stamp per
+    /// batch, cosmetically invisible at streak band scale.
+    private static func strokeDirection(_ points: [BrushStroke.StrokePoint], at i: Int) -> SIMD2<Float> {
+        guard !points.isEmpty else { return SIMD2<Float>(1, 0) }
+        let prev = points[max(0, min(i - 1, points.count - 1))].location
+        let next = points[min(points.count - 1, i + 1)].location
+        let dx = Float(next.x - prev.x)
+        let dy = Float(next.y - prev.y)
+        let len = (dx * dx + dy * dy).squareRoot()
+        guard len.isFinite, len > 0.0001 else { return SIMD2<Float>(1, 0) }
+        return SIMD2<Float>(dx / len, dy / len)
     }
 
     /// Composite all layers into a single image
@@ -4909,6 +4952,7 @@ class CanvasRenderer: NSObject {
             case .marker:   return markerPipelineState
             case .airbrush: return airbrushPipelineState
             case .charcoal: return charcoalPipelineState
+            case .watercolor: return watercolorPipelineState
             default:        return brushPipelineState
             }
         }()
@@ -5037,6 +5081,7 @@ class CanvasRenderer: NSObject {
                 return max(0, min(1, point.pressureAlpha))
             }()
             uniforms.pressureAlpha = Float(safePressureAlpha)
+            uniforms.strokeDir = Self.strokeDirection(stroke.points, at: index)
 
             // Copy position to avoid overlapping access
             var position = positions[index]

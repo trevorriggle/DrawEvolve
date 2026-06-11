@@ -58,6 +58,17 @@ struct BrushUniforms {
                             // shader's `pointSize = size * pressure`).
                             // Trailing position preserves C-ABI prefix for
                             // shaders that don't reference this field.
+    float2 strokeDir;       // Unit travel direction of the stroke at this
+                            // stamp (central difference over neighboring
+                            // stamp locations; (1,0) when degenerate).
+                            // Marker + watercolor band their fiber streaks
+                            // along the axis PERPENDICULAR to this so the
+                            // streaks run with the stroke whatever way it
+                            // travels. Trailing append lands in the struct's
+                            // existing tail padding (float2 aligns to 8 →
+                            // offset 56, size stays 64 on both the MSL and
+                            // Swift sides), so the C-ABI prefix AND total
+                            // stride are unchanged for every other shader.
 };
 
 // Perceptual hardness remap. Earlier this used `sqrt(h)` so slider 0.5
@@ -725,10 +736,12 @@ fragment float4 pencilFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
-// 2. Marker — flat-topped, very crisp edge, subtle felt-tip horizontal
-// streak. Distinct from brush (which has a soft falloff option). The
-// streak comes from ink wicking along felt fibers along the stroke
-// direction.
+// 2. Marker — chisel-tip art marker (5.4 revamp). Crisp edge, juicy
+// flat semi-transparent body, and VISIBLE felt-fiber streaks that run
+// along the stroke's actual travel direction (uniforms.strokeDir) —
+// the old version banded on fixed layer-Y, so streaks only read on
+// horizontal strokes and the tool looked like a featureless stamp
+// everywhere else.
 fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
                                       float2 pointCoord [[point_coord]],
                                       constant BrushUniforms &uniforms [[buffer(0)]],
@@ -737,17 +750,21 @@ fragment float4 markerFragmentShader(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    // Softer-than-Sharpie, harder-than-brush feather: chisel-tip marker
-    // ink doesn't deposit at a perfectly sharp edge, but it's also not
-    // airbrushed. 15% feather sits between ink pen (3%) and brush
-    // (~36% at default hardness).
-    float alpha = 1.0 - smoothstep(0.85, 1.0, dist);
+    // Crisper-than-before feather: 8% (was 15%, which read as mushy —
+    // a felt nib deposits a clean wet edge). Still softer than ink pen.
+    float alpha = 1.0 - smoothstep(0.92, 1.0, dist);
 
-    // Felt-tip streak: very subtle horizontal banding (~8% modulation)
-    // simulating ink wicking through felt fibers along the stroke
-    // axis. Y is quantized to coarse bands so adjacent rows share
-    // values, creating visible streaks rather than per-pixel noise.
-    float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
+    // Felt-fiber streaks: band the layer position along the axis
+    // perpendicular to stroke travel, so the streaks run WITH the
+    // stroke in any direction. Coarse quantization keeps adjacent
+    // fibers coherent (streaks, not noise). 18% modulation (was 8% —
+    // invisible in practice). Layer-anchored, so the pattern survives
+    // the wet-ink .max deposit (position-keyed modulation composes as
+    // itself under max).
+    float2 sdir = uniforms.strokeDir;
+    float fiberCoord = dot(layerPos, float2(-sdir.y, sdir.x));
+    float fiber = brushHash(float2(13.0, floor(fiberCoord * 0.22)));
+    float streak = mix(0.82, 1.0, fiber);
     alpha *= streak;
 
     // Pressure → SIZE primarily, plus a mild opacity taper so stroke
@@ -882,6 +899,52 @@ fragment float4 charcoalFragmentShader(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb, alpha * uniforms.color.a);
 }
 
+// 6. Watercolor — juicy water-based marker (5.4). Reference look: flat
+// semi-transparent bands with strong dry-brush streaking and ragged
+// organic borders. Three position-keyed ingredients, all of which
+// compose cleanly under the wet-ink .max deposit (a stroke's cross-
+// section equals the stamp profile, and layer-anchored modulation is
+// idempotent under max):
+//   1. Ragged edge — the stamp radius wanders with coarse layer-space
+//      noise, so the stroke silhouette is organic, not compass-drawn.
+//   2. Directional fiber streaks — two octaves banded perpendicular to
+//      strokeDir; strong (up to ~40%) so the dry-brush drag reads.
+//   3. Flat body — single watercolor value per stroke; overlapping
+//      SEPARATE strokes deepen at commit (premul-over), giving the
+//      layered-wash look without faking pigment migration.
+// Pressure taper is shallow (0.85 floor) for the same reason as the
+// airbrush: under .max deposit the pressure term is a per-stroke value
+// ceiling that overlap can't rebuild.
+fragment float4 watercolorFragmentShader(VertexOut in [[stage_in]],
+                                          float2 pointCoord [[point_coord]],
+                                          constant BrushUniforms &uniforms [[buffer(0)]],
+                                          texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    // Ragged organic edge: perturb the effective radius with coarse
+    // layer-space noise (cells ~7 px) so the border wanders like wet
+    // pigment finding paper tooth.
+    float edgeNoise = brushHash(floor(layerPos * 0.15));
+    float edge = mix(0.84, 1.0, edgeNoise);
+    float alpha = 1.0 - smoothstep(edge - 0.12, edge, dist);
+
+    // Directional dry-brush streaks, two octaves along the stroke.
+    float2 sdir = uniforms.strokeDir;
+    float fiberCoord = dot(layerPos, float2(-sdir.y, sdir.x));
+    float band1 = brushHash(float2(7.0,  floor(fiberCoord * 0.10)));
+    float band2 = brushHash(float2(29.0, floor(fiberCoord * 0.35)));
+    float streak = mix(0.60, 1.0, band1 * 0.6 + band2 * 0.4);
+    alpha *= streak;
+
+    // Shallow pressure taper — see airbrush rationale (max-blend ceiling).
+    alpha *= uniforms.opacity * mix(0.85, 1.0, uniforms.pressureAlpha);
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+    return float4(uniforms.color.rgb, alpha * uniforms.color.a);
+}
+
 // MARK: - Wet-ink premultiplied stamp variants (Phase A.5 onward)
 //
 // Each shader below mirrors its OLD counterpart's body up through alpha
@@ -961,8 +1024,9 @@ fragment float4 pencilFragmentShaderPremul(VertexOut in [[stage_in]],
     return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
 }
 
-// 3. Marker — premul. Same identity as OLD: very crisp edge + felt
-// streak. See markerFragmentShader for design rationale.
+// 3. Marker — premul. Mirrors markerFragmentShader's 5.4 revamp: crisp
+// 8% feather + directional felt-fiber streaks along strokeDir. See the
+// non-premul variant for design rationale; keep the curves in sync.
 fragment float4 markerFragmentShaderPremul(VertexOut in [[stage_in]],
                                             float2 pointCoord [[point_coord]],
                                             constant BrushUniforms &uniforms [[buffer(0)]],
@@ -971,9 +1035,12 @@ fragment float4 markerFragmentShaderPremul(VertexOut in [[stage_in]],
     float2 center = float2(0.5, 0.5);
     float dist = distance(pointCoord, center) * 2.0;
 
-    float alpha = 1.0 - smoothstep(0.85, 1.0, dist);
+    float alpha = 1.0 - smoothstep(0.92, 1.0, dist);
 
-    float streak = mix(0.92, 1.0, brushHash(float2(13.0, floor(layerPos.y * 0.2))));
+    float2 sdir = uniforms.strokeDir;
+    float fiberCoord = dot(layerPos, float2(-sdir.y, sdir.x));
+    float fiber = brushHash(float2(13.0, floor(fiberCoord * 0.22)));
+    float streak = mix(0.82, 1.0, fiber);
     alpha *= streak;
 
     // Pressure → SIZE primarily, plus mild opacity taper on lift. See
@@ -1051,6 +1118,36 @@ fragment float4 charcoalFragmentShaderPremul(VertexOut in [[stage_in]],
 
     float pressureOpacity = mix(0.1, 1.0, uniforms.pressureAlpha);
     alpha *= uniforms.opacity * pressureOpacity;
+
+    alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
+
+    float finalAlpha = alpha * uniforms.color.a;
+    return float4(uniforms.color.rgb * finalAlpha, finalAlpha);
+}
+
+// Watercolor — premul. Mirrors watercolorFragmentShader (ragged
+// layer-noise edge + two-octave directional streaks + flat body); see
+// the non-premul variant for design rationale. Keep the curves in sync.
+fragment float4 watercolorFragmentShaderPremul(VertexOut in [[stage_in]],
+                                                float2 pointCoord [[point_coord]],
+                                                constant BrushUniforms &uniforms [[buffer(0)]],
+                                                texture2d<float> selectionMask [[texture(2)]]) {
+    float2 layerPos = in.position.xy + uniforms.tileOrigin;
+    float2 center = float2(0.5, 0.5);
+    float dist = distance(pointCoord, center) * 2.0;
+
+    float edgeNoise = brushHash(floor(layerPos * 0.15));
+    float edge = mix(0.84, 1.0, edgeNoise);
+    float alpha = 1.0 - smoothstep(edge - 0.12, edge, dist);
+
+    float2 sdir = uniforms.strokeDir;
+    float fiberCoord = dot(layerPos, float2(-sdir.y, sdir.x));
+    float band1 = brushHash(float2(7.0,  floor(fiberCoord * 0.10)));
+    float band2 = brushHash(float2(29.0, floor(fiberCoord * 0.35)));
+    float streak = mix(0.60, 1.0, band1 * 0.6 + band2 * 0.4);
+    alpha *= streak;
+
+    alpha *= uniforms.opacity * mix(0.85, 1.0, uniforms.pressureAlpha);
 
     alpha *= sampleSelectionMask(selectionMask, in.position, uniforms.tileOrigin);
 

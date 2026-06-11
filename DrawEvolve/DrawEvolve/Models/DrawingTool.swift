@@ -25,6 +25,7 @@ enum DrawingTool {
     case marker
     case airbrush
     case charcoal
+    case watercolor  // 5.4: juicy water-based marker — ragged streaky bands
 
     // Shape tools
     case line
@@ -66,6 +67,7 @@ enum DrawingTool {
         case .marker: return "highlighter"
         case .airbrush: return "wind"
         case .charcoal: return "scribble.variable"
+        case .watercolor: return "paintbrush.fill"
         case .line: return "line.diagonal"
         case .rectangle: return "rectangle"
         case .circle: return "circle"
@@ -116,6 +118,7 @@ enum DrawingTool {
         case .marker: return "Marker"
         case .airbrush: return "Airbrush"
         case .charcoal: return "Charcoal"
+        case .watercolor: return "Watercolor"
         case .line: return "Line"
         case .rectangle: return "Rectangle"
         case .circle: return "Circle"
@@ -265,6 +268,13 @@ struct BrushSettings: Codable {
             s.hardness = 0.4      // soft-ish edge
             s.spacing = 0.09      // looser overlap so density varies along the stroke
             s.grainDensity = 1.0  // paper pixels deposit nothing — real gaps under overlap
+        case .watercolor:
+            s.size = 30           // wide wash band
+            s.opacity = 0.55      // watercolor translucency — separate strokes
+                                  // overlap-deepen at commit, like layered washes
+            s.hardness = 0.0      // unused (shader has its own ragged edge)
+            s.spacing = 0.03      // tight overlap so the band reads continuous
+                                  // under the .max deposit despite the ragged edge
         case .blur:
             s.hardness = 0.4      // soft disc — hard-edged blur leaves visible stamp rings
             s.spacing = 0.04      // tight overlap so blurred deposits read as a continuous smear

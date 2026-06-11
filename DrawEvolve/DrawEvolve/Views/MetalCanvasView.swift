@@ -634,7 +634,7 @@ struct MetalCanvasView: UIViewRepresentable {
         // circle) stay on OLD renderStroke until Phase H.
         private func isWetInkTool(_ tool: DrawingTool) -> Bool {
             switch tool {
-            case .brush, .eraser, .pencil, .marker, .airbrush, .charcoal:
+            case .brush, .eraser, .pencil, .marker, .airbrush, .charcoal, .watercolor:
                 return true
             default:
                 return false
@@ -4897,7 +4897,7 @@ struct MetalCanvasView: UIViewRepresentable {
         private var canSnapToLine: Bool {
             switch currentTool {
             case .brush, .eraser, .blur,
-                 .pencil, .marker, .airbrush, .charcoal:
+                 .pencil, .marker, .airbrush, .charcoal, .watercolor:
                 return true
             default:
                 return false

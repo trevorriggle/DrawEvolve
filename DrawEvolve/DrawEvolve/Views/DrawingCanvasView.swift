@@ -2157,7 +2157,7 @@ struct DrawingCanvasView: View {
     private var toolUsesBrushCursor: Bool {
         switch canvasState.currentTool {
         case .brush, .eraser, .pencil, .marker, .airbrush,
-             .charcoal, .blur, .smudge, .line, .rectangle, .circle:
+             .charcoal, .watercolor, .blur, .smudge, .line, .rectangle, .circle:
             return true
         default:
             return false
@@ -3114,7 +3114,7 @@ struct DrawingCanvasView: View {
     /// them in sync when adding tools.
     private var brushSizeRailVisible: Bool {
         switch canvasState.currentTool {
-        case .brush, .pencil, .marker, .airbrush, .charcoal,
+        case .brush, .pencil, .marker, .airbrush, .charcoal, .watercolor,
              .eraser, .blur, .smudge,
              .line, .rectangle, .circle:
             return true
@@ -3136,7 +3136,7 @@ struct DrawingCanvasView: View {
     /// rendering surface is different. Source of truth on which tools
     /// count as "brush variants" lives here.
     private static let phoneBrushVariants: [DrawingTool] = [
-        .pencil, .brush, .marker, .airbrush, .charcoal,
+        .pencil, .brush, .marker, .watercolor, .airbrush, .charcoal,
     ]
 
     private var isCurrentToolBrushVariant: Bool {
@@ -3212,7 +3212,8 @@ struct DrawingCanvasView: View {
         switch tool {
         case .pencil:   return "Sharp, narrow, paper-tooth grain"
         case .brush:    return "Round disc, soft edge — the default"
-        case .marker:   return "Flat-topped, semi-transparent, overlaps deepen"
+        case .marker:   return "Crisp chisel tip, felt-fiber streaks"
+        case .watercolor: return "Juicy wash, ragged edges, dry-brush streaks"
         case .airbrush: return "Big soft mist, builds via overlap"
         case .charcoal: return "Wide, grainy, broken edges"
         default:        return ""

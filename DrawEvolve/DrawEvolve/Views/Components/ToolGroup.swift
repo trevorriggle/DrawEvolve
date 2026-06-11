@@ -71,6 +71,7 @@ extension DrawingTool {
         case .marker: return "marker"
         case .airbrush: return "airbrush"
         case .charcoal: return "charcoal"
+        case .watercolor: return "watercolor"
         case .line: return "line"
         case .rectangle: return "rectangle"
         case .circle: return "circle"
@@ -99,6 +100,7 @@ extension DrawingTool {
         case "marker": self = .marker
         case "airbrush": self = .airbrush
         case "charcoal": self = .charcoal
+        case "watercolor": self = .watercolor
         case "line": self = .line
         case "rectangle": self = .rectangle
         case "circle": self = .circle
@@ -138,6 +140,7 @@ struct ToolGroup {
             .tool(.pencil),
             .tool(.brush),
             .tool(.marker),
+            .tool(.watercolor),
             .tool(.airbrush),
             .tool(.charcoal),
         ],
