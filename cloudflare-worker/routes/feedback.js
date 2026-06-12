@@ -937,7 +937,7 @@ export async function handleFeedback(request, env, ctx) {
     // tomorrow." Run AFTER tier rate limits, BEFORE the OpenAI call. These
     // are absolute provider/user spend caps; the tier-based per-minute /
     // per-day quotas above are independent soft rate limits.
-    const ceilingDecision = await enforceCostCeilings({ env, userId, now });
+    const ceilingDecision = await enforceCostCeilings({ env, userId, now, tier });
     if (!ceilingDecision.ok) {
       console.error('[cost-ceiling] hit', {
         error: ceilingDecision.body.error,

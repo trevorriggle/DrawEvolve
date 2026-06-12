@@ -17,9 +17,12 @@
 // before any OpenAI call. Lives in this file because it's cost / abuse
 // machinery in the same neighborhood as quota counters.
 
+// Tier shape locked 2026-06-12 (pricing decision, see Desktop cost
+// sheet): free = one real coaching session/day; pro = feels-unlimited
+// for a serious hobbyist, profit-floored by the monthly spend cap below.
 export const TIER_LIMITS = {
-  free: { perMinute: 5,  perDay: 20  },
-  pro:  { perMinute: 15, perDay: 200 },
+  free: { perMinute: 5,  perDay: 3  },
+  pro:  { perMinute: 15, perDay: 20 },
 };
 export const IP_HOURLY_CAP = 100;
 export const ANOMALY_MULTIPLIER = 5;
@@ -64,7 +67,7 @@ export function secondsUntilNextUtcMidnight(now) {
 // to stay out of TestFlight users' way (looser per-month than the daily
 // caps imply) — real numbers come with the pricing decision.
 
-export const MONTHLY_LIMIT_DEFAULTS = { free: 200, pro: 2000 };
+export const MONTHLY_LIMIT_DEFAULTS = { free: 20, pro: 200 };
 
 export function utcMonthKey(now) {
   const d = new Date(now);
@@ -429,11 +432,33 @@ export async function incrementUserTokensToday(env, userId, dayKey, tokens) {
  * still gets to make one request, which then records its actual usage and
  * pushes them over. Acceptable: the next request is rejected.
  */
-export async function enforceCostCeilings({ env, userId, now }) {
+export async function enforceCostCeilings({ env, userId, now, tier = 'free' }) {
   const dayKey = utcDayKey(now);
   const dailyCap = readDailySpendCapUsd(env);
   const userTokenCap = readPerUserDailyTokenCap(env);
   const retryAfter = secondsUntilNextUtcMidnight(now);
+
+  // Per-user MONTHLY spend cap — the no-loss guarantee. Checked first:
+  // it's the only ceiling whose breach means "this user costs more than
+  // they pay," and its scope tells the client this isn't a daily wall.
+  // Should essentially never fire (UX caps bound usage far below it) —
+  // if telemetry shows it firing, that's a pricing-design signal.
+  const monthKey = utcMonthKey(now);
+  const monthlySpendCap = readMonthlySpendCapUsd(env, tier);
+  const monthlySpend = await getUserSpendMonth(env, userId, monthKey);
+  if (monthlySpend >= monthlySpendCap) {
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'monthly_spend_cap_exceeded',
+        scope: 'spend',
+        tier,
+        retryAfter: secondsUntilNextUtcMonth(now),
+        message: 'You have genuinely maxed out the engine this month — quota resets on the 1st.',
+      },
+    };
+  }
 
   const dailySpend = await getDailySpend(env, dayKey);
   if (dailySpend + ESTIMATED_REQUEST_COST_USD > dailyCap) {
@@ -474,9 +499,60 @@ export async function enforceCostCeilings({ env, userId, now }) {
 export async function recordRequestUsage({ env, userId, dayKey, usage }) {
   if (!usage) return;
   const tokens = (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+  const puts = [];
   if (tokens > 0) {
-    await incrementUserTokensToday(env, userId, dayKey, tokens);
+    puts.push(incrementUserTokensToday(env, userId, dayKey, tokens));
   }
+  // Per-user MONTHLY spend meter (no-loss guarantee, 2026-06-12). Every
+  // OpenAI path (critique, Eve, recommendations) already routes its
+  // usage block through here, so this single choke point accumulates
+  // each user's actual measured dollar cost. monthKey derives from
+  // dayKey (YYYY-MM-DD → YYYY-MM). computeRequestCost prices everything
+  // at gpt-5.1 rates, OVERCOUNTING the mini calls — conservative in the
+  // profitable direction.
+  const cost = computeRequestCost(usage);
+  if (cost > 0) {
+    puts.push(incrementUserSpendMonth(env, userId, dayKey.slice(0, 7), cost));
+  }
+  await Promise.all(puts);
+}
+
+// =============================================================================
+// Per-user monthly spend cap — the Pro no-loss guarantee (2026-06-12)
+//
+// UX caps (daily/monthly counts) shape the experience; THIS is the profit
+// floor. A user's measured spend (actual OpenAI usage × list price, via
+// computeRequestCost) accumulates in user_spend_month:<user>:<YYYY-MM>;
+// enforceCostCeilings hard-stops at the tier's cap. Caps sit far above
+// what the UX caps even permit (pro $3.00 ≈ 450 critiques of cost vs the
+// 200/month UX cap), so they're invisible to every legitimate user —
+// they exist to make "loss-making Pro subscriber" mathematically
+// impossible at $4.99 (nets $4.24 under the App Store Small Business
+// Program; guaranteed margin ≥ $1.24).
+
+export const SPEND_CAP_MONTHLY_DEFAULTS_USD = { free: 0.75, pro: 3.00 };
+
+export function readMonthlySpendCapUsd(env, tier) {
+  const raw = tier === 'pro' ? env?.SPEND_CAP_MONTHLY_PRO_USD : env?.SPEND_CAP_MONTHLY_FREE_USD;
+  const parsed = parseFloat(raw ?? '');
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return SPEND_CAP_MONTHLY_DEFAULTS_USD[tier] ?? SPEND_CAP_MONTHLY_DEFAULTS_USD.free;
+}
+
+export async function getUserSpendMonth(env, userId, monthKey) {
+  const raw = await env.QUOTA_KV.get(`user_spend_month:${userId}:${monthKey}`);
+  const parsed = parseFloat(raw ?? '0');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export async function incrementUserSpendMonth(env, userId, monthKey, amountUsd) {
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) return;
+  const current = await getUserSpendMonth(env, userId, monthKey);
+  await env.QUOTA_KV.put(
+    `user_spend_month:${userId}:${monthKey}`,
+    String(current + amountUsd),
+    { expirationTtl: 40 * 24 * 3600 },
+  );
 }
 
 // =============================================================================
@@ -498,9 +574,21 @@ export async function recordRequestUsage({ env, userId, dayKey, usage }) {
 // doesn't belong in the per-user KV layer.
 
 export const EVE_TIER_LIMITS = {
-  free: { perMinute: 10, perDay: 60  },
-  pro:  { perMinute: 30, perDay: 600 },
+  free: { perMinute: 10, perDay: 10  },
+  pro:  { perMinute: 30, perDay: 100 },
 };
+
+// Eve monthly windows (tier shape 2026-06-12). Eve is the cost center —
+// daily caps alone left a "$9/month grinder" hole (60/day × 30). Same
+// calendar-month KV pattern as the critique monthly windows.
+export const EVE_MONTHLY_DEFAULTS = { free: 75, pro: 1000 };
+
+export function readEveMonthlyLimit(env, tier) {
+  const raw = tier === 'pro' ? env?.EVE_MONTHLY_PRO : env?.EVE_MONTHLY_FREE;
+  const parsed = parseInt(raw ?? '', 10);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return EVE_MONTHLY_DEFAULTS[tier] ?? EVE_MONTHLY_DEFAULTS.free;
+}
 
 function readEveLimit(env, key, fallback) {
   const raw = env?.[key];
@@ -580,11 +668,14 @@ export async function enforceEveRateLimits({ env, userId, tier, now }) {
   const limits = readEveTierLimits(env)[tier] ?? readEveTierLimits(env).free;
   const dayKey = utcDayKey(now);
 
-  const dailyKey  = `eve_quota:${userId}:${dayKey}`;
-  const minuteKey = `eve_rate:${userId}`;
+  const monthKey = utcMonthKey(now);
+  const dailyKey   = `eve_quota:${userId}:${dayKey}`;
+  const monthlyKey = `eve_quota_month:${userId}:${monthKey}`;
+  const minuteKey  = `eve_rate:${userId}`;
 
-  const [dailyRaw, minuteRaw] = await Promise.all([
+  const [dailyRaw, monthlyRaw, minuteRaw] = await Promise.all([
     env.QUOTA_KV.get(dailyKey),
+    env.QUOTA_KV.get(monthlyKey),
     env.QUOTA_KV.get(minuteKey),
   ]);
 
@@ -602,6 +693,29 @@ export async function enforceEveRateLimits({ env, userId, tier, now }) {
         used: dailyCount,
         retryAfter,
         message: eveDailyMessage(tier, limits.perDay, retryAfter),
+      },
+    };
+  }
+
+  // Eve monthly gate (tier shape 2026-06-12) — closes the daily-grinder
+  // cost hole. Same calendar-month semantics as the critique windows.
+  const monthlyCount = parseInt(monthlyRaw ?? '0', 10) || 0;
+  const monthlyLimit = readEveMonthlyLimit(env, tier);
+  if (monthlyCount >= monthlyLimit) {
+    const retryAfter = secondsUntilNextUtcMonth(now);
+    return {
+      ok: false,
+      status: 429,
+      body: {
+        error: 'eve_quota_exceeded',
+        scope: 'monthly',
+        tier,
+        limit: monthlyLimit,
+        used: monthlyCount,
+        retryAfter,
+        message: tier === 'pro'
+          ? `You've used all ${monthlyLimit} Eve messages for this month. Resets on the 1st.`
+          : `You've used all ${monthlyLimit} free Eve messages for this month. Resets on the 1st — or upgrade to Pro for more.`,
       },
     };
   }
@@ -641,19 +755,24 @@ export async function enforceEveRateLimits({ env, userId, tier, now }) {
 
   return {
     ok: true,
-    ctx: { dailyKey, dailyCount, tier, userId, limits },
+    ctx: { dailyKey, dailyCount, monthlyKey, monthlyCount, tier, userId, limits },
   };
 }
 
 /**
- * Increment the Eve daily message counter after a successful assistant
- * turn. Pairs with enforceEveRateLimits. Fire-and-forget — failure
- * never blocks the user response.
+ * Increment the Eve daily + monthly message counters after a successful
+ * assistant turn. Pairs with enforceEveRateLimits. Fire-and-forget —
+ * failure never blocks the user response.
  */
 export async function recordSuccessfulEveTurn({ env, ctx }) {
-  const { dailyKey, dailyCount } = ctx;
-  const next = dailyCount + 1;
-  await env.QUOTA_KV.put(dailyKey, String(next), { expirationTtl: 48 * 3600 });
+  const { dailyKey, dailyCount, monthlyKey, monthlyCount } = ctx;
+  const puts = [
+    env.QUOTA_KV.put(dailyKey, String(dailyCount + 1), { expirationTtl: 48 * 3600 }),
+  ];
+  if (monthlyKey) {
+    puts.push(env.QUOTA_KV.put(monthlyKey, String((monthlyCount ?? 0) + 1), { expirationTtl: 40 * 24 * 3600 }));
+  }
+  await Promise.all(puts);
 }
 
 // =============================================================================
@@ -673,10 +792,11 @@ export async function readQuotaStatus({ env, userId, tier, now }) {
   const eveLimits = readEveTierLimits(env)[tier] ?? readEveTierLimits(env).free;
   const tokenCap = readPerUserDailyTokenCap(env);
 
-  const [dailyRaw, monthlyRaw, eveDailyRaw, tokensToday] = await Promise.all([
+  const [dailyRaw, monthlyRaw, eveDailyRaw, eveMonthlyRaw, tokensToday] = await Promise.all([
     env.QUOTA_KV.get(`quota:${userId}:${dayKey}`),
     env.QUOTA_KV.get(`quota_month:${userId}:${monthKey}`),
     env.QUOTA_KV.get(`eve_quota:${userId}:${dayKey}`),
+    env.QUOTA_KV.get(`eve_quota_month:${userId}:${monthKey}`),
     getUserTokensToday(env, userId, dayKey),
   ]);
 
@@ -693,6 +813,8 @@ export async function readQuotaStatus({ env, userId, tier, now }) {
     eve_messages: {
       used_today: parseInt(eveDailyRaw ?? '0', 10) || 0,
       limit_today: eveLimits.perDay,
+      used_month: parseInt(eveMonthlyRaw ?? '0', 10) || 0,
+      limit_month: readEveMonthlyLimit(env, tier),
     },
     tokens: {
       used_today: tokensToday,

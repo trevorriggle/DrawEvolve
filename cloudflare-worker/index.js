@@ -300,6 +300,12 @@ export {
   secondsUntilNextUtcMonth,
   readMonthlyCritiqueLimit,
   readQuotaStatus,
+  EVE_MONTHLY_DEFAULTS,
+  readEveMonthlyLimit,
+  SPEND_CAP_MONTHLY_DEFAULTS_USD,
+  readMonthlySpendCapUsd,
+  getUserSpendMonth,
+  incrementUserSpendMonth,
 } from './middleware/rate-limit.js';
 
 export { handleQuotaStatus };

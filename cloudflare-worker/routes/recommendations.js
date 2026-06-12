@@ -154,7 +154,9 @@ export async function handleRecommendations(request, env, ctx) {
   // cap. Recommendations don't have their own per-minute bucket because
   // they're explicit user actions, not chat tempo.
   const now = Date.now();
-  const ceilingDecision = await enforceCostCeilings({ env, userId, now });
+  const ceilingDecision = await enforceCostCeilings({
+    env, userId, now, tier: getUserTier(payload).tier,
+  });
   if (!ceilingDecision.ok) {
     return jsonResponse(ceilingDecision.body, ceilingDecision.status, {
       'Retry-After': String(ceilingDecision.body.retryAfter),

@@ -115,6 +115,10 @@ import {
   readMonthlyCritiqueLimit,
   MONTHLY_LIMIT_DEFAULTS,
   readQuotaStatus,
+  EVE_MONTHLY_DEFAULTS,
+  readEveMonthlyLimit,
+  SPEND_CAP_MONTHLY_DEFAULTS_USD,
+  readMonthlySpendCapUsd,
   isValidClientRequestId,
   checkIdempotency,
   recordIdempotent,
@@ -5657,7 +5661,7 @@ test('enforceEveRateLimits returns 429 eve_quota_exceeded when daily cap is hit'
   const { env, kv } = makeEnv();
   kv.setNow(FIXED_NOW);
   const dayKey = utcDayKey(FIXED_NOW);
-  await kv.put(`eve_quota:${FREE_USER}:${dayKey}`, '60', { expirationTtl: 48 * 3600 });
+  await kv.put(`eve_quota:${FREE_USER}:${dayKey}`, String(EVE_TIER_LIMITS.free.perDay), { expirationTtl: 48 * 3600 });
 
   const decision = await enforceEveRateLimits({
     env, userId: FREE_USER, tier: 'free', now: FIXED_NOW,
@@ -5667,7 +5671,71 @@ test('enforceEveRateLimits returns 429 eve_quota_exceeded when daily cap is hit'
   assert.equal(decision.body.error, 'eve_quota_exceeded');
   assert.equal(decision.body.scope, 'daily');
   assert.equal(decision.body.tier, 'free');
-  assert.equal(decision.body.limit, 60);
+  assert.equal(decision.body.limit, EVE_TIER_LIMITS.free.perDay);
+});
+
+test('enforceEveRateLimits returns 429 with monthly scope at the Eve monthly cap (2026-06-12 tier shape)', async () => {
+  const { env, kv } = makeEnv({ EVE_MONTHLY_FREE: '75' });
+  kv.setNow(FIXED_NOW);
+  await kv.put(`eve_quota_month:${FREE_USER}:${utcMonthKey(FIXED_NOW)}`, '75', { expirationTtl: 40 * 24 * 3600 });
+
+  const decision = await enforceEveRateLimits({
+    env, userId: FREE_USER, tier: 'free', now: FIXED_NOW,
+  });
+  assert.equal(decision.ok, false);
+  assert.equal(decision.body.error, 'eve_quota_exceeded');
+  assert.equal(decision.body.scope, 'monthly');
+  assert.equal(decision.body.limit, 75);
+  assert.match(decision.body.message, /upgrade to pro/i);
+});
+
+test('recordSuccessfulEveTurn increments daily and monthly counters together', async () => {
+  const { env, kv } = makeEnv();
+  kv.setNow(FIXED_NOW);
+  const ok = await enforceEveRateLimits({ env, userId: FREE_USER, tier: 'free', now: FIXED_NOW });
+  assert.equal(ok.ok, true);
+  await recordSuccessfulEveTurn({ env, ctx: ok.ctx });
+  assert.equal(await kv.get(`eve_quota:${FREE_USER}:${utcDayKey(FIXED_NOW)}`), '1');
+  assert.equal(await kv.get(`eve_quota_month:${FREE_USER}:${utcMonthKey(FIXED_NOW)}`), '1');
+});
+
+test('enforceCostCeilings 429s with spend scope at the tier monthly spend cap; recordRequestUsage accumulates measured dollars', async () => {
+  const { env, kv } = makeEnv({ SPEND_CAP_MONTHLY_FREE_USD: '0.75' });
+  kv.setNow(FIXED_NOW);
+  const monthKey = utcMonthKey(FIXED_NOW);
+
+  // Under cap → passes.
+  const under = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW, tier: 'free' });
+  assert.equal(under.ok, true);
+
+  // Accumulate measured spend through the shared usage choke point:
+  // 100k prompt + 100k completion at gpt-5.1 rates = $0.063 + $0.50.
+  await recordRequestUsage({
+    env, userId: FREE_USER, dayKey: utcDayKey(FIXED_NOW),
+    usage: { prompt_tokens: 100_000, completion_tokens: 100_000 },
+  });
+  const spent = parseFloat(await kv.get(`user_spend_month:${FREE_USER}:${monthKey}`));
+  assert.ok(Math.abs(spent - 0.563) < 0.001, `expected ~0.563, got ${spent}`);
+
+  // Push past the cap → 429 scope "spend".
+  await kv.put(`user_spend_month:${FREE_USER}:${monthKey}`, '0.80', { expirationTtl: 40 * 24 * 3600 });
+  const over = await enforceCostCeilings({ env, userId: FREE_USER, now: FIXED_NOW, tier: 'free' });
+  assert.equal(over.ok, false);
+  assert.equal(over.status, 429);
+  assert.equal(over.body.error, 'monthly_spend_cap_exceeded');
+  assert.equal(over.body.scope, 'spend');
+});
+
+test('pro spend cap reads env override and defaults to SPEND_CAP_MONTHLY_DEFAULTS_USD', () => {
+  assert.equal(readMonthlySpendCapUsd({}, 'pro'), SPEND_CAP_MONTHLY_DEFAULTS_USD.pro);
+  assert.equal(readMonthlySpendCapUsd({ SPEND_CAP_MONTHLY_PRO_USD: '4.50' }, 'pro'), 4.5);
+  assert.equal(readMonthlySpendCapUsd({}, 'free'), SPEND_CAP_MONTHLY_DEFAULTS_USD.free);
+  // 2026-06-12 tier shape lock — these constants ARE the pricing decision.
+  assert.deepEqual(TIER_LIMITS, { free: { perMinute: 5, perDay: 3 }, pro: { perMinute: 15, perDay: 20 } });
+  assert.deepEqual(MONTHLY_LIMIT_DEFAULTS, { free: 20, pro: 200 });
+  assert.deepEqual(EVE_TIER_LIMITS, { free: { perMinute: 10, perDay: 10 }, pro: { perMinute: 30, perDay: 100 } });
+  assert.deepEqual(EVE_MONTHLY_DEFAULTS, { free: 75, pro: 1000 });
+  assert.deepEqual(SPEND_CAP_MONTHLY_DEFAULTS_USD, { free: 0.75, pro: 3.00 });
 });
 
 test('enforceEveRateLimits returns 429 eve_rate_limited when per-minute cap is hit', async () => {

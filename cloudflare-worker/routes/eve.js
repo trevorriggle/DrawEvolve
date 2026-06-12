@@ -675,7 +675,7 @@ async function handleSendMessage(request, env, ctx, conversationId, requiresPro)
 
   // Global cost ceilings — daily spend + per-user token. Same gates the
   // critique path runs through; one wallet, two paths.
-  const ceilingDecision = await enforceCostCeilings({ env, userId, now });
+  const ceilingDecision = await enforceCostCeilings({ env, userId, now, tier });
   if (!ceilingDecision.ok) {
     return jsonResponse(ceilingDecision.body, ceilingDecision.status, {
       'Retry-After': String(ceilingDecision.body.retryAfter),
