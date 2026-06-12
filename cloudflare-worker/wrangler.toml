@@ -116,8 +116,8 @@ STAGE_OF_WORK_ENABLED = "true"             # "true" | "false"
 # conversation. One "turn" = one user message + one assistant message.
 EVE_PER_MINUTE_FREE = "10"
 EVE_PER_MINUTE_PRO = "30"
-EVE_PER_DAY_FREE = "10"
-EVE_PER_DAY_PRO = "100"
+EVE_PER_DAY_FREE = "5"
+EVE_PER_DAY_PRO = "50"
 EVE_MAX_TURNS_PER_CONVERSATION = "100"
 
 # Phase 2A.1 — per-user daily token cap. Worst-case ceiling on any single
